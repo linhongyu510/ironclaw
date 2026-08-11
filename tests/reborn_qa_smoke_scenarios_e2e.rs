@@ -17,10 +17,10 @@ use std::{future::Future, time::Duration};
 
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+    OMP_WRITE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
@@ -74,9 +74,15 @@ fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
 #[tokio::test]
 async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
     let time = cap(TIME_CAPABILITY_ID);
-    let write_file = cap(WRITE_FILE_CAPABILITY_ID);
-    let read_file = cap(READ_FILE_CAPABILITY_ID);
-    let apply_patch = cap(APPLY_PATCH_CAPABILITY_ID);
+    let write = cap(OMP_WRITE_CAPABILITY_ID);
+    let read = cap(OMP_READ_CAPABILITY_ID);
+    let edit = cap(OMP_EDIT_CAPABILITY_ID);
+    // The hashline edit anchors on the deterministic snapshot tag the write
+    // leg recorded for the freshly-written content (the write engine records
+    // the tag for subsequent edits; compute_file_hash is the engine's seam).
+    let continuity_tag = ironclaw_extension_support::coding::omp::harness::compute_file_hash(
+        "session marker alpha\n",
+    );
     let steps = [
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
@@ -88,7 +94,7 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &write_file,
+                &write,
                 "qa_write_time",
                 serde_json::json!({
                     "path": "/workspace/qa-reborn-loop.txt",
@@ -99,7 +105,7 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &read_file,
+                &read,
                 "qa_read_time",
                 serde_json::json!({"path": "/workspace/qa-reborn-loop.txt"}),
             )],
@@ -107,7 +113,7 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &write_file,
+                &write,
                 "qa_write_alpha",
                 serde_json::json!({
                     "path": "/workspace/qa-session-continuity.md",
@@ -118,7 +124,7 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &read_file,
+                &read,
                 "qa_read_alpha",
                 serde_json::json!({"path": "/workspace/qa-session-continuity.md"}),
             )],
@@ -126,19 +132,19 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &apply_patch,
-                "qa_append_beta",
+                &edit,
+                "qa_edit_beta",
                 serde_json::json!({
-                    "path": "/workspace/qa-session-continuity.md",
-                    "old_string": "session marker alpha\n",
-                    "new_string": "session marker alpha\nsession marker beta\n"
+                    "input": format!(
+                        "[/workspace/qa-session-continuity.md#{continuity_tag}]\nPUT 1:\n+session marker alpha\n+session marker beta\n"
+                    )
                 }),
             )],
             expected_tool_results: Vec::new(),
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &read_file,
+                &read,
                 "qa_read_beta",
                 serde_json::json!({"path": "/workspace/qa-session-continuity.md"}),
             )],
@@ -164,12 +170,12 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         capability_order(&invocations),
         vec![
             TIME_CAPABILITY_ID,
-            WRITE_FILE_CAPABILITY_ID,
-            READ_FILE_CAPABILITY_ID,
-            WRITE_FILE_CAPABILITY_ID,
-            READ_FILE_CAPABILITY_ID,
-            APPLY_PATCH_CAPABILITY_ID,
-            READ_FILE_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            OMP_READ_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            OMP_READ_CAPABILITY_ID,
+            OMP_EDIT_CAPABILITY_ID,
+            OMP_READ_CAPABILITY_ID,
         ]
     );
     assert_eq!(
@@ -483,10 +489,14 @@ fn qa_error_process_repo_patch_and_cleanup_smokes() {
 async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
     let json = cap(JSON_CAPABILITY_ID);
     let shell = cap(SHELL_CAPABILITY_ID);
-    let write_file = cap(WRITE_FILE_CAPABILITY_ID);
-    let read_file = cap(READ_FILE_CAPABILITY_ID);
-    let list_dir = cap(LIST_DIR_CAPABILITY_ID);
-    let apply_patch = cap(APPLY_PATCH_CAPABILITY_ID);
+    let write = cap(OMP_WRITE_CAPABILITY_ID);
+    let read = cap(OMP_READ_CAPABILITY_ID);
+    let glob = cap(GLOB_CAPABILITY_ID);
+    let edit = cap(OMP_EDIT_CAPABILITY_ID);
+    // Anchored hashline edit on the snapshot tag the qa_patch_write leg
+    // recorded for the freshly-written content.
+    let patch_tag =
+        ironclaw_extension_support::coding::omp::harness::compute_file_hash("alpha\nbeta\ngamma\n");
     let steps = [
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
@@ -536,7 +546,7 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &write_file,
+                &write,
                 "qa_patch_write",
                 serde_json::json!({
                     "path": "/workspace/qa-patch-isolation.txt",
@@ -547,19 +557,19 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &apply_patch,
+                &edit,
                 "qa_patch_beta",
                 serde_json::json!({
-                    "path": "/workspace/qa-patch-isolation.txt",
-                    "old_string": "beta",
-                    "new_string": "BETA"
+                    "input": format!(
+                        "[/workspace/qa-patch-isolation.txt#{patch_tag}]\nPUT 2:\n+BETA\n"
+                    )
                 }),
             )],
             expected_tool_results: Vec::new(),
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &read_file,
+                &read,
                 "qa_patch_read",
                 serde_json::json!({"path": "/workspace/qa-patch-isolation.txt"}),
             )],
@@ -568,7 +578,7 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
                 call(
-                    &write_file,
+                    &write,
                     "qa_create_cleanup_a",
                     serde_json::json!({
                         "path": "/workspace/qa-cleanup-smoke/a",
@@ -576,7 +586,7 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
                     }),
                 ),
                 call(
-                    &write_file,
+                    &write,
                     "qa_create_cleanup_b",
                     serde_json::json!({
                         "path": "/workspace/qa-cleanup-smoke/b",
@@ -584,7 +594,7 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
                     }),
                 ),
                 call(
-                    &write_file,
+                    &write,
                     "qa_create_cleanup_c",
                     serde_json::json!({
                         "path": "/workspace/qa-cleanup-smoke/c",
@@ -596,9 +606,9 @@ async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
         },
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(
-                &list_dir,
-                "qa_cleanup_list_before",
-                serde_json::json!({"path": "/workspace/qa-cleanup-smoke"}),
+                &glob,
+                "qa_cleanup_glob_before",
+                serde_json::json!({"path": "qa-cleanup-smoke/*"}),
             )],
             expected_tool_results: Vec::new(),
         },

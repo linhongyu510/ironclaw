@@ -32,8 +32,9 @@ static LOOSE_HASHLINE_HEADER_RE: std::sync::LazyLock<regex::Regex> =
     });
 /// `XD_SCHEME_NEAR_MISSES` from the pinned write.ts.
 const XD_SCHEME_NEAR_MISSES: [&str; 3] = ["dx", "xdd", "xdt"];
-/// Schemes the pinned internal-URL router registers handlers for
-/// (`router.getHandler(scheme)` is truthy for these).
+/// Schemes the pinned internal-URL router registers handlers for. This native
+/// file-only slice does not implement that router, so these targets are
+/// rejected rather than becoming unreachable colon-named workspace files.
 const KNOWN_INTERNAL_SCHEMES: [&str; 15] = [
     "agent", "artifact", "history", "issue", "local", "memory", "omp", "pr", "rule", "security",
     "skill", "ssh", "vault", "mcp", "xd",
@@ -47,11 +48,11 @@ pub(crate) fn render_unknown_uri_like_target(trimmed: &str, suggestion: &str) ->
     )
 }
 
-/// `assertWriteTargetAddressable` from the pinned write.ts. Known internal
-/// schemes (the router's `canHandle` in the pinned source) pass through to
-/// path resolution — our engines have no internal-URL router, so such
-/// targets surface the IronClaw path-resolution error downstream. Unknown
-/// schemes and `xd/` near-misses produce the exact pinned error text.
+/// `assertWriteTargetAddressable` from the pinned write.ts. Unknown schemes
+/// and `xd/` near-misses produce the exact pinned error. Known internal
+/// schemes are rejected explicitly until IronClaw's mediated internal-URL
+/// router is implemented; silently treating them as file paths creates files
+/// the matching read route cannot reach.
 fn assert_write_target_addressable(target: &str) -> Result<(), OmpEngineError> {
     let trimmed = target.trim();
     if trimmed.starts_with('/') {
@@ -70,10 +71,19 @@ fn assert_write_target_addressable(target: &str) -> Result<(), OmpEngineError> {
         return Ok(());
     };
     let scheme = captures[1].to_ascii_lowercase();
-    // conflict:// has no router handler but is spliced downstream by
-    // parseConflictUri in the pinned source (later slice); let it pass.
-    if scheme == "conflict" || KNOWN_INTERNAL_SCHEMES.contains(&scheme.as_str()) {
-        return Ok(());
+    // conflict:// requires the later conflict-router slice. Reject it here
+    // rather than creating an unreachable colon-named workspace file.
+    if scheme == "conflict" {
+        return Err(omp_error(
+            OmpEngineErrorKind::UnknownUriLikeTarget,
+            format!("Internal URI write target '{trimmed}' is not supported in this environment."),
+        ));
+    }
+    if KNOWN_INTERNAL_SCHEMES.contains(&scheme.as_str()) {
+        return Err(omp_error(
+            OmpEngineErrorKind::UnknownUriLikeTarget,
+            format!("Internal URI write target '{trimmed}' is not supported in this environment."),
+        ));
     }
     let suggestion = if XD_SCHEME_NEAR_MISSES.contains(&scheme.as_str()) {
         format!(" Did you mean 'xd://{}'?", &captures[2])
@@ -208,13 +218,17 @@ mod tests {
             error.message(),
             "Unknown URI-like write target 'dx://bar'. Did you mean 'xd://bar'? Prefix the path with './' to write it as a filesystem path."
         );
-        // Known internal schemes pass through (router canHandle in the
-        // pinned source; resolution failure is IronClaw-specific).
-        assert!(assert_write_target_addressable("skill://my-skill/guide").is_ok());
-        // Plain paths and conflict:// pass.
+        // Known internal schemes are not file paths in this file-only slice.
+        let error =
+            assert_write_target_addressable("skill://my-skill/guide").expect_err("rejected");
+        assert_eq!(
+            error.message(),
+            "Internal URI write target 'skill://my-skill/guide' is not supported in this environment."
+        );
+        // Plain filesystem paths pass; unrouted conflict URIs do not.
         assert!(assert_write_target_addressable("src/foo.ts").is_ok());
         assert!(assert_write_target_addressable("./foo://bar").is_ok());
-        assert!(assert_write_target_addressable("conflict://2").is_ok());
+        assert!(assert_write_target_addressable("conflict://2").is_err());
         // The render function keeps the same-scheme suggestion reachable.
         assert_eq!(
             render_unknown_uri_like_target("skill://x", " Did you mean 'skill://x'?"),

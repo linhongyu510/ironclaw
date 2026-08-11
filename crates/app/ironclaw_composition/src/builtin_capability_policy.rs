@@ -631,7 +631,7 @@ mod tests {
         );
         assert!(
             policy
-                .grant(&CapabilityId::new("builtin.apply_patch").expect("capability id"))
+                .grant(&CapabilityId::new("builtin.edit").expect("capability id"))
                 .is_ok()
         );
         assert!(

@@ -42,7 +42,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use serde_json::json;
 
 use super::harness::{
-    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, TestArtifactPersister,
+    standalone_root_filesystem,
 };
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -97,6 +98,7 @@ pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     ))?))
     .with_first_party_http_egress(first_party_egress)
     .with_mcp_runtime(mcp_runtime)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
     .with_trust_policy(Arc::new(first_party_and_mcp_trust_policy(mcp_provider_id)?));
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }

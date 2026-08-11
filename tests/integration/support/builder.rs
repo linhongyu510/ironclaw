@@ -526,7 +526,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
+    /// `write`/`read` tools (same set as `file_tools()`), backed by
     /// the real `StagedCapabilityIo` instead of the ephemeral
     /// `ProductLiveCapabilityIo` test double, so artifact-backed result
     /// projection follows the production path.
@@ -537,7 +537,7 @@ impl RebornIntegrationHarnessBuilder {
 
     /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
     /// confirmed `/host` mount grant, so `wrap_surface_disclosure`'s
-    /// scoped-roots note is observable on `read_file`'s captured tool
+    /// scoped-roots note is observable on `read`'s captured tool
     /// definition (the layer is disabled without a confirmed host-home mount).
     pub fn with_confirmed_host_mount(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
@@ -1723,7 +1723,7 @@ impl RebornIntegrationHarness {
     /// `/workspace` mount, e.g. `"approved.txt"`) exists on disk and its
     /// contents contain `expected`. Reads the REAL persisted file the gated
     /// capability wrote after approval — the genuine side effect — not a
-    /// recorded result (a `builtin.write_file` result does not echo the written
+    /// recorded result (a `builtin.write` result does not echo the written
     /// content). Only available on a host-runtime capability harness; returns
     /// `Err` for the Echo backend.
     pub async fn assert_workspace_file_contains(

@@ -616,7 +616,7 @@ where
     }
 
     /// Configure the operator post-edit check appended to successful
-    /// `builtin.write_file` / `builtin.apply_patch` output. Composition
+    /// `builtin.write` / `builtin.edit` output. Composition
     /// resolves the config once (see `PostEditCheckConfig::from_env`) and
     /// threads it here; the feature stays off when this is never called.
     pub fn with_post_edit_check(mut self, post_edit_check: crate::PostEditCheckConfig) -> Self {

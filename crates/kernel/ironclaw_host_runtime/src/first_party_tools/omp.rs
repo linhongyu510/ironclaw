@@ -270,16 +270,26 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
             OMP_WRITE_CAPABILITY_ID | OMP_EDIT_CAPABILITY_ID
         ) && let Some(service) = &request.services.post_edit_check
         {
-            let edited_scoped_path = request
-                .input
-                .get("path")
-                .and_then(serde_json::Value::as_str);
+            // Hashline edit carries paths in section headers rather than a
+            // top-level field. A multi-file edit runs one advisory check,
+            // rooted at its deterministic first section.
+            let edited_scoped_path = match request.capability_id.as_str() {
+                OMP_WRITE_CAPABILITY_ID => request
+                    .input
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                OMP_EDIT_CAPABILITY_ID => {
+                    ironclaw_extension_support::coding::omp::first_edit_target_path(&request.input)
+                }
+                _ => None,
+            };
             if let Some(check) = crate::post_edit_check::run_post_edit_check(
                 &self.post_edit_check_seen,
                 service.process.as_ref(),
                 &request.scope,
                 request.mounts.as_ref(),
-                edited_scoped_path,
+                edited_scoped_path.as_deref(),
                 &service.config,
             )
             .await
@@ -478,7 +488,7 @@ fn bounded_diagnostic(message: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_diagnostic;
+    use super::*;
 
     #[test]
     fn diagnostic_bound_preserves_utf8_and_never_exceeds_limit() {
@@ -488,11 +498,6 @@ mod tests {
         assert!(bounded.len() <= 31, "{} bytes", bounded.len());
         assert!(bounded.ends_with("[diagnostic truncated]"));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn canonical_digest_covers_the_full_output_before_artifact_previewing() {

@@ -15,8 +15,10 @@
 //!    chain flows the exact omp output shapes back as tool results
 //!    (hashline header `[file#TAG]`, numbered rows; edit success header +
 //!    preview), and the edit really mutates the workspace file.
-//! 3. The derived spelling (`builtin__read`) still resolves for back-compat
-//!    within the override seam.
+//! 3. The derived spelling (`builtin__read`) of an overridden omp tool does
+//!    NOT resolve after the clean cutover: only the exact advertised name
+//!    (`read`) resolves, and a model that insists on the derived encoding
+//!    fails the turn with the unknown-tool category.
 //! 4. A gated omp `write` raises a real `BlockedApproval` gate through the
 //!    ordinary approval path and persists after approval.
 //!
@@ -133,14 +135,18 @@ fn omp_surface_advertises_exact_names_schemas_and_descriptions() {
                 );
             }
 
-            // Retired coding tools and derived glob/grep spellings are absent.
+            // Derived spellings of the omp tools and the retired coding tools
+            // are absent.
             for retired in [
+                "builtin__read",
+                "builtin__write",
+                "builtin__edit",
+                "builtin__glob",
+                "builtin__grep",
                 "builtin__read_file",
                 "builtin__write_file",
                 "builtin__list_dir",
                 "builtin__apply_patch",
-                "builtin__glob",
-                "builtin__grep",
                 "builtin__result_read",
             ] {
                 assert!(
@@ -240,42 +246,56 @@ fn omp_read_edit_read_chain_flows_exact_shapes() {
     });
 }
 
-/// The derived spelling of an overridden capability (`builtin__read`) still
-/// resolves within the override seam — transcripts that call the derived
-/// name keep working while the model is advertised the exact name.
+/// The derived spelling of an overridden capability (`builtin__read`) does
+/// NOT resolve after the clean cutover — the exact advertised name `read` is
+/// the only resolvable spelling, and a model that insists on the derived
+/// encoding fails the turn with the unknown-tool category instead of
+/// dispatching the omp engine.
 #[test]
-fn omp_derived_spelling_still_resolves() {
-    run_async_test_with_stack("omp_derived_spelling_still_resolves", || async {
-        let content = "alpha\nbeta\n";
+fn omp_derived_spelling_does_not_resolve() {
+    run_async_test_with_stack("omp_derived_spelling_does_not_resolve", || async {
         let h = RebornIntegrationHarness::test_default()
             .with_omp_coding_tools()
+            .with_turn_event_sink()
             .script([
                 RebornScriptedReply::tool_call("builtin__read", json!({ "path": "foo.txt" })),
-                RebornScriptedReply::text("read via derived spelling"),
+                RebornScriptedReply::tool_call("builtin__read", json!({ "path": "foo.txt" })),
             ])
             .build()
             .await
             .expect("harness builds");
-        let path = h
-            .capability_recorder
-            .workspace_file_path("foo.txt")
-            .expect("host-runtime harness exposes the workspace root");
-        std::fs::write(&path, content).expect("seed workspace file");
-        h.submit_turn("read the file by its encoded name")
+        let run_id = h
+            .submit_turn_async("read the file by its encoded name")
             .await
-            .expect("turn completes");
-
-        let output = output_text(
-            &h.tool_result_output("builtin.read")
-                .await
-                .expect("read result"),
+            .expect("turn submitted");
+        let state = h
+            .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+            .await
+            .expect("the unresolvable derived spelling fails the turn");
+        let failure = state
+            .failure
+            .as_ref()
+            .expect("failed run carries a durable failure");
+        assert_eq!(
+            failure.category(),
+            "model_invalid_output",
+            "the derived spelling must fail as invalid model output, not resolve: {failure:?}"
         );
         assert!(
-            output.starts_with("[foo.txt#")
-                && output.contains("1:alpha")
-                && output.contains("2:beta"),
-            "the derived spelling builtin__read resolved to the omp engine: {output}"
+            failure.detail().is_some_and(|detail| {
+                detail.contains("outside the advertised capability surface")
+            }),
+            "the durable failure names the outside-surface rejection: {failure:?}"
         );
+        h.assert_failed_turn_event(
+            "model_invalid_output",
+            "outside the advertised capability surface",
+        )
+        .await
+        .expect("durable failed event carries the unknown-tool category and detail");
+        h.assert_no_turn_event_recorded(ironclaw_turns::TurnEventKind::Completed)
+            .await
+            .expect("no completion while the derived spelling is unresolvable");
     });
 }
 

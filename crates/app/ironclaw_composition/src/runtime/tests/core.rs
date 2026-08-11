@@ -1382,20 +1382,20 @@ impl HostManagedModelGateway for WorkspaceListingGateway {
             return Ok(HostManagedModelResponse::assistant_reply("workspace ok"));
         }
 
-        let list_dir_id = CapabilityId::new("builtin.list_dir").expect("list_dir id");
-        let list_dir_tool = capabilities
+        let glob_id = CapabilityId::new("builtin.glob").expect("glob id");
+        let glob_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == list_dir_id)
-            .expect("list_dir provider tool definition");
+            .find(|definition| definition.capability_id == glob_id)
+            .expect("glob provider tool definition");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("provider-turn-1".to_string()),
                 id: "call-1".to_string(),
-                name: list_dir_tool.name,
+                name: glob_tool.name,
                 arguments: serde_json::json!({"path": "/workspace"}),
                 response_reasoning: None,
                 reasoning: None,

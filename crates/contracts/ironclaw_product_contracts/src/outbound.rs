@@ -1985,10 +1985,10 @@ mod tests {
             invocation_id: InvocationId::new(),
             turn_run_id: Some(run_id),
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
-            capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
+            capability_id: CapabilityId::new("builtin.read").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
             error_kind: None,
-            title: "read_file".to_string(),
+            title: "read".to_string(),
             subtitle: Some("src/main.rs".to_string()),
             input_summary: Some("path: src/main.rs".to_string()),
             output_summary: Some("read file".to_string()),
@@ -2003,7 +2003,7 @@ mod tests {
         .expect("valid preview");
 
         let json = serde_json::to_value(&view).expect("serialize");
-        assert_eq!(json["title"], "read_file");
+        assert_eq!(json["title"], "read");
         assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["subtitle"], "src/main.rs");
         assert_eq!(json["output_kind"], "text");
@@ -2038,9 +2038,9 @@ mod tests {
             "timeline_message_id": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
-            "capability_id": "builtin.read_file",
+            "capability_id": "builtin.read",
             "status": "completed",
-            "title": "read_file",
+            "title": "read",
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",
@@ -2060,9 +2060,9 @@ mod tests {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
-            "capability_id": "builtin.read_file",
+            "capability_id": "builtin.read",
             "status": "completed",
-            "title": "read_file",
+            "title": "read",
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",
@@ -2084,9 +2084,9 @@ mod tests {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
-            "capability_id": "builtin.read_file",
+            "capability_id": "builtin.read",
             "status": "completed",
-            "title": "read_file",
+            "title": "read",
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",
@@ -2112,9 +2112,9 @@ mod tests {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
-            "capability_id": "builtin.read_file",
+            "capability_id": "builtin.read",
             "status": "completed",
-            "title": "read_file",
+            "title": "read",
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",

@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, ProviderToolName},
     runtime::RuntimeKind,
 };
-use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
+use ironclaw_host_runtime::OMP_READ_CAPABILITY_ID;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
     CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
@@ -130,7 +130,7 @@ impl RecordingTestCapabilityPort {
 
     fn primary_capability_id(&self) -> CapabilityId {
         let id = if self.use_subagent_allowed_tool {
-            READ_FILE_CAPABILITY_ID
+            OMP_READ_CAPABILITY_ID
         } else {
             TEST_CAPABILITY_ID
         };

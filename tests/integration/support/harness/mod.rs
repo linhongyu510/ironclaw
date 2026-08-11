@@ -74,11 +74,11 @@ pub(crate) use super::doubles::{
     RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver, VendorResponseRouter,
 };
 pub(crate) use assembly::{
-    StandaloneRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,
-    capability_ids_from_strs, copy_dir_recursive, default_capability_io_pair,
-    host_runtime_storage_roots, http_test_policy, memory_mounts, qa_smoke_mounts, skill_mounts,
-    standalone_all_effects, standalone_host_runtime_with_http_egress,
-    standalone_host_runtime_with_live_http_egress,
+    StandaloneRootMounts, TestArtifactPersister, TriggerActiveRunLookupHostRuntime,
+    bundled_extension_provider_trust, capability_ids_from_strs, copy_dir_recursive,
+    default_capability_io_pair, host_runtime_storage_roots, http_test_policy, memory_mounts,
+    qa_smoke_mounts, skill_mounts, standalone_all_effects,
+    standalone_host_runtime_with_http_egress, standalone_host_runtime_with_live_http_egress,
     standalone_host_runtime_with_real_egress_pipeline,
     standalone_host_runtime_with_registry_and_egress, standalone_mount_descriptor,
     standalone_root_filesystem, wildcard_test_policy, workspace_mounts,

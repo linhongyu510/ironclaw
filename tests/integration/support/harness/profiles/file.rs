@@ -8,7 +8,7 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::{
-    JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID, OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -19,8 +19,9 @@ fn file_tools_with_runtime_policy(
 ) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(OMP_READ_CAPABILITY_ID)?,
+            CapabilityId::new(GLOB_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
@@ -99,7 +100,7 @@ pub(crate) async fn file_tools_with_durable_capability_io()
 
 pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
-        capability_ids: vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
+        capability_ids: vec![CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?],
         effect_kinds: vec![EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,

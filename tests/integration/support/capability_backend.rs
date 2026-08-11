@@ -62,7 +62,7 @@ pub(super) enum RebornCapabilityBackend {
     /// recorded. Distinct from `BuiltinHttpTools`, whose
     /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
     BuiltinHttpToolsRealEgress,
-    /// `write_file`/`read_file` (same as `file_tools()`), but backed by the
+    /// `write`/`read` (same as `file_tools()`), but backed by the
     /// real `StagedCapabilityIo` instead of the ephemeral
     /// `ProductLiveCapabilityIo` test double, so artifact-backed result
     /// projection follows the production path.

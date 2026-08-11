@@ -945,7 +945,7 @@ mod tests {
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     #[tokio::test]
-    async fn capability_io_records_read_file_display_preview() {
+    async fn capability_io_records_read_display_preview() {
         let io = ProductLiveCapabilityIo::default();
         let run_context = loop_run_context().await;
         let tool_call = ProviderToolCall {
@@ -953,7 +953,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: ProviderToolName::new("read_file").expect("provider tool name"),
+            name: ProviderToolName::new("read").expect("provider tool name"),
             arguments: serde_json::json!({"path": "src/main.rs", "api_key": "sk-secret"}),
             response_reasoning: None,
             reasoning: None,
@@ -964,7 +964,7 @@ mod tests {
             .await
             .expect("input staged");
         let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.read_file").unwrap();
+        let capability_id = CapabilityId::new("builtin.read").unwrap();
         io.write_capability_result(CapabilityResultWrite {
             receipt: None,
             completed_artifact: None,
@@ -973,7 +973,7 @@ mod tests {
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability_id,
-            output: serde_json::json!({"content": "fn main() {}"}),
+            output: serde_json::json!({"output": "[main.rs#1A2B]\n1:fn main() {}"}),
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })
@@ -985,18 +985,173 @@ mod tests {
             .display_previews
             .record_for_invocation(invocation_id)
             .expect("preview recorded");
-        assert_eq!(record.title, "read_file");
+        assert_eq!(record.title, "read");
         assert_eq!(record.subtitle.as_deref(), Some("src/main.rs"));
         assert!(
             record
                 .input_summary
                 .as_deref()
-                .is_some_and(|summary| summary.contains("path: src/main.rs"))
+                .is_some_and(|summary| summary.contains("path: src/main.rs")),
+            "the omp read input summary must surface the path, got {:?}",
+            record.input_summary
         );
-        assert_eq!(record.output_preview.as_deref(), Some("fn main() {}"));
-        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        assert!(
+            record
+                .output_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("[main.rs#1A2B]")
+                    && preview.contains("fn main() {}")),
+            "the omp read output envelope must render as its extracted output string, got {:?}",
+            record.output_preview
+        );
+        assert_eq!(
+            record.output_kind.as_deref(),
+            Some("text"),
+            "the omp read output envelope must render as text, not a generic JSON dump"
+        );
+        assert!(
+            !record
+                .output_preview
+                .as_deref()
+                .is_some_and(|preview| preview.starts_with('{')),
+            "the omp read preview must not be a JSON dump, got {:?}",
+            record.output_preview
+        );
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
         assert!(!rendered.contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn capability_io_records_write_display_preview_without_content() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        let tool_call = ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: ProviderToolName::new("write").expect("provider tool name"),
+            arguments: serde_json::json!({
+                "path": "src/main.rs",
+                "content": "fn main() {}\n// top-secret body"
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let input_ref = io
+            .register_provider_tool_call_input(&run_context, &tool_call)
+            .await
+            .expect("input staged");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.write").unwrap();
+        io.write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
+            run_context: &run_context,
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            output: serde_json::json!({
+                "output": "[main.rs#1A2B]\nSuccessfully wrote 31 bytes to main.rs"
+            }),
+            display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
+        })
+        .await
+        .map(|_| ())
+        .expect("result staged");
+
+        let record = io
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("preview recorded");
+        let input_summary = record.input_summary.as_deref().unwrap();
+        assert!(
+            input_summary.contains("path: src/main.rs")
+                && input_summary.contains("content_bytes: 31"),
+            "the omp write input summary must surface path and byte count, got {input_summary}"
+        );
+        assert!(
+            !input_summary.contains("fn main()") && !input_summary.contains("top-secret"),
+            "the omp write input summary must never embed the written content, got {input_summary}"
+        );
+        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        assert!(
+            record
+                .output_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("Successfully wrote 31 bytes")),
+            "the omp write output must render as its extracted output string, got {:?}",
+            record.output_preview
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_io_records_edit_display_preview_without_grammar_payload() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        let tool_call = ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: ProviderToolName::new("edit").expect("provider tool name"),
+            arguments: serde_json::json!({
+                "input": "[main.rs#1A2B]\nPUT 1.=1:\n+fn main() {}\n"
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let input_ref = io
+            .register_provider_tool_call_input(&run_context, &tool_call)
+            .await
+            .expect("input staged");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.edit").unwrap();
+        io.write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
+            run_context: &run_context,
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            output: serde_json::json!({"output": "[main.rs#1A2B]\nEdit applied."}),
+            display_preview: None,
+            durable_persistence: DurablePersistence::Persist,
+        })
+        .await
+        .map(|_| ())
+        .expect("result staged");
+
+        let record = io
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("preview recorded");
+        let input_summary = record.input_summary.as_deref().unwrap();
+        assert!(
+            input_summary.contains("input_bytes: 39"),
+            "the omp edit input summary must surface only the grammar byte count, got {input_summary}"
+        );
+        assert!(
+            !input_summary.contains("main.rs")
+                && !input_summary.contains("#1A2B")
+                && !input_summary.contains("fn main()"),
+            "the omp edit input summary must never embed the hashline grammar payload, got \
+             {input_summary}"
+        );
+        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        assert!(
+            record
+                .output_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("Edit applied")),
+            "the omp edit output must render as its extracted output string, got {:?}",
+            record.output_preview
+        );
     }
 
     /// Regression (#activity-card-args): in production the loop wraps this
@@ -1086,20 +1241,18 @@ mod tests {
             )
             .expect("input staged");
         let invocation_id = InvocationId::new();
-        let capability_id = CapabilityId::new("builtin.write_file").unwrap();
+        let capability_id = CapabilityId::new("builtin.write").unwrap();
         io.write_capability_result(CapabilityResultWrite { receipt: None, run_context: &run_context,
         completed_artifact: None,
         canonical_output_digest: None,
         input_ref: &input_ref,
         invocation_id,
         capability_id: &capability_id,
-        output: serde_json::json!({"success": true}),
+        output: serde_json::json!({"output": "[main.rs#1A2B]\nSuccessfully wrote 3 bytes to main.rs"}),
         display_preview: Some(CapabilityDisplayOutputPreview {
-            output_summary: Some("Edited 1 file: +1/-1".to_string()),
-            output_preview:
-                "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-                    .to_string(),
-            output_kind: "unified_diff".to_string(),
+            output_summary: Some("wrote main.rs".to_string()),
+            output_preview: "[main.rs#1A2B]\n1:new\n".to_string(),
+            output_kind: "text".to_string(),
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
         }),
@@ -1111,16 +1264,13 @@ mod tests {
             .display_previews
             .record_for_invocation(invocation_id)
             .expect("preview recorded");
-        assert_eq!(record.output_kind.as_deref(), Some("unified_diff"));
-        assert_eq!(
-            record.output_summary.as_deref(),
-            Some("Edited 1 file: +1/-1")
-        );
+        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        assert_eq!(record.output_summary.as_deref(), Some("wrote main.rs"));
         assert!(
             record
                 .output_preview
                 .as_deref()
-                .is_some_and(|preview| preview.contains("+new"))
+                .is_some_and(|preview| preview.contains("1:new"))
         );
         assert_eq!(record.subtitle.as_deref(), Some("/workspace/main.rs"));
     }

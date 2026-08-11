@@ -70,7 +70,7 @@ pub struct InvocationServices {
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
     /// Operator-configured post-edit check appended to successful
-    /// `builtin.write_file` / `builtin.apply_patch` output, bundled with the
+    /// `builtin.write` / `builtin.edit` output, bundled with the
     /// process port that runs it. Resolved once per invocation; `None` keeps
     /// the feature off for this invocation. The edit plans declare no process
     /// effect, so the resolver — the only layer that inspects process backends
@@ -505,8 +505,8 @@ impl MountScopedRootFilesystem {
     /// nothing written under it reports `NotFound`, which is right for an
     /// ordinary path and wrong for the root --- and it broke every brand-new
     /// per-caller workspace, whose `tenants/{tenant}/users/{user}` directory
-    /// does not exist until the first write, so `list_dir` and `glob` failed
-    /// instead of reporting an empty workspace. Roots read as EMPTY; anything
+    /// does not exist until the first write, so `glob` failed instead of
+    /// reporting an empty workspace. Roots read as EMPTY; anything
     /// deeper keeps reporting `NotFound`.
     fn is_mount_root(&self, path: &VirtualPath) -> bool {
         self.mounts.mounts.iter().any(|grant| &grant.target == path)

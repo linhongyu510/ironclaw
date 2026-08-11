@@ -27,12 +27,12 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
         // MUST delegate to inner. The `LoopCapabilityPort` default resolves a
         // call by searching `self.tool_definitions()` (the disclosed/advertised
         // surface), which rejects every name that resolves only at the port
-        // boundary — e.g. the omp override seam's derived alias
-        // (`builtin__read` for the `read` override) — with "outside the
-        // visible capability surface" before the inner snapshot can resolve it.
-        // This is the model gateway's resolvability pre-check, so it must reach
-        // inner (same reason the surface-tracking wrapper in
-        // `ironclaw_turn_runner` delegates).
+        // boundary — deferred/disclosed tools, synthetic capabilities, and
+        // other inner-resolvable names — with "outside the visible capability
+        // surface" before the inner snapshot can resolve it. This is the model
+        // gateway's resolvability pre-check, so it must reach inner (same
+        // reason the surface-tracking wrapper in `ironclaw_turn_runner`
+        // delegates).
         self.inner.provider_tool_call_capability_ids(tool_call)
     }
 

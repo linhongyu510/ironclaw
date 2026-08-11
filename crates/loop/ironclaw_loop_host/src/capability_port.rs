@@ -1851,7 +1851,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         "host runtime capability id is reserved for a synthetic loop capability",
                     ));
                 }
-                let (provider_tool_name, derived_alias) = resolve_provider_tool_name(
+                let provider_tool_name = resolve_provider_tool_name(
                     &capability.descriptor.id,
                     capability.descriptor.provider_tool_name.as_ref(),
                     &snapshot.provider_names,
@@ -1859,15 +1859,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 snapshot
                     .provider_names
                     .insert(provider_tool_name.clone(), capability_id.clone());
-                // Back-compat within the override seam: the derived spelling
-                // of an overridden capability keeps resolving alongside the
-                // advertised name (see `resolve_provider_tool_name`).
-                if let Some(derived_alias) = derived_alias {
-                    snapshot
-                        .provider_names
-                        .entry(derived_alias)
-                        .or_insert_with(|| capability_id.clone());
-                }
                 snapshot.capabilities.insert(
                     capability_id.clone(),
                     SurfaceCapabilitySnapshot::Runtime(Box::new(
@@ -3124,10 +3115,8 @@ fn provider_tool_name(
 /// override on the descriptor wins for advertisement (validated here at the
 /// provider boundary); without one the name derives from the capability id
 /// (`'.' -> "__"` encoding plus collision-digest suffix, [`provider_tool_name`]).
-/// When an override is present, the derived spelling is ALSO returned as a
-/// resolution alias so transcripts that call the derived name keep resolving
-/// (back-compat within the override seam — the advertised surface shows only
-/// the override).
+/// An override is a clean cutover: only the explicit provider name resolves.
+/// The derived spelling is not retained as an alias.
 ///
 /// A collision between an override and any name already registered on the
 /// surface (another capability's override or derived name) fails loudly
@@ -3136,9 +3125,9 @@ fn resolve_provider_tool_name(
     capability_id: &CapabilityId,
     override_name: Option<&ProviderToolName>,
     existing: &HashMap<ProviderToolName, CapabilityId>,
-) -> Result<(ProviderToolName, Option<ProviderToolName>), AgentLoopHostError> {
+) -> Result<ProviderToolName, AgentLoopHostError> {
     let Some(override_name) = override_name else {
-        return Ok((provider_tool_name(capability_id, existing), None));
+        return Ok(provider_tool_name(capability_id, existing));
     };
     let advertised = override_name.clone();
     if existing
@@ -3150,9 +3139,7 @@ fn resolve_provider_tool_name(
             "capability provider tool name override collides with another capability on the surface",
         ));
     }
-    let derived = provider_tool_name(capability_id, existing);
-    let alias = (derived != advertised).then_some(derived);
-    Ok((advertised, alias))
+    Ok(advertised)
 }
 
 fn provider_tool_name_with_digest(
@@ -4924,28 +4911,23 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_name_override_advertises_exactly_and_keeps_derived_alias() {
+    fn provider_tool_name_override_advertises_exactly_without_alias() {
         let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
         let override_name = ProviderToolName::new("read").expect("provider tool name");
-        let (advertised, alias) =
+        let advertised =
             resolve_provider_tool_name(&capability_id, Some(&override_name), &HashMap::new())
                 .expect("override resolves");
 
         assert_eq!(advertised.as_str(), "read");
-        assert_eq!(
-            alias.as_ref().map(|name| name.as_str()),
-            Some("builtin__read")
-        );
     }
 
     #[test]
     fn provider_tool_name_without_override_derives_unchanged() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-        let (advertised, alias) = resolve_provider_tool_name(&capability_id, None, &HashMap::new())
+        let advertised = resolve_provider_tool_name(&capability_id, None, &HashMap::new())
             .expect("derived name resolves");
 
         assert_eq!(advertised.as_str(), "demo__echo");
-        assert!(alias.is_none(), "no override means no derived alias");
     }
 
     #[test]

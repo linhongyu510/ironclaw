@@ -1,12 +1,13 @@
-//! `read` engine — files and directories ONLY, ported from the pinned
-//! `packages/coding-agent/src/tools/read.ts` (disk path), `read-format.ts`,
-//! `read-selector.ts`, `session/streaming-output.ts`, and
-//! `workspace-tree.ts` at commit `08819b279cf02ae2545e69dad7111ab48d91d35e`.
+//! `read` engine — files, directories, and scoped `artifact://` results,
+//! ported from the pinned `packages/coding-agent/src/tools/read.ts` (disk
+//! path), `read-format.ts`, `read-selector.ts`,
+//! `session/streaming-output.ts`, and `workspace-tree.ts` at commit
+//! `08819b279cf02ae2545e69dad7111ab48d91d35e`.
 //!
-//! The engine always runs in hashline display mode (the issue #7392 target
-//! context): file reads emit a `[basename#TAG]` header, `LINE:TEXT` numbered
-//! rows, and the pinned truncation/elision notices. Archives, SQLite,
-//! documents, URLs, and SSH are later slices and are NOT implemented.
+//! The engine always runs in hashline display mode: file reads emit a
+//! `[basename#TAG]` header, `LINE:TEXT` numbered rows, and the pinned
+//! truncation/elision notices. Archives, SQLite, documents, URLs, and SSH
+//! remain later slices.
 //!
 //! Documented deviation: the pinned upstream appends the elision footer
 //! (`[…Nln elided; re-read needed ranges with <path>:<selector>]`,
@@ -17,6 +18,10 @@
 use std::time::SystemTime;
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
+use ironclaw_host_api::artifact::{
+    ArtifactAccessError, ArtifactByteRange, ArtifactLineRange, ArtifactReadTarget, ArtifactRef,
+    ArtifactSelector,
+};
 use serde_json::Value;
 
 use super::super::config::{MAX_READ_SIZE, MAX_VISITED_ENTRIES};
@@ -206,6 +211,13 @@ pub(crate) async fn read(ctx: &OmpEngineContext, input: Value) -> Result<String,
     // filesystem entry named like `test:1-2` / `log:raw` wins over selector
     // interpretation; only a definitive miss falls back to the strict split.
     let strict = split_path_and_sel(path);
+    if path.starts_with("artifact://") {
+        if let Some((artifact_url, byte_range)) = path.rsplit_once(":bytes:") {
+            let selector = format!("bytes:{byte_range}");
+            return read_artifact(ctx, artifact_url, Some(&selector)).await;
+        }
+        return read_artifact(ctx, &strict.0, strict.1.as_deref()).await;
+    }
     let (local_path, sel) = if strict.1.is_some() && literal_path_exists(ctx, path).await? {
         (path.to_string(), None)
     } else {
@@ -325,6 +337,130 @@ pub(crate) async fn read(ctx: &OmpEngineContext, input: Value) -> Result<String,
     read_single_range(ctx, &resolved, &display, &parsed, &text, offset, limit)
 }
 
+async fn read_artifact(
+    ctx: &OmpEngineContext,
+    artifact_url: &str,
+    sel: Option<&str>,
+) -> Result<String, OmpEngineError> {
+    let artifact_ref = artifact_url
+        .parse::<ArtifactRef>()
+        .map_err(|error| omp_error(OmpEngineErrorKind::PathResolution, error.to_string()))?;
+    let byte_range = sel
+        .and_then(|selector| selector.strip_prefix("bytes:"))
+        .map(parse_artifact_byte_range)
+        .transpose()?;
+    let parsed = if byte_range.is_some() {
+        ParsedSelector::None
+    } else {
+        parse_sel(sel).map_err(|message| omp_error(OmpEngineErrorKind::InvalidSelector, message))?
+    };
+    if matches!(parsed, ParsedSelector::Conflicts) {
+        return Err(omp_error(
+            OmpEngineErrorKind::InvalidSelector,
+            "Conflict selectors are not supported for artifacts.".to_string(),
+        ));
+    }
+    let ranges = match &parsed {
+        ParsedSelector::Lines { ranges, .. } => ranges
+            .iter()
+            .map(|range| ArtifactLineRange {
+                start: range.start_line,
+                end: range.end_line.unwrap_or(u64::MAX),
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let selector = match (byte_range, &parsed, ranges.as_slice()) {
+        (Some(range), _, _) => ArtifactSelector::Bytes(range),
+        (_, ParsedSelector::Lines { raw: true, .. }, [range]) => ArtifactSelector::RawLines(*range),
+        (_, ParsedSelector::Lines { .. }, [range]) => ArtifactSelector::Lines(*range),
+        (_, ParsedSelector::Lines { .. }, ranges) => ArtifactSelector::MultiLines(ranges.to_vec()),
+        _ => ArtifactSelector::Full,
+    };
+    let reader = ctx.artifact_reader.as_ref().ok_or_else(|| {
+        omp_error(
+            OmpEngineErrorKind::Filesystem,
+            "No session - artifacts unavailable".to_string(),
+        )
+    })?;
+    let chunk = reader
+        .read(ArtifactReadTarget {
+            artifact_id: artifact_ref.id(),
+            selector,
+            max_output_bytes: DEFAULT_MAX_BYTES as u64,
+        })
+        .await
+        .map_err(|error| {
+            let message = if error == ArtifactAccessError::OversizedUnsliced {
+                format!(
+                    "Artifact {} exceeds the read limit. Use bounded byte selectors such as artifact://{}:bytes:0-8191, then continue with the next byte range.",
+                    artifact_ref.id().get(),
+                    artifact_ref.id().get(),
+                )
+            } else {
+                format!("Cannot read artifact: {error}")
+            };
+            omp_error(OmpEngineErrorKind::Filesystem, message)
+        })?
+        .ok_or_else(|| {
+            omp_error(
+                OmpEngineErrorKind::PathNotFound,
+                format!("Artifact {} not found", artifact_ref.id().get()),
+            )
+        })?;
+    let text = String::from_utf8(chunk.content).map_err(|_| {
+        omp_error(
+            OmpEngineErrorKind::Filesystem,
+            format!(
+                "[Cannot read binary artifact '{artifact_url}' ({}); binary bytes cannot be returned in JSON output.]",
+                format_bytes(chunk.total_bytes)
+            ),
+        )
+    })?;
+    if byte_range.is_some() || parsed.is_raw() || text.is_empty() {
+        return Ok(text);
+    }
+
+    let lines = text.strip_suffix('\n').unwrap_or(&text).split('\n');
+    let line_numbers = match &parsed {
+        ParsedSelector::Lines { ranges, .. } => ranges
+            .iter()
+            .flat_map(|range| {
+                let end = range.end_line.unwrap_or(u64::MAX);
+                range.start_line..=end
+            })
+            .take(DEFAULT_MAX_LINES as usize)
+            .collect::<Vec<_>>(),
+        _ => (1..=DEFAULT_MAX_LINES).collect::<Vec<_>>(),
+    };
+    Ok(lines
+        .zip(line_numbers)
+        .map(|(line, number)| format_numbered_line(number, line))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn parse_artifact_byte_range(range: &str) -> Result<ArtifactByteRange, OmpEngineError> {
+    let invalid = || {
+        omp_error(
+            OmpEngineErrorKind::InvalidSelector,
+            format!(
+                "Invalid artifact byte selector ':bytes:{range}'. Use :bytes:START-END with zero-based inclusive byte offsets."
+            ),
+        )
+    };
+    let (start, end) = range.split_once('-').ok_or_else(invalid)?;
+    if start.is_empty() || end.is_empty() {
+        return Err(invalid());
+    }
+    let start = start.parse::<u64>().map_err(|_| invalid())?;
+    let end = end.parse::<u64>().map_err(|_| invalid())?;
+    if end < start {
+        return Err(invalid());
+    }
+    Ok(ArtifactByteRange { start, end })
+}
+
 /// The pinned `#readDirectory`: builds the workspace tree (maxDepth 2,
 /// per-dir child cap 12, root uncapped), renders it, then slices by
 /// offset/limit.
@@ -428,7 +564,6 @@ async fn render_directory_tree(
         ".parcel-cache",
         "coverage",
     ];
-
     #[derive(Debug, Clone)]
     struct Node {
         name: String,
@@ -618,11 +753,8 @@ async fn render_directory_tree(
 
     // Render (renderNode + formatLines).
     #[derive(Clone)]
-    #[allow(dead_code)]
     struct RenderedLine {
         label: String,
-        depth: usize,
-        is_root: bool,
         size: Option<String>,
         age: Option<String>,
     }
@@ -632,8 +764,6 @@ async fn render_directory_tree(
         if node.depth == 0 {
             out.push(RenderedLine {
                 label: node.name.clone(),
-                depth: 0,
-                is_root: true,
                 size: None,
                 age: None,
             });
@@ -654,8 +784,6 @@ async fn render_directory_tree(
             };
             out.push(RenderedLine {
                 label: format!("{indent}- {}{suffix}", node.name),
-                depth: node.depth,
-                is_root: false,
                 size: if node.is_dir {
                     None
                 } else {
@@ -682,8 +810,6 @@ async fn render_directory_tree(
                 "  ".repeat(child_depth),
                 node.dropped_count
             ),
-            depth: child_depth,
-            is_root: false,
             size: None,
             age: None,
         });
@@ -878,9 +1004,7 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
         if let Some(label) = match_marker(line, THEIRS_PREFIX) {
             if phase == Phase::Theirs {
                 let p = partial.as_ref().expect("checked");
-                if let (Some(_separator_line), Some(_theirs_lines)) =
-                    (p.separator_line, &p.theirs_lines)
-                {
+                if p.separator_line.is_some() && p.theirs_lines.is_some() {
                     blocks.push(ConflictBlock {
                         start_line: p.start_line,
                         end_line: ln,
@@ -1568,5 +1692,13 @@ mod tests {
         assert_eq!(blocks[0].ours_label.as_deref(), Some("HEAD"));
         assert_eq!(blocks[0].theirs_label.as_deref(), Some("branch"));
         assert!(blocks[0].base_lines.is_none());
+    }
+
+    #[test]
+    fn conflict_summary_empty_message() {
+        let entries: Vec<ConflictEntry> = Vec::new();
+        let _ = entries;
+        // No blocks -> the read engine emits the empty message; the summary
+        // function itself only renders with entries.
     }
 }

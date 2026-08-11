@@ -3017,14 +3017,14 @@ mod tests {
         // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
         // — a Python module named right after a request verb. That is NOT a
         // capability request; the guard must not fire and suppress the model's
-        // legitimate write_file calls.
+        // legitimate write calls.
         let messages = vec![ChatMessage::user(
             "Read form.html, then use `playwright.sync_api` (Python sync API) to \
              write an end-to-end test saved as test_form.py.",
         )];
         let tools = vec![
-            tool_def("builtin.write_file", "builtin__write_file"),
-            tool_def("builtin.read_file", "builtin__read_file"),
+            tool_def("builtin.write", "builtin__write"),
+            tool_def("builtin.read", "builtin__read"),
         ];
         assert!(
             unavailable_requested_capability_guard(&messages, &tools).is_none(),
@@ -3039,7 +3039,7 @@ mod tests {
         let messages = vec![ChatMessage::user(
             "Fetch the page using the builtin.http capability.",
         )];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let tools = vec![tool_def("builtin.write", "builtin__write")];
         let guard = unavailable_requested_capability_guard(&messages, &tools);
         assert!(
             guard.is_some(),
@@ -3056,7 +3056,7 @@ mod tests {
         let messages = vec![ChatMessage::user(
             "Fetch the page using the `builtin.http` capability.",
         )];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let tools = vec![tool_def("builtin.write", "builtin__write")];
         let guard = unavailable_requested_capability_guard(&messages, &tools);
         assert!(
             guard.is_some(),
@@ -3071,7 +3071,7 @@ mod tests {
         // (`builtin`) is still a request, even with only a request verb and no
         // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
         let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
-        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let tools = vec![tool_def("builtin.write", "builtin__write")];
         let guard = unavailable_requested_capability_guard(&messages, &tools);
         assert!(
             guard.is_some(),
@@ -3686,7 +3686,7 @@ mod tests {
             );
         }
         // Real capability ids are still recognized.
-        for token in ["builtin.shell", "builtin.read_file", "gmail.send"] {
+        for token in ["builtin.shell", "builtin.read", "gmail.send"] {
             assert!(
                 is_likely_capability_reference(token),
                 "{token} should be a capability reference"

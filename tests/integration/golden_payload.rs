@@ -191,7 +191,8 @@ async fn golden_image_attachment_turn() {
 }
 
 /// (h) Gated turn (approve arm): a real `BlockedApproval` gate raised by a
-/// scripted `builtin.write_file` call, approved, and resumed. Snapshots both
+/// scripted `builtin.write` call (emitting the exact omp provider name
+/// `write`, as advertised), approved, and resumed. Snapshots both
 /// captured inference calls around the gate, pinning that a resume doesn't
 /// silently drop, duplicate, or reorder history. Distinct from (b): this one
 /// actually parks on `TurnStatus::BlockedApproval` between the two calls.
@@ -204,7 +205,7 @@ async fn golden_gated_turn_approve() {
         .thread("golden-gated-approve")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.write_file",
+                "builtin.write",
                 json!({"path": "/workspace/golden.txt", "content": "golden write"}),
             ),
             RebornScriptedReply::text("file written"),

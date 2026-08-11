@@ -828,7 +828,7 @@ async fn multi_entry_collection_knobs_round_trip() {
         .expect("port assembles");
 
     // capability_id_filter: both listed builtin ids survive, everything else
-    // (e.g. builtin.shell, builtin.read_file, ...) is dropped.
+    // (e.g. builtin.shell, builtin.read, ...) is dropped.
     let definitions = port.tool_definitions().expect("tool definitions");
     let mut builtin_ids: Vec<&str> = definitions
         .iter()

@@ -198,7 +198,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
 | Delivery-target tools resolve through the real outbound service | `outbound_target.rs` |
-| The omp benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep` coding names with fixture-byte schemas/descriptions, flows read→edit→read through the real path, keeps the derived spelling resolving, and gates omp writes | `reborn_omp_registration.rs` |
+| The omp benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep` coding names with fixture-byte schemas/descriptions, flows read→edit→read through the real path, proves the derived spelling (`builtin__read`) is unresolvable, and gates omp writes | `reborn_omp_registration.rs` |
 
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
@@ -334,8 +334,9 @@ noop, line/range errors), glob/grep behavior and exact errors, and the
 five omp engines at the MODEL boundary through the existing first-party
 capability path under the exact pinned names (`read`/`write`/`edit`/`glob`/
 `grep`; schemas/descriptions byte-matched to the fixture snapshot), proves
-the read→edit→read chain and the derived-spelling back-compat alias through
-a real turn, and gates omp writes through the real approval path.
+the read→edit→read chain and that the derived spelling (`builtin__read`)
+fails to resolve through a real turn, and gates omp writes through the real
+approval path.
 
 ---
 

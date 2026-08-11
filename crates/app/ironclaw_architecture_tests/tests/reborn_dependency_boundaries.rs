@@ -680,7 +680,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 18_994 -> 19_003 (#7491): `CapabilityDescriptor.provider_tool_name`
         // carries the already-validated provider spelling as a typed DTO field;
         // alias resolution and execution remain in ironclaw_loop_host.
-        ("ironclaw_host_api", 19_003),
+        // 19_003 -> 19_375 (#7491 artifact-read cutover): neutral artifact
+        // identity, selector, scoped access, resumable persistence, and completed
+        // artifact DTOs let first-party tools cross the host boundary without
+        // importing a store. Authorization/binding remains in host_runtime and
+        // persistence/read implementation remains in ironclaw_threads.
+        // 19_375 -> 19_404 (#7491 OMP cutover): origin-gate contract tests pin
+        // the transferred read-only `builtin.read` exemption and the absence of
+        // the retired ids. Runtime authorization remains in host_runtime.
+        ("ironclaw_host_api", 19_404),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -736,7 +744,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_306),
+        // 13_306 -> 13_521 (#7491 artifact-read cutover): the loop result-write
+        // contract carries completed artifacts and the model-visible observation
+        // vocabulary gains an `ArtifactReference` detail. Artifact creation,
+        // authorization, persistence, and rendering remain in host_runtime,
+        // ironclaw_threads, and loop_host.
+        ("ironclaw_loop_contracts", 13_521),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

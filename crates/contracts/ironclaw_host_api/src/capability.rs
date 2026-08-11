@@ -149,8 +149,10 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
-    "builtin.read_file",
-    "builtin.list_dir",
+    // The retired `read_file`/`list_dir` builtins migrated to the single omp
+    // `read` engine; the reviewed read-only Ungated posture transfers to its
+    // id (`builtin.read`). The dead ids hold no exemption.
+    "builtin.read",
     "builtin.glob",
     "builtin.grep",
     "builtin.skill_list",
@@ -501,7 +503,34 @@ mod origin_gate_wire_tests {
             assert_eq!(matrix.product, OriginGatePolicy::Forbidden, "{id}");
             assert_eq!(matrix.automation, OriginGatePolicy::Forbidden, "{id}");
         }
-        let gated = OriginGateMatrix::builtin_loop_run_seed("builtin.write_file");
+        // The omp `read` id inherits the reviewed read-only Ungated posture of
+        // the retired `read_file`/`list_dir` builtins it replaced.
+        assert!(
+            UNGATED_LOOP_RUN_CAPABILITIES.contains(&"builtin.read"),
+            "builtin.read must be in the Ungated allowlist"
+        );
+        let read = OriginGateMatrix::builtin_loop_run_seed("builtin.read");
+        assert_eq!(read.loop_run, OriginGatePolicy::Ungated);
+        assert_eq!(read.product, OriginGatePolicy::Forbidden);
+        assert_eq!(read.automation, OriginGatePolicy::Forbidden);
+        // The retired ids are dead and hold no exemption: absent from the
+        // allowlist, so they fall to GatedUnlessGranted like every other
+        // non-allowlisted builtin.
+        for retired in ["builtin.read_file", "builtin.list_dir"] {
+            assert!(
+                !UNGATED_LOOP_RUN_CAPABILITIES.contains(&retired),
+                "{retired} is retired and must not remain in the allowlist"
+            );
+            let matrix = OriginGateMatrix::builtin_loop_run_seed(retired);
+            assert_eq!(
+                matrix.loop_run,
+                OriginGatePolicy::GatedUnlessGranted,
+                "{retired}"
+            );
+            assert_eq!(matrix.product, OriginGatePolicy::Forbidden, "{retired}");
+            assert_eq!(matrix.automation, OriginGatePolicy::Forbidden, "{retired}");
+        }
+        let gated = OriginGateMatrix::builtin_loop_run_seed("builtin.write");
         assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
         assert_eq!(gated.product, OriginGatePolicy::Forbidden);
         assert_eq!(gated.automation, OriginGatePolicy::Forbidden);

@@ -28,7 +28,7 @@ const MAX_LIMIT: usize = 200;
 
 pub(crate) async fn glob(ctx: &OmpEngineContext, input: Value) -> Result<String, OmpEngineError> {
     let path_input = input.get("path").and_then(Value::as_str);
-    let limit = input.get("limit").and_then(Value::as_u64);
+    let limit = input.get("limit").and_then(Value::as_f64);
     let hidden = input.get("hidden").and_then(Value::as_bool);
     let gitignore = input.get("gitignore").and_then(Value::as_bool);
     let _ = gitignore; // virtual backends carry no .gitignore rules (see module docs)
@@ -60,8 +60,8 @@ pub(crate) async fn glob(ctx: &OmpEngineContext, input: Value) -> Result<String,
         ));
     }
 
-    let requested_limit = limit.unwrap_or(DEFAULT_LIMIT as u64);
-    if requested_limit == 0 {
+    let requested_limit = limit.unwrap_or(DEFAULT_LIMIT as f64);
+    if !requested_limit.is_finite() || requested_limit <= 0.0 {
         return Err(omp_error(
             OmpEngineErrorKind::Input,
             "Limit must be a positive number",
@@ -496,6 +496,20 @@ mod tests {
         assert_eq!(to_path_list(None), Vec::<String>::new());
         assert_eq!(to_path_list(Some("a;b")), vec!["a", "b"]);
         assert_eq!(to_path_list(Some("a")), vec!["a"]);
+    }
+
+    #[test]
+    fn numeric_limit_accepts_json_float_representation() {
+        let input = serde_json::json!({"limit": 1.0});
+
+        assert_eq!(input.get("limit").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(
+            input
+                .get("limit")
+                .and_then(Value::as_f64)
+                .map(|limit| (limit as usize).clamp(1, MAX_LIMIT)),
+            Some(1)
+        );
     }
 
     #[test]

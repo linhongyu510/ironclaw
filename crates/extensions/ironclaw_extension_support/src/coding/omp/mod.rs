@@ -184,6 +184,20 @@ pub async fn edit(ctx: &OmpEngineContext, input: Value) -> Result<Value, OmpEngi
     Ok(json!({ "output": output }))
 }
 
+/// Return the first file section's scoped path from a validated hashline edit.
+///
+/// The host uses this deterministic path as the working-directory hint for
+/// its single advisory post-edit check. The edit engine has already parsed the
+/// same input successfully before the host calls this helper.
+pub fn first_edit_target_path(input: &Value) -> Option<String> {
+    let edit = input.get("input")?.as_str()?;
+    hashline::Patch::parse(edit)
+        .ok()?
+        .sections
+        .first()
+        .map(|section| scoped_path_input(&section.path))
+}
+
 pub async fn glob(ctx: &OmpEngineContext, input: Value) -> Result<Value, OmpEngineError> {
     let output = glob::glob(ctx, input).await?;
     Ok(json!({ "output": output }))
@@ -502,5 +516,22 @@ pub(crate) fn workspace_virtual_root(
             tracing::debug!(%error, "omp workspace mount root resolution failed");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_edit_target_path;
+
+    #[test]
+    fn first_edit_target_path_uses_first_hashline_section() {
+        let input = serde_json::json!({
+            "input": "*** Begin Patch\n[second/project.rs#A1B2]\nPUT 1.=1:\n+two\n[first/project.rs#C3D4]\nPUT 1.=1:\n+one\n*** End Patch\n"
+        });
+
+        assert_eq!(
+            first_edit_target_path(&input).as_deref(),
+            Some("/workspace/second/project.rs")
+        );
     }
 }

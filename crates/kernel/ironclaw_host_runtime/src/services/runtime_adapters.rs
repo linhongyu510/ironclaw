@@ -830,7 +830,7 @@ where
                 ));
             }
 
-            let mut offset = 0_u64;
+            let mut persisted_remaining = persisted_len;
             for chunk in pending.bytes.chunks(64 * 1024) {
                 let chunk_len =
                     u64::try_from(chunk.len()).map_err(|_| first_party_resource_error())?;
@@ -846,23 +846,16 @@ where
                         )
                         .map_err(|_| first_party_resource_error())?;
                 }
-                let chunk_end = offset
-                    .checked_add(chunk_len)
-                    .ok_or_else(first_party_resource_error)?;
-                if chunk_end <= write_state.persisted_bytes {
-                    offset = chunk_end;
+                if persisted_remaining >= chunk.len() {
+                    persisted_remaining -= chunk.len();
                     continue;
                 }
-                if offset != write_state.persisted_bytes {
-                    return Err(first_party_artifact_error(
-                        ArtifactWriteError::DigestMismatch,
-                    ));
-                }
+                let unpersisted = &chunk[persisted_remaining..];
+                persisted_remaining = 0;
                 persistence
-                    .append(&pending.handle, chunk)
+                    .append(&pending.handle, unpersisted)
                     .await
                     .map_err(first_party_artifact_error)?;
-                offset = chunk_end;
             }
             let completed = match write_state.completed {
                 Some(completed)

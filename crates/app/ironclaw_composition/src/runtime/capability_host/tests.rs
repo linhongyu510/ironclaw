@@ -34,12 +34,12 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_host_runtime::{
-        APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-        OUTBOUND_DELIVER_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+        GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+        OMP_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, SHELL_CAPABILITY_ID,
         SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
-        SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+        SPAWN_SUBAGENT_CAPABILITY_ID,
     };
     use ironclaw_loop_contracts::{
         CapabilityCallCandidate, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
@@ -1842,8 +1842,8 @@ mod tests {
             .map(|capability| capability.as_str())
             .collect::<Vec<_>>();
 
-        assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
-        assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
+        assert!(capability_ids.contains(&OMP_WRITE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&OMP_EDIT_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
         // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
         // wrap_synthetic_capabilities, not a policy capability.
@@ -2087,16 +2087,13 @@ mod tests {
                 .deny_private_ip_ranges
         );
 
-        let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
+        let read_grant = grant_for(OMP_READ_CAPABILITY_ID);
         assert_eq!(
-            read_file_grant.constraints.allowed_effects,
+            read_grant.constraints.allowed_effects,
             local_host_allowed_effects
         );
-        assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
-        assert_eq!(
-            read_file_grant.constraints.network,
-            NetworkPolicy::default()
-        );
+        assert_eq!(read_grant.constraints.mounts, workspace_mounts);
+        assert_eq!(read_grant.constraints.network, NetworkPolicy::default());
 
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
         assert_eq!(
@@ -3565,11 +3562,6 @@ mod tests {
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
-        let raw_workspace = workspace_root
-            .canonicalize()
-            .expect("canonical workspace root")
-            .to_string_lossy()
-            .into_owned();
         let raw_host_home = host_home
             .canonicalize()
             .expect("canonical host home")
@@ -3649,12 +3641,11 @@ mod tests {
             .await
             .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
         for capability_id in [
-            READ_FILE_CAPABILITY_ID,
-            WRITE_FILE_CAPABILITY_ID,
-            LIST_DIR_CAPABILITY_ID,
+            OMP_READ_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            OMP_EDIT_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
-            APPLY_PATCH_CAPABILITY_ID,
         ] {
             let descriptor = surface
                 .descriptors
@@ -3670,6 +3661,24 @@ mod tests {
                 !descriptor.safe_description.contains(&raw_host_home),
                 "model-visible description must not disclose raw host home path"
             );
+        }
+        // The omp `read`/`write`/`glob`/`grep` engines pin a `path` parameter,
+        // so the confirmed host mount is re-disclosed inside its schema
+        // description. The omp hashline `edit` engine pins the exact `input`
+        // schema — a single hashline-grammar string property with NO `path`
+        // parameter — so its schema carries no path description and is asserted
+        // by its real shape instead.
+        for capability_id in [
+            OMP_READ_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+        ] {
+            let descriptor = surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} descriptor visible"));
             let path_description =
                 descriptor.parameters_schema["properties"]["path"]["description"]
                     .as_str()
@@ -3683,6 +3692,30 @@ mod tests {
                 "model-visible schema must not disclose raw host home path"
             );
         }
+        let edit_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == OMP_EDIT_CAPABILITY_ID)
+            .expect("omp edit descriptor visible");
+        assert_eq!(
+            edit_descriptor.parameters_schema["properties"]["input"]["type"].as_str(),
+            Some("string"),
+            "omp edit schema must pin the single hashline `input` property: {}",
+            edit_descriptor.parameters_schema
+        );
+        assert_eq!(
+            edit_descriptor.parameters_schema["required"],
+            serde_json::json!(["input"]),
+            "omp edit schema must require the hashline `input` property: {}",
+            edit_descriptor.parameters_schema
+        );
+        assert!(
+            edit_descriptor.parameters_schema["properties"]
+                .get("path")
+                .is_none(),
+            "omp edit schema must not advertise a retired `path` property: {}",
+            edit_descriptor.parameters_schema
+        );
         let shell_descriptor = surface
             .descriptors
             .iter()
@@ -3707,12 +3740,11 @@ mod tests {
         );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         for capability_id in [
-            READ_FILE_CAPABILITY_ID,
-            WRITE_FILE_CAPABILITY_ID,
-            LIST_DIR_CAPABILITY_ID,
+            OMP_READ_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            OMP_EDIT_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
-            APPLY_PATCH_CAPABILITY_ID,
         ] {
             let tool = tool_definitions
                 .iter()
@@ -3723,6 +3755,25 @@ mod tests {
                 "{capability_id} provider tool description should disclose confirmed host mount: {}",
                 tool.description
             );
+            assert!(
+                !tool.description.contains(&raw_host_home),
+                "provider-visible tool surface must not disclose raw host home path"
+            );
+        }
+        // Mirrors the capability-descriptor loop above: path-bearing omp tools
+        // disclose the confirmed host mount inside their `path` schema
+        // description; the hashline `edit` tool pins the exact `input` schema
+        // with no `path` property.
+        for capability_id in [
+            OMP_READ_CAPABILITY_ID,
+            OMP_WRITE_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+        ] {
+            let tool = tool_definitions
+                .iter()
+                .find(|definition| definition.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} tool definition visible"));
             let tool_path_description = tool.parameters["properties"]["path"]["description"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{capability_id} tool path description"));
@@ -3731,11 +3782,31 @@ mod tests {
                 "{capability_id} provider tool path schema should disclose confirmed host mount: {tool_path_description}"
             );
             assert!(
-                !tool.description.contains(&raw_host_home)
-                    && !tool_path_description.contains(&raw_host_home),
+                !tool_path_description.contains(&raw_host_home),
                 "provider-visible tool surface must not disclose raw host home path"
             );
         }
+        let edit_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == OMP_EDIT_CAPABILITY_ID)
+            .expect("omp edit tool definition visible");
+        assert_eq!(
+            edit_tool.parameters["properties"]["input"]["type"].as_str(),
+            Some("string"),
+            "omp edit tool schema must pin the single hashline `input` property: {}",
+            edit_tool.parameters
+        );
+        assert_eq!(
+            edit_tool.parameters["required"],
+            serde_json::json!(["input"]),
+            "omp edit tool schema must require the hashline `input` property: {}",
+            edit_tool.parameters
+        );
+        assert!(
+            edit_tool.parameters["properties"].get("path").is_none(),
+            "omp edit tool schema must not advertise a retired `path` property: {}",
+            edit_tool.parameters
+        );
         let shell_tool = tool_definitions
             .iter()
             .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
@@ -3769,32 +3840,32 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
-                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
-                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
+                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         let Resolution::Done(completed) = outcome else {
-            panic!("expected completed read_file invocation");
+            panic!("expected completed omp read invocation");
         };
         let output = capability_io
             .result_output(&completed_loop_result_ref(&completed))
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
-        assert_eq!(
-            output["content"],
-            serde_json::json!("     1│ safe host file")
+        assert!(
+            output["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("1: safe host file")),
+            "the confirmed host file must be readable through /host, got {output}"
         );
 
         let input_ref = capability_io
             .register_provider_tool_call_input(
                 &run_context,
-                &provider_tool_call(
-                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
-                ),
+                &provider_tool_call(serde_json::json!({"path": "/workspace/note.txt"})),
             )
             .await
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
@@ -3803,24 +3874,26 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
-                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
-                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
+                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("workspace omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         let Resolution::Done(completed) = outcome else {
-            panic!("expected completed read_file invocation");
+            panic!("expected completed omp read invocation");
         };
         let output = capability_io
             .result_output(&completed_loop_result_ref(&completed))
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
-        assert_eq!(
-            output["content"],
-            serde_json::json!("     1│ safe workspace file")
+        assert!(
+            output["output"]
+                .as_str()
+                .is_some_and(|text| text.contains("1: safe workspace file")),
+            "the workspace file must be readable through /workspace, got {output}"
         );
     }
 
@@ -4031,14 +4104,14 @@ mod tests {
         let read_descriptor = surface
             .descriptors
             .iter()
-            .find(|descriptor| descriptor.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
-            .expect("read_file descriptor visible");
+            .find(|descriptor| descriptor.capability_id.as_str() == OMP_READ_CAPABILITY_ID)
+            .expect("read descriptor visible");
         assert!(
             !read_descriptor.safe_description.contains("/host")
                 && !read_descriptor
                     .safe_description
                     .contains("Available scoped roots"),
-            "normal standalone read_file description must not disclose host roots: {}",
+            "normal standalone read description must not disclose host roots: {}",
             read_descriptor.safe_description
         );
         let shell_descriptor = surface
@@ -4054,17 +4127,15 @@ mod tests {
             shell_descriptor.safe_description
         );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
-        let read_file_tool = tool_definitions
+        let read_tool = tool_definitions
             .iter()
-            .find(|definition| definition.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
-            .expect("read_file tool definition visible");
+            .find(|definition| definition.capability_id.as_str() == OMP_READ_CAPABILITY_ID)
+            .expect("read tool definition visible");
         assert!(
-            !read_file_tool.description.contains("/host")
-                && !read_file_tool
-                    .description
-                    .contains("Available scoped roots"),
+            !read_tool.description.contains("/host")
+                && !read_tool.description.contains("Available scoped roots"),
             "normal standalone provider tool description must not disclose host roots: {}",
-            read_file_tool.description
+            read_tool.description
         );
         let shell_tool = tool_definitions
             .iter()
@@ -4091,19 +4162,19 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
-                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
-                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
+                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("raw workspace omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         match outcome {
             Resolution::Done(failure) => {
                 assert_eq!(
                     failure.verdict.error_kind(),
-                    Some(&FailureKind::InputEncode)
+                    Some(&FailureKind::FilesystemDenied)
                 );
             }
             other => panic!("expected raw workspace read to be denied, got {other:?}"),
@@ -4494,7 +4565,7 @@ mod tests {
             .expect("prompt-stage surface refresh");
 
         let mut call1 = provider_tool_call_with_name(
-            "builtin__read_file",
+            "read",
             serde_json::json!({"path": "/host/nonexistent.txt"}),
         );
         call1.id = "call-mid-response-1".to_string();
@@ -4522,10 +4593,8 @@ mod tests {
             .await
             .expect("activate github extension");
 
-        let mut call2 = provider_tool_call_with_name(
-            "builtin__read_file",
-            serde_json::json!({"path": "/host/other.txt"}),
-        );
+        let mut call2 =
+            provider_tool_call_with_name("read", serde_json::json!({"path": "/host/other.txt"}));
         call2.id = "call-mid-response-2".to_string();
         let candidate2 = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))

@@ -53,7 +53,7 @@ async fn build_group_capability_with_base(
 }
 
 impl RebornIntegrationGroup {
-    /// Group with real file-tool approval stores (write_file/read_file at
+    /// Group with real file-tool approval stores (write/read at
     /// `PermissionMode::Ask`). Auto-approve is disabled for the group scope at
     /// construction so gated tool calls raise real `BlockedApproval` gates.
     /// Resolve with `approve_gate`/`deny_gate` per thread; re-enable with
@@ -130,7 +130,7 @@ impl RebornIntegrationGroup {
         Self::builder().extension_delivery().await
     }
 
-    /// [`Self::extension_delivery`] plus `builtin.write_file`, so a background
+    /// [`Self::extension_delivery`] plus `builtin.write`, so a background
     /// run can park on a REAL approval gate while its notification channels
     /// stay deliverable. Auto-approve is ON; gate the write per-scenario with
     /// `set_ask_each_time_override_for_test`.
@@ -231,7 +231,7 @@ impl RebornIntegrationGroup {
         Self::builder().triggers().await
     }
 
-    /// Trigger verbs plus `builtin.write_file` on one runtime (#5886
+    /// Trigger verbs plus `builtin.write` on one runtime (#5886
     /// blocked-trigger visibility). Auto-approve is ON so the verbs dispatch
     /// gate-free; a scenario gates the write via
     /// `set_ask_each_time_override_for_test`.
@@ -274,7 +274,7 @@ impl RebornIntegrationGroup {
         Self::builder().multiuser_memory_tools().await
     }
 
-    /// C-MULTIUSER: file-approval tools (write_file/read_file @ `Ask`) with
+    /// C-MULTIUSER: file-approval tools (write/read @ `Ask`) with
     /// **per-actor capability scoping**. A grant via
     /// [`RebornIntegrationGroup::enable_auto_approve_for_owner`] and an explicit
     /// OFF via [`RebornIntegrationGroup::disable_auto_approve_for_owner`] each
@@ -838,7 +838,7 @@ impl RebornIntegrationGroupBuilder {
 
     /// Per-actor-scoped file-approval group. See
     /// [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
-    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch;
+    /// (write/read @ `Ask`) plus per-actor capability dispatch;
     /// auto-approve defaults ON per owner, so a test that needs an owner to
     /// GATE sets that owner OFF via `disable_auto_approve_for_owner` — the
     /// per-user setting is what isolation asserts. Dispatch user == turn owner,
@@ -861,7 +861,7 @@ impl RebornIntegrationGroupBuilder {
     /// resolver a scoped deployment's factory uses
     /// (`scoped_workspace_mount_view_for_test`). File tools stay at `Ask`
     /// (per-owner auto-approve toggles like `multiuser_approvals`) and the
-    /// coding-read verbs (`list_dir`/`glob`/`grep`) are surfaced so a fresh
+    /// coding-read verbs (`glob`/`grep`) are surfaced so a fresh
     /// caller's never-written workspace root is read through the production
     /// turn path.
     ///
@@ -896,7 +896,6 @@ impl RebornIntegrationGroupBuilder {
         let mut profile =
             super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
         profile.capability_ids.extend([
-            CapabilityId::new(ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID)?,
             CapabilityId::new(ironclaw_host_runtime::GLOB_CAPABILITY_ID)?,
             CapabilityId::new(ironclaw_host_runtime::GREP_CAPABILITY_ID)?,
         ]);
