@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use ironclaw_assistant::SuggestionsProductService;
 use ironclaw_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
     standalone_runtime_policy,
@@ -203,6 +204,131 @@ async fn dead_run_derives_failed_and_a_fresh_generate_claims_cleanly() -> Harnes
     assert_ne!(
         retried.generation.job_id, claimed.generation.job_id,
         "the retry must be a genuinely NEW job, not the dead one"
+    );
+    Ok(())
+}
+
+/// Fault-injecting `TurnCoordinator` decorator: forwards every method to the
+/// real harness coordinator except `submit_turn`, which always fails and
+/// records the request's `idempotency_key` (which embeds the caller's
+/// `job_id` — see `suggestions_product_service.rs`'s
+/// `format!("suggestion-generation:{job_id}")` binding ref) so a test can
+/// prove two submission attempts claimed genuinely different jobs.
+struct SubmitFailingCoordinator {
+    inner: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    seen_idempotency_keys: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnCoordinator for SubmitFailingCoordinator {
+    async fn prepare_turn(
+        &self,
+        scope: ironclaw_turns::TurnScope,
+    ) -> Result<ironclaw_turns::TurnRunId, ironclaw_turns::TurnError> {
+        self.inner.prepare_turn(scope).await
+    }
+
+    async fn submit_turn(
+        &self,
+        request: ironclaw_turns::SubmitTurnRequest,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, ironclaw_turns::TurnError> {
+        self.seen_idempotency_keys
+            .lock()
+            .expect("idempotency key log lock")
+            .push(request.idempotency_key.as_str().to_string());
+        Err(ironclaw_turns::TurnError::Unavailable {
+            reason: "scripted submit_turn failure for a claim-release regression test".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ironclaw_turns::ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, ironclaw_turns::TurnError> {
+        self.inner.resume_turn(request).await
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
+        self.inner.retry_turn(request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, ironclaw_turns::TurnError> {
+        self.inner.cancel_run(request).await
+    }
+
+    async fn get_run_state(
+        &self,
+        request: ironclaw_turns::GetRunStateRequest,
+    ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
+        self.inner.get_run_state(request).await
+    }
+}
+
+/// (Medium, henrypark133) `submit_generation_turn`'s failure path (claim
+/// release via `record_failure`) had no test driving a real submission
+/// failure through the actual call site. Proves: (1) the POST surfaces an
+/// error, (2) the claim is released (not left wedged for
+/// `MIN_CLAIM_AGE_BEFORE_RECLAIM` to eventually clear), (3) a subsequent
+/// generate call claims a genuinely NEW job rather than deduping onto the
+/// failed one.
+#[tokio::test]
+async fn submit_failure_releases_the_claim_and_a_retry_claims_a_fresh_job() -> HarnessResult<()> {
+    let harness = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await?;
+    let failing_coordinator = Arc::new(SubmitFailingCoordinator {
+        inner: harness.coordinator.clone(),
+        seen_idempotency_keys: std::sync::Mutex::new(Vec::new()),
+    });
+    let service = ironclaw_assistant::RebornSuggestionsProductService::new(
+        ironclaw_suggestions::SuggestionsStore::new(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::default(),
+        )),
+        harness.thread_harness.service.clone(),
+        failing_coordinator.clone(),
+    );
+    let caller = harness.suggestions_caller();
+
+    // `ProductSurfaceError::internal_from` deliberately sanitizes the
+    // returned error (it logs the real cause and returns a generic
+    // "internal" error to the caller) — assert the POST fails, not on the
+    // (intentionally redacted) message text.
+    service
+        .generate_suggestions_for_test(caller.clone(), suggestions_thread_id("submit-fail-1"))
+        .await
+        .expect_err("a submit_turn failure must surface as an error, not a silent success");
+
+    let view = service.get_suggestions(caller.clone()).await?;
+    assert_eq!(
+        view.generation.job_id, None,
+        "a failed submission must release the claim, not leave it wedged: {view:?}"
+    );
+
+    service
+        .generate_suggestions_for_test(caller, suggestions_thread_id("submit-fail-2"))
+        .await
+        .expect_err("the retry is scripted to fail too, but must still attempt a real submit");
+
+    let seen = failing_coordinator
+        .seen_idempotency_keys
+        .lock()
+        .expect("idempotency key log lock");
+    assert_eq!(
+        seen.len(),
+        2,
+        "both generate calls must reach submit_turn: {seen:?}"
+    );
+    assert_ne!(
+        seen[0], seen[1],
+        "the retry must claim a genuinely NEW job (embedded in the idempotency key), \
+         not dedupe onto the released claim's job: {seen:?}"
     );
     Ok(())
 }
