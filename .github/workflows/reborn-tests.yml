@@ -1033,6 +1033,10 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # This replay drives a full Reborn turn on the libtest thread; its
+      # recorded CRM fixture exceeds the default stack. Keep the same proven
+      # value as the root and group Reborn runtime jobs.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

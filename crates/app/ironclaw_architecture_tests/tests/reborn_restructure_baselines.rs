@@ -137,7 +137,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// Union re-measured 41_582 -> 42_455 on 2026-08-10 for the profile-stable
 /// durable-layout assembly and adoption-time encrypted-state verification.
 /// The budget ceiling is pinned to this exact combined-tree count.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_455;
+/// Re-recorded 42_455 -> 42_669 on 2026-08-11 after profile-control cleanup,
+/// measured with the same budget gate; the manifest and this paired record
+/// move together so the nudge assertion remains binding.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_669;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 830 Arc<dyn> (governed prod, excl slack/extension_host)".
