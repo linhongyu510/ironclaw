@@ -1398,6 +1398,17 @@ impl RebornRuntime {
         )
     }
 
+    /// Returns the generic extension host assembled for this standalone
+    /// runtime so integration tests can assert the active snapshot mirrors a
+    /// durable fixture installation. Test support only; it is not part of the
+    /// production runtime surface.
+    #[cfg(feature = "test-support")]
+    pub fn generic_extension_host_for_test(
+        &self,
+    ) -> Option<Arc<ironclaw_extension_host::ExtensionHost>> {
+        self.extension_management.generic_host()
+    }
+
     #[cfg(feature = "test-support")]
     pub async fn standalone_active_extension_authority_for_test(
         &self,

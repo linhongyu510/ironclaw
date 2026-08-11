@@ -500,7 +500,7 @@ impl ExtensionLifecycleManager {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
         let installation = ExtensionInstallation::new(
-            installation_id,
+            installation_id.clone(),
             extension_id.clone(),
             ironclaw_extension_registry::ExtensionManifestRef::new(extension_id, None),
             Vec::new(),
@@ -534,7 +534,7 @@ impl ExtensionLifecycleManager {
         };
         host.install(crate::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
-            installation_id: format!("{}-test-install", package.id.as_str()),
+            installation_id: installation_id.as_str().to_string(),
             state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
