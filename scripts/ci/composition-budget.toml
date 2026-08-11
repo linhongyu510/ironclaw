@@ -215,6 +215,13 @@ loc_observed_date = "2026-08-10"
 # only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
 # two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
 # count exactly, no slack.
-arc_dyn_ceiling = 816
+# 816 -> 818 (2026-08-11, unified channel model): the session-inbound lane's
+# two inverted ports wired at assembly — the `SessionChannelDirectory`
+# (declared in product_contracts, implemented by extension_host over the
+# deployment registry) and the durable session-inbound `IdempotencyLedger` —
+# plus the generic `ChannelNotificationSetupService`, offset by the deleted
+# `WebPushComposition` handle family. Observed on the merged branch: 833;
+# 818 + 15 tolerance = 833 — equal to the observed count exactly, no slack.
+arc_dyn_ceiling = 818
 arc_dyn_tolerance = 15
 arc_dyn_observed = 831
