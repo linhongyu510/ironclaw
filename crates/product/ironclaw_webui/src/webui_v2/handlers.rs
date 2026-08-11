@@ -1905,8 +1905,12 @@ pub async fn get_suggestions(
     Extension(caller): Extension<ProductSurfaceCaller>,
 ) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let surface = state.bind_services(caller);
+    // `{}`, not `Value::Null`: SUGGESTIONS_VIEW's dispatch arm validates with
+    // `parse_empty_view_params`, the same no-param contract every sibling
+    // unpaginated view uses (e.g. `query_llm_config_snapshot`'s
+    // `params: serde_json::json!({})`) — `Null` fails that validation.
     let response = SUGGESTIONS_VIEW
-        .query_on(&surface, serde_json::Value::Null, None)
+        .query_on(&surface, serde_json::json!({}), None)
         .await?;
     Ok(Json(response))
 }
