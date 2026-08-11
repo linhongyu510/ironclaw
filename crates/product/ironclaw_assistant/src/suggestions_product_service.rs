@@ -43,29 +43,42 @@ const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
 /// Minimum age an `active_job` must reach before a concurrent caller's
 /// crash-recovery pre-check is allowed to treat it as dead and supersede it.
 ///
-/// Without this, two concurrent `generate` calls can both observe the SAME
-/// claim, both resolve its liveness as `Terminal`/`Missing` (a run that has
-/// already reached a terminal `TurnStatus` — including a plain successful
-/// completion that never called `render_suggestions`, e.g. the prose-reply
-/// case — looks identical to a genuinely abandoned/crashed one, and a
-/// freshly-claimed run whose `submit_generation_turn` call hasn't reached
-/// `TurnCoordinator::submit_turn` yet looks `Missing` for the same reason),
-/// and both independently clear-then-reclaim: the "clear" and "reclaim" are
-/// two separate CAS writes, not one atomic operation, so nothing stops both
-/// racers from completing their own clear-then-reclaim sequence and minting
-/// two DIFFERENT job_ids for what a caller must observe as one dedup'd run
-/// (spec §4 / decision D1). Found via a full-suite-load integration test
-/// failure (`concurrent_generate_calls_converge_on_one_claim`) that a
-/// filtered/isolated run of the same test never reproduced.
+/// THIS IS A MITIGATION FOR A GAP, NOT A COMPLETE DESIGN ON ITS OWN. The
+/// real fix is `SuggestionGenerationFinalizerSink`
+/// (`ironclaw_composition::suggestions`) — the spec §6 "turn finalizer" —
+/// which clears `active_job` the moment its own run's `TurnEventSink` event
+/// fires, so a `Terminal`/`Missing` claim a reader observes is (almost
+/// always) already a genuinely stale one, not a run that just completed
+/// normally without calling `render_suggestions` (a plain successful
+/// completion and a crash both resolve to the same `RunLiveness`, and
+/// without the finalizer clearing the claim on ITS OWN terminal transition,
+/// nothing else does until some other request's pre-check happens to poll).
 ///
-/// This closes the window the same way a lease-expiry check would: a claim
-/// younger than this is treated as still-forming regardless of what the
-/// coordinator currently reports, so every racer within the window converges
-/// on returning the SAME (first) claim instead of racing to replace it. A
-/// claim older than this is still recoverable exactly as before — this does
-/// not reintroduce a permanently-stuck-running state, it only delays when a
-/// genuinely dead claim becomes eligible for supersession.
-const MIN_CLAIM_AGE_BEFORE_RECLAIM: chrono::Duration = chrono::Duration::seconds(3);
+/// The finalizer does not make this constant unnecessary, because it does
+/// not close the window atomically with the status transition itself: the
+/// run's `TurnStatus` becomes `Terminal`-observable (via
+/// `TurnCoordinator::get_run_state`, what `run_liveness` below reads) at
+/// commit time, and the finalizer's `TurnEventSink::publish` fires
+/// separately, on its own schedule, afterward — a concurrent pre-check that
+/// lands in that gap still sees `active_job` set with `Terminal`/`Missing`
+/// liveness and nothing else protecting it. This constant is what protects
+/// that residual gap: a claim younger than this is treated as still-forming
+/// regardless of what the coordinator currently reports, so every racer
+/// within the window converges on returning the SAME (first) claim instead
+/// of racing to replace it. A claim older than this remains recoverable
+/// exactly as before.
+///
+/// Failure mode if the finalizer is ever removed, disabled, or fails
+/// unnoticed (its own errors are best-effort/swallowed at `debug!`, matching
+/// every sibling `TurnEventSink`): this constant reverts to being the ONLY
+/// protection, and claim formation exceeding it under real load (a busy CI
+/// box, GC pause, or thread-starved host) reopens the double-claim race this
+/// whole mechanism exists to close — found via a full-suite-load integration
+/// test failure (`concurrent_generate_calls_converge_on_one_claim`) that a
+/// filtered/isolated run of the same test never reproduced. Do not raise
+/// this value to "fix" a flake without first checking the finalizer is
+/// actually wired and firing.
+const MIN_CLAIM_AGE_BEFORE_RECLAIM: chrono::Duration = chrono::Duration::milliseconds(500);
 
 /// Product command input for `suggestions.generate` — takes no fields; kept
 /// as a named type (rather than reusing `EmptyProductCommandInput` directly

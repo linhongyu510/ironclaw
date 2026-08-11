@@ -3533,8 +3533,21 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via
     // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
-    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
-        vec![trace_capture_sink, projection_turn_event_wake_sink];
+    // Suggestion-generation's spec §6 turn finalizer (#7038) shares the same
+    // seam: it clears a suggestion-generation `active_job` the moment ITS
+    // run goes terminal, so `RunLiveness::Terminal`/`Missing` in the product
+    // service's crash-recovery pre-check is unambiguous — see
+    // `SuggestionGenerationFinalizerSink`'s doc comment in `suggestions.rs`.
+    let suggestion_generation_finalizer_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
+        Arc::new(crate::suggestions::SuggestionGenerationFinalizerSink::new(
+            ironclaw_suggestions::SuggestionsStore::new(Arc::clone(&services.extension_filesystem)
+                as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        ));
+    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> = vec![
+        trace_capture_sink,
+        projection_turn_event_wake_sink,
+        suggestion_generation_finalizer_sink,
+    ];
     let mut skill_learning_extraction_tasks: Option<
         Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
