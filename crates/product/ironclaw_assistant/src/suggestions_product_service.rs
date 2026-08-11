@@ -40,6 +40,33 @@ pub const SUGGESTIONS_GENERATE_COMMAND_ID: &str = "suggestions.generate";
 /// as a literal — see the call site's comment for why it is not imported.
 const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
 
+/// Minimum age an `active_job` must reach before a concurrent caller's
+/// crash-recovery pre-check is allowed to treat it as dead and supersede it.
+///
+/// Without this, two concurrent `generate` calls can both observe the SAME
+/// claim, both resolve its liveness as `Terminal`/`Missing` (a run that has
+/// already reached a terminal `TurnStatus` — including a plain successful
+/// completion that never called `render_suggestions`, e.g. the prose-reply
+/// case — looks identical to a genuinely abandoned/crashed one, and a
+/// freshly-claimed run whose `submit_generation_turn` call hasn't reached
+/// `TurnCoordinator::submit_turn` yet looks `Missing` for the same reason),
+/// and both independently clear-then-reclaim: the "clear" and "reclaim" are
+/// two separate CAS writes, not one atomic operation, so nothing stops both
+/// racers from completing their own clear-then-reclaim sequence and minting
+/// two DIFFERENT job_ids for what a caller must observe as one dedup'd run
+/// (spec §4 / decision D1). Found via a full-suite-load integration test
+/// failure (`concurrent_generate_calls_converge_on_one_claim`) that a
+/// filtered/isolated run of the same test never reproduced.
+///
+/// This closes the window the same way a lease-expiry check would: a claim
+/// younger than this is treated as still-forming regardless of what the
+/// coordinator currently reports, so every racer within the window converges
+/// on returning the SAME (first) claim instead of racing to replace it. A
+/// claim older than this is still recoverable exactly as before — this does
+/// not reintroduce a permanently-stuck-running state, it only delays when a
+/// genuinely dead claim becomes eligible for supersession.
+const MIN_CLAIM_AGE_BEFORE_RECLAIM: chrono::Duration = chrono::Duration::seconds(3);
+
 /// Product command input for `suggestions.generate` — takes no fields; kept
 /// as a named type (rather than reusing `EmptyProductCommandInput` directly
 /// in the trait signature) so the wire shape has a name of its own if a
@@ -171,6 +198,14 @@ impl RebornSuggestionsProductService {
             .map_err(ProductSurfaceError::internal_from)?
             && let Some(active_job) = &doc.active_job
         {
+            let claim_age = chrono::Utc::now() - active_job.started_at;
+            if claim_age < MIN_CLAIM_AGE_BEFORE_RECLAIM {
+                // Too young to safely tell "genuinely dead" apart from "another
+                // concurrent racer's claim still forming" — converge on it
+                // rather than risk a second racer independently reclaiming the
+                // same slot (see MIN_CLAIM_AGE_BEFORE_RECLAIM's doc comment).
+                return Ok(derive_suggestions_view(&doc, Some(RunLiveness::Live)));
+            }
             let scope = turn_scope(&caller, active_job.thread_id.clone());
             match self.run_liveness(&scope, active_job.run_id).await {
                 RunLiveness::Live => {
