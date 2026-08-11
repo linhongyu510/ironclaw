@@ -10,8 +10,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    SubmitTurnResponse, TurnActor, TurnScope,
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    SourceBindingRef, SubmitTurnResponse, TurnActor, TurnScope,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_suggestions::{
@@ -36,9 +36,6 @@ pub type RebornSuggestionsResponse = SuggestionsView;
 
 pub const SUGGESTIONS_VIEW_ID: &str = "suggestions";
 pub const SUGGESTIONS_GENERATE_COMMAND_ID: &str = "suggestions.generate";
-/// Mirrors `ironclaw_turn_runner::planned_driver_factory::SUGGESTION_GENERATION_RUN_PROFILE_ID`
-/// as a literal — see the call site's comment for why it is not imported.
-const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
 
 /// Minimum age an `active_job` must reach before a concurrent caller's
 /// crash-recovery pre-check is allowed to treat it as dead and supersede it.
@@ -141,7 +138,14 @@ impl RebornSuggestionsProductService {
             // A backend error is treated as Missing (fail toward `failed`,
             // never toward a permanently stuck `running` — see the domain
             // crate's `derive_suggestions_view` doc comment).
-            Err(_) => RunLiveness::Missing,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    %run_id,
+                    "suggestion-generation run liveness lookup failed; treating as Missing"
+                );
+                RunLiveness::Missing
+            }
         }
     }
 }
@@ -264,7 +268,7 @@ impl RebornSuggestionsProductService {
             .submit_generation_turn(&caller, thread_id, run_id, job_id)
             .await
         {
-            Ok(accepted_run_id) => {
+            SubmitGenerationOutcome::Accepted(accepted_run_id) => {
                 // The coordinator is free to mint its own run id rather than
                 // honor `requested_run_id` verbatim (it only enforces a
                 // scope match against a PRIOR `prepare_turn` reservation,
@@ -285,10 +289,56 @@ impl RebornSuggestionsProductService {
                 }
                 self.read_live_view(&caller).await
             }
-            Err(error) => {
-                // Release the claim so the next POST can retry cleanly
-                // instead of waiting for the crash-recovery liveness path.
-                let _ = self
+            SubmitGenerationOutcome::AcceptedButUnlinked {
+                accepted_run_id,
+                error,
+            } => {
+                // submit_turn already accepted this run — it may still
+                // execute and later call the rendering tool. Releasing the
+                // claim here (as the NotAccepted arm does) would let a
+                // concurrent caller submit a second generation while this
+                // one is in flight, reintroducing the exact race this claim
+                // exists to prevent. Retain the claim; only reconcile the
+                // run id so liveness polling still tracks the real run.
+                if accepted_run_id != run_id {
+                    // silent-ok: best-effort reconciliation; if this write
+                    // fails the claim still reflects the placeholder run_id,
+                    // and MIN_CLAIM_AGE_BEFORE_RECLAIM / the finalizer sink
+                    // remain the backstop once the run goes terminal.
+                    if let Err(reconcile_error) = self
+                        .store
+                        .update_active_job_run_id(
+                            &caller.tenant_id,
+                            &caller.user_id,
+                            job_id,
+                            accepted_run_id,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            %reconcile_error,
+                            %job_id,
+                            "failed to reconcile accepted-but-unlinked suggestion-generation run id"
+                        );
+                    }
+                }
+                tracing::error!(
+                    %error,
+                    %job_id,
+                    %accepted_run_id,
+                    "suggestion-generation run accepted but post-accept linking failed; \
+                     claim retained for the in-flight run"
+                );
+                Err(ProductSurfaceError::internal_from(error))
+            }
+            SubmitGenerationOutcome::NotAccepted(error) => {
+                // No run was ever accepted — safe to release the claim so
+                // the next POST can retry cleanly instead of waiting for the
+                // crash-recovery liveness path.
+                // silent-ok: best-effort claim release; if this write itself
+                // fails, the crash-recovery liveness path (run_liveness +
+                // MIN_CLAIM_AGE_BEFORE_RECLAIM) still clears the stale claim.
+                if let Err(release_error) = self
                     .store
                     .record_failure(
                         &caller.tenant_id,
@@ -296,11 +346,39 @@ impl RebornSuggestionsProductService {
                         job_id,
                         format!("failed to start suggestion generation: {error}"),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::debug!(
+                        %release_error,
+                        %job_id,
+                        "failed to release suggestion-generation claim after submit failure"
+                    );
+                }
                 Err(ProductSurfaceError::internal_from(error))
             }
         }
     }
+}
+
+/// Outcome of attempting to submit a suggestion-generation turn, distinguishing
+/// whether a run was actually accepted before the failure — the caller must
+/// only release the CAS claim in the [`NotAccepted`](Self::NotAccepted) case;
+/// releasing it after [`AcceptedButUnlinked`](Self::AcceptedButUnlinked) would
+/// let a concurrent caller submit a second run while the accepted one is
+/// still executing.
+enum SubmitGenerationOutcome {
+    /// `submit_turn` and the post-accept linking (`mark_message_submitted`)
+    /// both succeeded.
+    Accepted(ironclaw_host_api::turn::TurnRunId),
+    /// `submit_turn` accepted the run, but `mark_message_submitted` failed
+    /// afterward. The run may still execute; the claim must be retained.
+    AcceptedButUnlinked {
+        accepted_run_id: ironclaw_host_api::turn::TurnRunId,
+        error: TurnError,
+    },
+    /// No run was accepted (failure occurred at or before `submit_turn`).
+    /// Safe to release the claim.
+    NotAccepted(TurnError),
 }
 
 impl RebornSuggestionsProductService {
@@ -310,7 +388,23 @@ impl RebornSuggestionsProductService {
         thread_id: ThreadId,
         run_id: ironclaw_host_api::turn::TurnRunId,
         job_id: Uuid,
-    ) -> Result<ironclaw_host_api::turn::TurnRunId, TurnError> {
+    ) -> SubmitGenerationOutcome {
+        match self
+            .submit_generation_turn_inner(caller, thread_id, run_id, job_id)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => SubmitGenerationOutcome::NotAccepted(error),
+        }
+    }
+
+    async fn submit_generation_turn_inner(
+        &self,
+        caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        run_id: ironclaw_host_api::turn::TurnRunId,
+        job_id: Uuid,
+    ) -> Result<SubmitGenerationOutcome, TurnError> {
         let scope = turn_scope(caller, thread_id.clone());
         let thread_scope = ThreadScope {
             tenant_id: caller.tenant_id.clone(),
@@ -360,34 +454,30 @@ impl RebornSuggestionsProductService {
                     scope,
                     actor,
                     accepted_message_ref: AcceptedMessageRef::new(request_id.clone()).map_err(
-                        |_| TurnError::InvalidRequest {
-                            reason: "invalid accepted message ref".to_string(),
+                        |e| TurnError::InvalidRequest {
+                            reason: format!("invalid accepted message ref: {e}"),
                         },
                     )?,
                     source_binding_ref: SourceBindingRef::new(request_id.clone()).map_err(
-                        |_| TurnError::InvalidRequest {
-                            reason: "invalid source binding ref".to_string(),
+                        |e| TurnError::InvalidRequest {
+                            reason: format!("invalid source binding ref: {e}"),
                         },
                     )?,
                     reply_target_binding_ref: ReplyTargetBindingRef::new(request_id.clone())
-                        .map_err(|_| TurnError::InvalidRequest {
-                            reason: "invalid reply target binding ref".to_string(),
+                        .map_err(|e| TurnError::InvalidRequest {
+                            reason: format!("invalid reply target binding ref: {e}"),
                         })?,
                     requested_run_profile: Some(
-                        // Literal, not imported: `ironclaw_turn_runner` (loop
-                        // layer) is dev-only from this product-layer crate.
-                        // Pinned against
-                        // `ironclaw_turn_runner::planned_driver_factory::SUGGESTION_GENERATION_RUN_PROFILE_ID`
-                        // by the suggestion-generation integration test.
-                        RunProfileRequest::new(SUGGESTION_GENERATION_RUN_PROFILE_ID).map_err(
-                            |_| TurnError::InvalidRequest {
-                                reason: "invalid suggestion-generation run profile id".to_string(),
-                            },
-                        )?,
+                        RunProfileRequest::new(RunProfileId::suggestion_generation().as_str())
+                            .map_err(|e| TurnError::InvalidRequest {
+                                reason: format!(
+                                    "invalid suggestion-generation run profile id: {e}"
+                                ),
+                            })?,
                     ),
-                    idempotency_key: IdempotencyKey::new(request_id).map_err(|_| {
+                    idempotency_key: IdempotencyKey::new(request_id).map_err(|e| {
                         TurnError::InvalidRequest {
-                            reason: "invalid idempotency key".to_string(),
+                            reason: format!("invalid idempotency key: {e}"),
                         }
                     })?,
                     received_at: chrono::Utc::now(),
@@ -410,7 +500,12 @@ impl RebornSuggestionsProductService {
         // turn/run and transitions it Accepted -> Submitted. Without this the
         // message never carries a `turn_run_id`, and the executor's reply
         // pipeline has nothing to attach the finalized assistant message to.
-        self.thread_service
+        //
+        // `submit_turn` above has already accepted this run — a failure here
+        // must NOT be reported the same way as a pre-accept failure (see
+        // `SubmitGenerationOutcome`): the run may still execute.
+        match self
+            .thread_service
             .mark_message_submitted(
                 &thread_scope,
                 &thread_id,
@@ -419,11 +514,15 @@ impl RebornSuggestionsProductService {
                 accepted_run_id.to_string(),
             )
             .await
-            .map_err(|error| TurnError::Unavailable {
-                reason: format!("suggestion-generation mark-submitted failed: {error}"),
-            })?;
-
-        Ok(accepted_run_id)
+        {
+            Ok(_) => Ok(SubmitGenerationOutcome::Accepted(accepted_run_id)),
+            Err(error) => Ok(SubmitGenerationOutcome::AcceptedButUnlinked {
+                accepted_run_id,
+                error: TurnError::Unavailable {
+                    reason: format!("suggestion-generation mark-submitted failed: {error}"),
+                },
+            }),
+        }
     }
 }
 

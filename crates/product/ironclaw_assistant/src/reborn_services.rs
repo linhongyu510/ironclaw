@@ -4214,6 +4214,7 @@ where
                 views::view_page(response)
             }
             id if id == SUGGESTIONS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
                 let response = self.get_suggestions(caller).await?;
                 views::view_page(response)
             }
