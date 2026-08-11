@@ -51,11 +51,7 @@ pub(crate) struct HostAccessAssembly {
 }
 
 impl HostAccessAssembly {
-    /// `workspace_scoped_per_caller` is the deployment's single workspace
-    /// scoping decision (see
-    /// [`crate::deployment::DeploymentConfig::workspace_scoped_per_caller`]).
-    /// Passing it here keeps the ambient host aliases below reachable only for
-    /// the deployments that are allowed them.
+    /// Builds workspace views from the deployment's resolved caller-scoping decision.
     pub(crate) fn build_workspace_filesystems(
         &self,
         filesystem: Arc<CompositeRootFilesystem>,
