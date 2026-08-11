@@ -48,7 +48,7 @@ pub(crate) fn bundled_first_party_bundles() -> anyhow::Result<Vec<FirstPartyPack
             .ok()
             .as_deref(),
     );
-    bundled_packages()
+    let mut bundles = bundled_packages()
         .into_iter()
         .map(|bundle| {
             let is_gsuite = is_gsuite_extension_id(&ExtensionId::new(bundle.id)?);
@@ -104,7 +104,26 @@ pub(crate) fn bundled_first_party_bundles() -> anyhow::Result<Vec<FirstPartyPack
                 search_aliases,
             })
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // The web-push channel package carries a crate (adapter/codec/provider),
+    // so its manifest is embedded crate-locally and bundled here — the binary
+    // is the one place that links concrete package crates, and adding it to
+    // `ironclaw_extension_support::packages` would grow the §11.2.7
+    // cross-crate include inventory instead.
+    bundles.push(FirstPartyPackageBundle {
+        id: ironclaw_web_push::WEB_PUSH_EXTENSION_ID.to_string(),
+        display_name: "Web UI".to_string(),
+        manifest_toml: ironclaw_web_push_extension::MANIFEST.to_string(),
+        assets: vec![FirstPartyPackageAsset {
+            path: "manifest.toml".to_string(),
+            bytes: ironclaw_web_push_extension::MANIFEST.as_bytes().to_vec(),
+        }],
+        onboarding: None,
+        oauth_setup: None,
+        trust_effects: None,
+        search_aliases: Vec::new(),
+    });
+    Ok(bundles)
 }
 
 fn compact_google_capabilities_enabled_from_value(value: Option<&str>) -> bool {
@@ -170,5 +189,16 @@ mod tests {
             .filter_map(|tool| tool["id"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, ["gmail.list_messages"]);
+    }
+
+    #[test]
+    fn fallible_bundle_assembly_preserves_web_push_package() {
+        let bundles = bundled_first_party_bundles().unwrap();
+
+        assert!(
+            bundles
+                .iter()
+                .any(|bundle| bundle.id == ironclaw_web_push::WEB_PUSH_EXTENSION_ID)
+        );
     }
 }
