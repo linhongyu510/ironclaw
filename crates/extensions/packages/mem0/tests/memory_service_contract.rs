@@ -121,3 +121,23 @@ ironclaw_memory::memory_service_contract_retrieval_only!(
             .expect("seed write through mem0's own write operation");
     }
 );
+
+// The mem0 manifest separately declares the OPTIONAL conventional
+// `ironclaw.memory.write` + `.read` tool pair with the same prompt/schema as
+// native, so it also opts into the document-target vocabulary contract.
+ironclaw_memory::memory_document_tool_contract!(
+    mem0_document_tools,
+    || Mem0MemoryService::new(
+        Arc::new(FakeMem0Server::default()),
+        Mem0Config { app_id: None },
+    ),
+    async |service: &Mem0MemoryService, invocation, request| {
+        service
+            .write(invocation, request)
+            .await
+            .expect("write through mem0's conventional document tool");
+    },
+    async |service: &Mem0MemoryService, invocation, request| {
+        service.read(invocation, request).await
+    }
+);

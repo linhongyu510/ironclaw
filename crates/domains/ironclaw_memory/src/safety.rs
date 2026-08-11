@@ -15,6 +15,7 @@ use ironclaw_host_api::{error::HostApiError, path::VirtualPath};
 
 use crate::events::{MemoryAuditContext, MemoryEventSinkError};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path};
+use crate::target::{BOOTSTRAP_DOCUMENT_PATH, HEARTBEAT_DOCUMENT_PATH, MEMORY_DOCUMENT_PATH};
 
 /// Version identifier for the protected prompt-path policy registry.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -150,10 +151,10 @@ pub const DEFAULT_PROMPT_PROTECTED_PATHS: &[&str] = &[
     "USER.md",
     "IDENTITY.md",
     "SYSTEM.md",
-    "MEMORY.md",
+    MEMORY_DOCUMENT_PATH,
     "TOOLS.md",
-    "HEARTBEAT.md",
-    "BOOTSTRAP.md",
+    HEARTBEAT_DOCUMENT_PATH,
+    BOOTSTRAP_DOCUMENT_PATH,
     "context/assistant-directives.md",
     "context/profile.json",
 ];

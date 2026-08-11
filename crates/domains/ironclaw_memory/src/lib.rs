@@ -15,6 +15,7 @@ mod metadata;
 mod path;
 mod safety;
 mod service;
+mod target;
 /// Provider-level contract suite every `MemoryService` impl wires; see the
 /// module docs. Test-only (zero bytes in production builds; the
 /// `src/test_support.rs` name is the repo-wide feature-gated convention).
@@ -54,4 +55,9 @@ pub use service::{
     MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID, memory_context_disabled,
     profile_set_response_output, read_response_output, search_response_output,
     tree_response_output, write_response_output,
+};
+pub use target::{
+    BOOTSTRAP_DOCUMENT_PATH, BOOTSTRAP_DOCUMENT_TARGET, DAILY_LOG_DOCUMENT_TARGET,
+    HEARTBEAT_DOCUMENT_PATH, HEARTBEAT_DOCUMENT_TARGET, MEMORY_DOCUMENT_PATH,
+    MEMORY_DOCUMENT_TARGET, document_target_aliases, resolve_document_target, same_document_target,
 };

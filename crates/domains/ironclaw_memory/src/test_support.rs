@@ -1,13 +1,13 @@
-//! Provider-level contract suite for [`MemoryService`](crate::MemoryService)
-//! implementations.
+//! Provider-level contract suites for [`MemoryService`](crate::MemoryService)
+//! implementations and the optional conventional memory document tools.
 //!
 //! Same scaffolding pattern as `ironclaw_memory_native::contract_tests`
 //! (factory closures, one `#[tokio::test]` per contract per impl via a wiring
-//! macro): the invariants every bound memory provider must honor are defined
-//! ONCE here, and each provider crate wires the suite over a real (or
-//! stateful-fake) backing so the contract is proven per impl, not per mock.
+//! macro): an invariant is defined ONCE here, and each applicable provider
+//! wires the suite over a real (or stateful-fake) backing so the contract is
+//! proven per impl, not per mock.
 //!
-//! Contracts:
+//! The lifecycle contracts every applicable provider wires:
 //! - **Scope isolation** across tenant/user/agent/project: content written in
 //!   one scope is invisible to retrieval in any scope differing on any axis.
 //! - **Lane disjointness** (F4 regression) for providers declaring BOTH
@@ -18,19 +18,32 @@
 //!   providers declaring the hook: a recorded exchange reports
 //!   `recorded: true` and is retrievable from the short-term lane.
 //!
+//! The optional conventional document-tool contract:
+//! - **Target-alias resolution** (#7505): a provider declaring the conventional
+//!   `ironclaw.memory.write` + `.read` tools with the shared prompt/schema must
+//!   return a fact written with `target: "memory"` at canonical `MEMORY.md`,
+//!   never store/read it only under the alias.
+//!
 //! F6 note (owner decision, 2026-07-27): there is deliberately NO profile-CAS
 //! contract — profile-write atomicity is per-provider (native CASes; mem0
 //! read-merge-writes), accepted variance behind the shared tool id.
 //!
-//! Tool surfaces are provider-owned (registry-routed handlers), so the suite
-//! cannot seed content through a shared trait method: each wiring supplies a
-//! SEED async closure that writes through the provider's own write operation.
+//! Tool surfaces are provider-owned (registry-routed handlers). The
+//! `memory_service_contract_*` macros therefore take a SEED closure only for
+//! arranging lifecycle-test content; they do NOT require a provider to expose
+//! document tools. A provider that opts into the conventional
+//! `ironclaw.memory.write` + `.read` surface separately wires
+//! [`memory_document_tool_contract!`] with WRITE and READ closures through its
+//! own inherent tool operations.
 //!
-//! Wire with [`memory_service_contract_full!`] (both lanes + recording — the
-//! native shape) or [`memory_service_contract_retrieval_only!`] (a
-//! long-term-only provider — the mem0 shape); both take
-//! `(label, factory, seed)` where `seed` is
-//! `async |service, invocation, write_request| { … }`.
+//! Lifecycle wiring:
+//! - [`memory_service_contract_full!`] `(label, factory, seed)` for both lanes
+//!   plus recording (the native shape).
+//! - [`memory_service_contract_retrieval_only!`] `(label, factory, seed)` for a
+//!   long-term-only provider (the mem0 shape).
+//!
+//! Optional document-tool wiring:
+//! - [`memory_document_tool_contract!`] `(label, factory, write, read)`.
 
 use ironclaw_host_api::{
     ids::{AgentId, CorrelationId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
@@ -38,9 +51,10 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
-    MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
-    MemoryServiceRecordRequest, MemoryServiceWriteRequest,
+    MEMORY_DOCUMENT_PATH, MEMORY_DOCUMENT_TARGET, MemoryContextProfileId, MemoryInteractionMessage,
+    MemoryInteractionRole, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceReadRequest,
+    MemoryServiceReadResponse, MemoryServiceRecordRequest, MemoryServiceWriteRequest,
 };
 
 /// Base scope every contract writes under: the full four-axis tuple, so each
@@ -374,9 +388,59 @@ where
     );
 }
 
-/// Wire the FULL provider contract suite (both retrieval lanes + interaction
-/// recording — the shape native declares). `$factory` must return a fresh
-/// service over a fresh backing per call.
+/// Optional conventional document-tool contract (#7505): a provider that
+/// declares `ironclaw.memory.write` + `.read` with the shared prompt/schema
+/// resolves their target aliases identically. A fact written with
+/// `target: "memory"` (the alias the shared write prompt teaches) must be
+/// returned by a read of canonical `MEMORY.md` — the path the host's
+/// always-on prompt lane reads. A provider that stores the alias unresolved
+/// (or skips compatibility matching on its read path) fails this contract.
+pub async fn target_aliases_resolve_to_canonical_documents<S, F, Write, Read>(
+    factory: F,
+    write: Write,
+    read: Read,
+) where
+    S: MemoryService,
+    F: Fn() -> S,
+    Write: AsyncFn(&S, MemoryInvocation, MemoryServiceWriteRequest),
+    Read: AsyncFn(
+        &S,
+        MemoryInvocation,
+        MemoryServiceReadRequest,
+    ) -> Result<MemoryServiceReadResponse, MemoryServiceError>,
+{
+    let service = factory();
+    let inv = invocation(base_scope());
+    write(
+        &service,
+        inv.clone(),
+        write_request(MEMORY_DOCUMENT_TARGET, "alias contract marker ibis"),
+    )
+    .await;
+
+    let canonical = read(
+        &service,
+        inv,
+        MemoryServiceReadRequest {
+            path: MEMORY_DOCUMENT_PATH.to_string(),
+        },
+    )
+    .await
+    .expect("reading the canonical document must succeed (not fail or report absent)");
+    assert!(
+        canonical.content.contains("alias contract marker ibis"),
+        "a fact written with `target: \"memory\"` must be readable at `MEMORY.md` — \
+         a provider that stores the alias unresolved fails the optional conventional \
+         document-tool contract (#7505); read back: {:?}",
+        canonical.content
+    );
+}
+
+/// Wire the FULL provider lifecycle contract suite (both retrieval lanes +
+/// interaction recording — the native shape). `$factory` must return a fresh
+/// service over a fresh backing per call. `$seed` arranges test content
+/// through a provider-specific seam; it does not imply a model-facing write
+/// tool.
 #[macro_export]
 macro_rules! memory_service_contract_full {
     ($label:ident, $factory:expr, $seed:expr) => {
@@ -404,10 +468,10 @@ macro_rules! memory_service_contract_full {
     };
 }
 
-/// Wire the contract suite for a provider declaring ONLY the long-term
-/// retrieval lane (the mem0 shape): scope isolation applies; the lane and
-/// recording contracts do not (those hooks are undeclared, so the host never
-/// calls them).
+/// Wire the provider lifecycle contract suite for a provider declaring ONLY
+/// the long-term retrieval lane (the mem0 shape): scope isolation applies;
+/// lane and recording contracts do not (those hooks are undeclared, so the
+/// host never calls them). `$seed` need not be a model-facing tool.
 #[macro_export]
 macro_rules! memory_service_contract_retrieval_only {
     ($label:ident, $factory:expr, $seed:expr) => {
@@ -418,6 +482,27 @@ macro_rules! memory_service_contract_retrieval_only {
             async fn scope_isolation_across_tenant_user_agent_project() {
                 $crate::test_support::scope_isolation_across_tenant_user_agent_project(
                     $factory, $seed,
+                )
+                .await;
+            }
+        }
+    };
+}
+
+/// Wire the OPTIONAL conventional document-tool contract for a provider
+/// whose manifest declares `ironclaw.memory.write` + `.read` with the shared
+/// prompt/schema vocabulary. Providers exposing different tools do not wire
+/// this suite.
+#[macro_export]
+macro_rules! memory_document_tool_contract {
+    ($label:ident, $factory:expr, $write:expr, $read:expr) => {
+        mod $label {
+            use super::*;
+
+            #[tokio::test]
+            async fn target_aliases_resolve_to_canonical_documents() {
+                $crate::test_support::target_aliases_resolve_to_canonical_documents(
+                    $factory, $write, $read,
                 )
                 .await;
             }

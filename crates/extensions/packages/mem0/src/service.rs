@@ -26,6 +26,18 @@
 //! | `profile_set`      | read-merge-write a `kind=profile` memory       | good     |
 //! | `profile_read`     | latest `kind=profile` memory bytes             | loose    |
 //!
+//! ## Conventional document-tool target aliases (#7505)
+//!
+//! This provider declares `ironclaw.memory.write` + `.read` with the same
+//! prompt/schema as native, so its `target` tag follows that optional shared
+//! vocabulary. The tag stored in mem0 metadata is the CANONICAL document path,
+//! resolved through `ironclaw_memory::resolve_document_target`: a write with
+//! `target: "memory"` is tagged `MEMORY.md`, exactly as native addresses it,
+//! so one logical document keeps one identity across backend swaps and the
+//! host's always-on lane (`read_document("MEMORY.md")`) finds it. Reads use
+//! `ironclaw_memory::same_document_target`, so rows tagged with a pre-fix
+//! legacy alias remain reachable by their canonical path.
+//!
 //! ## `infer=false` (verbatim) document-tool mapping
 //!
 //! mem0's `add` defaults to running an LLM to *extract facts* from the message
@@ -48,7 +60,7 @@ use ironclaw_memory::{
     MemoryServiceReadResponse, MemoryServiceSearchRequest, MemoryServiceSearchResponse,
     MemoryServiceSearchResult, MemoryServiceTreeRequest, MemoryServiceTreeResponse,
     MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus,
-    memory_context_disabled,
+    memory_context_disabled, resolve_document_target, same_document_target,
 };
 use serde_json::{Map, Value, json};
 
@@ -276,7 +288,13 @@ impl Mem0MemoryService {
             return Err(MemoryServiceError::input());
         }
         let namespace = self.scoped_namespace(&invocation.scope);
-        let metadata = json!({ TARGET_KEY: request.target, SOURCE_KEY: SOURCE_VALUE });
+        // Target aliases are contract vocabulary (#7505): resolve through the
+        // domain-owned table so the stored tag is the CANONICAL document path
+        // (`target: "memory"` → `MEMORY.md`), matching what the host's
+        // always-on lane reads. Never store the alias unresolved.
+        let resolved_target =
+            resolve_document_target(&request.target, request.timezone.as_deref())?;
+        let metadata = json!({ TARGET_KEY: resolved_target, SOURCE_KEY: SOURCE_VALUE });
         let body = self.add_body(&namespace, &request.content, metadata);
         let response = self
             .transport
@@ -286,7 +304,10 @@ impl Mem0MemoryService {
         ensure_success(&response, "write").map_err(MemoryServiceError::operation_from)?;
         Ok(MemoryServiceWriteResponse {
             status: MemoryWriteStatus::Written,
-            path: request.target,
+            // Report the canonical path (native reports its resolved path
+            // too), so the model learns the document's real address, not the
+            // alias it wrote with.
+            path: resolved_target,
             // mem0 is inherently additive: every write adds a memory.
             append: true,
             content_length: request.content.len(),
@@ -314,10 +335,17 @@ impl Mem0MemoryService {
         // fragments by `created_at` before joining; otherwise an append-style
         // document reads back scrambled. `sort_by` is stable, so fragments that
         // share (or lack) a `created_at` keep their relative list order.
+        //
+        // Tag matching is alias-aware (#7505): new writes are tagged with the
+        // canonical path (`MEMORY.md`), and pre-fix rows tagged with the legacy
+        // alias (`memory`) must stay reachable by that same canonical path.
         let mut fragments: Vec<&Value> = response_items(&response.body)
             .map_err(MemoryServiceError::operation_from)?
             .into_iter()
-            .filter(|item| item_metadata_str(item, TARGET_KEY) == Some(request.path.as_str()))
+            .filter(|item| {
+                item_metadata_str(item, TARGET_KEY)
+                    .is_some_and(|stored| same_document_target(stored, &request.path))
+            })
             .collect();
         fragments.sort_by(|left, right| item_created_at(left).cmp(item_created_at(right)));
         let parts: Vec<String> = fragments
@@ -655,6 +683,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_resolves_target_aliases_to_canonical_paths_before_storing() {
+        // #7505: the stored `target` tag must be the canonical document path
+        // (`MEMORY.md`), never the alias the model wrote with — the host's
+        // always-on lane reads the canonical path.
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
+        let response = service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: "memory".to_string(),
+                    content: "durable fact via alias".to_string(),
+                    append: true,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect("write should succeed");
+        assert_eq!(
+            response.path, "MEMORY.md",
+            "the write response must report the canonical path, not the alias"
+        );
+
+        let recorded = transport.recorded();
+        assert_eq!(recorded.len(), 1);
+        let body = recorded[0].body.as_ref().expect("add body");
+        assert_eq!(
+            body["metadata"]["target"],
+            json!("MEMORY.md"),
+            "a `target: \"memory\"` write must be tagged with the canonical document path"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_resolves_daily_log_through_the_shared_timezone_rule() {
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
+        service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: "daily_log".to_string(),
+                    content: "today's log entry".to_string(),
+                    append: true,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: Some("Europe/Berlin".to_string()),
+                },
+            )
+            .await
+            .expect("write should succeed");
+        let recorded = transport.recorded();
+        assert_eq!(recorded.len(), 1);
+        let stored = recorded[0].body.as_ref().expect("add body")["metadata"]["target"]
+            .as_str()
+            .expect("target tag");
+        assert!(
+            stored.starts_with("daily/") && stored.ends_with(".md"),
+            "daily_log must resolve to today's dated canonical path, got {stored}"
+        );
+
+        let invalid = service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: "daily_log".to_string(),
+                    content: "rejected".to_string(),
+                    append: true,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: Some("not/a-zone".to_string()),
+                },
+            )
+            .await
+            .expect_err("an invalid timezone must fail the write");
+        assert_eq!(invalid.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[tokio::test]
     async fn write_patch_is_unsupported() {
         let (service, _transport) = service_with(MockMem0Transport::always_ok(json!({})));
         let error = service
@@ -789,6 +904,31 @@ mod tests {
             .await
             .expect_err("absent target is not found");
         assert_eq!(missing.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn read_matches_legacy_alias_tags_alongside_canonical_paths() {
+        // #7505: pre-fix rows tagged with the legacy alias (`memory`) must stay
+        // reachable by the canonical path (`MEMORY.md` — what the host's
+        // always-on lane reads), alongside post-fix canonical tags.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
+            { "memory": "legacy alias row", "metadata": { "target": "memory" } },
+            { "memory": "canonical row", "metadata": { "target": "MEMORY.md" } },
+            { "memory": "other doc", "metadata": { "target": "HEARTBEAT.md" } }
+        ])));
+        let read = service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "MEMORY.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+        assert_eq!(
+            read.content, "legacy alias row\ncanonical row",
+            "both the legacy-alias and canonical tags must reconstruct the document"
+        );
     }
 
     #[tokio::test]

@@ -13,13 +13,12 @@ use crate::{
     MemoryWriteOutcome, RepositoryMemoryBackend,
 };
 use async_trait::async_trait;
-use chrono::Utc;
-use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_memory::{
-    DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
-    PromptSafetyAllowanceId, PromptWriteSafetyEventSink, content_bytes_sha256,
+    BOOTSTRAP_DOCUMENT_PATH, BOOTSTRAP_DOCUMENT_TARGET, DocumentMetadata, MemoryContext,
+    MemoryDocumentPath, MemoryDocumentScope, PromptSafetyAllowanceId, PromptWriteSafetyEventSink,
+    content_bytes_sha256, resolve_document_target,
 };
 use ironclaw_memory::{
     MemoryInteractionMessage, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
@@ -39,9 +38,6 @@ use serde_json::{Map, Value, json};
 // republish them under `ironclaw_memory_native::` — and this module exports
 // only `NativeMemoryService`, the native adapter implemented below.
 
-const MEMORY_PATH: &str = "MEMORY.md";
-const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
-const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
 const PROFILE_DOCUMENT_PATH: &str = "context/profile.json";
 const MAX_MEMORY_PATCH_RETRIES: usize = 8;
 
@@ -131,7 +127,9 @@ impl NativeMemoryService {
     ) -> Result<MemoryServiceWriteResponse, MemoryServiceError> {
         reject_local_or_traversal_path(&request.target)?;
         let (scope, context) = self.scoped_context(&invocation)?;
-        let resolved_path = resolve_target_path(&request.target, request.timezone.as_deref())?;
+        // Native declares the conventional document-tool vocabulary; resolve
+        // its aliases through the shared domain table (#7505), never locally.
+        let resolved_path = resolve_document_target(&request.target, request.timezone.as_deref())?;
         // The `threads/` namespace is reserved for per-thread short-term scratch
         // written ONLY by the trusted after-turn recorder via `record_interaction`
         // (which routes through `write_reserved_document`, bypassing this guard). A
@@ -145,8 +143,10 @@ impl NativeMemoryService {
         let path = document_path(&scope, &resolved_path)?;
         let options = write_options(request.metadata.as_ref());
 
-        if request.target == "bootstrap" {
-            if path.relative_path() != BOOTSTRAP_PATH || resolved_path != BOOTSTRAP_PATH {
+        if request.target == BOOTSTRAP_DOCUMENT_TARGET {
+            if path.relative_path() != BOOTSTRAP_DOCUMENT_PATH
+                || resolved_path != BOOTSTRAP_DOCUMENT_PATH
+            {
                 return Err(MemoryServiceError::operation());
             }
             let context = context.clone().with_prompt_write_safety_allowance(
@@ -491,7 +491,7 @@ impl NativeMemoryService {
             return Err(MemoryServiceError::input());
         }
         let (scope, context) = self.scoped_context(invocation)?;
-        let resolved_path = resolve_target_path(target, None)?;
+        let resolved_path = resolve_document_target(target, None)?;
         // Defense in depth: this bypass writes ONLY the reserved `threads/`
         // namespace. Reject anything else so a future caller cannot smuggle an
         // arbitrary path past the public `write` guard through this helper.
@@ -590,25 +590,6 @@ fn build_native_backend(
         backend = backend.with_prompt_write_safety_event_sink(prompt_write_safety_event_sink);
     }
     Arc::new(backend)
-}
-
-fn resolve_target_path(target: &str, timezone: Option<&str>) -> Result<String, MemoryServiceError> {
-    match target {
-        "memory" => Ok(MEMORY_PATH.to_string()),
-        "heartbeat" => Ok(HEARTBEAT_PATH.to_string()),
-        "bootstrap" => Ok(BOOTSTRAP_PATH.to_string()),
-        "daily_log" => {
-            let timezone = match timezone {
-                Some(value) => value
-                    .parse::<Tz>()
-                    .map_err(|_| MemoryServiceError::input())?,
-                None => Tz::UTC,
-            };
-            let now = Utc::now().with_timezone(&timezone);
-            Ok(format!("daily/{}.md", now.format("%Y-%m-%d")))
-        }
-        path => Ok(path.to_string()),
-    }
 }
 
 fn document_path(

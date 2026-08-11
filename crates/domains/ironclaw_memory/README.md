@@ -25,12 +25,20 @@ point.
   tools built on it.
 - Path/scope grammar: `MemoryDocumentScope`, `MemoryDocumentPath` (validating
   constructors; fail-closed), `MemoryContext`.
+- Optional conventional document-tool vocabulary (`target`): providers that
+  declare `ironclaw.memory.write` + `.read` with the shared prompt/schema use
+  the reserved aliases (`memory` → `MEMORY.md`, `daily_log` → today's dated
+  log, `heartbeat`, `bootstrap`) and the domain-owned resolution/identity
+  helpers (`resolve_document_target`, `same_document_target`). Providers may
+  instead expose different tools or none; only conventional document-tool
+  providers opt into this vocabulary and its conformance suite.
 - Prompt-write-safety vocabulary (`safety`): operation, source, severity,
   reason codes, policy trait, event sink — the *shape* of what a provider must
   enforce; the enforcement engine lives in the providers.
 - Metadata + hashing helpers (`metadata`, `hash`); significant-event/audit
   contracts (`events`).
-- `test_support` — the shared conformance suite every provider wires against.
+- `test_support` — shared lifecycle conformance every applicable provider
+  wires, plus the separate opt-in conventional document-tool conformance.
 
 ## Depends on / consumed by
 

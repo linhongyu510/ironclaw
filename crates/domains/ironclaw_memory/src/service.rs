@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::metadata::DocumentMetadata;
+use crate::target::DAILY_LOG_DOCUMENT_TARGET;
 
 const MAX_LOCALE_LEN: usize = 35;
 
@@ -81,7 +82,7 @@ impl MemoryServiceWriteRequest {
         // semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
-            Some(Value::Null) | None => "daily_log".to_string(),
+            Some(Value::Null) | None => DAILY_LOG_DOCUMENT_TARGET.to_string(),
             Some(_) => return Err(MemoryServiceError::input()),
         };
         // Provider-neutral containment: reject a target that would escape the
@@ -107,7 +108,7 @@ impl MemoryServiceWriteRequest {
             .get("new_string")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let append = if target == "daily_log" {
+        let append = if target == DAILY_LOG_DOCUMENT_TARGET {
             true
         } else {
             input.get("append").and_then(Value::as_bool).unwrap_or(true)
@@ -905,9 +906,10 @@ fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
 /// Reject a write `target` that would escape the scoped memory mount or fail to
 /// name a document. Mirrors the fail-closed `not` pattern the model-facing
 /// `document-write` input schema advertises: blank, absolute path (leading `/`),
-/// any `..` traversal, or a backslash separator. Reserved names (`daily_log`,
-/// `memory`, `heartbeat`, `bootstrap`) and ordinary relative document paths
-/// (`notes/x.md`) pass unchanged.
+/// any `..` traversal, or a backslash separator. Reserved aliases (the
+/// `*_DOCUMENT_TARGET` vocabulary in `crate::target`) and ordinary relative
+/// document paths (`notes/x.md`) pass unchanged; resolution to the canonical
+/// document is the domain-owned [`resolve_document_target`] table.
 fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
     if target.trim().is_empty()
         || target.starts_with('/')

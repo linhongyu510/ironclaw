@@ -1268,3 +1268,20 @@ ironclaw_memory::memory_service_contract_full!(
             .expect("seed write through native's own write operation");
     }
 );
+
+// The native manifest separately declares the OPTIONAL conventional
+// `ironclaw.memory.write` + `.read` tool pair with the shared prompt/schema,
+// so it also opts into the document-target vocabulary contract (#7505).
+ironclaw_memory::memory_document_tool_contract!(
+    native_document_tools,
+    || NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None),
+    async |service: &NativeMemoryService, invocation, request| {
+        service
+            .write(invocation, request)
+            .await
+            .expect("write through native's conventional document tool");
+    },
+    async |service: &NativeMemoryService, invocation, request| {
+        service.read(invocation, request).await
+    }
+);
