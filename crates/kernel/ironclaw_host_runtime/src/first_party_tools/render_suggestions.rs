@@ -353,25 +353,45 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_card_field_is_rejected_before_the_hook() {
-        let hook = Arc::new(FakeHook::new(Ok(())));
-        let handler = RenderSuggestionsHandler { hook: hook.clone() };
-        let mut oversized_card = card("Triage inbox");
-        oversized_card["title"] = json!("x".repeat(MAX_TITLE_LEN + 1));
+        // Table-driven over all five bounded fields `card_length_issues`
+        // checks, so dropping any one `check(...)` call there leaves that
+        // field unbounded and fails a case here instead of passing silently.
+        for (field, limit) in [
+            ("title", MAX_TITLE_LEN),
+            ("description", MAX_DESCRIPTION_LEN),
+            ("suggested_prompt", MAX_SUGGESTED_PROMPT_LEN),
+            ("category", MAX_CATEGORY_LEN),
+            ("extension_id", MAX_EXTENSION_ID_LEN),
+        ] {
+            let hook = Arc::new(FakeHook::new(Ok(())));
+            let handler = RenderSuggestionsHandler { hook: hook.clone() };
+            let mut oversized_card = card("Triage inbox");
+            oversized_card["extension_id"] = json!("gmail");
+            oversized_card[field] = json!("x".repeat(limit + 1));
 
-        let error = handler
-            .dispatch(sample_request(json!({ "cards": [oversized_card] })))
-            .await
-            .expect_err("oversized title must fail");
+            let error = handler
+                .dispatch(sample_request(json!({ "cards": [oversized_card] })))
+                .await
+                .expect_err(&format!("oversized {field} must fail"));
 
-        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
-        let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
-            panic!("expected Dispatch variant");
-        };
-        let Some(DispatchFailureDetail::InvalidInput { issues }) = detail.as_deref() else {
-            panic!("expected InvalidInput detail, got {detail:?}");
-        };
-        assert!(issues.iter().any(|issue| issue.path == "cards[0].title"));
-        assert!(hook.seen.lock().unwrap().is_empty());
+            let expected_path = format!("cards[0].{field}");
+            assert_eq!(
+                error.kind(),
+                Some(RuntimeDispatchErrorKind::InputEncode),
+                "field {field}"
+            );
+            let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+                panic!("expected Dispatch variant for {field}");
+            };
+            let Some(DispatchFailureDetail::InvalidInput { issues }) = detail.as_deref() else {
+                panic!("expected InvalidInput detail for {field}, got {detail:?}");
+            };
+            assert!(
+                issues.iter().any(|issue| issue.path == expected_path),
+                "field {field}: expected issue at {expected_path}, got {issues:?}"
+            );
+            assert!(hook.seen.lock().unwrap().is_empty(), "field {field}");
+        }
     }
 
     #[tokio::test]

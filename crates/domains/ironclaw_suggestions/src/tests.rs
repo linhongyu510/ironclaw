@@ -530,6 +530,20 @@ async fn claim_succeeds_over_an_incompatible_schema_document() {
         .await
         .expect("claim must succeed by CAS-overwriting the incompatible document");
     assert!(matches!(outcome, ClaimOutcome::Claimed { .. }));
+
+    // Read back through the store's own path resolution (not the hand-built
+    // `path` above) so a future `doc_path` change that silently strands the
+    // claim at a different path fails this assertion instead of a
+    // `read_versioned` that returns `Absent` and lets it pass vacuously.
+    let doc = store_over_raw
+        .read_doc(&tenant(), &user())
+        .await
+        .expect("read")
+        .expect("the incompatible doc must be replaced by a current-schema doc");
+    assert!(
+        doc.active_job.is_some(),
+        "the CAS overwrite must persist the claim, not just return Claimed"
+    );
 }
 
 // `record_failure_sets_last_error_and_clears_active_job` is likewise not
