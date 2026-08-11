@@ -573,6 +573,7 @@ struct StubServices {
     submit_turn_calls: Mutex<Vec<ProductSubmitTurnRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
+    stat_fs_calls: Mutex<Vec<RebornFsStatRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
@@ -1363,6 +1364,10 @@ impl StubServices {
             id if id == FS_STAT_VIEW.id => {
                 let request: RebornFsStatRequest =
                     serde_json::from_value(query.params).expect("fs stat params");
+                self.stat_fs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request.clone());
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornFsStatResponse {
                         stat: ProjectFsStat {
@@ -8513,6 +8518,12 @@ async fn stat_fs_path_keeps_workspace_path_mount_relative() {
     assert_eq!(
         body["stat"]["path"], "report.md",
         "stat response must echo the mount-relative path, not the prefixed served path"
+    );
+    let calls = services.stat_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "report.md",
+        "stat must dispatch the mount-relative path, not only echo it in the response"
     );
 }
 

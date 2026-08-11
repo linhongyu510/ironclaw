@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("source root");
+    let mut deepest = source.clone();
+    for level in 0..=MAX_ADOPTION_TREE_DEPTH {
+        deepest = deepest.join(format!("level-{level}"));
+        fs::create_dir(&deepest).expect("nested source directory");
+    }
+    fs::write(deepest.join("payload.txt"), b"payload").expect("nested source file");
+
+    let copy_error = copy_ordinary_tree(&source, &temp.path().join("destination"))
+        .expect_err("copy must fail closed instead of recursively traversing unbounded input");
+    assert!(format!("{copy_error:#}").contains("depth"));
+
+    let validation_error = validate_ordinary_tree(&source)
+        .expect_err("validation must share the copy traversal depth bound");
+    assert!(format!("{validation_error:#}").contains("depth"));
+
+    let content_error = directory_has_content(&source)
+        .expect_err("content detection must share the traversal depth bound");
+    assert!(format!("{content_error:#}").contains("depth"));
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinked_legacy_database_is_rejected_without_source_mutation() {
@@ -25,7 +50,9 @@ fn symlinked_legacy_database_is_rejected_without_source_mutation() {
     assert!(
         !temp
             .path()
-            .join("runtime/layout-adoption/journal.toml")
+            .join("runtime")
+            .join(ADOPTION_DIR)
+            .join(JOURNAL_FILE)
             .exists()
     );
 }
@@ -83,7 +110,7 @@ fn recovery_rejects_a_symlinked_snapshot_ancestor_before_source_mutation() {
     write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
     let outside = temp.path().join("outside-snapshots");
     fs::create_dir(&outside).expect("outside snapshots");
-    symlink(&outside, adoption_root.join("snapshot")).expect("snapshot symlink");
+    symlink(&outside, adoption_root.join(SNAPSHOT_DIR)).expect("snapshot symlink");
 
     let error = adopt_layout(&home, requirement, confirmed_options())
         .expect_err("snapshot symlink must not be followed during recovery");
@@ -162,7 +189,7 @@ fn replay_rejects_a_swapped_symlinked_staging_child_before_install() {
     let candidate = candidates.first().expect("one candidate");
     let snapshot = candidate.snapshot_root(&adoption_root);
     snapshot_source(candidate, &snapshot).expect("snapshot source");
-    let staging = adoption_root.join("staging");
+    let staging = adoption_root.join(STAGING_DIR);
     fs::create_dir(&staging).expect("staging root");
     let outside = temp.path().join("outside-state");
     fs::create_dir(&outside).expect("outside state");
@@ -189,5 +216,5 @@ fn replay_rejects_a_swapped_symlinked_staging_child_before_install() {
         "staged replay must not write through a swapped child"
     );
     assert!(!temp.path().join("state").exists());
-    assert!(!temp.path().join("layout.toml").exists());
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
 }

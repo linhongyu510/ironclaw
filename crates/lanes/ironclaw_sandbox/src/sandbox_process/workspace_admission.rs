@@ -311,10 +311,12 @@ struct WorkspaceLeafIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WorkspaceLeafAdmission {
-    /// A POSIX admission observation, not a retained directory handle. Docker
-    /// re-resolves `path` for its bind mount after revalidation, so callers
-    /// must not treat this identity as preventing later filesystem races.
+    /// Docker re-resolves this path for its bind mount after revalidation.
+    /// It is therefore not a retained directory handle and remains subject to
+    /// filesystem races after admission.
     pub(super) path: PathBuf,
+    /// POSIX identity observed during admission. It proves the revalidation
+    /// observation, but cannot prevent a later path replacement.
     identity: WorkspaceLeafIdentity,
 }
 

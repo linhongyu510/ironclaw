@@ -646,7 +646,23 @@ pub(super) fn copy_system_tree(source: &Path, destination: &Path) -> anyhow::Res
     Ok(())
 }
 
+/// Maximum nesting accepted from an operator-controlled adoption source.
+///
+/// This is a structural safety bound, independent of file count: every
+/// recursive adoption walk shares it so validation cannot approve a tree that
+/// copying or content detection would traverse without limit.
+pub(super) const MAX_ADOPTION_TREE_DEPTH: usize = 64;
+
 pub(super) fn copy_ordinary_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    copy_ordinary_tree_at_depth(source, destination, 0)
+}
+
+fn copy_ordinary_tree_at_depth(
+    source: &Path,
+    destination: &Path,
+    depth: usize,
+) -> anyhow::Result<()> {
+    ensure_adoption_tree_depth(source, depth)?;
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("inspect source {}", source.display()))?;
     if metadata.file_type().is_symlink() {
@@ -673,7 +689,11 @@ pub(super) fn copy_ordinary_tree(source: &Path, destination: &Path) -> anyhow::R
     {
         let entry =
             entry.with_context(|| format!("read source entry under {}", source.display()))?;
-        copy_ordinary_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        copy_ordinary_tree_at_depth(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            depth + 1,
+        )?;
     }
     ensure_directory_path_matches_handle(source, &source_handle)?;
     sync_directory(destination)
@@ -705,6 +725,9 @@ pub(super) fn copy_ordinary_file(source: &Path, destination: &Path) -> anyhow::R
             .mode();
         fs::set_permissions(destination, fs::Permissions::from_mode(mode))
             .with_context(|| format!("preserve mode on {}", destination.display()))?;
+        output
+            .sync_all()
+            .with_context(|| format!("sync preserved mode on {}", destination.display()))?;
     }
     Ok(())
 }
@@ -765,7 +788,9 @@ pub(super) fn establish_and_verify_master_key_policy(path: &Path) -> anyhow::Res
         })?;
     }
     let file = open_file_no_follow(path)?;
-    verify_master_key_policy(&file, path, "destination")
+    verify_master_key_policy(&file, path, "destination")?;
+    file.sync_all()
+        .with_context(|| format!("sync restored master key mode at {}", path.display()))
 }
 
 pub(super) fn verify_master_key_policy(
@@ -865,6 +890,11 @@ pub(super) fn read_utf8_file_no_follow(path: &Path) -> anyhow::Result<String> {
 }
 
 pub(super) fn validate_ordinary_tree(path: &Path) -> anyhow::Result<()> {
+    validate_ordinary_tree_at_depth(path, 0)
+}
+
+fn validate_ordinary_tree_at_depth(path: &Path, depth: usize) -> anyhow::Result<()> {
+    ensure_adoption_tree_depth(path, depth)?;
     let metadata =
         fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -884,7 +914,7 @@ pub(super) fn validate_ordinary_tree(path: &Path) -> anyhow::Result<()> {
         fs::read_dir(path).with_context(|| format!("read source directory {}", path.display()))?
     {
         let entry = entry.with_context(|| format!("read source entry under {}", path.display()))?;
-        validate_ordinary_tree(&entry.path())?;
+        validate_ordinary_tree_at_depth(&entry.path(), depth + 1)?;
     }
     ensure_directory_path_matches_handle(path, &directory_handle)
 }
@@ -933,6 +963,11 @@ pub(super) fn directory_is_empty(path: &Path) -> anyhow::Result<bool> {
 }
 
 pub(super) fn directory_has_content(path: &Path) -> anyhow::Result<bool> {
+    directory_has_content_at_depth(path, 0)
+}
+
+fn directory_has_content_at_depth(path: &Path, depth: usize) -> anyhow::Result<bool> {
+    ensure_adoption_tree_depth(path, depth)?;
     let metadata =
         fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -952,11 +987,21 @@ pub(super) fn directory_has_content(path: &Path) -> anyhow::Result<bool> {
     }
     for entry in fs::read_dir(path).with_context(|| format!("read directory {}", path.display()))? {
         let entry = entry.with_context(|| format!("read entry under {}", path.display()))?;
-        if directory_has_content(&entry.path())? {
+        if directory_has_content_at_depth(&entry.path(), depth + 1)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn ensure_adoption_tree_depth(path: &Path, depth: usize) -> anyhow::Result<()> {
+    if depth > MAX_ADOPTION_TREE_DEPTH {
+        bail!(
+            "adoption source tree exceeds maximum depth {MAX_ADOPTION_TREE_DEPTH} at {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn sync_directory(path: &Path) -> anyhow::Result<()> {

@@ -201,12 +201,13 @@ pub(super) fn resume_adoption(
 
     if journal.phase == AdoptionPhase::CanonicalInstalled {
         verify_canonical_inventory(paths, &candidate, &snapshot)?;
+        verify_canonical_workspace(paths, workspace.as_ref())?;
         cleanup_completed_staging(adoption_root, &journal.operation_id)?;
         journal.phase = AdoptionPhase::MigrationPending;
         write_journal(journal_path, journal)?;
     }
 
-    if journal.phase == AdoptionPhase::MigrationPending {
+    let store_verified_on_this_run = if journal.phase == AdoptionPhase::MigrationPending {
         verify_post_migration_canonical_shape(paths, &candidate, &snapshot, false)?;
         verify_canonical_store(
             paths,
@@ -214,20 +215,27 @@ pub(super) fn resume_adoption(
             store_verification,
         )?;
         verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
+        verify_canonical_workspace(paths, workspace.as_ref())?;
         journal.phase = AdoptionPhase::StoreVerified;
         write_journal(journal_path, journal)?;
-    }
+        true
+    } else {
+        false
+    };
 
     // StoreVerified is durable progress, not a proof that the canonical tree
     // still exists. Never compare post-migration libSQL bytes to the immutable
     // snapshot; validate the post-migration shape and reopen the real store.
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
-    verify_canonical_store(
-        paths,
-        candidate.kind.requirement().durable_state,
-        store_verification,
-    )?;
+    if !store_verified_on_this_run {
+        verify_canonical_store(
+            paths,
+            candidate.kind.requirement().durable_state,
+            store_verification,
+        )?;
+    }
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
+    verify_canonical_workspace(paths, workspace.as_ref())?;
     initialize_disposable_namespaces(home, paths)?;
 
     let manifest = LayoutManifest::new(journal.target_requirement);
@@ -383,11 +391,23 @@ pub(super) fn verify_completed_staged_install(
     workspace: Option<&ValidatedWorkspaceImportDecision>,
 ) -> anyhow::Result<()> {
     verify_canonical_inventory(paths, candidate, snapshot)?;
-    if let Some(workspace) = workspace {
-        validate_ordinary_tree(&workspace_leaf_path(paths, workspace))?;
-    }
+    verify_canonical_workspace(paths, workspace)?;
     require_ordinary_directory(paths.workspace_root())?;
     Ok(())
+}
+
+pub(super) fn verify_canonical_workspace(
+    paths: &RebornStoragePaths,
+    workspace: Option<&ValidatedWorkspaceImportDecision>,
+) -> anyhow::Result<()> {
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+    require_matching_tree(
+        &workspace.source,
+        &workspace_leaf_path(paths, workspace),
+        "canonical tenant/user workspace",
+    )
 }
 
 pub(super) fn require_proven_staging(staging: &Path, operation_id: &str) -> anyhow::Result<()> {
@@ -721,6 +741,8 @@ pub(super) fn verify_canonical_store(
     durable_state: DurableStateKind,
     verification: CanonicalStoreVerification,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    record_canonical_store_verification();
     match (durable_state, verification) {
         (DurableStateKind::EmbeddedLibSql, CanonicalStoreVerification::EmbeddedLibSql) => {
             let state_root = paths.state_root().to_path_buf();

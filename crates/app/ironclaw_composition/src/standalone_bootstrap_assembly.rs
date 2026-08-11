@@ -249,6 +249,9 @@ fn validate_legacy_skill_snapshot_tree(storage_root: &Path) -> Result<(), Reborn
     validate_legacy_skill_snapshot_root(&storage_root.join("skills"))?;
 
     let tenants_root = storage_root.join("tenants");
+    if !validate_legacy_skill_snapshot_directory_if_present(&tenants_root)? {
+        return Ok(());
+    }
     let tenants = match std::fs::read_dir(&tenants_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -582,6 +585,37 @@ mod skill_disk_import_tests {
                 .await
                 .is_err(),
             "a rejected snapshot must not import an outside skill"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_skill_snapshot_import_rejects_a_symlinked_tenants_root() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let outside = tempfile::tempdir().expect("outside tenants root");
+        let filesystem = database_filesystem();
+        seed_skill_on_disk(outside.path(), "escaped-tenants-root");
+        symlink(
+            outside.path().join("tenants"),
+            storage.path().join("tenants"),
+        )
+        .expect("tenants root alias");
+
+        let error = import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+            .await
+            .expect_err("a tenants-root symlink must fail before directory traversal");
+
+        assert!(error.to_string().contains("symlink"), "{error}");
+        assert!(
+            RootFilesystem::stat(
+                filesystem.as_ref(),
+                &virtual_skill_path("escaped-tenants-root")
+            )
+            .await
+            .is_err(),
+            "a rejected tenants-root alias must not import an outside skill"
         );
     }
 

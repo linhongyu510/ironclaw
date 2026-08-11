@@ -108,15 +108,20 @@ fn migration_pending_recovery_accepts_a_real_post_copy_libsql_write() {
     })
     .expect("real post-copy store write");
 
-    let journal = toml::to_string(&journal)
-        .expect("serialize journal")
-        .replace("phase = \"prepare\"", "phase = \"migration-pending\"");
-    fs::write(adoption_root.join("journal.toml"), journal).expect("migration-pending journal");
+    let mut journal = journal;
+    journal.phase = AdoptionPhase::MigrationPending;
+    write_journal(&adoption_root.join(JOURNAL_FILE), &journal).expect("migration-pending journal");
 
+    reset_canonical_store_verification_count();
     adopt_layout(&home, requirement, confirmed_options())
         .expect("post-copy store writes must not be byte-compared to the snapshot");
 
     assert!(temp.path().join("layout.toml").is_file());
+    assert_eq!(
+        canonical_store_verification_count(),
+        1,
+        "a MigrationPending run verifies before persisting StoreVerified; the final manifest path must not reopen it again"
+    );
 }
 
 #[test]

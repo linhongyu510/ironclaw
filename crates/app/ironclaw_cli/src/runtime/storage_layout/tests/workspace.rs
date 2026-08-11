@@ -60,6 +60,69 @@ fn external_workspace_requires_preview_confirmation_and_preserves_the_source() {
 }
 
 #[test]
+fn workspace_mismatch_blocks_manifest_publication_and_preserves_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+    let workspace_source = temp.path().join("legacy-workspace");
+    fs::create_dir_all(workspace_source.join("nested")).expect("workspace source");
+    fs::write(workspace_source.join("nested/keep.txt"), b"workspace data").expect("workspace file");
+    let paths = RebornStoragePaths::from_home(&home);
+    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+    fs::create_dir_all(&adoption_root).expect("adoption root");
+    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+    let candidate = candidates.first().expect("one candidate");
+    let workspace = prepare_workspace_import(
+        Some(&workspace_import(workspace_source.clone(), true)),
+        &paths,
+    )
+    .expect("workspace decision")
+    .expect("workspace requested")
+    .validate()
+    .expect("validated workspace decision");
+    let snapshot = candidate.snapshot_root(&adoption_root);
+    let mut journal = AdoptionJournal::new(
+        candidate,
+        requirement,
+        Some(WorkspaceImportDecision {
+            source: workspace.source.clone(),
+            tenant: workspace.tenant.to_string(),
+            user: workspace.user.to_string(),
+            digest: workspace.digest.clone(),
+        }),
+    );
+    snapshot_source(candidate, &snapshot).expect("snapshot source");
+    stage_snapshot(
+        candidate,
+        &snapshot,
+        &adoption_root,
+        Some(&workspace),
+        &journal.operation_id,
+    )
+    .expect("stage snapshot");
+    install_staged(&paths, &adoption_root, Some(&workspace)).expect("install staged content");
+    fs::write(
+        workspace_leaf_path(&paths, &workspace).join("nested/keep.txt"),
+        b"tampered installed workspace",
+    )
+    .expect("tamper installed workspace");
+    journal.phase = AdoptionPhase::CanonicalInstalled;
+    write_journal(&adoption_root.join(JOURNAL_FILE), &journal).expect("canonical journal");
+
+    let error = adopt_layout(&home, requirement, confirmed_options())
+        .expect_err("workspace mismatch must block manifest publication");
+
+    assert!(format!("{error:#}").contains("workspace"), "{error:#}");
+    assert_eq!(
+        fs::read(workspace_source.join("nested/keep.txt")).expect("source retained"),
+        b"workspace data"
+    );
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+}
+
+#[test]
 fn automatic_startup_refuses_a_journaled_external_workspace_import() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
