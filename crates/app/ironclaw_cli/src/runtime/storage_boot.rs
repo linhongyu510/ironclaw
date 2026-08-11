@@ -201,21 +201,21 @@ pub(super) fn canonical_store_verification_for_adoption(
                     config_file,
                 )
                 .context(
-                    "verify canonical external PostgreSQL store and secret resolver before adoption",
+                    "open hosted single-tenant PostgreSQL store and secret resolver for adoption preflight",
                 )?;
                 block_on_cli(ironclaw_composition::verify_hosted_postgres_store_for_adoption(
                     bindings,
                 ))
                 .context(
-                    "verify canonical external PostgreSQL store and secret resolver before adoption",
+                    "run hosted single-tenant PostgreSQL migrations and encrypted-record verification before adoption",
                 )?;
                 Ok(storage_layout::CanonicalStoreVerification::ExternalPostgresVerified)
             }
             ironclaw_composition::deployment::StorageShape::OperatorSupplied => anyhow::bail!(
-                "external PostgreSQL layout adoption remains unsupported for operator-supplied storage"
+                "external PostgreSQL layout adoption is supported only for hosted single-tenant pool storage; operator-supplied handles cannot be reopened by offline adoption"
             ),
             storage_shape => anyhow::bail!(
-                "external PostgreSQL layout adoption requires a hosted pool or operator-supplied storage shape; got {storage_shape:?}"
+                "external PostgreSQL layout adoption is supported only for hosted single-tenant pool storage; got {storage_shape:?}"
             ),
         },
     }

@@ -114,7 +114,12 @@ fn workspace_mismatch_blocks_manifest_publication_and_preserves_source() {
     let error = adopt_layout(&home, requirement, confirmed_options())
         .expect_err("workspace mismatch must block manifest publication");
 
-    assert!(format!("{error:#}").contains("workspace"), "{error:#}");
+    let diagnostic = format!("{error:#}");
+    assert!(
+        diagnostic.contains("canonical tenant/user workspace at")
+            && diagnostic.contains("does not match adoption snapshot"),
+        "{diagnostic}"
+    );
     assert_eq!(
         fs::read(workspace_source.join("nested/keep.txt")).expect("source retained"),
         b"workspace data"

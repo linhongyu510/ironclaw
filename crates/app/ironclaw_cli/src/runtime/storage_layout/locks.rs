@@ -29,15 +29,7 @@ pub(super) fn acquire_named_lock(
     {
         let path = directory.join(file_name);
         require_ordinary_directory(directory)?;
-        #[cfg(unix)]
         let mut file = open_adoption_lock_file(&path)?;
-        #[cfg(windows)]
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .with_context(|| format!("open advisory lock {} for {operation}", path.display()))?;
         fs2::FileExt::try_lock_exclusive(&file).with_context(|| {
         format!(
             "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
@@ -72,6 +64,37 @@ pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
             path.display()
         )
     })
+}
+
+#[cfg(windows)]
+pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path).with_context(|| {
+        format!(
+            "open advisory lock without following links {}",
+            path.display()
+        )
+    })?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect opened advisory lock {}", path.display()))?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_file() {
+        bail!(
+            "expected an ordinary non-reparse-point file at {}",
+            path.display()
+        );
+    }
+    Ok(file)
 }
 
 pub(super) fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {

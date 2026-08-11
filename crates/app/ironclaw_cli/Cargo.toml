@@ -102,6 +102,9 @@ libc = "0.2"
 # file left by a crashed offline process cannot permanently block recovery.
 fs2 = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 # Enable the composition crate's `test-support` seam for CLI unit tests so
 # `open_reborn_identity_resolver` (the test-only standalone resolver opener)

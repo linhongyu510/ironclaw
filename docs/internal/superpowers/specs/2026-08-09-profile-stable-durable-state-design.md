@@ -349,7 +349,21 @@ Before releasing the profile-agnostic layout:
 7. Verify shell calls report `sandboxed: true` and fail closed if the backend is unavailable.
 8. Exercise a compatible profile rollback and confirm the same durable state remains visible.
 
-After adoption, a compatible profile rollback is a configuration rollback, not a database rollback. The initial physical-layout adoption must separately define whether rollback can reopen the legacy layout, restore a snapshot, or is intentionally one-way.
+After adoption, a compatible profile rollback on a layout-v1-capable binary is a
+configuration rollback, not a database rollback. Binary rollback across the
+physical-layout adoption boundary is intentionally one-way: a released older
+binary looks for profile-indexed roots and cannot reopen the canonical layout,
+regardless of whether it understands every `layout.toml` field. The manifest
+therefore remains strict (`deny_unknown_fields`), and migration metadata such as
+the retained remote-memory namespace stays in that single authoritative record
+rather than a compatibility sidecar that could drift.
+
+An operator who must return to a pre-layout-v1 binary stops every replica,
+preserves the failed canonical home, restores the pre-deployment authoritative
+store backup, and restores the journal-owned immutable legacy snapshot to its
+original profile root. There is no automatic reverse migration or in-place
+downgrade. The rollout gate must prove the backup and snapshot are readable
+before adoption and retain them until the operator's rollback window closes.
 
 ## Decisions and remaining questions before implementation
 

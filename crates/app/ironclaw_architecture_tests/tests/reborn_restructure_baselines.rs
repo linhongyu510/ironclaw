@@ -141,9 +141,9 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// measured with the same budget gate; the manifest and this paired record
 /// move together so the nudge assertion remains binding.
 /// Re-measured 42_669 -> 42_934 after merging #7471's dedicated process-journal
-/// PostgreSQL pool; that service-graph assembly remains independent of the
-/// data-plane pool.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_934;
+/// PostgreSQL pool, then 42_934 -> 42_952 for review-requested test-only
+/// inspection seams; each measurement uses the same production-source gate.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_952;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 832 Arc<dyn> (governed prod, excl slack/extension_host)".

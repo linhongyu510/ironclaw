@@ -994,7 +994,7 @@ fn directory_has_content_at_depth(path: &Path, depth: usize) -> anyhow::Result<b
     Ok(false)
 }
 
-fn ensure_adoption_tree_depth(path: &Path, depth: usize) -> anyhow::Result<()> {
+pub(super) fn ensure_adoption_tree_depth(path: &Path, depth: usize) -> anyhow::Result<()> {
     if depth > MAX_ADOPTION_TREE_DEPTH {
         bail!(
             "adoption source tree exceeds maximum depth {MAX_ADOPTION_TREE_DEPTH} at {}",

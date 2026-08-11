@@ -1,5 +1,25 @@
 use super::*;
 
+#[cfg(any(unix, windows))]
+#[test]
+fn adoption_lock_rejects_an_existing_non_file_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let adoption_root = temp.path().join("layout-adoption");
+    fs::create_dir(&adoption_root).expect("adoption root");
+    fs::create_dir(adoption_root.join(ADOPTION_LOCK_FILE)).expect("non-file lock path");
+
+    let error = match acquire_adoption_lock(&adoption_root) {
+        Ok(_) => panic!("non-file lock path must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(
+        format!("{error:#}").contains("ordinary non-symlink file")
+            || format!("{error:#}").contains("ordinary non-reparse-point file"),
+        "{error:#}"
+    );
+}
+
 #[test]
 fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -23,6 +43,16 @@ fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     let content_error = directory_has_content(&source)
         .expect_err("content detection must share the traversal depth bound");
     assert!(format!("{content_error:#}").contains("depth"));
+}
+
+#[test]
+fn adoption_tree_depth_guard_accepts_the_exact_bound() {
+    let boundary = std::path::Path::new("boundary-entry");
+    ensure_adoption_tree_depth(boundary, MAX_ADOPTION_TREE_DEPTH)
+        .expect("the documented maximum depth is inclusive");
+    let error = ensure_adoption_tree_depth(boundary, MAX_ADOPTION_TREE_DEPTH + 1)
+        .expect_err("the first depth beyond the bound fails closed");
+    assert!(format!("{error:#}").contains("exceeds maximum depth"));
 }
 
 #[cfg(unix)]

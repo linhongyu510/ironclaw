@@ -3068,7 +3068,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         assert!(
             error
                 .to_string()
-                .contains("verify canonical external PostgreSQL store"),
+                .contains("open hosted single-tenant PostgreSQL store"),
             "{error:#}"
         );
         assert!(legacy_prompt.is_file(), "legacy source remains in place");
@@ -3128,7 +3128,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         assert!(
             hosted_error
                 .to_string()
-                .contains("verify canonical external PostgreSQL store"),
+                .contains("open hosted single-tenant PostgreSQL store"),
             "{hosted_error:#}"
         );
 
@@ -3139,9 +3139,9 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
             requirement,
         )
         .expect_err("operator-supplied PostgreSQL remains fail closed for adoption");
-        assert!(
-            operator_error.to_string().contains("operator-supplied"),
-            "{operator_error:#}"
+        assert_eq!(
+            operator_error.to_string(),
+            "external PostgreSQL layout adoption is supported only for hosted single-tenant pool storage; operator-supplied handles cannot be reopened by offline adoption"
         );
     }
 

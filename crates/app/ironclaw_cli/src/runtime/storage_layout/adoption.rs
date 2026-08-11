@@ -256,8 +256,6 @@ where
             preverified_store,
             verify_store,
         )?;
-        verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
-        verify_canonical_workspace(paths, workspace.as_ref())?;
         journal.phase = AdoptionPhase::StoreVerified;
         write_journal(journal_path, journal)?;
         true
@@ -267,9 +265,11 @@ where
 
     // StoreVerified is durable progress, not a proof that the canonical tree
     // still exists. Never compare post-migration libSQL bytes to the immutable
-    // snapshot; validate the post-migration shape and reopen the real store.
-    verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
+    // snapshot. On replay, prove required files still exist before an opener can
+    // recreate them, then reopen the real store. A same-run verification already
+    // has that pre-store proof from MigrationPending above.
     if !store_verified_on_this_run {
+        verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
         verify_store_once(
             paths,
             candidate.kind.requirement().durable_state,

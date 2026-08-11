@@ -162,6 +162,8 @@ fn adoption_requires_explicit_quiescence_and_backup_confirmations() {
 
 #[test]
 fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
+    let _env_lock = crate::runtime::test_env::lock_runtime_env();
+    let _app_id = crate::runtime::test_env::EnvGuard::clear("MEMORY_MEM0_APP_ID");
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
     let legacy = temp.path().join("local-dev");
@@ -189,6 +191,28 @@ fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
             .expect("restart resolves persisted memory-provider namespace"),
         Some(legacy_memory_provider_app_id.clone()),
         "a restart without an environment override must reopen the released remote-memory partition"
+    );
+    let boot_config = ironclaw_config::RebornBootConfig::resolve_from_env_parts(
+        Some(temp.path().as_os_str().to_os_string()),
+        None,
+        None,
+        Some("local-dev".into()),
+    )
+    .expect("restart boot config");
+    let runtime_input = crate::runtime::build_runtime_input_with_options(
+        &boot_config,
+        crate::runtime::RuntimeInputCaller::Serve,
+        crate::runtime::RuntimeInputOptions::default(),
+    )
+    .expect("restart runtime input")
+    .inner;
+    assert_eq!(
+        runtime_input
+            .services
+            .expect("restart services input")
+            .memory_provider_app_id_for_test(),
+        Some(legacy_memory_provider_app_id.as_str()),
+        "the production runtime caller must carry the persisted namespace into composition"
     );
     assert_eq!(
         crate::runtime::memory_provider_app_id_for_runtime(

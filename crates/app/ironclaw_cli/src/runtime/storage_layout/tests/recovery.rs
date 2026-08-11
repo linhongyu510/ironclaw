@@ -244,6 +244,36 @@ fn schema_four_journal_without_memory_namespace_resumes_without_a_second_migrati
 }
 
 #[test]
+fn recovery_rejects_a_foreign_memory_namespace_before_source_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+    let paths = RebornStoragePaths::from_home(&home);
+    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+    create_adoption_root(temp.path(), &paths, &adoption_root).expect("adoption root");
+    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+    let candidate = candidates.first().expect("one candidate");
+    let mut journal = AdoptionJournal::new(candidate, requirement, None);
+    journal.memory_provider_app_id = Some("foreign-memory-namespace".to_string());
+    write_journal(&adoption_root.join(JOURNAL_FILE), &journal).expect("tampered journal");
+
+    let error = adopt_layout(&home, requirement, confirmed_options())
+        .expect_err("foreign memory namespace must fail closed");
+
+    assert_eq!(
+        error.to_string(),
+        "adoption journal memory-provider namespace does not match its legacy source; refusing to resume"
+    );
+    assert!(
+        legacy.join(DB_FILE).is_file(),
+        "legacy source remains in place"
+    );
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+}
+
+#[test]
 fn recovery_never_deletes_unproven_canonical_content() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());

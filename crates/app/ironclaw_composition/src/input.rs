@@ -448,6 +448,11 @@ impl RebornHostBindings {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn memory_provider_app_id_for_test(&self) -> Option<&str> {
+        self.memory_provider_connection.app_id.as_deref()
+    }
+
     /// Override the local runtime tenant/agent identity used by command-style
     /// services that need a surface context before a full runtime exists.
     pub fn with_local_runtime_identity(mut self, tenant_id: TenantId, agent_id: AgentId) -> Self {
