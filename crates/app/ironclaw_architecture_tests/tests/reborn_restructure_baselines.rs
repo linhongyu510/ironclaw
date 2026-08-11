@@ -140,11 +140,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// Re-recorded 42_455 -> 42_669 on 2026-08-11 after profile-control cleanup,
 /// measured with the same budget gate; the manifest and this paired record
 /// move together so the nudge assertion remains binding.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_669;
+/// Re-measured 42_669 -> 42_934 after merging #7471's dedicated process-journal
+/// PostgreSQL pool; that service-graph assembly remains independent of the
+/// data-plane pool.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_934;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
-/// 830 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 830;
+/// 832 Arc<dyn> (governed prod, excl slack/extension_host)".
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 832;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

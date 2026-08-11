@@ -185,7 +185,10 @@ observed_date = "2026-08-07"
 # removed obsolete composition branching. Measured on this exact tree with
 # `bash scripts/ci/check-composition-budget.sh --print`; set to current, not
 # padded.
-loc_ceiling = 42669
+# Re-measured 42669 -> 42934 after merging #7471's dedicated process-journal
+# PostgreSQL pool, which keeps lease heartbeats independent of data-plane
+# saturation. This is the exact merged-tree count, not added slack.
+loc_ceiling = 42934
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -196,7 +199,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42669
+loc_observed = 42934
 loc_observed_date = "2026-08-11"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
