@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -181,6 +181,7 @@ pub struct RebornHostBindings {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
+    pub(crate) supplemental_builtin_shell_guidance: Option<&'static str>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -616,6 +617,31 @@ impl RebornHostBindings {
     }
 }
 
+/// Exposes the root assembled by `local_filesystem_from_deployment` so
+/// caller-level tests can observe storage identity. Production code must use
+/// the assembled runtime rather than inspect its substrate input.
+///
+/// This is a free function so test support does not add a member to the
+/// production `RebornHostBindings` struct.
+#[cfg(feature = "test-support")]
+pub(crate) fn local_filesystem_storage_root_for_test(
+    bindings: &RebornHostBindings,
+) -> Option<&Path> {
+    match &bindings.storage {
+        RebornStorageInput::LocalFilesystem { root, .. } => Some(root),
+        _ => None,
+    }
+}
+
+/// Returns the opaque supplemental built-in shell guidance carried by test
+/// bindings without adding a test-only method to `RebornHostBindings`.
+#[cfg(feature = "test-support")]
+pub(crate) fn supplemental_builtin_shell_guidance_for_test(
+    bindings: &RebornHostBindings,
+) -> Option<&'static str> {
+    bindings.supplemental_builtin_shell_guidance
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn libsql_host_bindings_for_test(
     profile: RebornCompositionProfile,
@@ -804,6 +830,13 @@ impl RebornHostBindings {
         self
     }
 
+    /// Carry host-selected supplemental shell guidance to the built-in package.
+    /// Composition transports this opaque text without interpreting it.
+    pub fn with_supplemental_builtin_shell_guidance(mut self, guidance: &'static str) -> Self {
+        self.supplemental_builtin_shell_guidance = Some(guidance);
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.deployment.require_runtime_http_egress = true;
         self
@@ -979,6 +1012,7 @@ impl RebornHostBindings {
             production_trust_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
+            supplemental_builtin_shell_guidance: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
