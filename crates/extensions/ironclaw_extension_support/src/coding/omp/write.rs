@@ -11,12 +11,12 @@
 use ironclaw_filesystem::{CasExpectation, Entry, FilesystemOperation};
 use serde_json::Value;
 
-use super::hashline::format::{compute_file_hash, format_hashline_header};
+use super::hashline::format::format_hashline_header;
 use super::hashline::{normalize_to_lf, strip_hashline_prefixes};
 use super::state::OmpScopeKey;
 use super::{
-    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, input_error, omp_error,
-    resolve_input_path, workspace_virtual_root,
+    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, filesystem_denied,
+    input_error, omp_error, resolve_input_path, workspace_virtual_root,
 };
 
 /// `URI_LIKE_WRITE_PATH_RE` from the pinned write.ts (`/^...$/i`).
@@ -26,6 +26,10 @@ static URI_LIKE_WRITE_PATH_RE: std::sync::LazyLock<regex::Regex> = std::sync::La
 /// `XD_MISSING_DELIMITER_RE` from the pinned write.ts (`/^xd\/+(.*)$/i`).
 static XD_MISSING_DELIMITER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^xd/+(.*)$").expect("static xd regex"));
+static LOOSE_HASHLINE_HEADER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").expect("static loose header regex")
+    });
 /// `XD_SCHEME_NEAR_MISSES` from the pinned write.ts.
 const XD_SCHEME_NEAR_MISSES: [&str; 3] = ["dx", "xdd", "xdt"];
 /// Schemes the pinned internal-URL router registers handlers for
@@ -87,13 +91,11 @@ fn assert_write_target_addressable(target: &str) -> Result<(), OmpEngineError> {
 /// line is hashline-prefixed; report whether anything was stripped.
 fn strip_write_content(content: &str) -> (String, bool) {
     let lines: Vec<String> = content.split('\n').map(ToString::to_string).collect();
-    let header_re =
-        regex::Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").expect("static loose header regex");
     let header_index = lines.iter().position(|line| !line.trim().is_empty());
     let Some(header_index) = header_index else {
         return (content.to_string(), false);
     };
-    if !header_re.is_match(&lines[header_index]) {
+    if !LOOSE_HASHLINE_HEADER_RE.is_match(&lines[header_index]) {
         return (content.to_string(), false);
     }
     let mut lines_without_header: Vec<String> = Vec::with_capacity(lines.len() - 1);
@@ -119,6 +121,16 @@ pub(crate) async fn write(ctx: &OmpEngineContext, input: Value) -> Result<String
     let (clean_content, stripped) = strip_write_content(content);
 
     let resolved = resolve_input_path(ctx, path, FilesystemOperation::WriteFile)?;
+    match ctx.filesystem.stat(&resolved.virtual_path).await {
+        Ok(stat) if stat.sensitive => return Err(filesystem_denied()),
+        Ok(_) | Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+        Err(error) => {
+            return Err(omp_error(
+                OmpEngineErrorKind::Filesystem,
+                format!("filesystem error: {error}"),
+            ));
+        }
+    }
     let display = display_path(
         &workspace_virtual_root(ctx).ok_or_else(|| {
             omp_error(
@@ -170,22 +182,6 @@ pub(crate) async fn write(ctx: &OmpEngineContext, input: Value) -> Result<String
         );
     }
     Ok(result_text)
-}
-
-/// The pinned success-shape helper for the harness differential seam.
-#[allow(dead_code)]
-pub(crate) fn format_success_line(display: &str, bytes: usize, tag: &str) -> String {
-    format!(
-        "{}\nSuccessfully wrote {bytes} bytes to {display}",
-        format_hashline_header(display, tag)
-    )
-}
-
-/// Reference implementation of the tag computation used by the harness to
-/// cross-check `[path#TAG]` headers.
-#[allow(dead_code)]
-pub(crate) fn reference_tag(text: &str) -> String {
-    compute_file_hash(&normalize_to_lf(text))
 }
 
 #[cfg(test)]
@@ -241,14 +237,5 @@ mod tests {
         let (cleaned, stripped) = strip_write_content("[foo.ts#1A2B]\n1:alpha\nbeta\n");
         assert!(!stripped);
         assert_eq!(cleaned, "[foo.ts#1A2B]\n1:alpha\nbeta\n");
-    }
-
-    #[test]
-    fn success_line_shape() {
-        let tag = reference_tag("content\n");
-        assert_eq!(tag.len(), 4);
-        let line = format_success_line("src/foo.ts", 8, &tag);
-        assert!(line.starts_with(&format!("[src/foo.ts#{tag}]")));
-        assert!(line.ends_with("Successfully wrote 8 bytes to src/foo.ts"));
     }
 }

@@ -182,14 +182,11 @@ fn assert_tool_failed_containing(outcome: &ToolOutcome, label: &str, needle: &st
     let ironclaw_host_api::resolution::ToolVerdict::RecoverableFailure { diagnostic, .. } =
         &done.verdict
     else {
-        panic!(
-            "{label} should fail recoverably, got {:?}",
-            done.verdict
-        );
+        panic!("{label} should fail recoverably, got {:?}", done.verdict);
     };
-    let text = diagnostic
-        .model_visible_text()
-        .unwrap_or_else(|| panic!("{label} failure must carry free-text cause, got {diagnostic:?}"));
+    let text = diagnostic.model_visible_text().unwrap_or_else(|| {
+        panic!("{label} failure must carry free-text cause, got {diagnostic:?}")
+    });
     assert!(
         text.contains(needle),
         "{label} failure diagnostic must contain {needle:?}, got {text:?}"

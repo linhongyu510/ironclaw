@@ -275,6 +275,15 @@ impl RebornCapabilityBackend {
                          RebornCapabilityBackend::BuiltinHttpTools"
                         .into());
                 }
+                if !keyed_http_responses.is_empty()
+                    || !web_access_response_bodies.is_empty()
+                    || !github_network_statuses.is_empty()
+                    || !real_egress_response_bodies.is_empty()
+                {
+                    return Err(
+                        "omp coding harness does not support scripted network egress inputs".into(),
+                    );
+                }
                 let host_runtime = super::harness::profiles::omp_coding::omp_coding_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }

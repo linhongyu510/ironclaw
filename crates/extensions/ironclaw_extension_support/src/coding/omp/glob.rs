@@ -17,9 +17,10 @@ use std::path::Path as FsPath;
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use serde_json::Value;
 
+use super::super::config::MAX_VISITED_ENTRIES;
 use super::{
-    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, omp_error,
-    resolve_input_path, workspace_virtual_root,
+    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, filesystem_denied,
+    omp_error, resolve_input_path, workspace_virtual_root,
 };
 
 const DEFAULT_LIMIT: usize = 200;
@@ -136,6 +137,12 @@ pub(crate) async fn glob(ctx: &OmpEngineContext, input: Value) -> Result<String,
             }
             continue;
         };
+        if stat.sensitive {
+            if is_single && !target.has_glob {
+                return Err(filesystem_denied());
+            }
+            continue;
+        }
         if !target.has_glob && stat.file_type == FileType::File {
             let display = display_path(&workspace_root, &target.search_path);
             merged.push((display, mtime_ms(&stat)));
@@ -265,7 +272,7 @@ async fn pattern_base_exists(
         return Ok(false);
     };
     match ctx.filesystem.stat(&resolved.virtual_path).await {
-        Ok(_) => Ok(true),
+        Ok(stat) => Ok(!stat.sensitive),
         Err(FilesystemError::NotFound { .. }) => Ok(false),
         Err(error) => Err(omp_error(
             OmpEngineErrorKind::Filesystem,
@@ -321,6 +328,7 @@ async fn walk_glob(
 
     let mut results: Vec<(String, u64)> = Vec::new();
     let mut stack: Vec<ironclaw_host_api::path::VirtualPath> = vec![base.clone()];
+    let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         if results.len() >= MAX_MATCHES {
             break;
@@ -336,6 +344,13 @@ async fn walk_glob(
             }
         };
         for entry in entries {
+            visited = visited.saturating_add(1);
+            if visited > MAX_VISITED_ENTRIES {
+                return Err(omp_error(
+                    OmpEngineErrorKind::ResourceLimit,
+                    "workspace traversal exceeds the entry limit",
+                ));
+            }
             let name = &entry.name;
             if name == ".git" {
                 continue;
@@ -344,6 +359,17 @@ async fn walk_glob(
                 continue;
             }
             if !include_hidden && name.starts_with('.') {
+                continue;
+            }
+            let stat = match ctx.filesystem.stat(&entry.path).await {
+                Ok(stat) => stat,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => {
+                    tracing::debug!(path = entry.path.as_str(), %error, "skipping glob entry after stat failed");
+                    continue;
+                }
+            };
+            if stat.sensitive {
                 continue;
             }
             // Match against the path relative to the walk base (the pinned
@@ -355,10 +381,7 @@ async fn walk_glob(
             let is_dir = entry.file_type == FileType::Directory;
             let matches_pattern = compiled.matches_path_with(FsPath::new(&relative), options);
             if matches_pattern {
-                let mtime = match ctx.filesystem.stat(&entry.path).await {
-                    Ok(stat) => mtime_ms(&stat),
-                    Err(_) => 0,
-                };
+                let mtime = mtime_ms(&stat);
                 let display = if is_dir {
                     format!("{display_relative}/")
                 } else {

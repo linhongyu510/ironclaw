@@ -8,7 +8,7 @@
 //! public API instead of cross-crate reach-ins (see
 //! `ironclaw_architecture_tests::reborn_cross_crate_include_scan`, §11.2.7).
 //!
-//! The `omp_registration_assets_byte_match_pinned_fixtures` crate test keeps
+//! The `omp_registration_assets_byte_match_pinned_fixtures` root test keeps
 //! these byte-identical to `tests/fixtures/omp_coding_contract/`.
 
 /// Pinned model-visible `read` tool description (the RENDERED prompt;

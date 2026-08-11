@@ -19,14 +19,15 @@ use std::time::SystemTime;
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use serde_json::Value;
 
+use super::super::config::{MAX_READ_SIZE, MAX_VISITED_ENTRIES};
 use super::hashline::format::{
     format_hashline_header, format_numbered_line, format_numbered_lines,
 };
 use super::selector::{ParsedSelector, parse_sel, sel_to_offset_limit};
 use super::state::OmpScopeKey;
 use super::{
-    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, input_error, omp_error,
-    resolve_input_path, workspace_virtual_root,
+    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, filesystem_denied,
+    input_error, omp_error, read_limit_exceeded, resolve_input_path, workspace_virtual_root,
 };
 
 /// Pinned `DEFAULT_MAX_LINES` (session/streaming-output.ts).
@@ -245,6 +246,13 @@ pub(crate) async fn read(ctx: &OmpEngineContext, input: Value) -> Result<String,
         .is_some_and(|stat| stat.file_type == FileType::Directory);
     let file_size = stat.as_ref().map(|stat| stat.len).unwrap_or(0);
 
+    if stat.as_ref().is_some_and(|stat| stat.sensitive) {
+        return Err(filesystem_denied());
+    }
+    if !is_directory && file_size > MAX_READ_SIZE {
+        return Err(read_limit_exceeded());
+    }
+
     if is_directory {
         if parsed.is_multi_range() {
             return Err(omp_error(
@@ -377,7 +385,11 @@ async fn read_directory(
             ));
         }
         let end = limit
-            .map(|limit| (start as u64 + limit).min(all_lines.len() as u64) as usize)
+            .map(|limit| {
+                (start as u64)
+                    .saturating_add(limit)
+                    .min(all_lines.len() as u64) as usize
+            })
             .unwrap_or(all_lines.len());
         let mut text = all_lines[start..end].join("\n");
         if end < all_lines.len() {
@@ -403,7 +415,6 @@ async fn render_directory_tree(
     max_depth: usize,
     per_dir_limit: usize,
 ) -> Result<String, OmpEngineError> {
-    #[allow(dead_code)]
     const EXCLUDED_DIRS: &[&str] = &[
         "node_modules",
         ".git",
@@ -432,33 +443,48 @@ async fn render_directory_tree(
     // The pinned `buildDirectoryTree` receives a single native recursive
     // scan (`listWorkspace({ maxDepth })`); our backend only lists one
     // level per call, so recurse into subdirectories here to mirror it.
-    let mut all_entries: Vec<ironclaw_filesystem::DirEntry> = entries.to_vec();
-    {
-        let mut frontier: Vec<(usize, ironclaw_host_api::path::VirtualPath)> = entries
-            .iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| (1, entry.path.clone()))
-            .collect();
-        while let Some((depth, dir)) = frontier.pop() {
-            if depth >= max_depth {
+    let mut all_entries: Vec<ironclaw_filesystem::DirEntry> = Vec::new();
+    let mut frontier: Vec<(usize, ironclaw_filesystem::DirEntry)> =
+        entries.iter().cloned().map(|entry| (1, entry)).collect();
+    let mut visited = 0usize;
+    while let Some((depth, entry)) = frontier.pop() {
+        visited = visited.saturating_add(1);
+        if visited > MAX_VISITED_ENTRIES {
+            return Err(omp_error(
+                OmpEngineErrorKind::ResourceLimit,
+                "workspace traversal exceeds the entry limit",
+            ));
+        }
+        if entry.file_type == FileType::Directory && EXCLUDED_DIRS.contains(&entry.name.as_str()) {
+            continue;
+        }
+        let stat = match ctx.filesystem.stat(&entry.path).await {
+            Ok(stat) => stat,
+            Err(FilesystemError::NotFound { .. }) => continue,
+            Err(error) => {
+                tracing::debug!(path = entry.path.as_str(), %error, "skipping directory entry after stat failed");
                 continue;
             }
-            match ctx.filesystem.list_dir(&dir).await {
-                Ok(children) => {
-                    for child in &children {
-                        if child.file_type == FileType::Directory {
-                            frontier.push((depth + 1, child.path.clone()));
-                        }
-                    }
-                    all_entries.extend(children);
-                }
-                Err(FilesystemError::NotFound { .. }) => continue,
-                Err(error) => {
-                    return Err(omp_error(
-                        OmpEngineErrorKind::Filesystem,
-                        format!("filesystem error: {error}"),
-                    ));
-                }
+        };
+        if stat.sensitive {
+            continue;
+        }
+        all_entries.push(entry.clone());
+        if entry.file_type != FileType::Directory || depth >= max_depth {
+            continue;
+        }
+        match ctx.filesystem.list_dir(&entry.path).await {
+            Ok(children) => frontier.extend(
+                children
+                    .into_iter()
+                    .map(|child| (depth.saturating_add(1), child)),
+            ),
+            Err(FilesystemError::NotFound { .. }) => {}
+            Err(error) => {
+                return Err(omp_error(
+                    OmpEngineErrorKind::Filesystem,
+                    format!("filesystem error: {error}"),
+                ));
             }
         }
     }
@@ -558,8 +584,7 @@ async fn render_directory_tree(
     let mut stack: Vec<(usize, String)> = Vec::new();
     {
         let all = by_parent.get("").cloned().unwrap_or_default();
-        let mut all = sort_by_recency(all);
-        let _dropped = cap_children(&mut all, usize::MAX);
+        let all = sort_by_recency(all);
         root_node.children = all;
         for child in &root_node.children {
             if child.is_dir {
@@ -998,8 +1023,10 @@ fn read_single_range(
     let start_line_display = start_line + 1;
 
     let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
-    let max_lines_to_collect =
-        (effective_limit + leading_context + trailing_context).min(DEFAULT_MAX_LINES);
+    let max_lines_to_collect = effective_limit
+        .saturating_add(leading_context)
+        .saturating_add(trailing_context)
+        .min(DEFAULT_MAX_LINES);
     let max_bytes_for_read = (DEFAULT_MAX_BYTES as u64)
         .max(max_lines_to_collect * BYTES_PER_LINE_BUDGET as u64)
         as usize;
@@ -1551,13 +1578,5 @@ mod tests {
         assert_eq!(blocks[0].ours_label.as_deref(), Some("HEAD"));
         assert_eq!(blocks[0].theirs_label.as_deref(), Some("branch"));
         assert!(blocks[0].base_lines.is_none());
-    }
-
-    #[test]
-    fn conflict_summary_empty_message() {
-        let entries: Vec<ConflictEntry> = Vec::new();
-        let _ = entries;
-        // No blocks -> the read engine emits the empty message; the summary
-        // function itself only renders with entries.
     }
 }

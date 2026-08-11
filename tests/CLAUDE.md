@@ -196,7 +196,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
 | Delivery-target tools resolve through the real outbound service | `outbound_target.rs` |
-| The omp-registration seam (issue #7392) advertises the exact pinned `read`/`write`/`edit`/`glob`/`grep` names with fixture-byte schemas/descriptions while the old tools coexist, flows read→edit→read through the real path, keeps the derived spelling resolving, and gates omp writes | `reborn_omp_registration.rs` |
+| The omp benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep` coding names with fixture-byte schemas/descriptions, flows read→edit→read through the real path, keeps the derived spelling resolving, and gates omp writes | `reborn_omp_registration.rs` |
 
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
@@ -241,7 +241,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
-One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 56 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

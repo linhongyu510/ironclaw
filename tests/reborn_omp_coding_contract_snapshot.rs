@@ -145,9 +145,7 @@ fn snapshotted_files_match_provenance_checksums() {
         "snapshotted files drifted from their pinned upstream checksums:\n{}",
         mismatches
             .iter()
-            .map(|(path, recorded, actual)| format!(
-                "  {path}: recorded {recorded}, actual {actual}"
-            ))
+            .map(|mismatch| format!("  {mismatch}"))
             .collect::<Vec<_>>()
             .join("\n")
     );
@@ -598,9 +596,7 @@ fn vendored_license_is_the_full_pinned_mit_text() {
         "vendored and derived assets drifted from their pinned checksums:\n{}",
         mismatches
             .iter()
-            .map(|(path, recorded, actual)| format!(
-                "  {path}: recorded {recorded}, actual {actual}"
-            ))
+            .map(|mismatch| format!("  {mismatch}"))
             .collect::<Vec<_>>()
             .join("\n")
     );

@@ -311,7 +311,48 @@ fn tool_entry(tool: &str) -> ToolEntry {
 /// the mismatches as `(snapshot_path, recorded, actual)`; empty when all
 /// match. Unsnapshotted upstream records are capture-time pins and are not
 /// byte-verified offline.
-pub fn verify_snapshotted_checksums(provenance: &Provenance) -> Vec<(String, String, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChecksumMismatch {
+    Sha256 {
+        path: String,
+        recorded: String,
+        actual: String,
+    },
+    ByteCount {
+        path: String,
+        recorded: usize,
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for ChecksumMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sha256 {
+                path,
+                recorded,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "{path}: SHA-256 recorded {recorded}, actual {actual}"
+                )
+            }
+            Self::ByteCount {
+                path,
+                recorded,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "{path}: bytes recorded {recorded}, actual {actual}"
+                )
+            }
+        }
+    }
+}
+
+pub fn verify_snapshotted_checksums(provenance: &Provenance) -> Vec<ChecksumMismatch> {
     let mut mismatches = Vec::new();
     for record in &provenance.files {
         if !record.snapshotted {
@@ -333,7 +374,7 @@ pub fn verify_snapshotted_checksums(provenance: &Provenance) -> Vec<(String, Str
 }
 
 fn verify_checksum(
-    mismatches: &mut Vec<(String, String, String)>,
+    mismatches: &mut Vec<ChecksumMismatch>,
     path: &str,
     recorded: &str,
     recorded_bytes: usize,
@@ -341,14 +382,18 @@ fn verify_checksum(
     let bytes = read_snapshot_file(path);
     let actual = sha256_hex(&bytes);
     if actual != recorded {
-        mismatches.push((path.to_string(), recorded.to_string(), actual));
+        mismatches.push(ChecksumMismatch::Sha256 {
+            path: path.to_string(),
+            recorded: recorded.to_string(),
+            actual,
+        });
     }
     if bytes.len() != recorded_bytes {
-        mismatches.push((
-            path.to_string(),
-            format!("{recorded_bytes} bytes"),
-            format!("{} bytes", bytes.len()),
-        ));
+        mismatches.push(ChecksumMismatch::ByteCount {
+            path: path.to_string(),
+            recorded: recorded_bytes,
+            actual: bytes.len(),
+        });
     }
 }
 

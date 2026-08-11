@@ -95,6 +95,10 @@ pub enum OmpEngineErrorKind {
     PathResolution,
     /// The backing filesystem reported an error.
     Filesystem,
+    /// Filesystem metadata or mount permissions denied access.
+    FilesystemDenied,
+    /// A bounded traversal or materialization limit was exceeded.
+    ResourceLimit,
     /// Internal invariant violated (defensive; not a model-visible shape).
     Internal,
 }
@@ -149,8 +153,6 @@ pub struct OmpEngineContext {
 /// A fully resolved engine target: the scoped path the caller named, the
 /// canonical virtual path on the backend, and the granting mount.
 pub(crate) struct OmpResolvedPath {
-    #[allow(dead_code)]
-    pub(crate) scoped_path: ironclaw_host_api::path::ScopedPath,
     pub(crate) virtual_path: ironclaw_host_api::path::VirtualPath,
     pub(crate) grant: ironclaw_host_api::mount::MountGrant,
 }
@@ -198,6 +200,7 @@ pub async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<Value, OmpEngi
 /// parser and error-template render functions without exposing engine
 /// internals. Not part of any production surface.
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod harness {
     use super::selector::{ParsedSelector, parse_sel, sel_to_offset_limit};
     use super::{OmpEngineErrorKind, hashline};
@@ -335,6 +338,8 @@ pub mod harness {
             OmpEngineErrorKind::MultiEntryAggregate => "MultiEntryAggregate",
             OmpEngineErrorKind::PathResolution => "PathResolution",
             OmpEngineErrorKind::Filesystem => "Filesystem",
+            OmpEngineErrorKind::FilesystemDenied => "FilesystemDenied",
+            OmpEngineErrorKind::ResourceLimit => "ResourceLimit",
             OmpEngineErrorKind::Internal => "Internal",
         }
     }
@@ -346,6 +351,20 @@ pub(crate) fn omp_error(kind: OmpEngineErrorKind, message: impl Into<String>) ->
 
 pub(crate) fn input_error(message: impl Into<String>) -> OmpEngineError {
     OmpEngineError::new(OmpEngineErrorKind::Input, message)
+}
+
+pub(crate) fn filesystem_denied() -> OmpEngineError {
+    OmpEngineError::new(
+        OmpEngineErrorKind::FilesystemDenied,
+        "workspace file access denied",
+    )
+}
+
+pub(crate) fn read_limit_exceeded() -> OmpEngineError {
+    OmpEngineError::new(
+        OmpEngineErrorKind::ResourceLimit,
+        "workspace file exceeds the read limit",
+    )
 }
 
 // ─── Path resolution ─────────────────────────────────────────────────────────
@@ -409,9 +428,10 @@ pub(crate) fn resolve_input_path(
         .mounts
         .scoped_path(scoped_path_input(path))
         .map_err(|error| {
+            tracing::debug!(%error, "omp scoped path resolution failed");
             omp_error(
                 OmpEngineErrorKind::PathResolution,
-                format!("{path} is not under an available scoped root: {error}"),
+                format!("{path} is not under an available scoped root"),
             )
         })?;
     if is_sensitive_path_str(scoped_path.as_str()) {
@@ -424,9 +444,10 @@ pub(crate) fn resolve_input_path(
         .mounts
         .resolve_with_grant(&scoped_path)
         .map_err(|error| {
+            tracing::debug!(%error, "omp mount resolution failed");
             omp_error(
                 OmpEngineErrorKind::PathResolution,
-                format!("{path} does not resolve inside an available scoped root: {error}"),
+                format!("{path} does not resolve inside an available scoped root"),
             )
         })?;
     if is_sensitive_path_str(virtual_path.as_str()) {
@@ -442,7 +463,6 @@ pub(crate) fn resolve_input_path(
         ));
     }
     Ok(OmpResolvedPath {
-        scoped_path,
         virtual_path,
         grant: grant.clone(),
     })
@@ -470,77 +490,18 @@ pub(crate) fn display_path(
 pub(crate) fn workspace_virtual_root(
     ctx: &OmpEngineContext,
 ) -> Option<ironclaw_host_api::path::VirtualPath> {
-    let scoped = ctx.mounts.scoped_path(DEFAULT_SCOPED_ROOT).ok()?;
-    ctx.mounts
-        .resolve_with_grant(&scoped)
-        .ok()
-        .map(|(virtual_path, _)| virtual_path)
-}
-
-#[cfg(test)]
-mod tests {
-    /// The registration-seam assets (issue #7392 slice 3) must stay
-    /// byte-identical to the pinned fixture snapshot: the model-visible
-    /// schemas and descriptions ARE the pinned contract bytes, so a fixture
-    /// regeneration must land in the assets tree too.
-    macro_rules! assert_asset_matches_fixture {
-        ($asset:literal, $fixture:literal) => {
-            assert_eq!(
-                include_str!($asset),
-                include_str!($fixture),
-                "{} drifted from the pinned fixture {}",
-                $asset,
-                $fixture
-            );
-        };
-    }
-
-    // The assets/ tree (schemas + prompts) is a byte-copy of the pinned
-    // upstream contract from can1357/oh-my-pi @ 08819b279cf02ae2545e69dad7111ab48d91d35e
-    // (MIT). The full license text and per-file SHA-256 provenance live at
-    // tests/fixtures/omp_coding_contract/licenses/LICENSE + provenance.json;
-    // these assertions pin the two trees together.
-    #[test]
-    fn omp_registration_assets_byte_match_pinned_fixtures() {
-        assert_asset_matches_fixture!(
-            "assets/schemas/read.json",
-            "../../../../../../tests/fixtures/omp_coding_contract/schemas/read.json"
-        );
-        assert_asset_matches_fixture!(
-            "assets/schemas/write.json",
-            "../../../../../../tests/fixtures/omp_coding_contract/schemas/write.json"
-        );
-        assert_asset_matches_fixture!(
-            "assets/schemas/edit.json",
-            "../../../../../../tests/fixtures/omp_coding_contract/schemas/edit.json"
-        );
-        assert_asset_matches_fixture!(
-            "assets/schemas/glob.json",
-            "../../../../../../tests/fixtures/omp_coding_contract/schemas/glob.json"
-        );
-        assert_asset_matches_fixture!(
-            "assets/schemas/grep.json",
-            "../../../../../../tests/fixtures/omp_coding_contract/schemas/grep.json"
-        );
-        assert_asset_matches_fixture!(
-            "assets/prompts/read.rendered.md",
-            "../../../../../../tests/fixtures/omp_coding_contract/prompts/read.rendered.md"
-        );
-        assert_asset_matches_fixture!(
-            "assets/prompts/write.md",
-            "../../../../../../tests/fixtures/omp_coding_contract/prompts/write.md"
-        );
-        assert_asset_matches_fixture!(
-            "assets/prompts/hashline.md",
-            "../../../../../../tests/fixtures/omp_coding_contract/prompts/hashline.md"
-        );
-        assert_asset_matches_fixture!(
-            "assets/prompts/glob.md",
-            "../../../../../../tests/fixtures/omp_coding_contract/prompts/glob.md"
-        );
-        assert_asset_matches_fixture!(
-            "assets/prompts/grep.md",
-            "../../../../../../tests/fixtures/omp_coding_contract/prompts/grep.md"
-        );
+    let scoped = match ctx.mounts.scoped_path(DEFAULT_SCOPED_ROOT) {
+        Ok(scoped) => scoped,
+        Err(error) => {
+            tracing::debug!(%error, "omp workspace mount root scoped-path lookup failed");
+            return None;
+        }
+    };
+    match ctx.mounts.resolve_with_grant(&scoped) {
+        Ok((virtual_path, _)) => Some(virtual_path),
+        Err(error) => {
+            tracing::debug!(%error, "omp workspace mount root resolution failed");
+            None
+        }
     }
 }

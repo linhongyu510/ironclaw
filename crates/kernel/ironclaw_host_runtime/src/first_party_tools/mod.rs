@@ -854,7 +854,10 @@ pub(super) fn bounded_input_size_with_max(
     input: &serde_json::Value,
     max_bytes: usize,
 ) -> Result<(), FirstPartyCapabilityError> {
-    let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
+    let bytes = serde_json::to_vec(input).map_err(|error| {
+        tracing::debug!(%error, "failed to serialize first-party capability input");
+        input_error()
+    })?;
     if bytes.len() > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
@@ -867,7 +870,10 @@ pub(super) fn bounded_output_bytes(
     output: &serde_json::Value,
     max_bytes: u64,
 ) -> Result<u64, FirstPartyCapabilityError> {
-    let bytes = serde_json::to_vec(output).map_err(|_| input_error())?;
+    let bytes = serde_json::to_vec(output).map_err(|error| {
+        tracing::debug!(%error, "failed to serialize first-party capability output");
+        input_error()
+    })?;
     let bytes = u64::try_from(bytes.len())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge))?;
     if bytes > max_bytes {

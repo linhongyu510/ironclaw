@@ -197,6 +197,7 @@ pub(crate) fn format_anchored_context(anchor_lines: &[u64], file_lines: &[String
 
 /// Format the required-shape diagnostic shown when a line reference is
 /// malformed (`formatFullAnchorRequirement` in the pinned source).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn format_full_anchor_requirement(raw: Option<&str>) -> String {
     let received = match raw {
         Some(raw) => format!(
@@ -606,6 +607,7 @@ pub(crate) fn render_mismatch_message(
 /// `parseTag`'s malformed line-reference message. The received segment
 /// rendered by `format_full_anchor_requirement` already carries its own
 /// trailing period, so no extra one is appended here.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn malformed_line_reference(raw: &str) -> String {
     format!(
         "Invalid line reference. Expected {}",
@@ -1455,7 +1457,7 @@ fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 
     lines
         .iter()
-        .filter(|line| !is_read_metadata_line(line) && !(strip_hash && HL_HEADER_RE.is_match(line)))
+        .filter(|line| !(is_read_metadata_line(line) || strip_hash && HL_HEADER_RE.is_match(line)))
         .map(|line| {
             if strip_hash {
                 let mut result = line.clone();
@@ -1640,7 +1642,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         || trimmed.starts_with("*** Move to:")
     {
         let preview = if trimmed.len() > 48 {
-            format!("{}…", &trimmed[..48])
+            format!("{}…", &trimmed[..trimmed.floor_char_boundary(48)])
         } else {
             trimmed.to_string()
         };
@@ -1660,7 +1662,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
     }
     if trimmed.starts_with("@@") {
         let preview = if trimmed.len() > 48 {
-            format!("{}…", &trimmed[..48])
+            format!("{}…", &trimmed[..trimmed.floor_char_boundary(48)])
         } else {
             trimmed.to_string()
         };
@@ -3515,7 +3517,7 @@ fn split_raw_sections(input: &str) -> Result<Vec<(String, Option<String>, String
             );
         }
         let preview = if first_line.len() > 120 {
-            &first_line[..120]
+            &first_line[..first_line.floor_char_boundary(120)]
         } else {
             first_line
         };
@@ -4028,6 +4030,20 @@ async fn prepare_section(
         .map_err(|_| file_not_found_message(&section.path))?;
     let virtual_path = resolved.virtual_path;
 
+    let stat = ctx.filesystem.stat(&virtual_path).await.map_err(|error| {
+        if matches!(error, ironclaw_filesystem::FilesystemError::NotFound { .. }) {
+            file_not_found_message(&section.path)
+        } else {
+            omp_error(
+                OmpEngineErrorKind::Filesystem,
+                format!("filesystem error: {error}"),
+            )
+        }
+    })?;
+    if stat.sensitive {
+        return Err(super::filesystem_denied());
+    }
+
     let Some(expected) = section.file_hash.clone() else {
         return Err(omp_error(
             OmpEngineErrorKind::HashlineApply,
@@ -4051,7 +4067,9 @@ async fn prepare_section(
 
     let text = String::from_utf8(raw_content).map_err(|_| file_not_found_message(&section.path))?;
     let normalized = normalize_to_lf(&text);
-    let live_matches = compute_file_hash(&normalized) == expected;
+    let live_matches =
+        ctx.snapshots
+            .snapshot_matches(scope_key, virtual_path.as_str(), &expected, &normalized);
 
     // Run-isolation gate (IronClaw-specific; see `state.rs`): the snapshot
     // registry binds tags to the scope+run that recorded them, so a tag must
@@ -4077,6 +4095,10 @@ async fn prepare_section(
 
     let parse_warnings = section.warnings().map_err(hashline_parse_error)?.to_vec();
     let file_op = section.file_op().map_err(hashline_parse_error)?.cloned();
+    if file_op.is_some() {
+        resolve_input_path(ctx, &section.path, FilesystemOperation::Delete)
+            .map_err(|_| super::filesystem_denied())?;
+    }
 
     // Block edits resolve against the tagged snapshot text; a drifted file is
     // rejected before resolution (no fuzzy writes).
@@ -4436,7 +4458,12 @@ impl OmpSnapshotRegistry {
         text: &str,
     ) -> String {
         let tag = compute_file_hash(text);
-        self.record(scope, virtual_path, &tag);
+        self.record(
+            scope,
+            virtual_path,
+            &tag,
+            *blake3::hash(text.as_bytes()).as_bytes(),
+        );
         tag
     }
 }
@@ -4490,11 +4517,13 @@ pub(crate) async fn edit(ctx: &OmpEngineContext, input: Value) -> Result<String,
 /// differential seam test can drive them against the golden fixtures.
 /// `per_file_failure_aggregate`: first per-file failure inside a multi-file
 /// edit batch.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn render_per_file_failure_aggregate(path: &str, error_text: &str) -> String {
     format!("Error editing {path}: {error_text}")
 }
 
 /// `files_not_applied`: the trailing entries of a failed multi-file batch.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn render_files_not_applied(skipped_paths: &str) -> String {
     format!(
         "Files NOT applied: {skipped_paths}; re-read the affected files and re-issue only the failed and unapplied files."

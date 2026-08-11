@@ -136,8 +136,8 @@ fn omp_surface_advertises_exact_names_schemas_and_descriptions() {
                 );
             }
 
-            // Both surfaces coexist: the old coding tools stay under their
-            // derived names...
+            // The benchmark surface is OMP-only for coding tools: legacy
+            // read/write/list/apply-patch names must not remain advertised.
             for old_tool in [
                 "builtin__read_file",
                 "builtin__write_file",
@@ -145,8 +145,8 @@ fn omp_surface_advertises_exact_names_schemas_and_descriptions() {
                 "builtin__apply_patch",
             ] {
                 assert!(
-                    seen.contains_key(old_tool),
-                    "old tool {old_tool} must stay registered in the omp-selected wiring"
+                    !seen.contains_key(old_tool),
+                    "legacy tool {old_tool} leaked"
                 );
             }
             // ...and the two ids the omp engines reuse (`builtin.glob`/`builtin.grep`)
@@ -260,7 +260,7 @@ fn omp_derived_spelling_still_resolves() {
         let h = RebornIntegrationHarness::test_default()
             .with_omp_coding_tools()
             .script([
-                RebornScriptedReply::tool_call("builtin.read", json!({ "path": "foo.txt" })),
+                RebornScriptedReply::tool_call("builtin__read", json!({ "path": "foo.txt" })),
                 RebornScriptedReply::text("read via derived spelling"),
             ])
             .build()

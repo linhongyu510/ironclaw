@@ -587,7 +587,7 @@ pub struct CapabilityDeclV2 {
     /// `#[serde(default)]` so resolved records persisted before this field
     /// existed rehydrate to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_tool_name: Option<String>,
+    pub provider_tool_name: Option<ProviderToolName>,
 }
 
 /// One product-facing surface a validated manifest declares, with the
@@ -1214,15 +1214,19 @@ impl CapabilityDeclV2 {
         // the same validation the loop boundary applies before advertising
         // it. `None` keeps the derived name; the field is additive so
         // existing manifests parse unchanged.
-        if let Some(provider_tool_name) = &raw.provider_tool_name {
-            ProviderToolName::new(provider_tool_name.clone()).map_err(|_| {
+        let provider_tool_name = raw
+            .provider_tool_name
+            .as_ref()
+            .map(|provider_tool_name| {
+                ProviderToolName::new(provider_tool_name.clone()).map_err(|error| {
                 ManifestV2Error::Invalid {
                     reason: format!(
-                        "capability {id} declares invalid provider_tool_name {provider_tool_name:?}"
+                        "capability {id} declares invalid provider_tool_name {provider_tool_name:?}: {error}"
                     ),
                 }
-            })?;
-        }
+                })
+            })
+            .transpose()?;
 
         // A `standard_op` binding's model-facing description is host-composed
         // from the canonical description core plus the extension's vendor
@@ -1423,7 +1427,7 @@ impl CapabilityDeclV2 {
             max_egress_bytes: raw.max_egress_bytes,
             resource_profile: raw.resource_profile,
             origin_gate_matrix: raw.origin_gate_matrix,
-            provider_tool_name: raw.provider_tool_name,
+            provider_tool_name,
         })
     }
 }

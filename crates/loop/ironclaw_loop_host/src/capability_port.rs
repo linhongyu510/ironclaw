@@ -1841,7 +1841,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 }
                 let (provider_tool_name, derived_alias) = resolve_provider_tool_name(
                     &capability.descriptor.id,
-                    capability.descriptor.provider_tool_name.as_deref(),
+                    capability.descriptor.provider_tool_name.as_ref(),
                     &snapshot.provider_names,
                 )?;
                 snapshot
@@ -3122,18 +3122,13 @@ fn provider_tool_name(
 /// rather than silently shadowing that capability.
 fn resolve_provider_tool_name(
     capability_id: &CapabilityId,
-    override_name: Option<&str>,
+    override_name: Option<&ProviderToolName>,
     existing: &HashMap<ProviderToolName, CapabilityId>,
 ) -> Result<(ProviderToolName, Option<ProviderToolName>), AgentLoopHostError> {
     let Some(override_name) = override_name else {
         return Ok((provider_tool_name(capability_id, existing), None));
     };
-    let advertised = ProviderToolName::new(override_name.to_string()).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "capability provider tool name override is not a valid provider tool name",
-        )
-    })?;
+    let advertised = override_name.clone();
     if existing
         .get(&advertised)
         .is_some_and(|existing_id| existing_id != capability_id)
@@ -4905,8 +4900,9 @@ mod tests {
     #[test]
     fn provider_tool_name_override_advertises_exactly_and_keeps_derived_alias() {
         let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
+        let override_name = ProviderToolName::new("read").expect("provider tool name");
         let (advertised, alias) =
-            resolve_provider_tool_name(&capability_id, Some("read"), &HashMap::new())
+            resolve_provider_tool_name(&capability_id, Some(&override_name), &HashMap::new())
                 .expect("override resolves");
 
         assert_eq!(advertised.as_str(), "read");
@@ -4927,18 +4923,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_name_override_rejects_invalid_names() {
-        let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
-        // ProviderToolName forbids dots; the exact-name mechanism must not
-        // smuggle an id-shaped override past the boundary validation.
-        let error =
-            resolve_provider_tool_name(&capability_id, Some("builtin.read"), &HashMap::new())
-                .expect_err("dotted override is rejected");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
     fn provider_tool_name_override_collision_fails_loudly() {
         let capability_id = CapabilityId::new("builtin.read").expect("valid capability id");
         let mut existing = HashMap::new();
@@ -4946,7 +4930,8 @@ mod tests {
             ProviderToolName::new("read").expect("provider tool name"),
             CapabilityId::new("builtin.write").expect("valid capability id"),
         );
-        let error = resolve_provider_tool_name(&capability_id, Some("read"), &existing)
+        let override_name = ProviderToolName::new("read").expect("provider tool name");
+        let error = resolve_provider_tool_name(&capability_id, Some(&override_name), &existing)
             .expect_err("colliding override is rejected");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);

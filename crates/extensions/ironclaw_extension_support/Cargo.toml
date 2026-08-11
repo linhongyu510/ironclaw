@@ -27,6 +27,10 @@ publish = false
 # `reborn_same_layer_edge_inventory.rs`.
 layer = "runtimes"
 
+[features]
+# Dev-only seam exposing the OMP differential harness to root integration tests.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.23.0"

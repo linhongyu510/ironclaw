@@ -9,8 +9,8 @@
 //! A successful edit refreshes the recorded snapshot, so chained edits on
 //! the same file keep working without an intervening read.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, MutexGuard};
 
 use ironclaw_host_api::ids::RunId;
 use ironclaw_host_api::resource::ResourceScope;
@@ -55,39 +55,74 @@ impl OmpScopeKey {
 #[derive(Debug, Clone)]
 struct SnapshotEntry {
     tag: String,
+    fingerprint: [u8; 32],
 }
 
 type SnapshotKey = (OmpScopeKey, String);
 
 /// Bounded registry of hashline snapshot tags keyed by (scope, virtual path).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OmpSnapshotRegistry {
-    entries: Mutex<HashMap<SnapshotKey, SnapshotEntry>>,
-    order: Mutex<Vec<SnapshotKey>>,
+    state: Mutex<SnapshotState>,
+    max_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotState {
+    entries: HashMap<SnapshotKey, SnapshotEntry>,
+    order: VecDeque<SnapshotKey>,
+}
+
+impl Default for OmpSnapshotRegistry {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(SnapshotState::default()),
+            max_entries: MAX_SNAPSHOT_ENTRIES,
+        }
+    }
 }
 
 impl OmpSnapshotRegistry {
+    #[cfg(test)]
+    fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            state: Mutex::new(SnapshotState::default()),
+            max_entries,
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, SnapshotState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Record the content tag observed for `virtual_path` under `scope`
     /// (computed by the caller via [`super::hashline::compute_file_hash`]).
-    pub(crate) fn record(&self, scope: &OmpScopeKey, virtual_path: &str, tag: &str) {
+    pub(crate) fn record(
+        &self,
+        scope: &OmpScopeKey,
+        virtual_path: &str,
+        tag: &str,
+        fingerprint: [u8; 32],
+    ) {
         let key = (scope.clone(), virtual_path.to_string());
-        let mut entries = self.entries.lock().expect("snapshot registry poisoned");
-        let mut order = self.order.lock().expect("snapshot registry order poisoned");
-        if !entries.contains_key(&key) {
-            if entries.len() >= MAX_SNAPSHOT_ENTRIES {
+        let mut state = self.lock_state();
+        if !state.entries.contains_key(&key) {
+            if state.entries.len() >= self.max_entries
+                && let Some(evicted) = state.order.pop_front()
+            {
                 // Evict the oldest recorded entry; the evicted path just
                 // requires a fresh read before its next edit.
-                if let Some(evicted) = order.first().cloned() {
-                    entries.remove(&evicted);
-                    order.remove(0);
-                }
+                state.entries.remove(&evicted);
             }
-            order.push(key.clone());
+            state.order.push_back(key.clone());
         }
-        entries.insert(
+        state.entries.insert(
             key,
             SnapshotEntry {
                 tag: tag.to_string(),
+                fingerprint,
             },
         );
     }
@@ -96,8 +131,9 @@ impl OmpSnapshotRegistry {
     /// was never read (or was evicted) in this scope+run.
     #[allow(dead_code)]
     pub(crate) fn recorded(&self, scope: &OmpScopeKey, virtual_path: &str) -> Option<String> {
-        let entries = self.entries.lock().expect("snapshot registry poisoned");
-        entries
+        let state = self.lock_state();
+        state
+            .entries
             .get(&(scope.clone(), virtual_path.to_string()))
             .map(|entry| entry.tag.clone())
     }
@@ -110,19 +146,37 @@ impl OmpSnapshotRegistry {
         virtual_path: &str,
         tag: &str,
     ) -> bool {
-        let entries = self.entries.lock().expect("snapshot registry poisoned");
-        entries
+        let state = self.lock_state();
+        state
+            .entries
             .get(&(scope.clone(), virtual_path.to_string()))
             .is_some_and(|entry| entry.tag == tag)
+    }
+
+    /// Verify that the current full normalized content is the exact snapshot
+    /// recorded with the model-visible tag. The four-hex tag remains the OMP
+    /// wire contract; this collision-resistant fingerprint is host-internal.
+    pub(crate) fn snapshot_matches(
+        &self,
+        scope: &OmpScopeKey,
+        virtual_path: &str,
+        tag: &str,
+        normalized: &str,
+    ) -> bool {
+        let fingerprint = *blake3::hash(normalized.as_bytes()).as_bytes();
+        let state = self.lock_state();
+        state
+            .entries
+            .get(&(scope.clone(), virtual_path.to_string()))
+            .is_some_and(|entry| entry.tag == tag && entry.fingerprint == fingerprint)
     }
 
     /// Drop the snapshot for a deleted path (REM).
     pub(crate) fn invalidate(&self, scope: &OmpScopeKey, virtual_path: &str) {
         let key = (scope.clone(), virtual_path.to_string());
-        let mut entries = self.entries.lock().expect("snapshot registry poisoned");
-        let mut order = self.order.lock().expect("snapshot registry order poisoned");
-        entries.remove(&key);
-        order.retain(|candidate| candidate != &key);
+        let mut state = self.lock_state();
+        state.entries.remove(&key);
+        state.order.retain(|candidate| candidate != &key);
     }
 }
 
@@ -151,7 +205,7 @@ mod tests {
     fn record_and_lookup_round_trip() {
         let registry = OmpSnapshotRegistry::default();
         let scope = scope(None);
-        registry.record(&scope, "/projects/workspace/foo.ts", "1A2B");
+        registry.record(&scope, "/projects/workspace/foo.ts", "1A2B", [1; 32]);
         assert_eq!(
             registry.recorded(&scope, "/projects/workspace/foo.ts"),
             Some("1A2B".to_string())
@@ -175,7 +229,7 @@ mod tests {
         let registry = OmpSnapshotRegistry::default();
         let run_a = scope(Some(RunId::new()));
         let run_b = scope(Some(RunId::new()));
-        registry.record(&run_a, "/projects/workspace/foo.ts", "1A2B");
+        registry.record(&run_a, "/projects/workspace/foo.ts", "1A2B", [1; 32]);
         assert!(
             registry
                 .recorded(&run_b, "/projects/workspace/foo.ts")
@@ -189,8 +243,8 @@ mod tests {
         let registry = OmpSnapshotRegistry::default();
         let scope = scope(None);
         let path = "/projects/workspace/foo.ts";
-        registry.record(&scope, path, "1A2B");
-        registry.record(&scope, path, "3C4D");
+        registry.record(&scope, path, "1A2B", [1; 32]);
+        registry.record(&scope, path, "3C4D", [2; 32]);
         assert_eq!(registry.recorded(&scope, path), Some("3C4D".to_string()));
         assert!(registry.tag_recognized(&scope, path, "3C4D"));
         assert!(!registry.tag_recognized(&scope, path, "1A2B"));
@@ -198,28 +252,24 @@ mod tests {
 
     #[test]
     fn bounded_registry_evicts_oldest() {
-        let registry = OmpSnapshotRegistry::default();
+        let registry = OmpSnapshotRegistry::with_capacity(2);
         let scope = scope(None);
-        // Bypass the constant by filling past a small local budget via the
-        // public constant path: MAX_SNAPSHOT_ENTRIES is large, so simulate
-        // eviction by invalidating and re-adding in order.
-        registry.record(&scope, "/p/a", "AAAA");
-        registry.record(&scope, "/p/b", "BBBB");
-        registry.invalidate(&scope, "/p/a");
-        registry.record(&scope, "/p/a", "CCCC");
-        // Order: b (oldest), a. Re-adding a pushed it to the back.
+        registry.record(&scope, "/p/a", "AAAA", [1; 32]);
+        registry.record(&scope, "/p/b", "BBBB", [2; 32]);
+        registry.record(&scope, "/p/c", "CCCC", [3; 32]);
+        assert!(registry.recorded(&scope, "/p/a").is_none());
         assert_eq!(registry.recorded(&scope, "/p/b"), Some("BBBB".to_string()));
-        assert_eq!(registry.recorded(&scope, "/p/a"), Some("CCCC".to_string()));
+        assert_eq!(registry.recorded(&scope, "/p/c"), Some("CCCC".to_string()));
     }
 
     #[test]
     fn invalidate_drops_entry_and_order() {
         let registry = OmpSnapshotRegistry::default();
         let scope = scope(None);
-        registry.record(&scope, "/p/a", "AAAA");
+        registry.record(&scope, "/p/a", "AAAA", [1; 32]);
         registry.invalidate(&scope, "/p/a");
         assert!(registry.recorded(&scope, "/p/a").is_none());
-        registry.record(&scope, "/p/a", "BBBB");
+        registry.record(&scope, "/p/a", "BBBB", [2; 32]);
         assert_eq!(registry.recorded(&scope, "/p/a"), Some("BBBB".to_string()));
     }
 }

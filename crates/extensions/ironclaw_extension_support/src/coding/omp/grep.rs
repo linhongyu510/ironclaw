@@ -15,17 +15,18 @@
 //! virtual backends (no `.gitignore` rules exist there); the delimited-path
 //! expansion beyond semicolons is not ported.
 
-use std::path::Path as FsPath;
+use std::{collections::BTreeSet, path::Path as FsPath};
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use serde_json::Value;
 
+use super::super::config::{GREP_MAX_TOTAL_BYTES, MAX_READ_SIZE, MAX_VISITED_ENTRIES};
 use super::hashline::format::format_hashline_header;
 use super::selector::{LineRange, parse_line_ranges};
 use super::state::OmpScopeKey;
 use super::{
-    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, input_error, omp_error,
-    resolve_input_path, workspace_virtual_root,
+    OmpEngineContext, OmpEngineError, OmpEngineErrorKind, display_path, filesystem_denied,
+    input_error, omp_error, read_limit_exceeded, resolve_input_path, workspace_virtual_root,
 };
 
 const DEFAULT_FILE_LIMIT: usize = 20;
@@ -43,8 +44,14 @@ struct PathSpec {
 
 struct FileHits {
     display_path: String,
-    virtual_path: ironclaw_host_api::path::VirtualPath,
+    snapshot_tag: Option<String>,
     lines: Vec<(u64, String, bool)>, // (line number, text, is_match)
+}
+
+#[derive(Default)]
+struct GrepBudget {
+    visited_entries: usize,
+    bytes_scanned: u64,
 }
 
 pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String, OmpEngineError> {
@@ -260,6 +267,7 @@ pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String,
 
     // Collect hits per target file.
     let mut all_hits: Vec<FileHits> = Vec::new();
+    let mut budget = GrepBudget::default();
     for (target, glob_filter) in &resolved_targets {
         let virtual_path = ironclaw_host_api::path::VirtualPath::new(target.clone())
             .map_err(|error| omp_error(OmpEngineErrorKind::PathResolution, error.to_string()))?;
@@ -267,8 +275,20 @@ pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String,
         let Some(stat) = stat else {
             continue;
         };
+        if stat.sensitive {
+            return Err(filesystem_denied());
+        }
         if stat.file_type == FileType::File {
-            let hits = search_file(ctx, &virtual_path, &workspace_root, &compiled, &specs).await?;
+            let hits = search_file(
+                ctx,
+                &virtual_path,
+                &workspace_root,
+                &compiled,
+                &specs,
+                &mut budget,
+                true,
+            )
+            .await?;
             all_hits.push(hits);
         } else if stat.file_type == FileType::Directory {
             let hits = search_directory(
@@ -278,6 +298,7 @@ pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String,
                 &workspace_root,
                 &compiled,
                 &specs,
+                &mut budget,
             )
             .await?;
             all_hits.extend(hits);
@@ -352,12 +373,11 @@ pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String,
         // header and every root-level file header.
         let mut sections: Vec<(String, String, Vec<String>)> = Vec::new();
         for hits in &selected {
-            let tag = if hits.lines.is_empty() {
-                None
-            } else {
-                record_snapshot_tag(ctx, &hits.virtual_path).await
-            };
-            let header_suffix = tag.map(|tag| format!("#{tag}")).unwrap_or_default();
+            let header_suffix = hits
+                .snapshot_tag
+                .as_ref()
+                .map(|tag| format!("#{tag}"))
+                .unwrap_or_default();
             sections.push((hits.display_path.clone(), header_suffix, render_hits(hits)));
         }
         let mut tree_root = GrepTree::new();
@@ -387,9 +407,8 @@ pub(crate) async fn grep(ctx: &OmpEngineContext, input: Value) -> Result<String,
             if !output_lines.is_empty() {
                 output_lines.push(String::new());
             }
-            let tag = record_snapshot_tag(ctx, &hits.virtual_path).await;
-            if let Some(tag) = tag {
-                output_lines.push(format_hashline_header(&hits.display_path, &tag));
+            if let Some(tag) = &hits.snapshot_tag {
+                output_lines.push(format_hashline_header(&hits.display_path, tag));
             }
             output_lines.extend(render_hits(hits));
         }
@@ -633,22 +652,64 @@ async fn search_file(
     workspace_root: &ironclaw_host_api::path::VirtualPath,
     compiled: &regex::Regex,
     specs: &[PathSpec],
+    budget: &mut GrepBudget,
+    explicit: bool,
 ) -> Result<FileHits, OmpEngineError> {
     let display = display_path(workspace_root, virtual_path);
-    let Some(text) = read_file_text(ctx, virtual_path).await? else {
+    let Some(stat) = stat_optional_omp(ctx, virtual_path).await? else {
         return Ok(FileHits {
             display_path: display,
-            virtual_path: virtual_path.clone(),
+            snapshot_tag: None,
             lines: Vec::new(),
         });
     };
-    let ranges = specs
-        .iter()
-        .find(|spec| spec.clean == display)
-        .and_then(|spec| spec.ranges.clone());
+    if stat.sensitive {
+        if explicit {
+            return Err(filesystem_denied());
+        }
+        return Ok(FileHits {
+            display_path: display,
+            snapshot_tag: None,
+            lines: Vec::new(),
+        });
+    }
+    if stat.len > MAX_READ_SIZE {
+        if explicit {
+            return Err(read_limit_exceeded());
+        }
+        return Ok(FileHits {
+            display_path: display,
+            snapshot_tag: None,
+            lines: Vec::new(),
+        });
+    }
+    let next_total = budget.bytes_scanned.saturating_add(stat.len);
+    if next_total > GREP_MAX_TOTAL_BYTES {
+        return Err(omp_error(
+            OmpEngineErrorKind::ResourceLimit,
+            "workspace grep exceeds the aggregate read limit",
+        ));
+    }
+    budget.bytes_scanned = next_total;
+    let Some(text) = read_file_text(ctx, virtual_path).await? else {
+        return Ok(FileHits {
+            display_path: display,
+            snapshot_tag: None,
+            lines: Vec::new(),
+        });
+    };
+    let mut ranges = None;
+    for spec in specs.iter().filter(|spec| spec.ranges.is_some()) {
+        if let Ok(resolved) = resolve_input_path(ctx, &spec.clean, FilesystemOperation::ReadFile)
+            && resolved.virtual_path == *virtual_path
+        {
+            ranges = spec.ranges.clone();
+            break;
+        }
+    }
     let lines: Vec<&str> = text.split('\n').collect();
     // Precompute match positions so context detection is linear.
-    let match_lines: Vec<u64> = lines
+    let match_lines: BTreeSet<u64> = lines
         .iter()
         .enumerate()
         .filter(|(_, line)| compiled.is_match(line))
@@ -663,23 +724,19 @@ async fn search_file(
         {
             continue;
         }
-        let is_match = compiled.is_match(line);
+        let is_match = match_lines.contains(&line_number);
         if !is_match {
             // Per-direction context windows (pinned grep.contextBefore=1 /
             // contextAfter=3, settings-schema.ts): a non-match line is
             // emitted only inside the contextBefore window of a LATER match
             // or the contextAfter window of an EARLIER match. Lines are
             // visited in ascending order, so no line is ever repeated.
-            let near_match = match_lines.iter().any(|other| {
-                if *other == line_number {
-                    return false;
-                }
-                if *other > line_number {
-                    *other - line_number <= CONTEXT_BEFORE as u64
-                } else {
-                    line_number - *other <= CONTEXT_AFTER as u64
-                }
-            });
+            let first_candidate = line_number.saturating_sub(CONTEXT_AFTER as u64);
+            let last_candidate = line_number.saturating_add(CONTEXT_BEFORE as u64);
+            let near_match = match_lines
+                .range(first_candidate..=last_candidate)
+                .next()
+                .is_some();
             if !near_match {
                 continue;
             }
@@ -692,9 +749,19 @@ async fn search_file(
         hits.push((line_number, (*line).to_string(), is_match));
         last_emitted = Some(line_number);
     }
+    let snapshot_tag = if hits.is_empty() {
+        None
+    } else {
+        let normalized = super::hashline::normalize_to_lf(&text);
+        Some(ctx.snapshots.record_and_return(
+            &OmpScopeKey::from_scope(&ctx.scope, ctx.run_id),
+            virtual_path.as_str(),
+            &normalized,
+        ))
+    };
     Ok(FileHits {
         display_path: display,
-        virtual_path: virtual_path.clone(),
+        snapshot_tag,
         lines: hits,
     })
 }
@@ -706,6 +773,7 @@ async fn search_directory(
     workspace_root: &ironclaw_host_api::path::VirtualPath,
     compiled: &regex::Regex,
     specs: &[PathSpec],
+    budget: &mut GrepBudget,
 ) -> Result<Vec<FileHits>, OmpEngineError> {
     let compiled_glob = glob::Pattern::new(glob_filter).map_err(|error| {
         omp_error(
@@ -732,7 +800,21 @@ async fn search_directory(
             }
         };
         for entry in entries {
+            budget.visited_entries = budget.visited_entries.saturating_add(1);
+            if budget.visited_entries > MAX_VISITED_ENTRIES {
+                return Err(omp_error(
+                    OmpEngineErrorKind::ResourceLimit,
+                    "workspace traversal exceeds the entry limit",
+                ));
+            }
             if entry.name == ".git" || entry.name == "node_modules" {
+                continue;
+            }
+            let stat = match stat_optional_omp(ctx, &entry.path).await? {
+                Some(stat) => stat,
+                None => continue,
+            };
+            if stat.sensitive {
                 continue;
             }
             // Match the pattern against the path relative to the walk base
@@ -748,7 +830,16 @@ async fn search_directory(
             if !compiled_glob.matches_path_with(FsPath::new(&relative), options) {
                 continue;
             }
-            let file_hits = search_file(ctx, &entry.path, workspace_root, compiled, specs).await?;
+            let file_hits = search_file(
+                ctx,
+                &entry.path,
+                workspace_root,
+                compiled,
+                specs,
+                budget,
+                false,
+            )
+            .await?;
             if !file_hits.lines.is_empty() {
                 hits.push(file_hits);
             }
@@ -759,22 +850,9 @@ async fn search_directory(
 
 fn line_in_ranges(line_number: u64, ranges: &[LineRange]) -> bool {
     ranges.iter().any(|range| {
-        line_number >= range.start_line && range.end_line.is_none_or(|end| line_number <= end)
+        line_number >= range.start_line
+            && (range.open_ended || line_number <= range.end_line.unwrap_or(range.start_line))
     })
-}
-
-/// Record the whole-file snapshot tag for a hit file (hashline mode header).
-async fn record_snapshot_tag(
-    ctx: &OmpEngineContext,
-    virtual_path: &ironclaw_host_api::path::VirtualPath,
-) -> Option<String> {
-    let text = read_file_text(ctx, virtual_path).await.ok()??;
-    let normalized = super::hashline::normalize_to_lf(&text);
-    Some(ctx.snapshots.record_and_return(
-        &OmpScopeKey::from_scope(&ctx.scope, ctx.run_id),
-        virtual_path.as_str(),
-        &normalized,
-    ))
 }
 
 /// `formatMatchLine` rows: `*N:line` matches, ` N:line` context, `...` gaps.
@@ -826,6 +904,7 @@ mod tests {
         let ranges = vec![LineRange {
             start_line: 50,
             end_line: Some(100),
+            open_ended: false,
         }];
         assert!(line_in_ranges(50, &ranges));
         assert!(line_in_ranges(100, &ranges));
@@ -833,6 +912,7 @@ mod tests {
         let open = vec![LineRange {
             start_line: 50,
             end_line: None,
+            open_ended: true,
         }];
         assert!(line_in_ranges(5000, &open));
     }
@@ -841,8 +921,7 @@ mod tests {
     fn match_rows_use_hashline_shapes() {
         let hits = FileHits {
             display_path: "a.ts".to_string(),
-            virtual_path: ironclaw_host_api::path::VirtualPath::new("/projects/workspace/a.ts")
-                .expect("path"),
+            snapshot_tag: None,
             lines: vec![
                 (1, "fn main() {}".to_string(), false),
                 (2, "match x {".to_string(), true),

@@ -1797,9 +1797,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_extension_manager/src/skill_auto_activate_capability.rs",
         "crates/ironclaw_extension_manager/src/ironhub/capabilities.rs",
         "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
-        // Test-support-gated omp registration seam (issue #7392 slice 3):
-        // builds the builtin package plus the five omp capabilities with
-        // their exact-name overrides; compiled out of production binaries.
+        // TEMPORARY production benchmark seam (issue #7392): builds the
+        // omp-only coding surface with exact provider-name overrides. Revert
+        // this unconditional seam when the benchmark arm reaches cutover.
         "crates/ironclaw_host_runtime/src/first_party_tools/omp.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.

@@ -71,9 +71,8 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
-    builtin_first_party_package,
-    builtin_first_party_package_for_process_backend, native_memory_first_party_package,
-    register_native_memory_tools,
+    builtin_first_party_package, builtin_first_party_package_for_process_backend,
+    native_memory_first_party_package, register_native_memory_tools,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -520,8 +519,7 @@ async fn production_process_backend_builders_advertise_omp_coding_surface() {
         ProcessBackendKind::UserSandbox,
         ProcessBackendKind::Docker,
     ] {
-        let package =
-            builtin_first_party_package_for_process_backend(process_backend).unwrap();
+        let package = builtin_first_party_package_for_process_backend(process_backend).unwrap();
         for id in OMP_IDS {
             assert!(
                 package
@@ -575,13 +573,14 @@ async fn production_process_backend_builders_advertise_omp_coding_surface() {
         }
     }
 
-    let trigger_hook_handlers = builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
-        Arc::new(InMemoryTriggerRepository::default()),
-        Arc::new(NoopTriggerCreateHook),
-        Arc::new(MissingTriggerActiveRunLookup),
-        ProcessBackendKind::Docker,
-    )
-    .unwrap();
+    let trigger_hook_handlers =
+        builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+            Arc::new(InMemoryTriggerRepository::default()),
+            Arc::new(NoopTriggerCreateHook),
+            Arc::new(MissingTriggerActiveRunLookup),
+            ProcessBackendKind::Docker,
+        )
+        .unwrap();
     for id in OMP_IDS {
         assert!(
             trigger_hook_handlers.contains_handler(&capability_id(id)),

@@ -11,13 +11,9 @@
 //! durable tool results).
 //!
 //! Two canonical ids overlap with the stock builtins: `builtin.glob` and
-//! `builtin.grep`. A package cannot declare the same id twice, so the
-//! omp-extended package REPLACES those two capabilities (same ids, omp
-//! manifest + handler + exact names) while the other old coding tools
-//! (`read_file`, `write_file`, `list_dir`, `apply_patch`) stay registered
-//! unchanged. The provider names never collide: the old tools advertise the
-//! derived `builtin__glob`/`builtin__grep` spellings, the omp tools the
-//! exact `glob`/`grep`.
+//! `builtin.grep`. The temporary benchmark package replaces those entries
+//! and removes the remaining legacy coding tools so the model sees only the
+//! five exact omp names.
 //!
 //! ⚠️ TEMPORARY benchmark override (revert at cutover): the omp surface is
 //! enabled in PRODUCTION builds for the /benchmark panel (issue #7392) — the
@@ -51,7 +47,7 @@ use ironclaw_host_api::{
     capability_profile::CapabilityProfileSchemaRef,
     dispatch::RuntimeDispatchErrorKind,
     error::HostApiError,
-    ids::CapabilityId,
+    ids::{CapabilityId, ProviderToolName},
     path::VirtualPath,
     resource::ResourceUsage,
     runtime_policy::ProcessBackendKind,
@@ -149,7 +145,11 @@ const OMP_CAPABILITIES: &[OmpCapabilityMetadata] = &[
         id: OMP_EDIT_CAPABILITY_ID,
         provider_tool_name: OMP_EDIT_PROVIDER_TOOL_NAME,
         description: OMP_EDIT_DESCRIPTION,
-        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        effects: &[
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
+        ],
         max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
         schema_ref: OMP_EDIT_SCHEMA_REF,
     },
@@ -230,7 +230,7 @@ fn omp_capability_manifest(
         max_egress_bytes: None,
         resource_profile: super::resource_profile(),
         origin_gate_matrix: Some(super::first_party_origin_gate_matrix(metadata.id)),
-        provider_tool_name: Some(metadata.provider_tool_name.to_string()),
+        provider_tool_name: Some(ProviderToolName::new(metadata.provider_tool_name)?),
     })
 }
 
@@ -261,11 +261,15 @@ pub fn insert_omp_coding_handlers(
 /// binds hashline edit tags to reads from the SAME run.
 pub struct OmpCodingTools {
     snapshots: Arc<OmpSnapshotRegistry>,
+    post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
 }
 
 impl OmpCodingTools {
     pub fn new(snapshots: Arc<OmpSnapshotRegistry>) -> Self {
-        Self { snapshots }
+        Self {
+            snapshots,
+            post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines::default(),
+        }
     }
 }
 
@@ -282,14 +286,17 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
         };
         super::bounded_input_size_with_max(&request.input, metadata.max_input_bytes)?;
         let start = Instant::now();
+        let mounts = request.mounts.clone().ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        })?;
         let context = OmpEngineContext {
             filesystem: Arc::clone(&request.services.filesystem),
-            mounts: request.mounts.clone().unwrap_or_default(),
+            mounts,
             scope: request.scope.clone(),
             run_id: request.run_id,
             snapshots: Arc::clone(&self.snapshots),
         };
-        let output = match request.capability_id.as_str() {
+        let mut output = match request.capability_id.as_str() {
             OMP_READ_CAPABILITY_ID => {
                 ironclaw_extension_support::coding::omp::read(&context, request.input.clone()).await
             }
@@ -309,6 +316,32 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
             _ => unreachable!("omp handler is registered only for the five omp ids"),
         }
         .map_err(omp_error)?;
+        let mut process_count = 0;
+        if matches!(
+            request.capability_id.as_str(),
+            OMP_WRITE_CAPABILITY_ID | OMP_EDIT_CAPABILITY_ID
+        ) && let Some(service) = &request.services.post_edit_check
+        {
+            let edited_scoped_path = request
+                .input
+                .get("path")
+                .and_then(serde_json::Value::as_str);
+            if let Some(check) = crate::post_edit_check::run_post_edit_check(
+                &self.post_edit_check_seen,
+                service.process.as_ref(),
+                &request.scope,
+                request.mounts.as_ref(),
+                edited_scoped_path,
+                &service.config,
+            )
+            .await
+            {
+                if let Some(object) = output.as_object_mut() {
+                    object.insert("post_edit_check".to_string(), check);
+                }
+                process_count = 1;
+            }
+        }
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_bytes =
             super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES).map_err(
@@ -318,7 +351,8 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
             output,
             ResourceUsage::default()
                 .set_wall_clock_ms(wall_clock_ms)
-                .set_output_bytes(output_bytes),
+                .set_output_bytes(output_bytes)
+                .set_process_count(process_count),
         ))
     }
 }
@@ -339,7 +373,49 @@ fn omp_capability_metadata(capability_id: &str) -> Option<OmpCapabilityMetadata>
 fn omp_error(error: OmpEngineError) -> FirstPartyCapabilityError {
     let kind = match error.kind() {
         OmpEngineErrorKind::Input => RuntimeDispatchErrorKind::InputEncode,
+        OmpEngineErrorKind::FilesystemDenied | OmpEngineErrorKind::PathResolution => {
+            RuntimeDispatchErrorKind::FilesystemDenied
+        }
+        OmpEngineErrorKind::ResourceLimit => RuntimeDispatchErrorKind::Resource,
         _ => RuntimeDispatchErrorKind::OperationFailed,
     };
-    FirstPartyCapabilityError::dispatch_with_diagnostic(kind, None, error.message())
+    FirstPartyCapabilityError::dispatch_with_diagnostic(
+        kind,
+        None,
+        bounded_diagnostic(
+            error.message(),
+            super::FIRST_PARTY_MAX_OUTPUT_BYTES as usize,
+        ),
+    )
+}
+
+fn bounded_diagnostic(message: &str, max_bytes: usize) -> String {
+    if message.len() <= max_bytes {
+        return message.to_string();
+    }
+    const MARKER: &str = "\n[diagnostic truncated]";
+    let content_limit = max_bytes.saturating_sub(MARKER.len());
+    let mut end = content_limit.min(message.len());
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = message[..end].to_string();
+    if MARKER.len() <= max_bytes {
+        bounded.push_str(MARKER);
+    }
+    bounded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_diagnostic;
+
+    #[test]
+    fn diagnostic_bound_preserves_utf8_and_never_exceeds_limit() {
+        let bounded = bounded_diagnostic("é".repeat(100).as_str(), 31);
+
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert!(bounded.len() <= 31, "{} bytes", bounded.len());
+        assert!(bounded.ends_with("[diagnostic truncated]"));
+    }
 }

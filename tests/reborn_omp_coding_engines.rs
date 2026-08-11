@@ -20,11 +20,8 @@
 //! 7. differential seam — `compare_cases` over the golden error templates
 //!    with the engine's render functions.
 //!
-//! NOTE: the bin is auto-discovered like every other `tests/reborn_*.rs`
-//! target (the root package's 63 explicit `[[test]]` blocks all live under
-//! `tests/integration/`; `cargo metadata` confirms autodiscovery is active
-//! — 102 test targets including the unregistered slice-1 snapshot bin — so
-//! a duplicate `[[test]]` entry would be a duplicate-target error).
+//! This top-level bin is explicitly registered in `Cargo.toml`, matching the
+//! repository coverage-map rule for every new Rust test target.
 
 mod support;
 
@@ -33,7 +30,7 @@ use std::sync::Arc;
 use ironclaw_extension_support::coding::omp::{
     OmpEngineContext, OmpEngineError, OmpEngineErrorKind, OmpSnapshotRegistry, harness,
 };
-use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend};
+use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind};
 use ironclaw_host_api::ids::{InvocationId, RunId, UserId};
 use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
 use ironclaw_host_api::path::{MountAlias, VirtualPath};
@@ -49,13 +46,71 @@ struct Fixture {
     snapshots: Arc<OmpSnapshotRegistry>,
 }
 
+#[test]
+fn omp_registration_assets_byte_match_pinned_fixtures() {
+    use ironclaw_extension_support::coding::omp::omp_assets;
+
+    let cases = [
+        (
+            omp_assets::OMP_READ_SCHEMA,
+            include_str!("fixtures/omp_coding_contract/schemas/read.json"),
+        ),
+        (
+            omp_assets::OMP_WRITE_SCHEMA,
+            include_str!("fixtures/omp_coding_contract/schemas/write.json"),
+        ),
+        (
+            omp_assets::OMP_EDIT_SCHEMA,
+            include_str!("fixtures/omp_coding_contract/schemas/edit.json"),
+        ),
+        (
+            omp_assets::OMP_GLOB_SCHEMA,
+            include_str!("fixtures/omp_coding_contract/schemas/glob.json"),
+        ),
+        (
+            omp_assets::OMP_GREP_SCHEMA,
+            include_str!("fixtures/omp_coding_contract/schemas/grep.json"),
+        ),
+        (
+            omp_assets::OMP_READ_DESCRIPTION,
+            include_str!("fixtures/omp_coding_contract/prompts/read.rendered.md"),
+        ),
+        (
+            omp_assets::OMP_WRITE_DESCRIPTION,
+            include_str!("fixtures/omp_coding_contract/prompts/write.md"),
+        ),
+        (
+            omp_assets::OMP_EDIT_DESCRIPTION,
+            include_str!("fixtures/omp_coding_contract/prompts/hashline.md"),
+        ),
+        (
+            omp_assets::OMP_GLOB_DESCRIPTION,
+            include_str!("fixtures/omp_coding_contract/prompts/glob.md"),
+        ),
+        (
+            omp_assets::OMP_GREP_DESCRIPTION,
+            include_str!("fixtures/omp_coding_contract/prompts/grep.md"),
+        ),
+    ];
+    for (asset, fixture) in cases {
+        assert_eq!(
+            asset, fixture,
+            "registration asset drifted from pinned fixture"
+        );
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
+        Self::with_permissions(MountPermissions::read_write_list_delete())
+    }
+
+    fn with_permissions(permissions: MountPermissions) -> Self {
         let filesystem = Arc::new(InMemoryBackend::new());
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").expect("mount alias"),
             VirtualPath::new("/projects/workspace").expect("virtual path"),
-            MountPermissions::read_write(),
+            permissions,
         )])
         .expect("mount view");
         let scope = ResourceScope::local_default(
@@ -109,6 +164,23 @@ impl Fixture {
             )
             .await
             .expect("seed write");
+    }
+
+    async fn seed_sensitive(&self, path: &str, content: &str) {
+        let ctx = self.ctx();
+        let resolved = ctx
+            .mounts
+            .resolve_with_grant(&ctx.mounts.scoped_path(path).expect("scoped path"))
+            .expect("grant");
+        let entry = Entry::record(
+            RecordKind::new("sensitive_test_record").expect("record kind"),
+            &json!({ "content": content }),
+        )
+        .expect("sensitive record");
+        ctx.filesystem
+            .put(&resolved.0, entry, CasExpectation::Any)
+            .await
+            .expect("seed sensitive entry");
     }
 
     /// Create a real directory (for the directory-error cases). On the
@@ -211,6 +283,19 @@ fn selector_parity_matches_all_golden_cases() {
     );
 }
 
+#[test]
+fn selector_overflow_inputs_fail_without_panicking() {
+    assert!(harness::parse_selector("1234567890123456789012345").is_err());
+    assert!(harness::parse_selector("18446744073709551615+5").is_err());
+
+    let parsed = harness::parse_selector("1-18446744073709551615,5")
+        .expect("u64::MAX endpoint merges without overflow");
+    assert_eq!(
+        parsed["offset_limit"],
+        json!({ "offset": 1, "limit": u64::MAX })
+    );
+}
+
 // ─── 2. Read ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -262,7 +347,7 @@ async fn read_range_selector_with_context() {
     assert!(
         text.starts_with("[foo.txt#"),
         "{}",
-        &text[..text.len().min(60)]
+        text.chars().take(60).collect::<String>()
     );
     assert!(text.contains("29:line 29"), "leading context: {text}");
     assert!(text.contains("30:line 30"));
@@ -316,10 +401,17 @@ async fn read_truncation_notice_at_3000_lines() {
     // Pinned `truncateHead` counts `countNewlines(content) + 1`, so the
     // trailing newline of the 4000th line makes the total 4001 (verified
     // against the pinned streaming-output.ts at 08819b2).
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(140)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     assert!(
         text.contains("[Showing lines 1-3000 of 4001. Use :3001 to continue]"),
-        "truncation notice: {}",
-        &text[text.len().saturating_sub(140)..]
+        "truncation notice: {tail}"
     );
     assert!(!text.contains("3001:line 3001"));
 }
@@ -389,6 +481,35 @@ async fn read_errors_exact() {
     .expect_err("peeled raw tail missing");
     assert_eq!(error_message(&error), "Path 'foo.txt:raw' not found");
     assert_eq!(error.kind(), OmpEngineErrorKind::PathNotFound);
+}
+
+#[tokio::test]
+async fn read_rejects_metadata_sensitive_and_oversized_files() {
+    let fixture = Fixture::new();
+    fixture
+        .seed_sensitive("/workspace/opaque-name.json", "do not expose")
+        .await;
+
+    let error = ironclaw_extension_support::coding::omp::read(
+        &fixture.ctx(),
+        json!({ "path": "opaque-name.json" }),
+    )
+    .await
+    .expect_err("metadata-sensitive entry is denied");
+    assert_eq!(error_message(&error), "workspace file access denied");
+
+    let oversized = "x".repeat(10 * 1024 * 1024 + 1);
+    fixture.seed("/workspace/oversized.txt", &oversized).await;
+    let error = ironclaw_extension_support::coding::omp::read(
+        &fixture.ctx(),
+        json!({ "path": "oversized.txt" }),
+    )
+    .await
+    .expect_err("oversized file rejected before materialization");
+    assert_eq!(
+        error_message(&error),
+        "workspace file exceeds the read limit"
+    );
 }
 
 // ─── 3. Write ───────────────────────────────────────────────────────────────
@@ -471,6 +592,22 @@ async fn write_strips_hashline_prefixes() {
     // the stripped content keeps its trailing newline (verified against the
     // pinned write.ts at 08819b2).
     assert_eq!(fixture.read_back("/workspace/b.txt").await, "alpha\nbeta\n");
+}
+
+#[tokio::test]
+async fn write_rejects_metadata_sensitive_existing_file() {
+    let fixture = Fixture::new();
+    fixture
+        .seed_sensitive("/workspace/opaque-name.json", "do not overwrite")
+        .await;
+
+    let error = ironclaw_extension_support::coding::omp::write(
+        &fixture.ctx(),
+        json!({ "path": "opaque-name.json", "content": "replacement" }),
+    )
+    .await
+    .expect_err("metadata-sensitive entry is denied");
+    assert_eq!(error_message(&error), "workspace file access denied");
 }
 
 // ─── 4. Edit ────────────────────────────────────────────────────────────────
@@ -629,6 +766,75 @@ async fn edit_stale_anchor_recognized_exact_and_never_writes() {
 }
 
 #[tokio::test]
+async fn edit_rejects_changed_content_that_collides_on_the_display_tag() {
+    let fixture = Fixture::new();
+    let mut by_tag = std::collections::HashMap::<String, String>::new();
+    let (before, collided, tag) = (0u64..100_000)
+        .find_map(|n| {
+            let candidate = format!("value-{n}\n");
+            let tag = harness::compute_file_hash(&candidate);
+            by_tag
+                .insert(tag.clone(), candidate.clone())
+                .filter(|prior| prior != &candidate)
+                .map(|prior| (prior, candidate, tag))
+        })
+        .expect("16-bit display tags produce a deterministic collision");
+
+    fixture.seed("/workspace/collision.txt", &before).await;
+    assert_eq!(fixture.read_tag("collision.txt").await, tag);
+    fixture.seed("/workspace/collision.txt", &collided).await;
+
+    let error = ironclaw_extension_support::coding::omp::edit(
+        &fixture.ctx(),
+        json!({ "input": format!("[collision.txt#{tag}]\nPUT 1:\n+replacement\n") }),
+    )
+    .await
+    .expect_err("full snapshot fingerprint detects the changed file");
+    assert_eq!(error.kind(), OmpEngineErrorKind::StaleAnchorHashRecognized);
+    assert_eq!(
+        fixture.read_back("/workspace/collision.txt").await,
+        collided
+    );
+}
+
+#[tokio::test]
+async fn edit_rem_and_move_require_delete_permission_before_writing() {
+    let fixture = Fixture::with_permissions(MountPermissions::read_write());
+    fixture.seed("/workspace/source.txt", "original\n").await;
+    let tag = fixture.read_tag("source.txt").await;
+
+    let rem_error = ironclaw_extension_support::coding::omp::edit(
+        &fixture.ctx(),
+        json!({ "input": format!("[source.txt#{tag}]\nREM\n") }),
+    )
+    .await
+    .expect_err("REM requires delete permission");
+    assert_eq!(error_message(&rem_error), "workspace file access denied");
+    assert_eq!(
+        fixture.read_back("/workspace/source.txt").await,
+        "original\n"
+    );
+
+    let move_error = ironclaw_extension_support::coding::omp::edit(
+        &fixture.ctx(),
+        json!({ "input": format!("[source.txt#{tag}]\nMV destination.txt\n") }),
+    )
+    .await
+    .expect_err("MV checks delete permission before writing the destination");
+    assert_eq!(error_message(&move_error), "workspace file access denied");
+    assert_eq!(
+        fixture.read_back("/workspace/source.txt").await,
+        "original\n"
+    );
+    let destination = ironclaw_extension_support::coding::omp::read(
+        &fixture.ctx(),
+        json!({ "path": "destination.txt" }),
+    )
+    .await;
+    assert!(destination.is_err(), "destination must not be written");
+}
+
+#[tokio::test]
 async fn edit_without_read_not_from_session_exact() {
     let fixture = Fixture::new();
     fixture.seed("/workspace/foo.ts", "line1\nline2\n").await;
@@ -737,6 +943,33 @@ async fn glob_patterns_hidden_and_limit() {
     let text = output(result);
     assert!(!text.contains(".hidden.ts"), "{text}");
     assert!(text.lines().count() <= 2, "limit applied: {text}");
+}
+
+#[tokio::test]
+async fn glob_and_grep_filter_metadata_sensitive_entries() {
+    let fixture = Fixture::new();
+    fixture.seed("/workspace/public.txt", "needle\n").await;
+    fixture
+        .seed_sensitive("/workspace/opaque-name.json", "needle")
+        .await;
+
+    let glob =
+        ironclaw_extension_support::coding::omp::glob(&fixture.ctx(), json!({ "path": "**/*" }))
+            .await
+            .expect("glob");
+    let glob_text = output(glob);
+    assert!(glob_text.contains("public.txt"));
+    assert!(!glob_text.contains("opaque-name.json"));
+
+    let grep = ironclaw_extension_support::coding::omp::grep(
+        &fixture.ctx(),
+        json!({ "pattern": "needle" }),
+    )
+    .await
+    .expect("grep");
+    let grep_text = output(grep);
+    assert!(grep_text.contains("public.txt"));
+    assert!(!grep_text.contains("opaque-name.json"));
 }
 
 #[tokio::test]

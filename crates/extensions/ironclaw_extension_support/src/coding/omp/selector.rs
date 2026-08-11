@@ -11,6 +11,7 @@
 pub(crate) struct LineRange {
     pub(crate) start_line: u64,
     pub(crate) end_line: Option<u64>,
+    pub(crate) open_ended: bool,
 }
 
 /// Parsed representation of a path-embedded selector (mirrors
@@ -143,7 +144,10 @@ fn parse_line_range_chunk(chunk: &str) -> Result<Option<LineRange>, String> {
     if start_digits.is_empty() {
         return Ok(None);
     }
-    let raw_start: u64 = start_digits.parse().map_err(|_| "invalid line number")?;
+    let raw_start: u64 = start_digits.parse().map_err(|error| {
+        tracing::debug!(%error, selector = chunk, "omp selector line number overflow");
+        "invalid line number"
+    })?;
     rest = &rest[start_digits.len()..];
 
     let mut sep = "";
@@ -173,7 +177,10 @@ fn parse_line_range_chunk(chunk: &str) -> Result<Option<LineRange>, String> {
                     return Ok(None);
                 }
             } else {
-                raw_end = rhs_digits.parse().ok();
+                raw_end = Some(rhs_digits.parse().map_err(|error| {
+                    tracing::debug!(%error, selector = chunk, "omp selector endpoint overflow");
+                    "invalid line number"
+                })?);
                 rest = &rest[rhs_digits.len()..];
             }
         }
@@ -195,7 +202,11 @@ fn parse_line_range_chunk(chunk: &str) -> Result<Option<LineRange>, String> {
                 "Invalid range {raw_start}+{count}: count must be >= 1."
             ));
         }
-        raw_end_line = Some(raw_start + count - 1);
+        raw_end_line = Some(
+            raw_start
+                .checked_add(count - 1)
+                .ok_or("invalid line number")?,
+        );
     } else if canonical_sep == "-"
         && let Some(end) = raw_end
     {
@@ -209,6 +220,7 @@ fn parse_line_range_chunk(chunk: &str) -> Result<Option<LineRange>, String> {
     Ok(Some(LineRange {
         start_line: raw_start,
         end_line: raw_end_line,
+        open_ended: canonical_sep == "-" && raw_end.is_none(),
     }))
 }
 
@@ -235,12 +247,15 @@ pub(crate) fn parse_line_ranges(sel: &str) -> Result<Option<Vec<LineRange>>, Str
     for current in parsed.into_iter().skip(1) {
         let last = merged.last_mut().expect("merged is non-empty");
         // Open-ended means "to EOF" — any later range is absorbed.
-        if last.end_line.is_none() {
+        if last.open_ended {
             continue;
         }
-        let last_end = last.end_line.expect("checked above");
-        if current.start_line <= last_end + 1 {
-            if current.end_line.is_none() || current.end_line > Some(last_end) {
+        let last_end = last.end_line.unwrap_or(last.start_line);
+        if current.start_line <= last_end.saturating_add(1) {
+            if current.open_ended {
+                last.open_ended = true;
+                last.end_line = None;
+            } else if current.end_line.unwrap_or(current.start_line) > last_end {
                 last.end_line = current.end_line;
             }
             continue;
@@ -256,7 +271,10 @@ pub(crate) fn sel_to_offset_limit(parsed: &ParsedSelector) -> (Option<u64>, Opti
     if let ParsedSelector::Lines { ranges, .. } = parsed
         && let Some(first) = ranges.first()
     {
-        let limit = first.end_line.map(|end| end - first.start_line + 1);
+        let limit = first.end_line.and_then(|end| {
+            end.checked_sub(first.start_line)
+                .and_then(|span| span.checked_add(1))
+        });
         return (Some(first.start_line), limit);
     }
     (None, None)
@@ -404,7 +422,8 @@ mod tests {
             merged,
             vec![LineRange {
                 start_line: 1,
-                end_line: Some(20)
+                end_line: Some(20),
+                open_ended: false,
             }]
         );
         let merged = parse_line_ranges("5-10,11-12")
@@ -414,7 +433,8 @@ mod tests {
             merged,
             vec![LineRange {
                 start_line: 5,
-                end_line: Some(12)
+                end_line: Some(12),
+                open_ended: false,
             }]
         );
         // 5-20,10- -> open-ended absorbs everything after.
@@ -425,7 +445,8 @@ mod tests {
             merged,
             vec![LineRange {
                 start_line: 5,
-                end_line: None
+                end_line: None,
+                open_ended: true,
             }]
         );
     }

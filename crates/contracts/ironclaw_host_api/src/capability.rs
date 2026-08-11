@@ -14,7 +14,7 @@ use crate::{
     action::{NetworkPolicy, NetworkTargetPattern},
     decision::RuntimeCredentialAuthRequirement,
     http::RuntimeCredentialTarget,
-    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, SecretHandle, VendorId},
     invocation::InvocationOrigin,
     messaging::StandardMessagingOp,
     mount::MountView,
@@ -270,7 +270,7 @@ pub struct CapabilityDescriptor {
     /// resolving for back-compat. Additive: `#[serde(default)]` so existing
     /// descriptors/records parse to `None` and serialize unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_tool_name: Option<String>,
+    pub provider_tool_name: Option<ProviderToolName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
