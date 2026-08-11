@@ -176,6 +176,10 @@ pub use scoped_fs::{
 };
 
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
+pub use filesystem_ledger::{
+    IdempotencyLedgerMigrationError, IdempotencyLedgerMigrationReport,
+    migrate_idempotency_ledger_root,
+};
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,

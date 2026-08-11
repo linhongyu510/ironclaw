@@ -49,7 +49,7 @@ mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
 mod readiness;
-mod release_workspace_migration;
+mod release_migration;
 mod root;
 mod runtime;
 mod runtime_input;

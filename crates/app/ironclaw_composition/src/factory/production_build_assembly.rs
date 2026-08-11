@@ -26,6 +26,7 @@ pub(super) async fn build_production_shaped(
         memory_binding_policy,
         memory_provider_connection,
         legacy_workspace_snapshot,
+        skip_rc1_channel_state_migration,
         ..
     } = input;
     let owner_id = deployment.owner_id.clone();
@@ -95,7 +96,9 @@ pub(super) async fn build_production_shaped(
         workspace_filesystems: None,
         standalone_storage_root: None,
         default_system_prompt_path: None,
+        workspace_root: None,
         legacy_workspace_snapshot,
+        skip_rc1_channel_state_migration,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
@@ -276,31 +279,6 @@ async fn build_local_storage_production_shaped(
         UserId::new(context.owner_id.clone()).map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    if let Some(source) = context.legacy_workspace_snapshot.as_ref() {
-        if !context.workspace_scoped_per_caller {
-            return Err(RebornBuildError::InvalidConfig {
-                reason: "legacy workspace migration requires per-caller workspace scoping"
-                    .to_string(),
-            });
-        }
-        let tenant_id = context
-            .local_runtime_identity
-            .as_ref()
-            .map(|identity| identity.tenant_id.clone())
-            .ok_or_else(|| RebornBuildError::InvalidConfig {
-                reason: "legacy workspace migration requires an explicit runtime tenant"
-                    .to_string(),
-            })?;
-        crate::release_workspace_migration::migrate_legacy_workspace_snapshot(
-            crate::release_workspace_migration::LegacyWorkspaceMigrationInput {
-                source: source.clone(),
-                workspace_root: workspace_root.clone(),
-                tenant_id,
-                user_id: owner_user_id.clone(),
-            },
-        )
-        .await?;
-    }
     let default_system_prompt_path = bootstrap_standalone_host(root, &owner_user_id).await?;
 
     let filesystem_bundle =
@@ -333,6 +311,7 @@ async fn build_local_storage_production_shaped(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
     )?);
+    context.workspace_root = Some(workspace_root.to_path_buf());
     context.local_process_port = host_access.process_port;
     context.standalone_storage_root = Some(root.clone());
     context.default_system_prompt_path = Some(default_system_prompt_path);
@@ -409,7 +388,9 @@ pub(super) struct RebornProductionBuildContext {
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
     pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,
+    pub(super) workspace_root: Option<PathBuf>,
     pub(super) legacy_workspace_snapshot: Option<PathBuf>,
+    pub(super) skip_rc1_channel_state_migration: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     #[cfg(any(test, feature = "test-support"))]
