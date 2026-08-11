@@ -134,7 +134,16 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// production wiring and inline regression coverage to the current main tree.
 /// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
 /// manifest ceiling and observed value move with this record.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
+/// ✎ Re-recorded 41_582 → 41_811 on 2026-08-11 for #7038 (suggestion cards,
+/// feat/suggestion-cards / PR #7498): `StoreBackedRenderSuggestionsHook` (the
+/// `render_suggestions` kernel-tool-to-store bridge, same shape as
+/// `TriggerCreatorPairingHook`) plus its construction/registration call sites
+/// stay in composition as genuine assembly; the behavior that shared the file
+/// (`SuggestionGenerationFinalizerSink`, the spec §6 turn finalizer) moved to
+/// `ironclaw_assistant`. Measured on this branch with `bash
+/// scripts/ci/check-composition-budget.sh --print`; `[gate].loc_ceiling`
+/// moves with this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_811;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
