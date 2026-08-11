@@ -149,6 +149,11 @@ mod trace_credits;
 mod types;
 mod views;
 
+// Crate-internal seam for the runtime communication context (#7247): the
+// model-facing prompt slice reuses the extensions card's per-caller auth
+// verdict instead of re-deriving "connected for this caller" a second way.
+pub(crate) use extensions::{CallerExtensionAuth, caller_extension_auth};
+
 use crate::conversation_binding::SessionLaneRejectingBindingResolver;
 use crate::inbound_turn::{DefaultInboundTurnService, SessionSkillActivationPorts};
 use crate::workflow::DefaultProductSurface;

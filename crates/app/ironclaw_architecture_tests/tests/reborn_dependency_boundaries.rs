@@ -641,17 +641,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // message. Contract vocabulary only — vendor reaction rendering (Slack
         // reactions.add/remove, Telegram setMessageReaction) lives in the channel
         // packages and the reaction lifecycle in the delivery observer. Count
-        // read from this test's failure message.
-        // 7_885 -> 7_999 (2026-08-10, unified-channel-model merge): +114 lines
+        // read from this test's failure message. 7_885 -> 7_892 after merging
+        // #7076's Basic credential target declaration and validator vocabulary;
+        // composition and injection remain in ironclaw_host_runtime.
+        // 7_892 -> 8_006 (2026-08-10, unified-channel-model merge): +114 lines
         // for the `IngressVerificationRecipe::AuthenticatedSession` trust class
         // (recipe.rs) and the `route_suffix` -> Option change with its
         // trust-class<->mount validation, two paired errors, and their inline
-        // `#[cfg(test)]` coverage (channel.rs) — the same delta the branch
-        // carried before the merge (7_758 -> 7_872), rebased on top of the two
-        // main-side raises above. Ingress-trust vocabulary + validation on the
-        // descriptor's own shape; the shared inbound pipeline that consumes it
-        // lives in ironclaw_extension_host / product, not here.
-        ("ironclaw_extension_contracts", 7_999),
+        // `#[cfg(test)]` coverage (channel.rs). Ingress-trust vocabulary +
+        // validation on the descriptor's own shape; the shared inbound
+        // pipeline that consumes it lives in ironclaw_extension_host /
+        // product, not here.
+        ("ironclaw_extension_contracts", 8_006),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -680,7 +681,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        ("ironclaw_host_api", 18_974),
+        // 18_974 -> 18_994 (#7076 takeover): the
+        // `RuntimeCredentialTarget::Basic` declaration, username validation,
+        // and wire-contract vocabulary; RFC 7617 composition remains in
+        // ironclaw_host_runtime.
+        ("ironclaw_host_api", 18_994),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -721,7 +726,22 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Vocabulary/comment change only — the actor-first ladder itself is
         // preserved (WebChat=actor, trigger=creator, system=fallback). Count
         // read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_112),
+        // 13_112 -> 13_172 (2026-08-10, #7247 truthful connection context):
+        // `PendingExtensionAuthState` (the per-caller "installed but not
+        // authenticated for this user" DTO) + its bounded, sanitized render
+        // arm beside the existing connected-channels line. Declaration and
+        // rendering vocabulary only — the per-caller verdict computation
+        // lives in ironclaw_assistant (`caller_extension_auth`), the ports in
+        // composition. Count read from this test's own failure message.
+        // 13_172 -> 13_306 (2026-08-10, #7294 recalled-memory framing,
+        // batch-merged with #7247): the instruction bundle's recall-framing
+        // message (`memory_recall_framing.md` include + its render wiring)
+        // lands in the same crate as #7247's raise; each fix measured the
+        // ceiling alone against main, so the batch branch re-measures the
+        // union — the #7147 parallel-baseline lesson applied. Framing/render
+        // vocabulary only — scope filtering stays in the memory providers
+        // and host runtime. Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_306),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
