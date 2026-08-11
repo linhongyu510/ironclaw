@@ -761,7 +761,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // instead of a loose duplicated scalar. Contract field/docs only;
         // rendering behavior is unchanged. Count read from this test's own
         // failure message.
-        ("ironclaw_loop_contracts", 13_307),
+        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
+        // truncation-watermark DTO carried across the existing context and
+        // prompt contracts. Window selection and task-pinning behavior remain
+        // in ironclaw_threads and ironclaw_loop_host.
+        // The merged tree carries both disjoint declaration changes; 13_317 is
+        // their provisional union, re-measured by this gate after resolution.
+        ("ironclaw_loop_contracts", 13_317),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

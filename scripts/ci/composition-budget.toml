@@ -172,8 +172,18 @@ observed_date = "2026-08-07"
 # generic notification-setup service, and the split ingress/reply/delivery
 # bindings. The behavior lives in ironclaw_auth/assistant/extension_host;
 # composition only constructs and threads their implementations. Measured on
-# this tree with this gate, set to current rather than padding the tolerance.
-loc_ceiling = 41751
+# the pre-main-sync tree with this gate.
+# Re-seeded 41582 -> 41810 on 2026-08-11 for #7471's merged tree. The dedicated
+# process-journal PostgreSQL pool adds service-graph assembly needed to keep
+# lease heartbeats independent of data-plane saturation; concurrent mainline
+# composition growth consumed the prior tolerance before this branch merged.
+# Measured by the Fast deterministic checks gate on the GitHub merge commit and
+# recorded explicitly rather than weakening or bypassing the absolute bound.
+# Union re-measured at 41942 after merging #7471 into the channel-capability
+# branch: the two assembly deltas are disjoint (journal pool/filesystem versus
+# channel registrations/capability bindings). Set to the merged-tree count;
+# do not spend the working tolerance to hide either reviewed change.
+loc_ceiling = 41942
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -184,7 +194,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41751
+loc_observed = 41942
 loc_observed_date = "2026-08-11"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
