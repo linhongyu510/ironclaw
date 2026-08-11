@@ -523,6 +523,8 @@ fn hosted_postgres_adoption_requires_verified_store_before_manifest_commit() {
 
     assert!(error.to_string().contains("were not verified"), "{error:#}");
     assert!(!temp.path().join("layout.toml").exists());
+    assert!(legacy.join("operator.md").is_file());
+    assert!(!temp.path().join("runtime/layout-adoption").exists());
 
     let mut verifier_invoked = false;
     adopt_layout_with_store_verification(
@@ -531,17 +533,10 @@ fn hosted_postgres_adoption_requires_verified_store_before_manifest_commit() {
         confirmed_options(),
         || {
             verifier_invoked = true;
-            let journal = read_journal(
-                &temp
-                    .path()
-                    .join("runtime/layout-adoption/journal.toml"),
-            )?;
-            assert_eq!(journal.phase, AdoptionPhase::MigrationPending);
+            assert!(!temp.path().join("runtime/layout-adoption").exists());
             assert!(
-                temp.path()
-                    .join("runtime/layout-adoption/snapshot/hosted-single-tenant/system/prompts/operator.md")
-                    .is_file(),
-                "external-store migrations begin only after the local snapshot is durable"
+                legacy.join("operator.md").is_file(),
+                "external-store verification must precede filesystem mutation"
             );
             Ok(CanonicalStoreVerification::ExternalPostgresVerified)
         },
@@ -550,6 +545,14 @@ fn hosted_postgres_adoption_requires_verified_store_before_manifest_commit() {
 
     assert!(verifier_invoked);
     assert!(temp.path().join("system/prompts/operator.md").is_file());
+    assert!(
+        temp.path()
+            .join(
+                "runtime/layout-adoption/snapshot/hosted-single-tenant/system/prompts/operator.md"
+            )
+            .is_file(),
+        "successful adoption retains its durable legacy snapshot"
+    );
     assert!(!temp.path().join("state/reborn-local-dev.db").exists());
 }
 

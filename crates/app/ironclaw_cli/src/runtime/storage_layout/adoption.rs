@@ -84,6 +84,7 @@ where
     let journal_path = adoption_root.join(JOURNAL_FILE);
     validate_adoption_ancestors(home_path, &paths, &adoption_root)?;
 
+    let mut preverified_store = None;
     let (mut journal, _lock) = if journal_path.exists() {
         validate_journal_owned_runtime(&paths, &adoption_root)?;
         let lock = acquire_existing_adoption_lock(&adoption_root)?;
@@ -109,6 +110,7 @@ where
         )?;
         ensure_initial_adoption_namespaces_empty(&paths)?;
         let workspace = prepare_workspace_import(workspace_import, &paths)?;
+        preverified_store = preverify_external_store(&paths, requirement, verify_store)?;
         create_adoption_root(home_path, &paths, &adoption_root)?;
         let lock = acquire_adoption_lock(&adoption_root)?;
         if journal_path.exists() {
@@ -131,6 +133,9 @@ where
             "adoption journal security requirement does not match this restart; inspect the preserved snapshot and resume with the original compatible profile"
         );
     }
+    if preverified_store.is_none() {
+        preverified_store = preverify_external_store(&paths, requirement, verify_store)?;
+    }
 
     resume_adoption(
         home_path,
@@ -138,9 +143,26 @@ where
         &adoption_root,
         &journal_path,
         &mut journal,
+        &mut preverified_store,
         verify_store,
     )?;
     Ok(())
+}
+
+fn preverify_external_store<VerifyStore>(
+    paths: &RebornStoragePaths,
+    requirement: LayoutRequirement,
+    verify_store: &mut VerifyStore,
+) -> anyhow::Result<Option<CanonicalStoreVerification>>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
+    if requirement.durable_state != DurableStateKind::ExternalPostgres {
+        return Ok(None);
+    }
+    let verification = verify_store()?;
+    verify_canonical_store(paths, requirement.durable_state, verification)?;
+    Ok(Some(verification))
 }
 
 pub(crate) fn validate_adopt_options(options: &AdoptOptions) -> anyhow::Result<()> {
@@ -165,6 +187,7 @@ pub(super) fn resume_adoption<VerifyStore>(
     adoption_root: &Path,
     journal_path: &Path,
     journal: &mut AdoptionJournal,
+    preverified_store: &mut Option<CanonicalStoreVerification>,
     verify_store: &mut VerifyStore,
 ) -> anyhow::Result<()>
 where
@@ -227,11 +250,11 @@ where
 
     let store_verified_on_this_run = if journal.phase == AdoptionPhase::MigrationPending {
         verify_post_migration_canonical_shape(paths, &candidate, &snapshot, false)?;
-        let store_verification = verify_store()?;
-        verify_canonical_store(
+        verify_store_once(
             paths,
             candidate.kind.requirement().durable_state,
-            store_verification,
+            preverified_store,
+            verify_store,
         )?;
         verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
         verify_canonical_workspace(paths, workspace.as_ref())?;
@@ -247,11 +270,11 @@ where
     // snapshot; validate the post-migration shape and reopen the real store.
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
     if !store_verified_on_this_run {
-        let store_verification = verify_store()?;
-        verify_canonical_store(
+        verify_store_once(
             paths,
             candidate.kind.requirement().durable_state,
-            store_verification,
+            preverified_store,
+            verify_store,
         )?;
     }
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
@@ -262,6 +285,21 @@ where
         .with_memory_provider_app_id(memory_provider_app_id);
     write_manifest_last(home, &manifest)?;
     Ok(())
+}
+
+fn verify_store_once<VerifyStore>(
+    paths: &RebornStoragePaths,
+    durable_state: DurableStateKind,
+    preverified_store: &mut Option<CanonicalStoreVerification>,
+    verify_store: &mut VerifyStore,
+) -> anyhow::Result<()>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
+    if preverified_store.take().is_some() {
+        return Ok(());
+    }
+    verify_canonical_store(paths, durable_state, verify_store()?)
 }
 
 pub(super) fn reconcile_staged_install(
