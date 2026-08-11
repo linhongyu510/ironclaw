@@ -888,7 +888,7 @@ where
 
         let serialize_started_at = latency_started_at();
 
-        let serialized_output = serde_json::to_vec(&result.output).map_err(|error| {
+        let serialized_output = serde_json::to_vec(&result.output).map_err(|_| {
             tracing::debug!(
                 reservation_id = %reservation_id,
                 "first-party runtime adapter output serialization failed"

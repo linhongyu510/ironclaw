@@ -282,14 +282,6 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// Result-writer half; see `io`'s doc -- always the SAME underlying
     /// object as `io`, coerced to the other trait.
     result_writer_io: Mutex<Arc<dyn LoopCapabilityResultWriter>>,
-    /// Set by `install_durable_capability_io`: the session thread service
-    /// backing `io`/`result_writer_io`. `None` until then (or forever, for
-    /// harnesses that never opt in). Also used to wrap the synthetic
-    /// `result_read` capability (`apply_synthetic_capability_wrappers`) so a
-    /// scripted `result_read` call can page through the durable record `io`
-    /// just persisted.
-    durable_capability_io_thread_service:
-        Mutex<Option<Arc<dyn ironclaw_threads::SessionThreadService>>>,
     /// Set from `HostRuntimeHarnessOptions::with_durable_capability_io()` at
     /// construction; read by the capability-mode assembly (`into_parts`) to
     /// decide whether to call `install_durable_capability_io` once the real
@@ -1023,7 +1015,6 @@ impl HostRuntimeCapabilityHarness {
             pending_approval_scopes,
             io: Mutex::new(io),
             result_writer_io: Mutex::new(result_writer_io),
-            durable_capability_io_thread_service: Mutex::new(None),
             durable_capability_io_requested: durable_capability_io,
             root,
             workspace_root,
@@ -1149,13 +1140,12 @@ impl HostRuntimeCapabilityHarness {
     ) {
         let (io, result_writer_io) =
             ironclaw_composition::test_support::staged_capability_io_with_observer_for_test(
-                thread_service.clone(),
+                thread_service,
                 self.user_id.clone(),
                 trajectory_observer,
             );
         *self.io.lock().unwrap() = io;
         *self.result_writer_io.lock().unwrap() = result_writer_io;
-        *self.durable_capability_io_thread_service.lock().unwrap() = Some(thread_service);
     }
 
     /// #5886: re-wire `builtin.trigger_list` dispatch to a REAL
@@ -2027,26 +2017,6 @@ impl HostRuntimeCapabilityHarness {
             milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
             skill_activation_source: self.skill_activation_source.clone(),
             project_service,
-            // result_read (durable tool-result projection seam, issue
-            // #5838): production always wires the run's session thread
-            // service into the synthetic `result_read` capability, so
-            // this is a required (non-`Option`) field. Harnesses that
-            // opted into `.with_durable_capability_io()` populate
-            // `durable_capability_io_thread_service` with the REAL group
-            // thread service; every other harness gets a fresh in-memory
-            // no-op service, mirroring the `project_service`/
-            // `tool_permission_overrides` "no opinion -> default" pattern
-            // above -- `result_read` is simply never granted for those
-            // harnesses (not in `capability_ids`), so the default is
-            // never actually read.
-            thread_service: self
-                .durable_capability_io_thread_service
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| {
-                    Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
-                }),
             trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)

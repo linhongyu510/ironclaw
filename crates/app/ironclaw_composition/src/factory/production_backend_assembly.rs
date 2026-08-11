@@ -338,7 +338,7 @@ pub(super) async fn build_backend_production(
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
-    omp_coding_tools_for_test: bool,
+    _omp_coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
