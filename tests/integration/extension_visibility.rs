@@ -98,8 +98,7 @@ async fn caller_owned_extension_capabilities_are_hidden_from_other_users() {
     let runtime = capability_harness
         .reborn_services_for_test()
         .expect("visibility-probe harness has a composed runtime");
-    let generic_host = runtime
-        .generic_extension_host_for_test()
+    let generic_host = ironclaw_composition::test_support::generic_extension_host_for_test(runtime)
         .expect("visibility-probe fixture is mirrored into the generic host");
     let active_extension = generic_host
         .snapshot()

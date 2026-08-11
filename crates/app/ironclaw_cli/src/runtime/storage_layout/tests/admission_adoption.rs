@@ -207,10 +207,9 @@ fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
     .expect("restart runtime input")
     .inner;
     assert_eq!(
-        runtime_input
-            .services
-            .expect("restart services input")
-            .memory_provider_app_id_for_test(),
+        ironclaw_composition::test_support::memory_provider_app_id_for_test(
+            &runtime_input.services.expect("restart services input"),
+        ),
         Some(legacy_memory_provider_app_id.as_str()),
         "the production runtime caller must carry the persisted namespace into composition"
     );

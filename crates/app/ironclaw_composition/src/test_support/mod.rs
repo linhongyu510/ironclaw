@@ -91,6 +91,24 @@ pub fn with_local_runtime_workspace_root_for_test(
     bindings
 }
 
+/// Read the memory-provider namespace carried by a production-built input.
+///
+/// This stays a test-support free function so production input structs do not
+/// grow inspection methods solely for integration assertions.
+pub fn memory_provider_app_id_for_test(bindings: &crate::RebornHostBindings) -> Option<&str> {
+    bindings.memory_provider_connection.app_id.as_deref()
+}
+
+/// Return the generic extension host assembled into a production-built runtime.
+///
+/// This stays a test-support free function so the runtime service object does
+/// not grow an integration-only inspection method.
+pub fn generic_extension_host_for_test(
+    runtime: &crate::RebornRuntime,
+) -> Option<std::sync::Arc<ironclaw_extension_host::ExtensionHost>> {
+    runtime.extension_management.generic_host()
+}
+
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
 ///
