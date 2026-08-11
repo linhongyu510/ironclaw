@@ -52,6 +52,7 @@ ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.
 # reads the identity directory and provisions per-user secrets through it.
 ironclaw_identity = { path = "../../domains/ironclaw_identity", version = "0.1.0" }
 ironclaw_trace_commons = { path = "../../domains/ironclaw_trace_commons", version = "0.1.0" }
+ironclaw_suggestions = { path = "../../domains/ironclaw_suggestions", version = "0.1.0" }
 ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }

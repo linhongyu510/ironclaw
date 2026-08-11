@@ -98,7 +98,8 @@ use crate::{
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
     ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
-    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductSurfaceFailure, RebornSuggestionsGenerateRequest, RebornSuggestionsResponse,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
@@ -108,7 +109,7 @@ use crate::{
         bounded_source_binding_ref,
     },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
-    product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
+    product_command_descriptors, required_audience, thread_metadata_is_hidden,
 };
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_product_contracts::inbound::{ProductRejectionKind, parse_product_slash_command};
@@ -554,6 +555,14 @@ pub const AUTOMATIONS_VIEW: ProductView<
     ProductListAutomationsRequest,
     RebornListAutomationsResponse,
 > = ProductView::unpaginated("automations");
+pub const SUGGESTIONS_VIEW: ProductView<serde_json::Value, RebornSuggestionsResponse> =
+    ProductView::unpaginated(crate::suggestions_product_service::SUGGESTIONS_VIEW_ID);
+pub const SUGGESTIONS_GENERATE_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornSuggestionsGenerateRequest,
+    RebornSuggestionsResponse,
+> = ProductSurfaceCommandDescriptor::new(
+    crate::suggestions_product_service::SUGGESTIONS_GENERATE_COMMAND_ID,
+);
 pub const PROJECT_FS_LIST_VIEW: ProductView<
     RebornProjectFsListRequest,
     RebornProjectFsListResponse,
@@ -1206,6 +1215,44 @@ impl AutomationProductService for UnsupportedAutomationProductService {
     ) -> Result<Option<TriggerRunThreadScope>, ProductSurfaceError> {
         // Trigger-thread access is unsupported when no automation service is wired.
         Ok(None)
+    }
+}
+
+/// Suggestion-card commands (#7038): `suggestions.get` / `suggestions.generate`.
+/// The real implementation (`RebornSuggestionsProductService`, which owns the
+/// CAS claim / hidden-thread / synthetic-submit flow) lives in
+/// `suggestions_product_service.rs`; only the trait interface and its
+/// fail-closed default live here, matching `AutomationProductService` above.
+#[async_trait]
+pub trait SuggestionsProductService: Send + Sync {
+    async fn get_suggestions(
+        &self,
+        caller: ProductAgentBoundCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError>;
+
+    async fn generate_suggestions(
+        &self,
+        caller: ProductAgentBoundCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedSuggestionsProductService;
+
+#[async_trait]
+impl SuggestionsProductService for UnsupportedSuggestionsProductService {
+    async fn get_suggestions(
+        &self,
+        _caller: ProductAgentBoundCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn generate_suggestions(
+        &self,
+        _caller: ProductAgentBoundCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
     }
 }
 
@@ -2233,6 +2280,7 @@ pub struct RebornServices<
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_service: Arc<dyn LifecycleProductService>,
     automation_service: Arc<dyn AutomationProductService>,
+    suggestions_service: Arc<dyn SuggestionsProductService>,
     skills_service: Arc<dyn SkillsProductService>,
     channel_connection_service: Arc<dyn ChannelConnectionService>,
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
@@ -2315,6 +2363,7 @@ where
                 "reborn_lifecycle_service_unwired",
             )),
             automation_service: Arc::new(UnsupportedAutomationProductService::new_static()),
+            suggestions_service: Arc::new(UnsupportedSuggestionsProductService),
             skills_service: Arc::new(UnsupportedSkillsProductService::new_static()),
             channel_connection_service: Arc::new(StaticChannelConnectionService),
             channel_config_service: None,
@@ -2479,6 +2528,14 @@ where
         automation_service: Arc<dyn AutomationProductService>,
     ) -> Self {
         self.automation_service = automation_service;
+        self
+    }
+
+    pub fn with_suggestions_product_service(
+        mut self,
+        suggestions_service: Arc<dyn SuggestionsProductService>,
+    ) -> Self {
+        self.suggestions_service = suggestions_service;
         self
     }
 
@@ -4149,6 +4206,10 @@ where
                 let response = self.build_automations_view(caller, request).await?;
                 views::view_page(response)
             }
+            id if id == SUGGESTIONS_VIEW.id => {
+                let response = self.get_suggestions(caller).await?;
+                views::view_page(response)
+            }
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_delivery_targets_view(caller).await?;
@@ -4925,6 +4986,34 @@ where
             .await
     }
 
+    async fn get_suggestions(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.suggestions_service.get_suggestions(caller).await
+    }
+
+    async fn generate_suggestions(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.suggestions_service.generate_suggestions(caller).await
+    }
+
     async fn resume_automation(
         &self,
         caller: ProductSurfaceCaller,
@@ -5406,7 +5495,7 @@ where
                 .await
                 .map_err(map_thread_error)?;
             for thread in response.threads {
-                if is_automation_trigger_thread(&thread) {
+                if is_hidden_source_thread(&thread) {
                     continue;
                 }
                 visible_threads.push(thread);
@@ -5759,17 +5848,21 @@ fn automation_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::service_unavailable(true)
 }
 
-fn is_automation_trigger_thread(thread: &SessionThreadRecord) -> bool {
+/// Thread-listing hidden-source predicate (spec §7-item-5): matches any
+/// registered hidden-thread source tag (automation trigger runs,
+/// suggestion-generation runs, ...), not automation triggers specifically —
+/// see `thread_metadata_is_hidden`'s doc comment for the registered set.
+fn is_hidden_source_thread(thread: &SessionThreadRecord) -> bool {
     let Some(metadata) = thread.metadata_json.as_deref() else {
         return false;
     };
-    match thread_metadata_is_automation_trigger(metadata) {
-        Ok(is_automation_trigger) => is_automation_trigger,
+    match thread_metadata_is_hidden(metadata) {
+        Ok(is_hidden) => is_hidden,
         Err(error) => {
             tracing::debug!(
                 error = %error,
                 thread_id = %thread.thread_id,
-                "failed to parse thread metadata_json for automation filter"
+                "failed to parse thread metadata_json for hidden-thread filter"
             );
             false
         }

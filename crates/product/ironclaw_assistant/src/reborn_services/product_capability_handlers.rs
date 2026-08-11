@@ -35,6 +35,7 @@ pub(super) enum ProductCommandHandler {
     AutomationResume,
     AutomationRename,
     AutomationDelete,
+    SuggestionsGenerate,
     NotificationChannelsSet,
     WebPushSubscribe,
     WebPushUnsubscribe,
@@ -75,6 +76,9 @@ impl ProductCommandHandler {
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
+            crate::suggestions_product_service::SUGGESTIONS_GENERATE_COMMAND_ID => {
+                Some(Self::SuggestionsGenerate)
+            }
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
             WEB_PUSH_SUBSCRIBE_COMMAND_ID => Some(Self::WebPushSubscribe),
             WEB_PUSH_UNSUBSCRIBE_COMMAND_ID => Some(Self::WebPushUnsubscribe),
@@ -311,6 +315,10 @@ impl ProductCommandHandler {
                         .delete_automation(caller, request.automation_id)
                         .await?,
                 )
+            }
+            Self::SuggestionsGenerate => {
+                let _request: RebornSuggestionsGenerateRequest = product_command_input(input)?;
+                command_output(services.generate_suggestions(caller).await?)
             }
             Self::NotificationChannelsSet => {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;

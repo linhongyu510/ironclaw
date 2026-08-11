@@ -66,6 +66,7 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
+mod suggestions_product_service;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
@@ -111,8 +112,9 @@ pub use auth_interaction::{
 // (`.claude/rules/type-placement.md`).
 pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
-    thread_metadata_is_automation_trigger,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, SUGGESTION_GENERATION_THREAD_SOURCE_TAG,
+    automation_trigger_thread_metadata_json, suggestion_generation_thread_metadata_json,
+    thread_metadata_is_automation_trigger, thread_metadata_is_hidden,
 };
 pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use channel_workflow::{
@@ -163,6 +165,12 @@ pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, NoProjectFilesystem, rejecting_product_surface_error,
 };
+// Suggestion-card record/store types (`SuggestionCard`, `SuggestionsStore`,
+// ...) are NOT re-exported here: `ironclaw_suggestions` owns them, and
+// PROPOSAL §6.9.1 / `product_declares_no_foreign_re_export_facade` forbid a
+// second import path through this crate. Consumers import directly from
+// `ironclaw_suggestions`. The product command layer this crate DOES own
+// lives in `suggestions_product_service` below.
 pub use scoped_fs::{
     ProjectScopedAttachmentReader,
     ProjectScopedFilesystemReader,
@@ -173,6 +181,10 @@ pub use scoped_fs::{
     map_filesystem_error,
     map_kind,
     mime_for_path,
+};
+pub use suggestions_product_service::{
+    RebornSuggestionsGenerateRequest, RebornSuggestionsProductService, RebornSuggestionsResponse,
+    SUGGESTIONS_GENERATE_COMMAND_ID, SUGGESTIONS_VIEW_ID,
 };
 
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
@@ -363,19 +375,20 @@ pub use reborn_services::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SettingsToolPermissionState, SkillsProductService,
-    StaticOperatorStatusService, THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA,
+    SUBMIT_TURN_COMMAND, SUGGESTIONS_GENERATE_COMMAND, SUGGESTIONS_VIEW,
+    SettingsToolPermissionState, SkillsProductService, StaticOperatorStatusService,
+    SuggestionsProductService, THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA,
     THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     TRACE_HOLD_AUTHORIZE_COMMAND, TriggerRunThreadScope, UnavailableRebornViewProvider,
     UnsupportedAutomationProductService, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductService, UnsupportedWebPushProductService,
-    WebPushProductService, list_outbound_delivery_targets_for_model,
-    notification_channels_set_input_schema, notification_channels_set_operator_tool_info,
-    outbound_delivery_synthetic_provider, outbound_delivery_targets_list_input_schema,
-    parse_notification_channels_set_input, parse_outbound_delivery_targets_list_input,
-    set_notification_channels_for_model,
+    UnsupportedOutboundPreferencesProductService, UnsupportedSuggestionsProductService,
+    UnsupportedWebPushProductService, WebPushProductService,
+    list_outbound_delivery_targets_for_model, notification_channels_set_input_schema,
+    notification_channels_set_operator_tool_info, outbound_delivery_synthetic_provider,
+    outbound_delivery_targets_list_input_schema, parse_notification_channels_set_input,
+    parse_outbound_delivery_targets_list_input, set_notification_channels_for_model,
 };
 
 pub use product_surface_inbound::{
