@@ -2,19 +2,12 @@
 
 use super::*;
 use super::{filesystem::*, model::*};
+#[cfg(any(unix, windows))]
+use fs2::FileExt as _;
 
 pub(super) struct AdoptionLock {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     _file: File,
-    #[cfg(not(unix))]
-    path: PathBuf,
-}
-
-#[cfg(not(unix))]
-impl Drop for AdoptionLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
 }
 
 pub(super) fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
@@ -26,41 +19,42 @@ pub(super) fn acquire_named_lock(
     file_name: &str,
     operation: &str,
 ) -> anyhow::Result<AdoptionLock> {
-    let path = directory.join(file_name);
-    require_ordinary_directory(directory)?;
-    #[cfg(unix)]
-    let mut file = open_adoption_lock_file(&path)?;
-    #[cfg(not(unix))]
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .with_context(|| {
-            format!(
-                "another {operation} may already be running; advisory lock {} exists",
-                path.display()
-            )
-        })?;
-    #[cfg(unix)]
-    file.try_lock_exclusive().with_context(|| {
+    #[cfg(not(any(unix, windows)))]
+    {
+        bail!(
+            "descriptor-backed advisory locks are unsupported on this platform; refusing {operation} at {}",
+            directory.display()
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    {
+        let path = directory.join(file_name);
+        require_ordinary_directory(directory)?;
+        #[cfg(unix)]
+        let mut file = open_adoption_lock_file(&path)?;
+        #[cfg(windows)]
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .with_context(|| format!("open advisory lock {} for {operation}", path.display()))?;
+        file.try_lock_exclusive().with_context(|| {
         format!(
             "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
             path.display()
         )
     })?;
-    file.set_len(0)
-        .with_context(|| format!("clear advisory lock {}", path.display()))?;
-    writeln!(file, "pid={}", std::process::id())
-        .with_context(|| format!("write advisory lock {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync advisory lock {}", path.display()))?;
-    sync_directory(directory)?;
-    Ok(AdoptionLock {
-        #[cfg(unix)]
-        _file: file,
-        #[cfg(not(unix))]
-        path,
-    })
+        file.set_len(0)
+            .with_context(|| format!("clear advisory lock {}", path.display()))?;
+        writeln!(file, "pid={}", std::process::id())
+            .with_context(|| format!("write advisory lock {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync advisory lock {}", path.display()))?;
+        sync_directory(directory)?;
+        Ok(AdoptionLock { _file: file })
+    }
 }
 
 #[cfg(unix)]

@@ -1,11 +1,11 @@
 #![allow(unused_imports)] // Scenario submodules share this private fixture prelude.
 
 use std::fs;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::Command;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::thread;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::{Duration, Instant};
 
 use ironclaw_composition::LegacySkillSnapshotSource;
@@ -195,7 +195,7 @@ pub(super) fn confirmed_options() -> AdoptOptions {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn advisory_lock_holder_subprocess() {
     let Ok(adoption_root) = std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_ROOT") else {
@@ -217,14 +217,13 @@ fn advisory_lock_holder_subprocess() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
-fn advisory_lock_recovers_after_a_crashed_process_without_reusing_a_stale_file() {
+fn advisory_lock_recovers_after_a_terminated_process() {
     let temp = tempfile::tempdir().expect("tempdir");
     let adoption_root = temp.path().join("layout-adoption");
     fs::create_dir(&adoption_root).expect("adoption root");
     let ready = temp.path().join("lock-ready");
-    let release = temp.path().join("lock-release");
     let test_binary = std::env::current_exe().expect("test binary");
     let mut child = Command::new(test_binary)
         .args([
@@ -234,7 +233,10 @@ fn advisory_lock_recovers_after_a_crashed_process_without_reusing_a_stale_file()
         ])
         .env("IRONCLAW_TEST_ADOPTION_LOCK_ROOT", &adoption_root)
         .env("IRONCLAW_TEST_ADOPTION_LOCK_READY", &ready)
-        .env("IRONCLAW_TEST_ADOPTION_LOCK_RELEASE", &release)
+        .env(
+            "IRONCLAW_TEST_ADOPTION_LOCK_RELEASE",
+            temp.path().join("lock-release"),
+        )
         .spawn()
         .expect("spawn lock holder");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -250,15 +252,11 @@ fn advisory_lock_recovers_after_a_crashed_process_without_reusing_a_stale_file()
         !format!("{contention:#}").is_empty(),
         "contention exposes a diagnostic error"
     );
-    fs::write(&release, b"release").expect("release lock holder");
-    let status = child.wait().expect("wait for released lock holder");
-    assert!(
-        status.success(),
-        "lock holder exits cleanly after its descriptor is released"
-    );
+    child.kill().expect("terminate lock holder");
+    let _status = child.wait().expect("reap terminated lock holder");
 
     let _lock = acquire_adoption_lock(&adoption_root)
-        .expect("OS advisory lock is released when the holder process exits");
+        .expect("OS advisory lock is released after a holder process is terminated");
 }
 
 pub(super) fn workspace_import(
