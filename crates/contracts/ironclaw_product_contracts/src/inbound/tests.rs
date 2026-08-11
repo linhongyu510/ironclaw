@@ -1,7 +1,7 @@
 use super::*;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentKind,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 
@@ -161,46 +161,6 @@ fn sample_parsed(payload: ProductInboundPayload) -> ParsedProductInbound {
     .expect("parsed")
 }
 
-fn attachment_descriptor(id: &str) -> ProductAttachmentDescriptor {
-    ProductAttachmentDescriptor::new(
-        id,
-        "application/pdf",
-        Some(format!("{id}.pdf")),
-        Some(4),
-        ProductAttachmentKind::Document,
-    )
-    .expect("descriptor")
-}
-
-fn envelope_with_channel_sources(sources: &[(&str, &str)]) -> ProductInboundEnvelope {
-    let descriptors = sources
-        .iter()
-        .map(|(id, _)| attachment_descriptor(id))
-        .collect::<Vec<_>>();
-    let refs = descriptors
-        .iter()
-        .zip(sources)
-        .map(|(descriptor, (_, vendor_ref))| ChannelAttachmentRef {
-            descriptor: descriptor.clone(),
-            vendor_ref: (*vendor_ref).to_string(),
-        })
-        .collect::<Vec<_>>();
-    ProductInboundEnvelope::from_trusted_parse(
-        sample_context(),
-        sample_parsed(ProductInboundPayload::UserMessage(
-            UserMessagePayload::new(
-                "review the attachments",
-                descriptors,
-                ProductTriggerReason::DirectChat,
-            )
-            .expect("payload"),
-        )),
-    )
-    .expect("envelope")
-    .with_channel_attachment_refs(refs)
-    .expect("matching refs")
-}
-
 #[test]
 fn user_message_text_length_bounded() {
     let oversize = "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES + 1);
@@ -348,142 +308,6 @@ fn envelope_is_built_from_trusted_context() {
     assert_eq!(envelope.adapter_id().as_str(), "telegram_v2");
     assert_eq!(envelope.source_channel().as_str(), "telegram_v2");
     assert_eq!(envelope.payload(), &ProductInboundPayload::NoOp);
-}
-
-#[test]
-fn channel_attachment_refs_must_match_descriptors_and_stay_transient() {
-    let descriptor = ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
-        "file-1",
-        "application/pdf",
-        Some("report.pdf".to_string()),
-        Some(4),
-        ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
-    )
-    .expect("descriptor");
-    let source = ChannelAttachmentRef {
-        descriptor: descriptor.clone(),
-        vendor_ref: "opaque-provider-file-reference".to_string(),
-    };
-    let payload = ProductInboundPayload::UserMessage(
-        UserMessagePayload::new(
-            "review the report",
-            vec![descriptor],
-            ProductTriggerReason::DirectChat,
-        )
-        .expect("payload"),
-    );
-
-    let non_user_envelope = ProductInboundEnvelope::from_trusted_parse(
-        sample_context(),
-        sample_parsed(ProductInboundPayload::NoOp),
-    )
-    .expect("non-user envelope");
-    assert!(
-        non_user_envelope
-            .with_channel_attachment_refs(vec![source.clone()])
-            .is_err(),
-        "channel attachment refs require a user-message payload"
-    );
-
-    // Mismatched refs fail closed before any transfer authority exists.
-    let mismatched = ChannelAttachmentRef {
-        descriptor: ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
-            "other-file",
-            "application/pdf",
-            None,
-            None,
-            ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
-        )
-        .expect("descriptor"),
-        vendor_ref: "other".to_string(),
-    };
-    let envelope =
-        ProductInboundEnvelope::from_trusted_parse(sample_context(), sample_parsed(payload))
-            .expect("envelope");
-    assert!(
-        envelope
-            .clone()
-            .with_channel_attachment_refs(vec![mismatched])
-            .is_err(),
-        "refs that do not match the payload descriptors are rejected"
-    );
-
-    // Matching refs stamp, are readable host-side, and never serialize —
-    // the provider transfer reference is transient host state.
-    let envelope = envelope
-        .with_channel_attachment_refs(vec![source])
-        .expect("matching refs stamp");
-    assert_eq!(envelope.channel_attachment_refs().len(), 1);
-    let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
-    assert!(
-        !serialized.contains("opaque-provider-file-reference"),
-        "provider transfer references must not enter the serialized envelope"
-    );
-}
-
-#[test]
-fn rewritten_user_message_rejects_ambiguous_channel_sources() {
-    let envelope =
-        envelope_with_channel_sources(&[("duplicate", "vendor-a"), ("duplicate", "vendor-b")]);
-    let rewrite = UserMessagePayload::new(
-        "keep one",
-        vec![attachment_descriptor("duplicate")],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let error = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect_err("a descriptor matching two vendor refs is ambiguous");
-    assert!(matches!(
-        error,
-        ProductAdapterError::MalformedInboundPayload { .. }
-    ));
-}
-
-#[test]
-fn rewritten_user_message_rejects_reusing_one_channel_source() {
-    let envelope = envelope_with_channel_sources(&[("single", "vendor-one")]);
-    let descriptor = attachment_descriptor("single");
-    let rewrite = UserMessagePayload::new(
-        "duplicate the attachment",
-        vec![descriptor.clone(), descriptor],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let error = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect_err("one vendor ref cannot satisfy two rewritten attachments");
-    assert!(matches!(
-        error,
-        ProductAdapterError::MalformedInboundPayload { .. }
-    ));
-}
-
-#[test]
-fn rewritten_user_message_remaps_multiple_channel_sources_in_policy_order() {
-    let envelope =
-        envelope_with_channel_sources(&[("first", "vendor-first"), ("second", "vendor-second")]);
-    let rewrite = UserMessagePayload::new(
-        "reverse the attachments",
-        vec![
-            attachment_descriptor("second"),
-            attachment_descriptor("first"),
-        ],
-        ProductTriggerReason::DirectChat,
-    )
-    .expect("rewrite");
-
-    let rewritten = envelope
-        .with_rewritten_user_message(rewrite)
-        .expect("unique sources remap");
-    let vendor_refs = rewritten
-        .channel_attachment_refs()
-        .iter()
-        .map(|source| source.vendor_ref.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(vendor_refs, ["vendor-second", "vendor-first"]);
 }
 
 #[test]

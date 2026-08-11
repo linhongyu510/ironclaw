@@ -131,6 +131,9 @@ mod tests {
     use ironclaw_extension_contracts::channel_adapter::{
         InboundOutcome, ProductTriggerReason, VerifiedInbound,
     };
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    };
     use ironclaw_extension_host::extension_ingress::{
         ChannelInboundSinkConfig, GenericChannelInboundSink, VerifiedEvidenceMint,
     };
@@ -148,6 +151,18 @@ mod tests {
     #[derive(Default)]
     struct CapturingSurface {
         requests: Mutex<Vec<ChannelInboundSurfaceRequest>>,
+    }
+
+    struct InertRestrictedEgress;
+
+    #[async_trait]
+    impl RestrictedEgress for InertRestrictedEgress {
+        async fn send(
+            &self,
+            _request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Err(RestrictedEgressError::PolicyDenied)
+        }
     }
 
     #[async_trait]
@@ -218,6 +233,7 @@ mod tests {
             ("/status@configured_bot", "/status", Some("status")),
             ("/status@other_bot", "/status@other_bot", None),
         ];
+        let egress = InertRestrictedEgress;
 
         for (index, (wire_text, _, _)) in cases.iter().enumerate() {
             let command = wire_text
@@ -245,14 +261,17 @@ mod tests {
                 .ingress
                 .as_ref()
                 .expect("the telegram binding declares a webhook ingress half")
-                .receive(VerifiedInbound {
-                    extension_id: telegram.extension_id.as_str(),
-                    installation_id: "install_test",
-                    config: &config,
-                    body: &body,
-                    headers: &[],
-                    can_reply_in_threads: false,
-                })
+                .receive(
+                    VerifiedInbound {
+                        extension_id: telegram.extension_id.as_str(),
+                        installation_id: "install_test",
+                        config: &config,
+                        body: &body,
+                        headers: &[],
+                        can_reply_in_threads: false,
+                    },
+                    &egress,
+                )
                 .await
                 .expect("shipping Telegram adapter normalizes the private command");
             let InboundOutcome::Messages(mut messages) = outcome else {
@@ -265,12 +284,6 @@ mod tests {
                     extension_id: telegram.extension_id.as_str().to_string(),
                     installation_id: "install_test".to_string(),
                     message,
-                    channel_adapter: telegram
-                        .surfaces
-                        .ingress
-                        .clone()
-                        .expect("the telegram binding declares a webhook ingress half"),
-                    channel_egress: None,
                 })
                 .await
                 .is_err(),

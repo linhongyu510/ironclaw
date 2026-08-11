@@ -97,13 +97,6 @@ method = "post"
 path = "/bot{telegram_bot_token}/deleteWebhook"
 body = {}
 
-# Inbound attachment bytes, fetched AFTER the webhook ack. The commit that
-# precedes the ack carries the vendor ref only — already in the parsed payload,
-# needing no network — so the message is durable immediately and the round trip
-# moves out of the pre-ack window without ever acking before the commit.
-[channel.attachments]
-fetch = { method = "get", path = "/bot{telegram_bot_token}/getFile" }
-
 [[channel.egress]]
 scheme = "https"
 host = "api.telegram.org"

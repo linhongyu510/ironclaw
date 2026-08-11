@@ -476,7 +476,11 @@ pub struct FakeChannelAdapter {
 
 #[async_trait]
 impl ChannelIngress for FakeChannelAdapter {
-    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        _request: VerifiedInbound<'_>,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         Ok(InboundOutcome::Ignore)
     }
 }

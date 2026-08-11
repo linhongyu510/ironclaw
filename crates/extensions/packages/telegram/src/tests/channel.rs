@@ -1,6 +1,42 @@
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
+
+struct InertEgress;
+
+#[async_trait]
+impl RestrictedEgress for InertEgress {
+    async fn send(
+        &self,
+        _request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        Err(RestrictedEgressError::PolicyDenied)
+    }
+}
+
+struct FixedAttachmentEgress;
+
+#[async_trait]
+impl RestrictedEgress for FixedAttachmentEgress {
+    async fn send(
+        &self,
+        request: RestrictedEgressRequest,
+    ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+        if request.url.ends_with("/getFile") {
+            return Ok(RestrictedEgressResponse {
+                status: 200,
+                body:
+                    br#"{"ok":true,"result":{"file_size":12,"file_path":"documents/fetched.bin"}}"#
+                        .to_vec(),
+            });
+        }
+        Ok(RestrictedEgressResponse {
+            status: 200,
+            body: b"hello world!".to_vec(),
+        })
+    }
+}
 
 fn bot_username_config() -> (String, String) {
     (
@@ -10,16 +46,26 @@ fn bot_username_config() -> (String, String) {
 }
 
 async fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+    inbound_with_egress(body, &InertEgress).await
+}
+
+async fn inbound_with_egress(
+    body: &[u8],
+    egress: &dyn RestrictedEgress,
+) -> Result<InboundOutcome, ChannelError> {
     let config = [bot_username_config()];
     TelegramChannelAdapter::default()
-        .receive(VerifiedInbound {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &config,
-            body,
-            headers: &[],
-            can_reply_in_threads: false,
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &config,
+                body,
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            egress,
+        )
         .await
 }
 
@@ -108,7 +154,7 @@ async fn malformed_updates_are_typed_parse_errors() {
 
 #[tokio::test]
 async fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() {
-    let outcome = inbound(
+    let outcome = inbound_with_egress(
         br#"{
                 "update_id": 45,
                 "message": {
@@ -124,6 +170,7 @@ async fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() 
                     }
                 }
             }"#,
+        &FixedAttachmentEgress,
     )
     .await
     .expect("attachment-only update parses");
@@ -133,12 +180,16 @@ async fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() 
     assert_eq!(messages.len(), 1);
     assert!(messages[0].text.is_empty());
     assert_eq!(messages[0].attachments.len(), 1);
-    assert_eq!(messages[0].attachments[0].vendor_ref, "file-opaque-1");
+    assert_eq!(
+        messages[0].attachments[0].descriptor.external_file_id,
+        "file-opaque-1"
+    );
+    assert!(messages[0].conversation_context.is_none());
 }
 
 #[tokio::test]
 async fn private_media_group_update_becomes_a_triggered_batch_fragment() {
-    let outcome = inbound(
+    let outcome = inbound_with_egress(
         br#"{
             "update_id": 46,
             "message": {
@@ -155,6 +206,7 @@ async fn private_media_group_update_becomes_a_triggered_batch_fragment() {
                 }
             }
         }"#,
+        &FixedAttachmentEgress,
     )
     .await
     .expect("media-group update parses");
@@ -175,7 +227,7 @@ async fn private_media_group_update_becomes_a_triggered_batch_fragment() {
 
 #[tokio::test]
 async fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
-    let outcome = inbound(
+    let outcome = inbound_with_egress(
         br#"{
             "update_id": 47,
             "message": {
@@ -192,6 +244,7 @@ async fn uncaptioned_group_media_fragment_is_retained_but_not_triggered() {
                 }
             }
         }"#,
+        &FixedAttachmentEgress,
     )
     .await
     .expect("media-group update parses");

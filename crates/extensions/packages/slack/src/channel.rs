@@ -14,8 +14,9 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, ImmediateResponse,
-    InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    ReactionAction, RunReaction, TargetCandidate, TargetQuery, VerifiedInbound,
+    InboundOutcome, NormalizedAttachment, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
+    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction, TargetCandidate,
+    TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -28,7 +29,8 @@ use serde::Deserialize;
 use crate::delivery::{SlackDeliveryFailureKind, slack_error_kind};
 use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
 use crate::payload::{
-    SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_inbound,
+    ParsedSlackInboundMessage, SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError,
+    normalize_slack_inbound,
 };
 
 /// The administrator-configuration handle carrying the bot token (manifest data; the
@@ -42,7 +44,11 @@ pub struct SlackChannelAdapter;
 
 #[async_trait]
 impl ChannelIngress for SlackChannelAdapter {
-    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        request: VerifiedInbound<'_>,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         let installation_id =
             AdapterInstallationId::new(request.installation_id).map_err(|error| {
                 ChannelError::Parse {
@@ -65,37 +71,43 @@ impl ChannelIngress for SlackChannelAdapter {
                 body: Vec::new(),
             })),
             SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            SlackInboundEvent::Message(mut message) => {
+            SlackInboundEvent::Message(parsed) => {
+                let ParsedSlackInboundMessage {
+                    mut message,
+                    pending_attachments,
+                } = *parsed;
                 if !request.can_reply_in_threads {
                     flatten_self_rooted_topic(&mut message)?;
                 }
-                Ok(InboundOutcome::Messages(vec![*message]))
+                for pending in pending_attachments {
+                    let fetched =
+                        crate::attachment_transfer::fetch_attachment(&pending, egress).await?;
+                    message.attachments.push(NormalizedAttachment {
+                        descriptor: pending.descriptor,
+                        fetched,
+                    });
+                }
+                if matches!(
+                    message.trigger,
+                    ProductTriggerReason::BotMention | ProductTriggerReason::ReplyToBot
+                ) {
+                    message.conversation_context =
+                        crate::conversation_context::fetch_conversation_context(
+                            &message.conversation,
+                            egress,
+                        )
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::debug!(
+                                error = %error,
+                                "slack conversation context failed; continuing without context"
+                            );
+                            None
+                        });
+                }
+                Ok(InboundOutcome::Messages(vec![message]))
             }
         }
-    }
-
-    async fn fetch_attachment(
-        &self,
-        attachment: &ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
-        crate::attachment_transfer::fetch_attachment(attachment, egress).await
-    }
-
-    /// Thread pings fetch that thread's replies; top-level channel pings
-    /// fetch recent channel history. Uses the workspace bot token over the
-    /// manifest-restricted egress and degrades to `Ok(None)` on any vendor
-    /// refusal (e.g. a missing `channels:history` scope) or transport
-    /// failure — context is advisory and never fails admission.
-    async fn fetch_conversation_context(
-        &self,
-        conversation: &ExternalConversationRef,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<
-        Option<ironclaw_extension_contracts::channel_adapter::ChannelConversationContext>,
-        ChannelError,
-    > {
-        crate::conversation_context::fetch_conversation_context(conversation, egress).await
     }
 }
 
@@ -647,14 +659,17 @@ mod tests {
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
         SlackChannelAdapter
-            .receive(VerifiedInbound {
-                extension_id: "slack",
-                installation_id: "install_alpha",
-                config: &[],
-                body,
-                headers: &owned_headers,
-                can_reply_in_threads: true,
-            })
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body,
+                    headers: &owned_headers,
+                    can_reply_in_threads: true,
+                },
+                &ScriptedEgress::new(Vec::new()),
+            )
             .await
     }
 
@@ -740,14 +755,17 @@ mod tests {
         can_reply_in_threads: bool,
     ) -> Result<InboundOutcome, ChannelError> {
         SlackChannelAdapter
-            .receive(VerifiedInbound {
-                extension_id: "slack",
-                installation_id: "install_alpha",
-                config: &[],
-                body,
-                headers: &[],
-                can_reply_in_threads,
-            })
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body,
+                    headers: &[],
+                    can_reply_in_threads,
+                },
+                &ScriptedEgress::new(Vec::new()),
+            )
             .await
     }
 
@@ -1219,15 +1237,50 @@ mod tests {
             }),
         ]);
 
-        let fetched = SlackChannelAdapter
-            .fetch_attachment(&attachment(), &egress)
+        let outcome = SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: br#"{
+                        "type": "event_callback",
+                        "event_id": "EvFileComplete",
+                        "team_id": "T-A",
+                        "event": {
+                            "type": "message",
+                            "channel_type": "im",
+                            "subtype": "file_share",
+                            "user": "U123",
+                            "channel": "D123",
+                            "text": "see attached",
+                            "ts": "1710000000.000010",
+                            "files": [{
+                                "id": "F123",
+                                "mimetype": "text/plain",
+                                "name": "notes.txt",
+                                "size": 5
+                            }]
+                        }
+                    }"#,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &egress,
+            )
             .await
-            .expect("attachment fetch succeeds");
+            .expect("attachment fetch succeeds during receive");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected complete message");
+        };
+        let fetched = &messages[0].attachments[0];
 
-        assert_eq!(fetched.id, "F123");
-        assert_eq!(fetched.filename.as_deref(), Some("notes.txt"));
-        assert_eq!(fetched.mime_type, "text/plain");
-        assert_eq!(fetched.bytes, b"hello");
+        assert_eq!(fetched.descriptor.external_file_id, "F123");
+        assert_eq!(fetched.fetched.id, "F123");
+        assert_eq!(fetched.fetched.filename.as_deref(), Some("notes.txt"));
+        assert_eq!(fetched.fetched.mime_type, "text/plain");
+        assert_eq!(fetched.fetched.bytes, b"hello");
+        assert!(messages[0].conversation_context.is_none());
         let requests = egress.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, NetworkMethod::Get);
@@ -1244,6 +1297,68 @@ mod tests {
             requests[1].credential.as_ref().map(SecretHandle::as_str),
             Some("slack_bot_token")
         );
+    }
+
+    #[tokio::test]
+    async fn shared_trigger_fetches_context_while_direct_chat_does_not() {
+        let shared = ScriptedEgress::new(vec![ScriptedEgress::ok(
+            r#"{"ok":true,"messages":[{"user":"U2","text":"earlier context"}]}"#,
+        )]);
+        let outcome = SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: br#"{
+                        "type":"event_callback","event_id":"EvContext","team_id":"T-A",
+                        "event":{"type":"app_mention","user":"U1","channel":"C1",
+                        "text":"<@UBOT> check this","ts":"1710000000.000100"}
+                    }"#,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &shared,
+            )
+            .await
+            .expect("shared mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected shared message");
+        };
+        assert_eq!(
+            messages[0]
+                .conversation_context
+                .as_ref()
+                .map(|context| context.text.as_str()),
+            Some("<@U2>: earlier context")
+        );
+        assert_eq!(shared.requests().len(), 1);
+        assert!(shared.requests()[0].url.contains("conversations.history"));
+
+        let direct = ScriptedEgress::new(Vec::new());
+        let outcome = SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: br#"{
+                        "type":"event_callback","event_id":"EvDirect","team_id":"T-A",
+                        "event":{"type":"message","channel_type":"im","user":"U1",
+                        "channel":"D1","text":"hello","ts":"1710000000.000200"}
+                    }"#,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &direct,
+            )
+            .await
+            .expect("direct message parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected direct message");
+        };
+        assert!(messages[0].conversation_context.is_none());
+        assert!(direct.requests().is_empty());
     }
 
     #[tokio::test]
@@ -1281,8 +1396,7 @@ mod tests {
 
         for (response, expected_retryable) in cases {
             let egress = ScriptedEgress::new(vec![response]);
-            let error = SlackChannelAdapter
-                .fetch_attachment(&attachment(), &egress)
+            let error = crate::attachment_transfer::fetch_attachment(&attachment(), &egress)
                 .await
                 .expect_err("unsafe or unavailable attachment must fail");
             assert!(matches!(
@@ -1309,8 +1423,7 @@ mod tests {
                 body: b"four".to_vec(),
             }),
         ]);
-        let error = SlackChannelAdapter
-            .fetch_attachment(&attachment(), &egress)
+        let error = crate::attachment_transfer::fetch_attachment(&attachment(), &egress)
             .await
             .expect_err("truncated body must fail");
         assert!(matches!(
@@ -1327,8 +1440,7 @@ mod tests {
             ),
             Err(RestrictedEgressError::ResponseTooLarge),
         ]);
-        let error = SlackChannelAdapter
-            .fetch_attachment(&attachment(), &egress)
+        let error = crate::attachment_transfer::fetch_attachment(&attachment(), &egress)
             .await
             .expect_err("host response cap must fail");
         assert!(matches!(
@@ -1451,8 +1563,7 @@ mod tests {
 
         for (attachment, responses, expected_retryable, expected_reason) in cases {
             let egress = ScriptedEgress::new(responses);
-            let error = SlackChannelAdapter
-                .fetch_attachment(&attachment, &egress)
+            let error = crate::attachment_transfer::fetch_attachment(&attachment, &egress)
                 .await
                 .expect_err("untrusted provider edge case must fail closed");
             assert!(matches!(
@@ -1475,8 +1586,7 @@ mod tests {
                 body: b"hello".to_vec(),
             }),
         ]);
-        let fetched = SlackChannelAdapter
-            .fetch_attachment(&unnamed, &egress)
+        let fetched = crate::attachment_transfer::fetch_attachment(&unnamed, &egress)
             .await
             .expect("a provider file without a display name remains valid");
         assert_eq!(fetched.filename, None);

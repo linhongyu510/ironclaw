@@ -193,11 +193,6 @@ pub struct ChannelDescriptor {
     /// not looking (delivery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<ChannelDeliveryDescriptor>,
-    /// The `[channel.attachments]` section: how the host fetches inbound
-    /// attachment bytes, run post-ack. Absent means this channel's inbound
-    /// messages carry nothing fetchable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<ChannelAttachmentsDescriptor>,
     /// User-account connection behavior for this channel. This declaration is
     /// the only authority for pairing presentation and connection notices;
     /// hosts must not infer a recipe from an extension id or display name.
@@ -556,20 +551,6 @@ pub enum ChannelVendorCallMethod {
     #[default]
     Post,
     Get,
-}
-
-/// The `[channel.attachments]` section: how the host fetches one inbound
-/// attachment's bytes, run **after** the webhook ack.
-///
-/// Declarative for the same reason registration is: the fetch is per-channel
-/// data over a generic execution path. Absence means the channel's inbound
-/// messages carry no fetchable attachments.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChannelAttachmentsDescriptor {
-    /// Resolves `{external_file_id}` from the attachment's vendor ref, plus
-    /// any config handle.
-    pub fetch: ChannelVendorCallRecipe,
 }
 
 /// Ingress declaration for an inbound channel.

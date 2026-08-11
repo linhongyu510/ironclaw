@@ -10,7 +10,8 @@ use ironclaw_extension_contracts::channel_adapter::{
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::test_support::conformance::{
-    ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
+    ChannelAdapterConformance, ConformanceInbound, ScriptedVendorServer,
+    run_channel_adapter_conformance,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgressRequest, RestrictedEgressResponse,
@@ -120,6 +121,7 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
 
 #[tokio::test]
 async fn inbound_identity_is_required_with_constructor_compatibility() {
+    let egress = ScriptedVendorServer::new(Arc::new(scripted_bot_api));
     for config in [
         Vec::new(),
         vec![(
@@ -128,14 +130,17 @@ async fn inbound_identity_is_required_with_constructor_compatibility() {
         )],
     ] {
         let result = TelegramChannelAdapter::default()
-            .receive(VerifiedInbound {
-                extension_id: "telegram",
-                installation_id: "install_alpha",
-                config: &config,
-                body: private_message_body(),
-                headers: &[],
-                can_reply_in_threads: false,
-            })
+            .receive(
+                VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &config,
+                    body: private_message_body(),
+                    headers: &[],
+                    can_reply_in_threads: false,
+                },
+                &egress,
+            )
             .await;
         let Err(error) = result else {
             panic!("missing or invalid bot identity must fail inbound normalization");
@@ -148,14 +153,17 @@ async fn inbound_identity_is_required_with_constructor_compatibility() {
         ..GroupTriggerPolicy::default()
     });
     let outcome = adapter
-        .receive(VerifiedInbound {
-            extension_id: "telegram",
-            installation_id: "install_alpha",
-            config: &[],
-            body: private_message_body(),
-            headers: &[],
-            can_reply_in_threads: false,
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: "telegram",
+                installation_id: "install_alpha",
+                config: &[],
+                body: private_message_body(),
+                headers: &[],
+                can_reply_in_threads: false,
+            },
+            &egress,
+        )
         .await
         .expect("an explicitly configured constructor policy remains valid");
     assert!(matches!(outcome, InboundOutcome::Messages(_)));
@@ -163,6 +171,7 @@ async fn inbound_identity_is_required_with_constructor_compatibility() {
 
 #[tokio::test]
 async fn username_enforces_vendor_grammar_for_inbound() {
+    let egress = ScriptedVendorServer::new(Arc::new(scripted_bot_api));
     let invalid_usernames = [
         "fixture_name".to_string(),
         "bot".to_string(),
@@ -173,14 +182,17 @@ async fn username_enforces_vendor_grammar_for_inbound() {
         let config = vec![(TELEGRAM_BOT_USERNAME_CONFIG.to_string(), username.clone())];
         assert!(
             TelegramChannelAdapter::default()
-                .receive(VerifiedInbound {
-                    extension_id: "telegram",
-                    installation_id: "install_alpha",
-                    config: &config,
-                    body: private_message_body(),
-                    headers: &[],
-                    can_reply_in_threads: false,
-                })
+                .receive(
+                    VerifiedInbound {
+                        extension_id: "telegram",
+                        installation_id: "install_alpha",
+                        config: &config,
+                        body: private_message_body(),
+                        headers: &[],
+                        can_reply_in_threads: false,
+                    },
+                    &egress
+                )
                 .await
                 .is_err(),
             "{username:?} must fail Telegram's public bot-username grammar"
@@ -193,14 +205,17 @@ async fn username_enforces_vendor_grammar_for_inbound() {
         assert!(
             matches!(
                 TelegramChannelAdapter::default()
-                    .receive(VerifiedInbound {
-                        extension_id: "telegram",
-                        installation_id: "install_alpha",
-                        config: &config,
-                        body: private_message_body(),
-                        headers: &[],
-                        can_reply_in_threads: false,
-                    })
+                    .receive(
+                        VerifiedInbound {
+                            extension_id: "telegram",
+                            installation_id: "install_alpha",
+                            config: &config,
+                            body: private_message_body(),
+                            headers: &[],
+                            can_reply_in_threads: false,
+                        },
+                        &egress
+                    )
                     .await,
                 Ok(InboundOutcome::Messages(_))
             ),
@@ -214,14 +229,17 @@ async fn username_enforces_vendor_grammar_for_inbound() {
     });
     assert!(matches!(
         constructor_compatible
-            .receive(VerifiedInbound {
-                extension_id: "telegram",
-                installation_id: "install_alpha",
-                config: &[],
-                body: private_message_body(),
-                headers: &[],
-                can_reply_in_threads: false,
-            })
+            .receive(
+                VerifiedInbound {
+                    extension_id: "telegram",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: private_message_body(),
+                    headers: &[],
+                    can_reply_in_threads: false,
+                },
+                &egress
+            )
             .await,
         Ok(InboundOutcome::Messages(_))
     ));

@@ -713,8 +713,6 @@ service = "acmechat.extension/v1"
 [channel]
 id = "messages"
 display_name = "AcmeChat messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]

@@ -90,6 +90,7 @@ fn substitute_json(value: &serde_json::Value, config: &[(String, String)]) -> se
 pub fn render_vendor_call(
     recipe: &ChannelVendorCallRecipe,
     host: &str,
+    credential_handle: Option<&ironclaw_host_api::ids::SecretHandle>,
     config: &[(String, String)],
 ) -> Result<RestrictedEgressRequest, ChannelError> {
     let path = substitute(&recipe.path, config);
@@ -121,9 +122,10 @@ pub fn render_vendor_call(
             Vec::new()
         },
         body,
-        // The credential is declared per egress target, not per call: the host
-        // injects it at the boundary exactly as it does for an adapter send.
-        credential: None,
+        // The lifecycle selected this manifest-declared egress target. Carry
+        // its handle as the host-owned call's explicit opt-in so restricted
+        // egress can resolve and inject the value at the boundary.
+        credential: credential_handle.cloned(),
         body_credentials: recipe.body_credentials.clone(),
     })
 }
@@ -133,11 +135,12 @@ pub fn render_vendor_call(
 pub async fn run_vendor_call(
     recipe: &ChannelVendorCallRecipe,
     host: &str,
+    credential_handle: Option<&ironclaw_host_api::ids::SecretHandle>,
     config: &[(String, String)],
     egress: &dyn RestrictedEgress,
     label: &str,
 ) -> Result<(), ChannelError> {
-    let request = render_vendor_call(recipe, host, config)?;
+    let request = render_vendor_call(recipe, host, credential_handle, config)?;
     let response = egress
         .send(request)
         .await
@@ -182,8 +185,14 @@ mod tests {
     /// passed through host code that has no business holding it.
     #[test]
     fn an_unresolved_placeholder_survives_for_egress_injection() {
-        let request = render_vendor_call(&registration_recipe(), "api.telegram.org", &config())
-            .expect("render");
+        let credential = SecretHandle::new("telegram_bot_token").expect("credential handle");
+        let request = render_vendor_call(
+            &registration_recipe(),
+            "api.telegram.org",
+            Some(&credential),
+            &config(),
+        )
+        .expect("render");
         assert_eq!(
             request.url, "https://api.telegram.org/bot{telegram_bot_token}/setWebhook",
             "the credential placeholder must reach egress unresolved"
@@ -196,8 +205,14 @@ mod tests {
     /// must the handle name, which the vendor must never see.
     #[test]
     fn the_rendered_body_carries_no_secret_value_and_no_handle_name() {
-        let request = render_vendor_call(&registration_recipe(), "api.telegram.org", &config())
-            .expect("render");
+        let credential = SecretHandle::new("telegram_bot_token").expect("credential handle");
+        let request = render_vendor_call(
+            &registration_recipe(),
+            "api.telegram.org",
+            Some(&credential),
+            &config(),
+        )
+        .expect("render");
         let body: serde_json::Value =
             serde_json::from_slice(request.body.as_deref().expect("body")).expect("json");
         assert_eq!(
@@ -223,8 +238,8 @@ mod tests {
             "the handle rides as a declared body credential"
         );
         assert!(
-            request.credential.is_none(),
-            "the target credential is declared per egress target, not per call"
+            request.credential.as_ref() == Some(&credential),
+            "the host-owned call must opt into the target's declared credential"
         );
     }
 
@@ -251,7 +266,7 @@ mod tests {
         let mut recipe = registration_recipe();
         recipe.path = "setWebhook".to_string();
         assert!(matches!(
-            render_vendor_call(&recipe, "api.telegram.org", &config()),
+            render_vendor_call(&recipe, "api.telegram.org", None, &config()),
             Err(ChannelError::VendorWiring { .. })
         ));
     }
@@ -264,7 +279,8 @@ mod tests {
             body: None,
             body_credentials: Vec::new(),
         };
-        let request = render_vendor_call(&recipe, "api.telegram.org", &config()).expect("render");
+        let request =
+            render_vendor_call(&recipe, "api.telegram.org", None, &config()).expect("render");
         assert!(request.body.is_none());
         assert!(request.headers.is_empty());
         assert!(request.url.ends_with("/deleteWebhook"));

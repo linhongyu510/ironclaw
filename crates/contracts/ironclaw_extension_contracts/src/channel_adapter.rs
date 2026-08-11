@@ -1,13 +1,13 @@
-//! The generic **channel adapter** contract (overview.md §4.2).
+//! The generic channel capability contracts (overview.md §4.2).
 //!
-//! One adapter per extension channel surface. It implements protocol
-//! behavior only — parse one host-verified inbound request, render and send
-//! one normalized outbound envelope, and the idempotent activate/cleanup
-//! vendor-wiring hooks. Everything around it (route table, verification
-//! recipes, replay, admission, target policy, attempt persistence, retry,
-//! drain) is the host ingress router and delivery coordinator, implemented
-//! once. The adapter never reports metadata (the resolved manifest is the
-//! authority) and never touches the delivery store.
+//! An extension package is a protocol translator and may implement any subset
+//! of three one-way methods: receive a complete vendor message, send a reply,
+//! and deliver out of band. The host owns everything around those translations
+//! (route table, verification recipes, replay, admission, target policy,
+//! attempt persistence, retry, drain). It also owns authenticated-session
+//! ingress and stream replies, so those manifest modes intentionally require
+//! no adapter implementation. The package never reports metadata (the resolved
+//! manifest is the authority) and never touches the delivery store.
 //!
 //! These DTOs are the seam between generic host pipelines and concrete
 //! protocol crates; the old metadata-carrying `ProductAdapter` is retired as
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use ironclaw_host_api::attachment::WorkspaceFile;
+use ironclaw_host_api::attachment::{InboundAttachment, WorkspaceFile};
 use serde::{Deserialize, Serialize};
 
 use crate::external::{
@@ -43,59 +43,24 @@ pub enum ProductTriggerReason {
     LinkedThreadAction,
 }
 
-/// **Ingress** — how input arrives. Pairs with `[channel.ingress]`.
+/// **Ingress** — how a vendor request becomes complete input. Pairs with a
+/// webhook/vendor `[channel.ingress]`.
 ///
-/// Absence of an implementation means the channel accepts no input, exactly
-/// as absence of the manifest section does; declaration and code cannot
-/// disagree because the host resolves both from the same descriptor.
+/// `authenticated_session` ingress is normalized by the host's session door
+/// and binds no implementation here. For every other ingress mode,
+/// `check_binding` requires this half at activation.
 #[async_trait]
 pub trait ChannelIngress: Send + Sync {
-    /// Parse one host-verified inbound request into a normalized outcome.
-    ///
-    /// Async so a channel is not artificially barred from awaiting — but it
-    /// must NOT fetch attachment bytes or conversation history here. Both are
-    /// deferred to the host's **post-ack** fetch pass, because the ack is
-    /// ack-after-commit and anything awaited here lands inside the pre-ack
-    /// window. Committing refs instead of bytes is what moves the round trip
-    /// later; inlining a fetch here moves it *earlier*.
-    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
-
-    /// Deferred handle (design §7.3): fetch one inbound attachment's bytes
-    /// through the channel's restricted egress.
-    ///
-    /// **Never call this before the ack.** The host commits the message with
-    /// the vendor *ref* — already in the parsed payload, needing no network —
-    /// acks, and only then runs this. `[channel.attachments]` is the manifest
-    /// declaration that a channel has fetchable attachments at all; the fetch
-    /// itself stays here because neither shipped vendor's transfer is one
-    /// templated request (see that descriptor's doc for the measurement).
-    ///
-    /// Default `Unsupported`: a channel whose messages carry no attachments —
-    /// or whose attachments arrive inline on an authenticated session — never
-    /// implements it.
-    async fn fetch_attachment(
+    /// Translate one host-verified vendor request into a complete normalized
+    /// outcome. Any attachment bytes or vendor-side conversation context are
+    /// resolved here through the manifest-restricted egress before the
+    /// adapter returns; the host never calls back into an adapter to finish a
+    /// half-normalized message.
+    async fn receive(
         &self,
-        _attachment: &ChannelAttachmentRef,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-
-    /// Deferred handle (design §7.3): recent vendor-side conversation history
-    /// for one inbound shared message. `topic`-bearing conversations fetch
-    /// that thread's messages; top-level conversations fetch recent channel
-    /// history.
-    ///
-    /// Advisory context that must never fail admission: `Ok(None)` covers the
-    /// default, missing scopes, and vendor failure alike. Like
-    /// [`Self::fetch_attachment`] it runs post-ack, for the same reason.
-    async fn fetch_conversation_context(
-        &self,
-        _conversation: &ExternalConversationRef,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<Option<ChannelConversationContext>, ChannelError> {
-        Ok(None)
-    }
+        request: VerifiedInbound<'_>,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError>;
 }
 
 /// **Reply** — answering the run's input, source-routed. Pairs with
@@ -147,24 +112,27 @@ pub trait ChannelDelivery: Send + Sync {
 
 /// The halves one extension's channel surface actually implements.
 ///
-/// Eleven methods on one trait became three across three traits, and this is
+/// Eleven methods on one trait became three methods across three traits, and this is
 /// what the host holds instead of a single `Arc<dyn ChannelAdapter>` whose
 /// unsupported methods were discovered at call time. A `None` here is the
-/// same fact as a missing manifest section, resolved once at binding.
+/// required fact for host-owned modes (`authenticated_session` ingress and
+/// `stream` reply); `check_binding` proves every manifest axis agrees with its
+/// implementation at activation.
 ///
 /// What left the trait entirely, and where it went:
 /// - `activate`/`cleanup` → `[channel.ingress.registration]` /
 ///   `[channel.ingress.deregistration]` recipes the host runs through
 ///   existing restricted egress with existing credential injection.
-/// - `deliver_notification` → the second trait. One run can stream an answer
+/// - `deliver_notification` → [`ChannelDelivery`]. One run can stream an answer
 ///   into an open tab *and* fire a push; those are two axes, not two intents.
 /// - the three notification-setup methods → host-owned per-user delivery
 ///   registrations, so the host can answer "is this user set up?" before a
 ///   send instead of discovering it inside the vendor path.
 ///
-/// `fetch_attachment`/`fetch_conversation_context` stayed, on
-/// [`ChannelIngress`], but **moved after the webhook ack** — which was the
-/// point of design §7. They are the deferred handles §7.3 sanctions.
+/// Ingress has the same complete-envelope shape as output: one translator
+/// method each way. [`ChannelIngress::receive`] resolves vendor handles before
+/// returning, while the generic host keeps validation, policy, persistence,
+/// and turn orchestration.
 #[derive(Clone, Default)]
 pub struct ChannelSurfaces {
     pub ingress: Option<Arc<dyn ChannelIngress>>,
@@ -243,7 +211,7 @@ pub const MAX_DELIVERY_REGISTRATION_ENDPOINT_BYTES: usize = 2 * 1024;
 pub const MAX_DELIVERY_REGISTRATIONS_PER_USER: usize = 20;
 
 /// One host-verified inbound request. Signing secrets are never in scope —
-/// the host executed the verification recipe before calling `inbound`.
+/// the host executed the verification recipe before calling `receive`.
 pub struct VerifiedInbound<'a> {
     pub extension_id: &'a str,
     pub installation_id: &'a str,
@@ -347,7 +315,11 @@ pub struct NormalizedInboundMessage {
     /// thread reply, …). The workflow's user-message payload requires it, so
     /// any host sink mapping normalized messages into the workflow needs it.
     pub trigger: ProductTriggerReason,
-    pub attachments: Vec<ChannelAttachmentRef>,
+    pub attachments: Vec<NormalizedAttachment>,
+    /// Recent vendor-side history when the adapter knows this message came
+    /// from a shared conversation and the vendor exposes a history API.
+    /// Untrusted content: the host sanitizes and frames it before model use.
+    pub conversation_context: Option<ChannelConversationContext>,
     /// Opaque per-message context (≤ 4 KiB) the host stores server-side and
     /// hands back at delivery time (reply routing). Never interpreted by the
     /// host.
@@ -357,10 +329,47 @@ pub struct NormalizedInboundMessage {
 /// Maximum size of an inbound message's opaque `reply_context`.
 pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 
-/// A transient vendor attachment reference: the descriptor the message
-/// declares plus the opaque provider handle used to fetch it. Bytes are
-/// fetched host-side through restricted egress with the channel credential
-/// only when a consumer needs them, keeping `inbound` pure.
+/// One complete inbound attachment returned by an adapter.
+///
+/// `descriptor` is what the vendor payload declared; `fetched` is what the
+/// adapter actually recovered through restricted egress. Keeping both lets
+/// the host reject disagreement instead of silently reconciling two claims
+/// from the same untrusted vendor.
+#[derive(Clone)]
+pub struct NormalizedAttachment {
+    pub descriptor: ProductAttachmentDescriptor,
+    pub fetched: InboundAttachment,
+}
+
+impl std::fmt::Debug for NormalizedAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NormalizedAttachment")
+            .field("descriptor", &self.descriptor)
+            .field("fetched_id", &self.fetched.id)
+            .field("fetched_mime_type", &self.fetched.mime_type)
+            .field("fetched_filename", &self.fetched.filename)
+            .field("size_bytes", &self.fetched.bytes.len())
+            .finish()
+    }
+}
+
+impl PartialEq for NormalizedAttachment {
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor == other.descriptor
+            && self.fetched.id == other.fetched.id
+            && self.fetched.mime_type == other.fetched.mime_type
+            && self.fetched.filename == other.fetched.filename
+            && self.fetched.bytes == other.fetched.bytes
+    }
+}
+
+impl Eq for NormalizedAttachment {}
+
+/// Package-internal parse/fetch state: the descriptor a vendor payload
+/// declares plus the opaque provider handle the adapter uses while completing
+/// [`ChannelIngress::receive`]. This is not part of the host inbound contract
+/// and must never cross adapter admission.
 ///
 /// Named distinctly from `ironclaw_common::AttachmentRef`, which is the
 /// durable byte-free transcript reference — a different concept that used to
@@ -383,8 +392,8 @@ impl std::fmt::Debug for ChannelAttachmentRef {
 /// Maximum size of one [`ChannelConversationContext`] text payload.
 pub const MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES: usize = 32 * 1024;
 
-/// Recent vendor-side conversation history fetched host-side for one inbound
-/// shared-channel message.
+/// Recent vendor-side conversation history fetched by the adapter through
+/// manifest-restricted egress for one inbound shared-channel message.
 ///
 /// The text is UNTRUSTED third-party content (whatever other channel members
 /// wrote): consumers must frame it as quoted information, never as
@@ -597,6 +606,28 @@ impl NormalizedInboundMessage {
     /// Validate host-enforceable bounds on a normalized message before it
     /// enters the workflow (the adapter is untrusted for size).
     pub fn validate(&self) -> Result<(), ChannelError> {
+        let mut attachment_ids = std::collections::HashSet::new();
+        for attachment in &self.attachments {
+            if !attachment_ids.insert(attachment.descriptor.external_file_id.as_str()) {
+                return Err(ChannelError::Parse {
+                    reason: format!(
+                        "duplicate attachment external_file_id `{}`",
+                        attachment.descriptor.external_file_id
+                    ),
+                });
+            }
+            if let Some(declared_size) = attachment.descriptor.size_bytes
+                && declared_size != attachment.fetched.bytes.len() as u64
+            {
+                return Err(ChannelError::Parse {
+                    reason: format!(
+                        "attachment `{}` declared {declared_size} bytes but fetched {} bytes",
+                        attachment.descriptor.external_file_id,
+                        attachment.fetched.bytes.len()
+                    ),
+                });
+            }
+        }
         if let Some(context) = &self.reply_context
             && context.len() > MAX_REPLY_CONTEXT_BYTES
         {
@@ -624,6 +655,30 @@ impl ImmediateResponse {
 mod tests {
     use super::*;
     use crate::external::ProductAttachmentKind;
+    use ironclaw_host_api::attachment::InboundAttachment;
+
+    fn normalized_attachment(
+        id: &str,
+        declared_size: Option<u64>,
+        bytes: &[u8],
+    ) -> NormalizedAttachment {
+        NormalizedAttachment {
+            descriptor: ProductAttachmentDescriptor::new(
+                id,
+                "application/pdf",
+                Some(format!("{id}.pdf")),
+                declared_size,
+                ProductAttachmentKind::Document,
+            )
+            .expect("descriptor"),
+            fetched: InboundAttachment {
+                id: id.to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: Some("vendor-name.pdf".to_string()),
+                bytes: bytes.to_vec(),
+            },
+        }
+    }
 
     #[test]
     fn channel_attachment_ref_debug_redacts_the_vendor_reference() {
@@ -645,6 +700,52 @@ mod tests {
     }
 
     #[test]
+    fn normalized_attachment_debug_redacts_fetched_bytes() {
+        let attachment =
+            normalized_attachment("file-1", Some(29), b"complete-byte-sentinel-secret");
+
+        let debug = format!("{attachment:?}");
+        assert!(debug.contains("file-1"));
+        assert!(debug.contains("size_bytes"));
+        assert!(debug.contains("29"));
+        assert!(!debug.contains("complete-byte-sentinel-secret"));
+        assert!(!debug.contains("99, 111, 109, 112"));
+    }
+
+    #[test]
+    fn complete_attachment_shape_rejects_duplicate_ids_and_declared_size_mismatch() {
+        let valid = || NormalizedInboundMessage {
+            actor: ExternalActorRef::new("user", "u-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "c-1", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new("e-1").expect("event"),
+            text: "hi".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: vec![normalized_attachment("file-1", Some(4), b"data")],
+            conversation_context: None,
+            reply_context: None,
+        };
+
+        assert!(valid().validate().is_ok());
+
+        let mut duplicate = valid();
+        duplicate
+            .attachments
+            .push(normalized_attachment("file-1", Some(4), b"data"));
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ChannelError::Parse { reason }) if reason.contains("duplicate")
+        ));
+
+        let mut wrong_size = valid();
+        wrong_size.attachments[0].descriptor.size_bytes = Some(5);
+        assert!(matches!(
+            wrong_size.validate(),
+            Err(ChannelError::Parse { reason }) if reason.contains("declared")
+        ));
+    }
+
+    #[test]
     fn reply_context_bound_is_enforced_host_side() {
         let message = NormalizedInboundMessage {
             actor: ExternalActorRef::new("user", "u-1", None::<&str>).expect("actor"),
@@ -653,6 +754,7 @@ mod tests {
             text: "hi".to_string(),
             trigger: ProductTriggerReason::DirectChat,
             attachments: Vec::new(),
+            conversation_context: None,
             reply_context: Some(vec![0u8; MAX_REPLY_CONTEXT_BYTES + 1]),
         };
         assert!(matches!(
@@ -705,6 +807,7 @@ mod tests {
                 text: "read both".to_string(),
                 trigger: ProductTriggerReason::DirectChat,
                 attachments: Vec::new(),
+                conversation_context: None,
                 reply_context: None,
             },
         }

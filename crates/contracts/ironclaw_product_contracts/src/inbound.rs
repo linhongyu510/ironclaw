@@ -9,7 +9,6 @@ use serde_json::Value;
 
 use crate::outbound::ProjectionCursor;
 use crate::surface::ProductSurfaceCaller;
-use ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -875,12 +874,6 @@ pub struct ProductInboundEnvelope {
     binding_directive: ProductInboundBindingDirective,
     received_at: DateTime<Utc>,
     payload: ProductInboundPayload,
-    /// Provider transfer references for channel attachments. Host-only and
-    /// transient: the serializable payload carries descriptors, while these
-    /// refs survive only long enough for accepted workflow intake to fetch
-    /// bytes through restricted egress.
-    #[serde(skip)]
-    channel_attachment_refs: Vec<ChannelAttachmentRef>,
 }
 
 impl ProductInboundEnvelope {
@@ -899,7 +892,6 @@ impl ProductInboundEnvelope {
             binding_directive: context.binding_directive,
             received_at: context.received_at,
             payload: parsed.payload,
-            channel_attachment_refs: Vec::new(),
         })
     }
 
@@ -974,43 +966,6 @@ impl ProductInboundEnvelope {
         &self.payload
     }
 
-    /// Attach the transient channel transfer references corresponding exactly
-    /// to the user-message descriptors already present in this envelope.
-    pub fn with_channel_attachment_refs(
-        mut self,
-        channel_attachment_refs: Vec<ChannelAttachmentRef>,
-    ) -> Result<Self, ProductAdapterError> {
-        let ProductInboundPayload::UserMessage(payload) = &self.payload else {
-            if channel_attachment_refs.is_empty() {
-                return Ok(self);
-            }
-            return Err(malformed(
-                "channel attachment references require a user-message payload",
-            ));
-        };
-        let descriptors = channel_attachment_refs
-            .iter()
-            .map(|attachment| &attachment.descriptor)
-            .collect::<Vec<_>>();
-        if descriptors
-            != payload
-                .attachments
-                .iter()
-                .collect::<Vec<&ProductAttachmentDescriptor>>()
-        {
-            return Err(malformed(
-                "channel attachment references do not match payload descriptors",
-            ));
-        }
-        self.channel_attachment_refs = channel_attachment_refs;
-        Ok(self)
-    }
-
-    /// Host-only transient provider references for deferred attachment fetch.
-    pub fn channel_attachment_refs(&self) -> &[ChannelAttachmentRef] {
-        &self.channel_attachment_refs
-    }
-
     /// Preserve host-stamped trusted context while replacing only the
     /// user-message payload after workflow-owned before-inbound policy rewrite.
     pub fn with_rewritten_user_message(
@@ -1021,36 +976,8 @@ impl ProductInboundEnvelope {
             return Err(malformed("cannot rewrite non-user-message payload"));
         }
         payload.validate()?;
-        let channel_attachment_refs = if self.channel_attachment_refs.is_empty() {
-            Vec::new()
-        } else {
-            let mut used = vec![false; self.channel_attachment_refs.len()];
-            let mut reconciled = Vec::with_capacity(payload.attachments.len());
-            for descriptor in &payload.attachments {
-                let matching = self
-                    .channel_attachment_refs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, source)| source.descriptor == *descriptor)
-                    .collect::<Vec<_>>();
-                let [(index, source)] = matching.as_slice() else {
-                    return Err(malformed(
-                        "policy-rewritten attachment has no unique original channel source",
-                    ));
-                };
-                if used[*index] {
-                    return Err(malformed(
-                        "policy-rewritten attachment reuses an original channel source",
-                    ));
-                }
-                used[*index] = true;
-                reconciled.push((*source).clone());
-            }
-            reconciled
-        };
         let mut envelope = self.clone();
         envelope.payload = ProductInboundPayload::UserMessage(payload);
-        envelope.channel_attachment_refs = channel_attachment_refs;
         Ok(envelope)
     }
 

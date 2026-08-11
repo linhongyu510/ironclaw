@@ -135,7 +135,23 @@ pub enum SlackInboundEvent {
     /// Any 200 response satisfies it; the body is ignored.
     SslCheck,
     Ignore,
-    Message(Box<NormalizedInboundMessage>),
+    Message(Box<ParsedSlackInboundMessage>),
+}
+
+/// Pure payload-normalization result retained inside the Slack package until
+/// [`crate::channel::SlackChannelAdapter`] finishes vendor reads.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedSlackInboundMessage {
+    pub message: NormalizedInboundMessage,
+    pub pending_attachments: Vec<ChannelAttachmentRef>,
+}
+
+impl std::ops::Deref for ParsedSlackInboundMessage {
+    type Target = NormalizedInboundMessage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
 }
 
 /// Parse one host-verified Slack Events API request into its normalized
@@ -202,7 +218,7 @@ pub fn normalize_slack_event(
     match parsed.payload {
         ProductInboundPayload::UserMessage(message) => {
             let trigger = message.trigger;
-            let attachments = message
+            let pending_attachments = message
                 .attachments
                 .into_iter()
                 .map(|descriptor| ChannelAttachmentRef {
@@ -211,17 +227,21 @@ pub fn normalize_slack_event(
                 })
                 .collect();
             Ok(SlackInboundEvent::Message(Box::new(
-                NormalizedInboundMessage {
-                    actor: parsed.external_actor_ref,
-                    conversation: parsed.external_conversation_ref,
-                    event_id: parsed.external_event_id,
-                    text: message.text,
-                    trigger,
-                    attachments,
-                    // Reply routing rides the conversation ref's thread anchors
-                    // (pre-coordinator delivery path); adopted when the P5
-                    // delivery coordinator consumes stored contexts.
-                    reply_context: None,
+                ParsedSlackInboundMessage {
+                    message: NormalizedInboundMessage {
+                        actor: parsed.external_actor_ref,
+                        conversation: parsed.external_conversation_ref,
+                        event_id: parsed.external_event_id,
+                        text: message.text,
+                        trigger,
+                        attachments: Vec::new(),
+                        conversation_context: None,
+                        // Reply routing rides the conversation ref's thread anchors
+                        // (pre-coordinator delivery path); adopted when the P5
+                        // delivery coordinator consumes stored contexts.
+                        reply_context: None,
+                    },
+                    pending_attachments,
                 },
             )))
         }
@@ -308,14 +328,18 @@ fn normalize_slack_slash_command(
     let text = slash_command_dispatch_text(&form.command, form.text.as_deref());
 
     Ok(SlackInboundEvent::Message(Box::new(
-        NormalizedInboundMessage {
-            actor,
-            conversation,
-            event_id,
-            text,
-            trigger,
-            attachments: Vec::new(),
-            reply_context: None,
+        ParsedSlackInboundMessage {
+            message: NormalizedInboundMessage {
+                actor,
+                conversation,
+                event_id,
+                text,
+                trigger,
+                attachments: Vec::new(),
+                conversation_context: None,
+                reply_context: None,
+            },
+            pending_attachments: Vec::new(),
         },
     )))
 }

@@ -18,14 +18,15 @@
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelDelivery, ChannelError, ChannelIngress, ChannelReply,
-    DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    ReactionAction, RunReaction, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, InboundOutcome,
+    NormalizedAttachment, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
+    PartDeliveryOutcome, ReactionAction, RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
-use ironclaw_host_api::{action::NetworkMethod, attachment::InboundAttachment, ids::SecretHandle};
+use ironclaw_host_api::{action::NetworkMethod, ids::SecretHandle};
 
+use crate::attachment_transfer::{ParsedTelegramBatchFragment, ParsedTelegramInboundMessage};
 use crate::{
     GroupTriggerPolicy, TELEGRAM_API_HOST, TelegramInboundEvent, normalize_telegram_update,
 };
@@ -105,7 +106,11 @@ impl TelegramChannelAdapter {
 
 #[async_trait]
 impl ChannelIngress for TelegramChannelAdapter {
-    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        request: VerifiedInbound<'_>,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         let installation_id =
             AdapterInstallationId::new(request.installation_id).map_err(|error| {
                 ChannelError::Parse {
@@ -118,20 +123,40 @@ impl ChannelIngress for TelegramChannelAdapter {
                 reason: error.to_string(),
             })? {
             TelegramInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
-            TelegramInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
-            TelegramInboundEvent::BatchFragment(fragment) => {
-                Ok(InboundOutcome::BatchFragment(fragment))
+            TelegramInboundEvent::Message(parsed) => {
+                let ParsedTelegramInboundMessage {
+                    message,
+                    pending_attachments,
+                } = *parsed;
+                let message = complete_message(message, pending_attachments, egress).await?;
+                Ok(InboundOutcome::Messages(vec![message]))
+            }
+            TelegramInboundEvent::BatchFragment(parsed) => {
+                let ParsedTelegramBatchFragment {
+                    mut fragment,
+                    pending_attachments,
+                } = *parsed;
+                fragment.message =
+                    complete_message(fragment.message, pending_attachments, egress).await?;
+                Ok(InboundOutcome::BatchFragment(Box::new(fragment)))
             }
         }
     }
+}
 
-    async fn fetch_attachment(
-        &self,
-        attachment: &ChannelAttachmentRef,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<InboundAttachment, ChannelError> {
-        crate::attachment_transfer::fetch_attachment(attachment, egress).await
+async fn complete_message(
+    mut message: NormalizedInboundMessage,
+    pending_attachments: Vec<ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef>,
+    egress: &dyn RestrictedEgress,
+) -> Result<NormalizedInboundMessage, ChannelError> {
+    for pending in pending_attachments {
+        let fetched = crate::attachment_transfer::fetch_attachment(&pending, egress).await?;
+        message.attachments.push(NormalizedAttachment {
+            descriptor: pending.descriptor,
+            fetched,
+        });
     }
+    Ok(message)
 }
 
 /// One vendor mechanism serves both output axes here, as it does for every

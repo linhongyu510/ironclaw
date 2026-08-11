@@ -706,7 +706,11 @@ fn host_served_bridge(
 
 #[async_trait]
 impl ChannelIngress for HostServedChannelBridge {
-    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        _request: VerifiedInbound<'_>,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)
     }
 }

@@ -13,11 +13,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_extension_contracts::channel_adapter::ChannelIngress;
-use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelError, ProductTriggerReason,
-};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::ProductAttachmentDescriptor;
 use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::ids::ThreadId;
 #[cfg(test)]
@@ -279,24 +276,6 @@ pub trait InboundTurnService: Send + Sync {
         self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
             .await
     }
-
-    /// Accept a channel user message with the exact transient adapter and
-    /// restricted egress authority pinned by the ingress router.
-    async fn accept_user_message_with_before_policy_and_channel_transfer(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        before_inbound_policy: &dyn BeforeInboundPolicy,
-        _channel_ingress: Arc<dyn ChannelIngress>,
-        _channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        if !envelope.channel_attachment_refs().is_empty() {
-            return Err(permanent_attachment_failure(
-                "channel attachment transfer is not supported by this turn service",
-            ));
-        }
-        self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
-            .await
-    }
 }
 
 /// Default implementation that composes a [`ProductBindingResolver`] with a
@@ -474,14 +453,8 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            Vec::new(),
-            None,
-            None,
-        )
-        .await
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, Vec::new())
+            .await
     }
 
     async fn accept_user_message_with_before_policy_and_attachments(
@@ -490,31 +463,8 @@ where
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            attachments,
-            None,
-            None,
-        )
-        .await
-    }
-
-    async fn accept_user_message_with_before_policy_and_channel_transfer(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        before_inbound_policy: &dyn BeforeInboundPolicy,
-        channel_ingress: Arc<dyn ChannelIngress>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(
-            envelope,
-            before_inbound_policy,
-            Vec::new(),
-            Some(channel_ingress),
-            Some(channel_egress),
-        )
-        .await
+        self.accept_with_before_policy_inner(envelope, before_inbound_policy, attachments)
+            .await
     }
 }
 
@@ -529,8 +479,6 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
-        pinned_channel_ingress: Option<Arc<dyn ChannelIngress>>,
-        pinned_channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -538,6 +486,7 @@ where
             });
         };
         let original_trigger = payload.trigger;
+        let original_descriptors = payload.attachments.clone();
         let prepared = self.prepare_user_message(envelope).await?;
         if let Some(outcome) = self
             .replay_prepared_user_message(envelope, &prepared)
@@ -546,15 +495,13 @@ where
             return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
-        // Bound the original untrusted channel descriptor set before it
-        // reaches a policy backend. Rewritten descriptors are reconciled and
-        // revalidated later, immediately before provider fetch.
-        if !envelope.channel_attachment_refs().is_empty() {
-            validate_attachment_sources(
-                payload.attachments.as_slice(),
-                envelope.channel_attachment_refs(),
-            )?;
-        }
+        // The adapter has already completed vendor transfer. Validate the
+        // descriptor/byte pairing and canonicalize media types before either
+        // the policy backend or durable message acceptance sees it.
+        let attachments = validate_and_normalize_inbound_attachments(
+            original_descriptors.as_slice(),
+            attachments,
+        )?;
 
         let policy_outcome = check_before_inbound_policy(
             before_inbound_policy,
@@ -584,113 +531,21 @@ where
             }
         };
 
-        let attachments = self
-            .resolve_inbound_attachments(
-                envelope_for_turn,
-                attachments,
-                pinned_channel_ingress.as_deref(),
-                pinned_channel_egress.as_deref(),
-            )
-            .await?;
-
-        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
-            .await
-            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
-    }
-
-    async fn resolve_inbound_attachments(
-        &self,
-        envelope: &ProductInboundEnvelope,
-        inline_attachments: Vec<InboundAttachment>,
-        pinned_channel_ingress: Option<&dyn ChannelIngress>,
-        pinned_channel_egress: Option<&dyn RestrictedEgress>,
-    ) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
-        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+        let ProductInboundPayload::UserMessage(rewritten_payload) = envelope_for_turn.payload()
+        else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
                 kind: "non_user_message".into(),
             });
         };
-        let sources = envelope.channel_attachment_refs();
-        if !inline_attachments.is_empty() {
-            if !sources.is_empty() {
-                return Err(permanent_attachment_failure(
-                    "mixed inline and channel attachment sources are not allowed",
-                ));
-            }
-            return Ok(inline_attachments);
-        }
-        if payload.attachments.is_empty() {
-            return Ok(Vec::new());
-        }
-        if sources.is_empty() {
-            return Err(permanent_attachment_failure(
-                "attachment descriptors have no channel transfer references",
-            ));
-        }
-        validate_attachment_sources(payload.attachments.as_slice(), sources)?;
+        let attachments = reconcile_inbound_attachments_after_policy(
+            original_descriptors.as_slice(),
+            rewritten_payload.attachments.as_slice(),
+            attachments,
+        )?;
 
-        let adapter = pinned_channel_ingress.ok_or_else(|| {
-            permanent_attachment_failure("channel attachment transfer is not configured")
-        })?;
-        let egress = pinned_channel_egress.ok_or_else(|| {
-            permanent_attachment_failure("channel attachment transfer is not configured")
-        })?;
-        let mut fetched = Vec::with_capacity(sources.len());
-        let mut total_bytes = 0usize;
-        for source in sources {
-            let mut attachment = adapter
-                .fetch_attachment(source, egress)
-                .await
-                .map_err(channel_attachment_error)?;
-            if attachment.id != source.descriptor.external_file_id {
-                return Err(permanent_attachment_failure(
-                    "fetched attachment id does not match its descriptor",
-                ));
-            }
-            // Compare canonical forms on both sides. The descriptor keeps the
-            // vendor's raw media type (which legitimately carries parameters
-            // such as `; charset=utf-8`), so normalizing only the fetched side
-            // would reject every attachment whose declared type is not already
-            // canonical instead of catching a genuine provider mismatch.
-            let mime_type = ironclaw_common::normalize_mime_type(&attachment.mime_type);
-            let declared_mime_type =
-                ironclaw_common::normalize_mime_type(&source.descriptor.mime_type);
-            if mime_type != declared_mime_type || !ironclaw_common::is_supported_mime(&mime_type) {
-                return Err(permanent_attachment_failure(
-                    "fetched attachment MIME type does not match its descriptor",
-                ));
-            }
-            attachment.mime_type = mime_type;
-            // The descriptor's filename wins when the vendor supplied one;
-            // otherwise keep whatever the adapter recovered. Some vendor
-            // payload kinds (inline photos, voice notes, stickers) carry no
-            // filename at all, and the adapter derives one from the provider
-            // download path — overwriting unconditionally discarded it.
-            if let Some(descriptor_filename) = source.descriptor.filename.clone() {
-                attachment.filename = Some(descriptor_filename);
-            }
-            if attachment.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
-                return Err(permanent_attachment_failure(
-                    "attachment exceeds the per-file byte limit",
-                ));
-            }
-            if let Some(declared_size) = source.descriptor.size_bytes
-                && declared_size != attachment.bytes.len() as u64
-            {
-                return Err(ProductSurfaceFailure::InboundAttachmentFailed {
-                    reason: "fetched attachment size does not match its descriptor".into(),
-                    retryable: true,
-                });
-            }
-            total_bytes = total_bytes.saturating_add(attachment.bytes.len());
-            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
-                return Err(permanent_attachment_failure(
-                    "attachments exceed the total byte limit",
-                ));
-            }
-            fetched.push(attachment);
-        }
-        Ok(fetched)
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
+            .await
+            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 
     async fn prepare_user_message(
@@ -1065,70 +920,99 @@ where
     }
 }
 
-fn validate_attachment_sources(
-    descriptors: &[ironclaw_extension_contracts::external::ProductAttachmentDescriptor],
-    sources: &[ChannelAttachmentRef],
-) -> Result<(), ProductSurfaceFailure> {
-    if descriptors.len() != sources.len() {
+fn validate_and_normalize_inbound_attachments(
+    descriptors: &[ProductAttachmentDescriptor],
+    attachments: Vec<InboundAttachment>,
+) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
+    if descriptors.len() != attachments.len() {
         return Err(permanent_attachment_failure(
-            "channel attachment references do not match message descriptors",
+            "attachment bytes do not match message descriptors",
         ));
     }
-    if sources.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+    if attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
         return Err(permanent_attachment_failure(
             "attachments exceed the count limit",
         ));
     }
-    let mut declared_total = 0u64;
-    for (descriptor, source) in descriptors.iter().zip(sources) {
-        if descriptor != &source.descriptor {
+    let mut external_file_ids = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    let mut normalized = Vec::with_capacity(attachments.len());
+    for (descriptor, mut attachment) in descriptors.iter().zip(attachments) {
+        if !external_file_ids.insert(descriptor.external_file_id.clone()) {
             return Err(permanent_attachment_failure(
-                "channel attachment references do not match message descriptors",
+                "attachment descriptors contain duplicate external file ids",
             ));
         }
-        if !ironclaw_common::is_supported_mime(&descriptor.mime_type) {
+        if attachment.id != descriptor.external_file_id {
             return Err(permanent_attachment_failure(
-                "attachment MIME type is not supported",
+                "fetched attachment id does not match its descriptor",
             ));
         }
-        if let Some(size) = descriptor.size_bytes {
-            if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
-                return Err(permanent_attachment_failure(
-                    "attachment exceeds the per-file byte limit",
-                ));
-            }
-            declared_total = declared_total.saturating_add(size);
-            if declared_total > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
-                return Err(permanent_attachment_failure(
-                    "attachments exceed the total byte limit",
-                ));
-            }
+        let mime_type = ironclaw_common::normalize_mime_type(&attachment.mime_type);
+        let declared_mime_type = ironclaw_common::normalize_mime_type(&descriptor.mime_type);
+        if mime_type != declared_mime_type || !ironclaw_common::is_supported_mime(&mime_type) {
+            return Err(permanent_attachment_failure(
+                "fetched attachment MIME type does not match its descriptor",
+            ));
         }
+        attachment.mime_type = mime_type;
+        if let Some(descriptor_filename) = descriptor.filename.clone() {
+            attachment.filename = Some(descriptor_filename);
+        }
+        if attachment.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
+            return Err(permanent_attachment_failure(
+                "attachment exceeds the per-file byte limit",
+            ));
+        }
+        if let Some(declared_size) = descriptor.size_bytes
+            && declared_size != attachment.bytes.len() as u64
+        {
+            return Err(permanent_attachment_failure(
+                "fetched attachment size does not match its descriptor",
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(attachment.bytes.len());
+        if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+            return Err(permanent_attachment_failure(
+                "attachments exceed the total byte limit",
+            ));
+        }
+        normalized.push(attachment);
     }
-    Ok(())
+    Ok(normalized)
 }
 
-fn channel_attachment_error(error: ChannelError) -> ProductSurfaceFailure {
-    match error {
-        ChannelError::AttachmentTransfer { retryable, .. } => {
-            ProductSurfaceFailure::InboundAttachmentFailed {
-                reason: "channel attachment transfer failed".into(),
-                retryable,
-            }
-        }
-        ChannelError::Configuration { .. } => ProductSurfaceFailure::InboundAttachmentFailed {
-            reason: "channel attachment transfer failed".into(),
-            retryable: true,
-        },
-        ChannelError::Unsupported => permanent_attachment_failure(
-            "channel adapter does not support inbound attachment transfer",
-        ),
-        ChannelError::Parse { .. }
-        | ChannelError::Render { .. }
-        | ChannelError::VendorWiring { .. } => {
-            permanent_attachment_failure("channel attachment transfer failed")
-        }
+fn reconcile_inbound_attachments_after_policy(
+    original_descriptors: &[ProductAttachmentDescriptor],
+    rewritten_descriptors: &[ProductAttachmentDescriptor],
+    attachments: Vec<InboundAttachment>,
+) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
+    if original_descriptors.len() != attachments.len() {
+        return Err(permanent_attachment_failure(
+            "attachment bytes do not match original message descriptors",
+        ));
     }
+    let mut used = BTreeSet::new();
+    let mut reconciled = Vec::with_capacity(rewritten_descriptors.len());
+    for rewritten in rewritten_descriptors {
+        let Some((index, _)) = original_descriptors
+            .iter()
+            .enumerate()
+            .find(|(index, original)| !used.contains(index) && *original == rewritten)
+        else {
+            return Err(permanent_attachment_failure(
+                "policy rewrite changed or invented an attachment descriptor",
+            ));
+        };
+        used.insert(index);
+        let attachment = attachments.get(index).cloned().ok_or_else(|| {
+            permanent_attachment_failure(
+                "attachment bytes do not match original message descriptors",
+            )
+        })?;
+        reconciled.push(attachment);
+    }
+    Ok(reconciled)
 }
 
 fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFailure {

@@ -555,18 +555,29 @@ async fn assert_partial_failure_attempts(services: &RebornRuntime, scope: &TurnS
 /// normalized message (mirrors the first half of `extension_delivery.rs`'s
 /// `preresolve_vendor_turn_scope`, without the HTTP layer).
 async fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
+    let egress = ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
+        Arc::new(
+            |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                status: 200,
+                body: Vec::new(),
+            },
+        ),
+    );
     let outcome = ironclaw_slack_extension::SlackChannelAdapter
-        .receive(VerifiedInbound {
-            extension_id: "slack",
-            installation_id: SLACK_INSTALLATION,
-            config: &[],
-            body: body.as_bytes(),
-            headers: &[],
-            // Slack's manifest `presentation.can_reply_in_threads` (#7377
-            // made the flag load-bearing); a DM body is unaffected either
-            // way, but the value must mirror the shipped manifest.
-            can_reply_in_threads: true,
-        })
+        .receive(
+            VerifiedInbound {
+                extension_id: "slack",
+                installation_id: SLACK_INSTALLATION,
+                config: &[],
+                body: body.as_bytes(),
+                headers: &[],
+                // Slack's manifest `presentation.can_reply_in_threads` (#7377
+                // made the flag load-bearing); a DM body is unaffected either
+                // way, but the value must mirror the shipped manifest.
+                can_reply_in_threads: true,
+            },
+            &egress,
+        )
         .await
         .expect("the slack DM body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
@@ -766,8 +777,6 @@ async fn admit_slack_dm_message(
             extension_id: "slack".to_string(),
             installation_id: SLACK_INSTALLATION.to_string(),
             message,
-            channel_adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-            channel_egress: None,
         })
         .await
         .expect("slack DM event is durably admitted");

@@ -4,8 +4,8 @@
 //! requests. Each verified fragment is therefore staged before its webhook is
 //! acknowledged, then a leased background worker admits the merged message
 //! after the provider-selected quiet window. The snapshot is host-private:
-//! opaque vendor attachment references never enter events, projections,
-//! transcripts, or model-visible state.
+//! completed attachment bytes never enter events, projections, transcripts,
+//! or model-visible state before admission.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
-use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, InboundBatchFragment, ProductTriggerReason,
+    ChannelConversationContext, InboundBatchFragment, NormalizedAttachment,
+    NormalizedInboundMessage, ProductTriggerReason,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -25,6 +25,7 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     error::HostApiError,
     ids::{InvocationId, TenantId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -38,7 +39,10 @@ const INBOUND_BATCH_ALIAS: &str = "/tenant-shared/inbound-batches";
 const INBOUND_BATCH_SNAPSHOT_PATH: &str = "/tenant-shared/inbound-batches/pending.json";
 const MAX_BATCHES: usize = 1_024;
 const MAX_FRAGMENTS_PER_BATCH: usize = 32;
-const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+// One complete message may carry 10 MiB of decoded attachment bytes. Base64
+// persistence adds ~4/3 overhead; 16 MiB keeps one maximum-size message plus
+// bounded metadata representable while retaining a hard snapshot ceiling.
+const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const PENDING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const TERMINAL_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const CLAIM_LEASE: Duration = Duration::from_secs(2 * 60);
@@ -655,7 +659,8 @@ struct StoredNormalizedInboundMessage {
     event_id: ExternalEventId,
     text: String,
     trigger: ProductTriggerReason,
-    attachments: Vec<StoredChannelAttachmentRef>,
+    attachments: Vec<StoredNormalizedAttachment>,
+    conversation_context: Option<String>,
     reply_context: Option<Vec<u8>>,
 }
 
@@ -670,8 +675,12 @@ impl From<&NormalizedInboundMessage> for StoredNormalizedInboundMessage {
             attachments: message
                 .attachments
                 .iter()
-                .map(StoredChannelAttachmentRef::from)
+                .map(StoredNormalizedAttachment::from)
                 .collect(),
+            conversation_context: message
+                .conversation_context
+                .as_ref()
+                .map(|context| context.text.clone()),
             reply_context: message.reply_context.clone(),
         }
     }
@@ -688,43 +697,82 @@ impl StoredNormalizedInboundMessage {
             attachments: self
                 .attachments
                 .into_iter()
-                .map(StoredChannelAttachmentRef::into_attachment)
+                .map(StoredNormalizedAttachment::into_attachment)
                 .collect(),
+            conversation_context: self
+                .conversation_context
+                .map(|text| ChannelConversationContext { text }),
             reply_context: self.reply_context,
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredChannelAttachmentRef {
+struct StoredNormalizedAttachment {
     descriptor: ProductAttachmentDescriptor,
-    vendor_ref: String,
+    fetched_id: String,
+    fetched_mime_type: String,
+    fetched_filename: Option<String>,
+    #[serde(with = "base64_bytes")]
+    fetched_bytes: Vec<u8>,
 }
 
-impl std::fmt::Debug for StoredChannelAttachmentRef {
+impl std::fmt::Debug for StoredNormalizedAttachment {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("StoredChannelAttachmentRef")
+            .debug_struct("StoredNormalizedAttachment")
             .field("descriptor", &self.descriptor)
-            .finish_non_exhaustive()
+            .field("fetched_id", &self.fetched_id)
+            .field("fetched_mime_type", &self.fetched_mime_type)
+            .field("fetched_filename", &self.fetched_filename)
+            .field("size_bytes", &self.fetched_bytes.len())
+            .finish()
     }
 }
 
-impl From<&ChannelAttachmentRef> for StoredChannelAttachmentRef {
-    fn from(attachment: &ChannelAttachmentRef) -> Self {
+impl From<&NormalizedAttachment> for StoredNormalizedAttachment {
+    fn from(attachment: &NormalizedAttachment) -> Self {
         Self {
             descriptor: attachment.descriptor.clone(),
-            vendor_ref: attachment.vendor_ref.clone(),
+            fetched_id: attachment.fetched.id.clone(),
+            fetched_mime_type: attachment.fetched.mime_type.clone(),
+            fetched_filename: attachment.fetched.filename.clone(),
+            fetched_bytes: attachment.fetched.bytes.clone(),
         }
     }
 }
 
-impl StoredChannelAttachmentRef {
-    fn into_attachment(self) -> ChannelAttachmentRef {
-        ChannelAttachmentRef {
+impl StoredNormalizedAttachment {
+    fn into_attachment(self) -> NormalizedAttachment {
+        NormalizedAttachment {
             descriptor: self.descriptor,
-            vendor_ref: self.vendor_ref,
+            fetched: InboundAttachment {
+                id: self.fetched_id,
+                mime_type: self.fetched_mime_type,
+                filename: self.fetched_filename,
+                bytes: self.fetched_bytes,
+            },
         }
+    }
+}
+
+mod base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD_NO_PAD.decode(encoded).map_err(D::Error::custom)
     }
 }
 
@@ -873,7 +921,7 @@ mod tests {
                 event_id: ExternalEventId::new(event_id).expect("event"),
                 text: format!("fragment {fragment_id}"),
                 trigger: ProductTriggerReason::DirectChat,
-                attachments: vec![ChannelAttachmentRef {
+                attachments: vec![NormalizedAttachment {
                     descriptor: ProductAttachmentDescriptor::new(
                         fragment_id,
                         "text/plain",
@@ -882,8 +930,14 @@ mod tests {
                         ProductAttachmentKind::Document,
                     )
                     .expect("descriptor"),
-                    vendor_ref: format!("opaque-{fragment_id}"),
+                    fetched: InboundAttachment {
+                        id: fragment_id.to_string(),
+                        mime_type: "text/plain".to_string(),
+                        filename: Some(format!("{fragment_id}.txt")),
+                        bytes: vec![order as u8],
+                    },
                 }],
+                conversation_context: None,
                 reply_context: None,
             },
         }

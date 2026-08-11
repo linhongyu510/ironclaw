@@ -18,11 +18,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelIngress, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
-    ProductTriggerReason,
+    ChannelConversationContext, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
 };
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
@@ -467,9 +465,7 @@ impl InboundSink for GenericChannelInboundSink {
         let InboundAdmission {
             extension_id: _,
             installation_id,
-            message,
-            channel_adapter,
-            channel_egress,
+            mut message,
         } = admission;
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
@@ -503,18 +499,19 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
-        // Advisory channel conversation context for shared-channel triggers:
-        // fetched host-side through the same pinned adapter + manifest-
-        // restricted egress that parsed the request, BEFORE admission and
-        // independent of the attachment-vs-plain branching below. Any miss
-        // (no capability, missing scopes, vendor/egress failure) degrades to
-        // no context — it never fails the sink.
-        let channel_context = fetch_channel_conversation_context(
-            channel_adapter.as_ref(),
-            channel_egress.as_deref(),
-            &message,
-        )
-        .await;
+        // The adapter decides whether vendor history is applicable and returns
+        // it with the complete message. The host remains the trust boundary for
+        // that untrusted text and sanitizes it before product admission.
+        message.conversation_context = message
+            .conversation_context
+            .take()
+            .and_then(|context| sanitize_channel_conversation_context(&context.text))
+            .and_then(|text| ChannelConversationContext::new(text).ok());
+        let attachments = message
+            .attachments
+            .iter()
+            .map(|attachment| attachment.fetched.clone())
+            .collect();
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -533,31 +530,13 @@ impl InboundSink for GenericChannelInboundSink {
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
             requested_model: None,
-            channel_context,
         };
-        let response = if request.message.attachments.is_empty() {
-            Box::pin(self.config.surface.admit_channel_inbound(request)).await
-        } else {
-            // Attachment-bearing admission pins the exact adapter and
-            // manifest-restricted egress that parsed the request, so accepted
-            // intake can fetch bytes after replay dedupe and policy.
-            let Some(channel_egress) = channel_egress else {
-                return Err(InboundSinkError {
-                    retryable: true,
-                    reason: "channel attachment egress is unavailable".to_string(),
-                });
-            };
-            Box::pin(
-                self.config
-                    .surface
-                    .admit_channel_inbound_with_attachment_transfer(
-                        request,
-                        channel_adapter,
-                        channel_egress,
-                    ),
-            )
-            .await
-        };
+        let response = Box::pin(
+            self.config
+                .surface
+                .admit_channel_inbound_with_inline_attachments(request, attachments),
+        )
+        .await;
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -628,49 +607,6 @@ impl InboundSink for GenericChannelInboundSink {
                     Ok(InboundAdmissionAck::Accepted)
                 }
             }
-        }
-    }
-}
-
-/// Whether an inbound trigger addresses the bot inside a shared conversation
-/// (channel/group), where recent vendor-side history is useful advisory
-/// context. Direct chats already carry their own thread; linked-thread
-/// actions are follow-ups on conversations the run already knows.
-fn is_shared_channel_trigger(trigger: ProductTriggerReason) -> bool {
-    // Only the conversational triggers hydrate: a `BotCommand` (slash command)
-    // is classified into a product command whose envelope never carries
-    // channel context, so fetching it would burn a vendor GET for nothing.
-    matches!(
-        trigger,
-        ProductTriggerReason::BotMention | ProductTriggerReason::ReplyToBot
-    )
-}
-
-/// Best-effort advisory context fetch for one shared-channel inbound message.
-/// Every miss — non-shared trigger, no deployment egress, adapter without the
-/// capability, vendor/egress failure, or unusable text — returns `None`; this
-/// helper must never fail the sink.
-async fn fetch_channel_conversation_context(
-    channel_adapter: &dyn ChannelIngress,
-    channel_egress: Option<&dyn RestrictedEgress>,
-    message: &NormalizedInboundMessage,
-) -> Option<String> {
-    if !is_shared_channel_trigger(message.trigger) {
-        return None;
-    }
-    let egress = channel_egress?;
-    match channel_adapter
-        .fetch_conversation_context(&message.conversation, egress)
-        .await
-    {
-        Ok(Some(context)) => sanitize_channel_conversation_context(&context.text),
-        Ok(None) => None,
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                "channel conversation context fetch failed; admitting without context"
-            );
-            None
         }
     }
 }
@@ -999,16 +935,12 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extension_contracts::channel_adapter::ChannelIngress;
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelAttachmentRef, ProductTriggerReason,
+        ChannelConversationContext, NormalizedAttachment, ProductTriggerReason,
     };
     use ironclaw_extension_contracts::external::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
         ProductAttachmentKind,
-    };
-    use ironclaw_extension_contracts::tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
     use ironclaw_host_api::ids::UserId;
     use ironclaw_product_contracts::inbound::{
@@ -1026,7 +958,9 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
-        transfer_submissions: AtomicUsize,
+        inline_submissions: AtomicUsize,
+        inline_attachments:
+            std::sync::Mutex<Vec<Vec<ironclaw_host_api::attachment::InboundAttachment>>>,
         classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
         channel_contexts: std::sync::Mutex<Vec<Option<String>>>,
     }
@@ -1035,7 +969,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
-                transfer_submissions: AtomicUsize::new(0),
+                inline_submissions: AtomicUsize::new(0),
+                inline_attachments: std::sync::Mutex::new(Vec::new()),
                 classifications: std::sync::Mutex::new(Vec::new()),
                 channel_contexts: std::sync::Mutex::new(Vec::new()),
             }
@@ -1045,8 +980,21 @@ mod tests {
             self.submissions.load(Ordering::SeqCst)
         }
 
-        fn transfer_submit_count(&self) -> usize {
-            self.transfer_submissions.load(Ordering::SeqCst)
+        fn inline_submit_count(&self) -> usize {
+            self.inline_submissions.load(Ordering::SeqCst)
+        }
+
+        fn inline_attachments(&self) -> Vec<Vec<u8>> {
+            self.inline_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .flat_map(|attachments| {
+                    attachments
+                        .iter()
+                        .map(|attachment| attachment.bytes.clone())
+                })
+                .collect()
         }
 
         fn classifications(&self) -> Vec<Option<ChannelInboundClassification>> {
@@ -1077,7 +1025,13 @@ mod tests {
             self.channel_contexts
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request.channel_context.clone());
+                .push(
+                    request
+                        .message
+                        .conversation_context
+                        .as_ref()
+                        .map(|context| context.text.clone()),
+                );
             self.submissions.fetch_add(1, Ordering::SeqCst);
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
@@ -1119,13 +1073,16 @@ mod tests {
             }))
         }
 
-        async fn admit_channel_inbound_with_attachment_transfer(
+        async fn admit_channel_inbound_with_inline_attachments(
             &self,
             request: ChannelInboundSurfaceRequest,
-            _channel_adapter: Arc<dyn ChannelIngress>,
-            _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
+            attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
         ) -> ChannelInboundSurfaceOutcome {
-            self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
+            self.inline_submissions.fetch_add(1, Ordering::SeqCst);
+            self.inline_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(attachments);
             self.admit_channel_inbound(request).await
         }
     }
@@ -1138,25 +1095,13 @@ mod tests {
             &self,
             _request: ChannelInboundSurfaceRequest,
         ) -> ChannelInboundSurfaceOutcome {
-            panic!("attachment admission must use the channel-transfer entrypoint")
-        }
-    }
-
-    struct TestRestrictedEgress;
-
-    #[async_trait]
-    impl RestrictedEgress for TestRestrictedEgress {
-        async fn send(
-            &self,
-            _request: RestrictedEgressRequest,
-        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-            Err(RestrictedEgressError::PolicyDenied)
+            panic!("attachment admission must use the inline-attachment entrypoint")
         }
     }
 
     fn admission_with_attachment() -> InboundAdmission {
         let mut admission = admission_for("review the attached report");
-        admission.message.attachments.push(ChannelAttachmentRef {
+        admission.message.attachments.push(NormalizedAttachment {
             descriptor: ProductAttachmentDescriptor::new(
                 "file-1",
                 "application/pdf",
@@ -1165,9 +1110,13 @@ mod tests {
                 ProductAttachmentKind::Document,
             )
             .expect("attachment descriptor"),
-            vendor_ref: "opaque-provider-file-reference".to_string(),
+            fetched: ironclaw_host_api::attachment::InboundAttachment {
+                id: "file-1".to_string(),
+                mime_type: "application/pdf".to_string(),
+                filename: Some("vendor-report.pdf".to_string()),
+                bytes: b"data".to_vec(),
+            },
         });
-        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
         admission
     }
 
@@ -1188,8 +1137,6 @@ mod tests {
 
     fn admission_for(text: &str) -> InboundAdmission {
         InboundAdmission {
-            channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
-            channel_egress: None,
             extension_id: "vendorx".to_string(),
             installation_id: "install".to_string(),
             message: NormalizedInboundMessage {
@@ -1200,6 +1147,7 @@ mod tests {
                 text: text.to_string(),
                 trigger: ProductTriggerReason::DirectChat,
                 attachments: Vec::new(),
+                conversation_context: None,
                 reply_context: None,
             },
         }
@@ -1371,48 +1319,29 @@ mod tests {
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
     }
 
-    /// A deployment without a channel egress transport cannot fetch bytes.
-    /// That is operator-fixable rather than structural, so it asks the vendor
-    /// to redeliver instead of durably settling the message.
     #[tokio::test]
-    async fn attachment_admission_without_channel_egress_is_retryable() {
-        let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let mut admission = admission_with_attachment();
-        admission.channel_egress = None;
-
-        let error = sink
-            .admit(admission)
-            .await
-            .expect_err("missing channel egress must not claim durable acceptance");
-
-        assert!(error.retryable);
-        assert_eq!(error.reason, "channel attachment egress is unavailable");
-        assert_eq!(workflow.submit_count(), 0);
-        assert_eq!(workflow.transfer_submit_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn attachment_admission_with_egress_uses_the_transfer_entrypoint() {
+    async fn complete_attachment_admission_uses_the_inline_entrypoint_with_exact_bytes() {
         let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
 
         let ack = sink
             .admit(admission_with_attachment())
             .await
-            .expect("attachment admission with pinned egress is admitted");
+            .expect("complete attachment is admitted");
 
         assert_eq!(ack, InboundAdmissionAck::Accepted);
         sink.drain().await;
-        assert_eq!(workflow.transfer_submit_count(), 1);
+        assert_eq!(workflow.inline_submit_count(), 1);
+        assert_eq!(workflow.inline_attachments(), vec![b"data".to_vec()]);
     }
 
-    /// A surface that does not implement attachment transfer will not
+    /// A surface that does not implement inline attachment landing will not
     /// implement it for a redelivery of the same message, so the inherited
     /// default settles permanently. A retryable outcome here left the vendor
     /// redelivering forever while the user received nothing at all — not even
     /// the message text — and it disagreed with the equivalent default on the
     /// inbound turn service, which was already permanent for this condition.
     #[tokio::test]
-    async fn inherited_attachment_transfer_failure_settles_permanently() {
+    async fn inherited_inline_attachment_failure_settles_permanently() {
         let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
@@ -1425,11 +1354,11 @@ mod tests {
         let error = sink
             .admit(admission_with_attachment())
             .await
-            .expect_err("an inherited unsupported transfer must not be admitted");
+            .expect_err("an inherited unsupported inline landing must not be admitted");
 
         assert!(
             !error.retryable,
-            "a structural transfer gap must not ask the vendor to redeliver"
+            "a structural landing gap must not ask the vendor to redeliver"
         );
     }
 
@@ -1467,127 +1396,37 @@ mod tests {
         }
     }
 
-    /// Scripted conversation-context adapter: records fetch calls and returns
-    /// a fixed outcome (context, none, or a channel error).
-    struct ScriptedContextAdapter {
-        fetch_calls: AtomicUsize,
-        outcome: Result<Option<String>, ChannelError>,
-    }
-
-    impl ScriptedContextAdapter {
-        fn new(outcome: Result<Option<String>, ChannelError>) -> Self {
-            Self {
-                fetch_calls: AtomicUsize::new(0),
-                outcome,
-            }
-        }
-    }
-
-    use ironclaw_extension_contracts::channel_adapter::{
-        ChannelConversationContext, ChannelError, InboundOutcome, VerifiedInbound,
-    };
-
-    #[async_trait]
-    impl ChannelIngress for ScriptedContextAdapter {
-        async fn receive(
-            &self,
-            _request: VerifiedInbound<'_>,
-        ) -> Result<InboundOutcome, ChannelError> {
-            Ok(InboundOutcome::Ignore)
-        }
-
-        async fn fetch_conversation_context(
-            &self,
-            _conversation: &ExternalConversationRef,
-            _egress: &dyn RestrictedEgress,
-        ) -> Result<Option<ChannelConversationContext>, ChannelError> {
-            self.fetch_calls.fetch_add(1, Ordering::SeqCst);
-            match &self.outcome {
-                Ok(Some(text)) => Ok(Some(
-                    ChannelConversationContext::new(text.clone()).expect("scripted context"),
-                )),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error.clone()),
-            }
-        }
-    }
-
-    fn shared_admission_with_adapter(adapter: Arc<ScriptedContextAdapter>) -> InboundAdmission {
+    fn shared_admission_with_context(context: &str) -> InboundAdmission {
         let mut admission = admission_for("<@bot> summarize this thread");
         admission.message.trigger = ProductTriggerReason::BotMention;
-        admission.channel_adapter = adapter;
-        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+        admission.message.conversation_context =
+            Some(ChannelConversationContext::new(context.to_string()).expect("scripted context"));
         admission
     }
 
     #[tokio::test]
-    async fn shared_trigger_attaches_fetched_conversation_context_to_the_admitted_request() {
+    async fn adapter_supplied_context_is_sanitized_before_the_admitted_request() {
         let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
-            "<@U1>: earlier message\n<@U2>: reply".to_string(),
-        ))));
 
         let ack = sink
-            .admit(shared_admission_with_adapter(Arc::clone(&adapter)))
+            .admit(shared_admission_with_context(
+                "<@U1>: earlier\r\nmessage\u{0007}\n<@U2>: reply",
+            ))
             .await
             .expect("admitted");
 
         assert_eq!(ack, InboundAdmissionAck::Accepted);
-        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             surface.channel_contexts(),
-            vec![Some("<@U1>: earlier message\n<@U2>: reply".to_string())]
+            vec![Some("<@U1>: earlier\nmessage\n<@U2>: reply".to_string())]
         );
     }
 
     #[tokio::test]
-    async fn direct_chat_never_fetches_conversation_context() {
+    async fn absent_adapter_context_stays_absent() {
         let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
-            "must never be fetched".to_string(),
-        ))));
-        let mut admission = admission_for("hello");
-        admission.channel_adapter = Arc::clone(&adapter) as Arc<dyn ChannelIngress>;
-        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+        sink.admit(admission_for("hello")).await.expect("admitted");
 
-        sink.admit(admission).await.expect("admitted");
-
-        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(surface.channel_contexts(), vec![None]);
-    }
-
-    #[tokio::test]
-    async fn conversation_context_fetch_failure_still_admits_without_context() {
-        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let adapter = Arc::new(ScriptedContextAdapter::new(Err(
-            ChannelError::VendorWiring {
-                reason: "scripted vendor failure".to_string(),
-            },
-        )));
-
-        let ack = sink
-            .admit(shared_admission_with_adapter(Arc::clone(&adapter)))
-            .await
-            .expect("a context fetch failure must not fail admission");
-
-        assert_eq!(ack, InboundAdmissionAck::Accepted);
-        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(surface.channel_contexts(), vec![None]);
-        assert_eq!(surface.submit_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn shared_trigger_without_egress_skips_the_fetch_and_still_admits() {
-        let (sink, surface, _) = pairing_sink(ChannelPairingInterception::NotHandled);
-        let adapter = Arc::new(ScriptedContextAdapter::new(Ok(Some(
-            "requires egress".to_string(),
-        ))));
-        let mut admission = shared_admission_with_adapter(Arc::clone(&adapter));
-        admission.channel_egress = None;
-
-        sink.admit(admission).await.expect("admitted");
-
-        assert_eq!(adapter.fetch_calls.load(Ordering::SeqCst), 0);
         assert_eq!(surface.channel_contexts(), vec![None]);
     }
 

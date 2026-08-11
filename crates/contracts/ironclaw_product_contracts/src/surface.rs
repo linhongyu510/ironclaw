@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, NormalizedInboundMessage};
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
@@ -73,11 +72,6 @@ pub struct ChannelInboundSurfaceRequest {
     /// Caller-requested model hint for session/API transports. `None` for
     /// channels that don't select a model.
     pub requested_model: Option<String>,
-    /// Recent vendor-side conversation history fetched host-side at ingress
-    /// (through the channel's restricted egress) for shared-channel triggers.
-    /// UNTRUSTED third-party text, advisory only: `None` whenever the channel
-    /// has no such capability or the fetch degraded.
-    pub channel_context: Option<String>,
 }
 
 /// Durable channel admission evidence returned by product workflow.
@@ -119,49 +113,12 @@ pub trait ChannelInboundProductSurface: Send + Sync {
         request: ChannelInboundSurfaceRequest,
     ) -> ChannelInboundSurfaceOutcome;
 
-    /// Admit one channel message while pinning the exact adapter and
-    /// manifest-restricted egress authority that parsed it, so accepted
-    /// user-message intake can fetch attachment bytes through restricted
-    /// egress after replay dedupe and before-inbound policy. The authority is
-    /// transient host state and never enters the serialized envelope or the
-    /// durable action ledger.
-    ///
-    /// The default admits attachment-free messages through
-    /// [`Self::admit_channel_inbound`] and fails attachment-bearing admission
-    /// closed for surfaces without transfer support.
-    ///
-    /// The failure is **permanent**: a surface that does not implement
-    /// transfer will never implement it for a redelivery of the same message,
-    /// so a retryable outcome would leave the vendor redelivering forever
-    /// while the user receives nothing — not even the message text. This
-    /// matches the equivalent default on the inbound turn service, which is
-    /// the same structural gap one layer down. A missing *deployment* egress
-    /// transport is a different, operator-fixable condition and stays
-    /// retryable at the ingress sink.
-    async fn admit_channel_inbound_with_attachment_transfer(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-        _channel_ingress: Arc<dyn ChannelIngress>,
-        _channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> ChannelInboundSurfaceOutcome {
-        if request.message.attachments.is_empty() {
-            return self.admit_channel_inbound(request).await;
-        }
-        ChannelInboundSurfaceOutcome::Invalid(ProductAdapterError::SurfaceRejected {
-            kind: ProductSurfaceRejectionKind::InvalidRequest,
-            status_code: 400,
-            retryable: false,
-            reason: RedactedString::new(
-                "channel attachment transfer is not supported by this product surface",
-            ),
-        })
-    }
-
-    /// Admit one channel message together with host-staged inline attachment
-    /// bytes — the session-transport door, where a synchronous authenticated
-    /// surface (browser upload, API body) already decoded the bytes and no
-    /// vendor fetch is needed. The bytes never enter the serialized envelope;
-    /// they are landed at message acceptance.
+    /// Admit one channel message together with already-materialized attachment
+    /// bytes. Authenticated session transports decode their inline bodies;
+    /// vendor adapters fetch through manifest-restricted egress inside
+    /// `ChannelIngress::receive`. Both enter this single landing door. The
+    /// bytes never enter the serialized envelope; they are landed at message
+    /// acceptance.
     ///
     /// The default admits attachment-free requests through
     /// [`Self::admit_channel_inbound`] and fails attachment-bearing admission

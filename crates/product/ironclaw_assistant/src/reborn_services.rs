@@ -6625,6 +6625,7 @@ fn session_inbound_request(
         text: content,
         trigger: ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
         attachments: Vec::new(),
+        conversation_context: None,
         reply_context: None,
     };
     Ok(ChannelInboundSurfaceRequest {
@@ -6639,9 +6640,6 @@ fn session_inbound_request(
         message,
         classification: None,
         requested_model,
-        // Session transports fetch no vendor-side history; the field exists
-        // for shared-channel webhook triggers.
-        channel_context: None,
     })
 }
 

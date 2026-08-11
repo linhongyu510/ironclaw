@@ -835,6 +835,7 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtu
     async fn receive(
         &self,
         request: ironclaw_extension_contracts::channel_adapter::VerifiedInbound<'_>,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<
         ironclaw_extension_contracts::channel_adapter::InboundOutcome,
         ironclaw_extension_contracts::channel_adapter::ChannelError,
@@ -884,6 +885,7 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelIngress for AcmeFixtu
                     text: field("text")?,
                     trigger: ProductTriggerReason::DirectChat,
                     attachments: Vec::new(),
+                    conversation_context: None,
                     reply_context: Some(b"acme-reply-route".to_vec()),
                 }]))
             }

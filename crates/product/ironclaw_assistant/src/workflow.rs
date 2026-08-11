@@ -12,9 +12,8 @@ use ironclaw_product_contracts::command::ProductCommandContext;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, ProductTriggerReason};
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
-use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::product_adapter::{
     ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
 };
@@ -171,24 +170,7 @@ impl DefaultProductSurface {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(Vec::new()))
-            .await
-    }
-
-    async fn submit_inbound_with_channel_attachment_transfer(
-        &self,
-        envelope: ProductInboundEnvelope,
-        channel_ingress: Arc<dyn ChannelIngress>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(
-            envelope,
-            InboundAttachmentAdmission::Channel {
-                adapter: channel_ingress,
-                egress: channel_egress,
-            },
-        )
-        .await
+        self.submit_inbound_inner(envelope, Vec::new()).await
     }
 
     pub async fn read_projection(
@@ -261,40 +243,7 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
         };
         admission_outcome(
             envelope.clone(),
-            Box::pin(
-                self.submit_inbound_inner(
-                    envelope,
-                    InboundAttachmentAdmission::Inline(attachments),
-                ),
-            )
-            .await,
-        )
-    }
-
-    async fn admit_channel_inbound_with_attachment_transfer(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-        channel_ingress: Arc<dyn ChannelIngress>,
-        channel_egress: Arc<dyn RestrictedEgress>,
-    ) -> ChannelInboundSurfaceOutcome {
-        // Preserve the vendor transfer references beside the descriptors the
-        // payload carries; `with_channel_attachment_refs` enforces that they
-        // correspond exactly and stay out of the serialized envelope.
-        let channel_attachment_refs = request.message.attachments.clone();
-        let envelope = match build_channel_envelope(request)
-            .and_then(|envelope| envelope.with_channel_attachment_refs(channel_attachment_refs))
-        {
-            Ok(envelope) => envelope,
-            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
-        };
-        admission_outcome(
-            envelope.clone(),
-            Box::pin(self.submit_inbound_with_channel_attachment_transfer(
-                envelope,
-                channel_ingress,
-                channel_egress,
-            ))
-            .await,
+            Box::pin(self.submit_inbound_inner(envelope, attachments)).await,
         )
     }
 }
@@ -372,7 +321,13 @@ fn build_channel_envelope(
                 request.message.trigger,
             )?
             .with_requested_model(request.requested_model)
-            .with_channel_context(request.channel_context.clone()),
+            .with_channel_context(
+                request
+                    .message
+                    .conversation_context
+                    .as_ref()
+                    .map(|context| context.text.clone()),
+            ),
         ),
     };
     let parsed = ParsedProductInbound::new(
@@ -401,14 +356,6 @@ fn admission_outcome(
     }
 }
 
-enum InboundAttachmentAdmission {
-    Inline(Vec<InboundAttachment>),
-    Channel {
-        adapter: Arc<dyn ChannelIngress>,
-        egress: Arc<dyn RestrictedEgress>,
-    },
-}
-
 impl DefaultProductSurface {
     /// Shared submit path for both the bytes-free [`Self::submit_inbound`]
     /// door and the inline-attachment [`Self::submit_inbound_with_attachments`] door.
@@ -417,7 +364,7 @@ impl DefaultProductSurface {
     async fn submit_inbound_inner(
         &self,
         envelope: ProductInboundEnvelope,
-        attachment_admission: InboundAttachmentAdmission,
+        attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         if matches!(
             envelope.payload(),
@@ -453,10 +400,8 @@ impl DefaultProductSurface {
         // Inline attachment bytes are only landed for user-message payloads (see
         // `dispatch_payload`). Fail closed if a caller staged bytes on any other
         // payload kind rather than silently dropping the user's files.
-        if matches!(
-            &attachment_admission,
-            InboundAttachmentAdmission::Inline(attachments) if !attachments.is_empty()
-        ) && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+        if !attachments.is_empty()
+            && !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
         {
             return Err(ProductAdapterError::SurfaceRejected {
                 kind: ProductSurfaceRejectionKind::InvalidRequest,
@@ -518,7 +463,7 @@ impl DefaultProductSurface {
                         auth_interaction_service: &*self.auth_interaction_service,
                         delivered_gate_routes: &*self.delivered_gate_routes,
                     },
-                    attachment_admission,
+                    attachments,
                 )
                 .await;
 
@@ -591,8 +536,7 @@ impl DefaultProductSurface {
         envelope: ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, InboundAttachmentAdmission::Inline(attachments))
-            .await
+        self.submit_inbound_inner(envelope, attachments).await
     }
 }
 
@@ -1238,33 +1182,18 @@ async fn dispatch_payload(
     action_id: ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
-    attachment_admission: InboundAttachmentAdmission,
+    attachments: Vec<InboundAttachment>,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            let dispatch = match attachment_admission {
-                InboundAttachmentAdmission::Channel { adapter, egress } => {
-                    ports
-                        .inbound_turn_service
-                        .accept_user_message_with_before_policy_and_channel_transfer(
-                            envelope,
-                            ports.before_inbound_policy,
-                            adapter,
-                            egress,
-                        )
-                        .await?
-                }
-                InboundAttachmentAdmission::Inline(attachments) => {
-                    ports
-                        .inbound_turn_service
-                        .accept_user_message_with_before_policy_and_attachments(
-                            envelope,
-                            ports.before_inbound_policy,
-                            attachments,
-                        )
-                        .await?
-                }
-            };
+            let dispatch = ports
+                .inbound_turn_service
+                .accept_user_message_with_before_policy_and_attachments(
+                    envelope,
+                    ports.before_inbound_policy,
+                    attachments,
+                )
+                .await?;
             match dispatch {
                 InboundUserMessageDispatch::Accepted(outcome) => {
                     let ack = outcome.to_ack();
@@ -2272,10 +2201,10 @@ mod tests {
                 text: "hey team".to_string(),
                 trigger,
                 attachments: Vec::new(),
+                conversation_context: None,
                 reply_context: None,
             },
             classification,
-            channel_context: None,
             requested_model: None,
         }
     }

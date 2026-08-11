@@ -18,7 +18,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAttachmentRef, ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome,
+    ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome, NormalizedAttachment,
     ProductTriggerReason, VerifiedInbound,
 };
 use ironclaw_extension_contracts::channel_adapter::{
@@ -44,6 +44,7 @@ use ironclaw_extension_host::{
     LoadContext, LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 
 /// What the scripted adapter observed per call: forwarded headers, body,
@@ -78,8 +79,6 @@ module = "wasm/acme_chat.wasm"
 [channel]
 id = "messages"
 display_name = "Acme chat"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -142,7 +141,11 @@ struct ScriptedChannelAdapter {
 
 #[async_trait]
 impl ChannelIngress for ScriptedChannelAdapter {
-    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        request: VerifiedInbound<'_>,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         self.inbound_calls.fetch_add(1, Ordering::SeqCst);
         self.seen.lock().expect("seen lock").push((
             request.headers.to_vec(),
@@ -180,16 +183,22 @@ impl ChannelIngress for ScriptedChannelAdapter {
                 let event = value["event"].as_str().unwrap_or("event-1");
                 let conversation = value["conversation"].as_str().unwrap_or("conv-1");
                 let attachments = if self.mode == AdapterMode::BatchFragment {
-                    vec![ChannelAttachmentRef {
+                    let id = value["fragment"].as_str().unwrap_or("fragment");
+                    vec![NormalizedAttachment {
                         descriptor: ProductAttachmentDescriptor::new(
-                            value["fragment"].as_str().unwrap_or("fragment"),
+                            id,
                             "text/plain",
                             value["filename"].as_str().map(str::to_string),
                             Some(1),
                             ProductAttachmentKind::Document,
                         )
                         .expect("attachment descriptor"),
-                        vendor_ref: value["fragment"].as_str().unwrap_or("fragment").to_string(),
+                        fetched: InboundAttachment {
+                            id: id.to_string(),
+                            mime_type: "text/plain".to_string(),
+                            filename: value["filename"].as_str().map(str::to_string),
+                            bytes: vec![1],
+                        },
                     }]
                 } else {
                     Vec::new()
@@ -202,6 +211,7 @@ impl ChannelIngress for ScriptedChannelAdapter {
                     text,
                     trigger: ProductTriggerReason::DirectChat,
                     attachments,
+                    conversation_context: None,
                     reply_context: matches!(self.mode, AdapterMode::MessageWithReplyContext)
                         .then(|| b"opaque-reply-route".to_vec()),
                 };
@@ -609,7 +619,7 @@ fn batch_fragment(
             event_id: ExternalEventId::new("recovery-event").expect("event"),
             text: text.to_string(),
             trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![ChannelAttachmentRef {
+            attachments: vec![NormalizedAttachment {
                 descriptor: ProductAttachmentDescriptor::new(
                     fragment_id,
                     "text/plain",
@@ -618,8 +628,14 @@ fn batch_fragment(
                     ProductAttachmentKind::Document,
                 )
                 .expect("descriptor"),
-                vendor_ref: fragment_id.to_string(),
+                fetched: InboundAttachment {
+                    id: fragment_id.to_string(),
+                    mime_type: "text/plain".to_string(),
+                    filename: Some(format!("{fragment_id}.txt")),
+                    bytes: vec![order as u8],
+                },
             }],
+            conversation_context: None,
             reply_context: None,
         },
     }
@@ -1426,7 +1442,11 @@ struct GenerationChannelAdapter {
 
 #[async_trait]
 impl ChannelIngress for GenerationChannelAdapter {
-    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    async fn receive(
+        &self,
+        _request: VerifiedInbound<'_>,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<InboundOutcome, ChannelError> {
         if let Some(entered) = &self.entered {
             entered.send(()).map_err(|error| ChannelError::Parse {
                 reason: error.to_string(),
@@ -1445,26 +1465,6 @@ impl ChannelIngress for GenerationChannelAdapter {
             ProductAttachmentKind::Image,
         )
         .expect("generation descriptor");
-        Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
-            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
-            conversation: ExternalConversationRef::new(None, "C-1", None, None)
-                .expect("conversation"),
-            event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
-            text: "attachment".to_string(),
-            trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![ChannelAttachmentRef {
-                descriptor,
-                vendor_ref: self.generation.to_string(),
-            }],
-            reply_context: None,
-        }]))
-    }
-
-    async fn fetch_attachment(
-        &self,
-        attachment: &ChannelAttachmentRef,
-        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         egress
             .send(
                 ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest {
@@ -1481,12 +1481,25 @@ impl ChannelIngress for GenerationChannelAdapter {
                 reason: error.to_string(),
                 retryable: true,
             })?;
-        Ok(ironclaw_host_api::attachment::InboundAttachment {
-            id: attachment.descriptor.external_file_id.clone(),
-            mime_type: attachment.descriptor.mime_type.clone(),
-            filename: attachment.descriptor.filename.clone(),
-            bytes: vec![self.generation.as_bytes()[0]],
-        })
+        Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "C-1", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
+            text: "attachment".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: vec![NormalizedAttachment {
+                fetched: InboundAttachment {
+                    id: descriptor.external_file_id.clone(),
+                    mime_type: descriptor.mime_type.clone(),
+                    filename: descriptor.filename.clone(),
+                    bytes: vec![self.generation.as_bytes()[0]],
+                },
+                descriptor,
+            }],
+            conversation_context: None,
+            reply_context: None,
+        }]))
     }
 }
 
@@ -1550,12 +1563,13 @@ impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTrans
     }
 }
 
-struct FetchingAdmissionSink {
+struct CompleteAttachmentAdmissionSink {
     fetched_ids: std::sync::Mutex<Vec<String>>,
+    fetched_bytes: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 #[async_trait]
-impl InboundSink for FetchingAdmissionSink {
+impl InboundSink for CompleteAttachmentAdmissionSink {
     async fn admit(
         &self,
         admission: InboundAdmission,
@@ -1568,22 +1582,14 @@ impl InboundSink for FetchingAdmissionSink {
                 retryable: false,
                 reason: "missing attachment".to_string(),
             })?;
-        let egress = admission.channel_egress.ok_or_else(|| InboundSinkError {
-            retryable: true,
-            reason: "missing pinned egress".to_string(),
-        })?;
-        let fetched = admission
-            .channel_adapter
-            .fetch_attachment(attachment, egress.as_ref())
-            .await
-            .map_err(|error| InboundSinkError {
-                retryable: true,
-                reason: error.to_string(),
-            })?;
         self.fetched_ids
             .lock()
             .expect("fetched ids lock")
-            .push(fetched.id);
+            .push(attachment.fetched.id.clone());
+        self.fetched_bytes
+            .lock()
+            .expect("fetched bytes lock")
+            .push(attachment.fetched.bytes.clone());
         Ok(InboundAdmissionAck::Accepted)
     }
 }
@@ -1612,8 +1618,6 @@ module = "wasm/acme_chat.wasm"
 [channel]
 id = "messages"
 display_name = "Acme chat"
-inbound = true
-outbound = true
 conversation_model = "continuous"
 
 [channel.ingress]
@@ -1697,8 +1701,9 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
         .await
         .expect("activate old generation");
 
-    let sink = Arc::new(FetchingAdmissionSink {
+    let sink = Arc::new(CompleteAttachmentAdmissionSink {
         fetched_ids: std::sync::Mutex::new(Vec::new()),
+        fetched_bytes: std::sync::Mutex::new(Vec::new()),
     });
     let router = Arc::new(ExtensionIngressRouter::new(
         host.snapshot_watch(),
@@ -1761,6 +1766,13 @@ async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upg
             .expect("fetched ids lock")
             .as_slice(),
         ["old-attachment"]
+    );
+    assert_eq!(
+        sink.fetched_bytes
+            .lock()
+            .expect("fetched bytes lock")
+            .as_slice(),
+        [vec![b'o']]
     );
     assert_eq!(
         transport

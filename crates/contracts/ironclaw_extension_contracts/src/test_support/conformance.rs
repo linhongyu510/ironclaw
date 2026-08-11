@@ -149,14 +149,17 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         // ── Inbound: a vendor-valid message normalizes, bounded and
         // well-formed.
         let outcome = ingress
-            .receive(VerifiedInbound {
-                extension_id: &extension_id,
-                installation_id: &installation_id,
-                config: &config,
-                body: &inbound.body,
-                headers: &inbound.headers,
-                can_reply_in_threads: true,
-            })
+            .receive(
+                VerifiedInbound {
+                    extension_id: &extension_id,
+                    installation_id: &installation_id,
+                    config: &config,
+                    body: &inbound.body,
+                    headers: &inbound.headers,
+                    can_reply_in_threads: true,
+                },
+                &server,
+            )
             .await
             .expect("conformance: the vendor-valid message fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
         let InboundOutcome::Messages(messages) = outcome else {
@@ -184,14 +187,17 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             &b"{\"unexpected\":true}"[..],
         ] {
             match ingress
-                .receive(VerifiedInbound {
-                    extension_id: &extension_id,
-                    installation_id: &installation_id,
-                    config: &config,
-                    body: garbage,
-                    headers: &[],
-                    can_reply_in_threads: true,
-                })
+                .receive(
+                    VerifiedInbound {
+                        extension_id: &extension_id,
+                        installation_id: &installation_id,
+                        config: &config,
+                        body: garbage,
+                        headers: &[],
+                        can_reply_in_threads: true,
+                    },
+                    &server,
+                )
                 .await
             {
                 Ok(InboundOutcome::Respond(response)) => response
@@ -219,14 +225,17 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         // immediately, within bounds.
         if let Some(challenge) = challenge_inbound {
             let outcome = ingress
-                .receive(VerifiedInbound {
-                    extension_id: &extension_id,
-                    installation_id: &installation_id,
-                    config: &config,
-                    body: &challenge.body,
-                    headers: &challenge.headers,
-                    can_reply_in_threads: true,
-                })
+                .receive(
+                    VerifiedInbound {
+                        extension_id: &extension_id,
+                        installation_id: &installation_id,
+                        config: &config,
+                        body: &challenge.body,
+                        headers: &challenge.headers,
+                        can_reply_in_threads: true,
+                    },
+                    &server,
+                )
                 .await
                 .expect("conformance: the challenge fixture must parse"); // safety: test-support conformance failure should fail the caller's test.
             let InboundOutcome::Respond(response) = outcome else {

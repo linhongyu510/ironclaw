@@ -30,6 +30,8 @@ use ironclaw_product_contracts::inbound::{
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::attachment_transfer::{ParsedTelegramBatchFragment, ParsedTelegramInboundMessage};
+
 pub const TELEGRAM_API_HOST: &str = "api.telegram.org";
 pub const TELEGRAM_FILE_API_HOST: &str = "api.telegram.org";
 pub const TELEGRAM_USER_ACTOR_KIND: &str = "telegram_user";
@@ -370,8 +372,8 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
 #[derive(Debug)]
 pub enum TelegramInboundEvent {
     Ignore,
-    Message(Box<NormalizedInboundMessage>),
-    BatchFragment(Box<InboundBatchFragment>),
+    Message(Box<ParsedTelegramInboundMessage>),
+    BatchFragment(Box<ParsedTelegramBatchFragment>),
 }
 
 /// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
@@ -418,7 +420,7 @@ pub fn normalize_telegram_update(
     let conversation = build_conversation_ref(&message)?;
     let attachments = collect_attachments(&message)?;
     let text = normalize_forwarded_text(&message, group_trigger_policy);
-    let attachments = attachments
+    let pending_attachments = attachments
         .into_iter()
         .map(|descriptor| ChannelAttachmentRef {
             vendor_ref: descriptor.external_file_id.clone(),
@@ -431,14 +433,20 @@ pub fn normalize_telegram_update(
         event_id,
         text,
         trigger,
-        attachments,
+        attachments: Vec::new(),
+        conversation_context: None,
         // Reply routing rides the conversation ref's thread anchors
         // (pre-coordinator delivery path); adopted when the P5 delivery
         // coordinator consumes stored contexts.
         reply_context: None,
     };
     let Some(media_group_key) = scoped_media_group_key else {
-        return Ok(TelegramInboundEvent::Message(Box::new(normalized)));
+        return Ok(TelegramInboundEvent::Message(Box::new(
+            ParsedTelegramInboundMessage {
+                message: normalized,
+                pending_attachments,
+            },
+        )));
     };
     let order = u64::try_from(message.message_id).map_err(|error| {
         PayloadParseError::InvalidExternalRef {
@@ -460,7 +468,12 @@ pub fn normalize_telegram_update(
             kind: "telegram_media_group",
             reason: error.to_string(),
         })?;
-    Ok(TelegramInboundEvent::BatchFragment(Box::new(fragment)))
+    Ok(TelegramInboundEvent::BatchFragment(Box::new(
+        ParsedTelegramBatchFragment {
+            fragment,
+            pending_attachments,
+        },
+    )))
 }
 
 fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {

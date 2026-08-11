@@ -360,6 +360,7 @@ impl ExtensionHost {
             crate::channel_vendor_calls::run_vendor_call(
                 recipe,
                 &target.host,
+                target.credential_handle.as_ref(),
                 &record.config,
                 egress.as_ref(),
                 wiring.label(),

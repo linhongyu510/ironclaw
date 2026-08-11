@@ -1,23 +1,11 @@
 use ironclaw_product_contracts::action::SourceBindingKey;
-use std::{
-    collections::VecDeque,
-    future::pending,
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{future::pending, sync::Mutex};
 
 use async_trait::async_trait;
 use chrono::TimeZone;
-use ironclaw_extension_contracts::channel_adapter::{
-    InboundOutcome, ProductTriggerReason, VerifiedInbound,
-};
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ProductAttachmentDescriptor, ProductAttachmentKind,
-};
-use ironclaw_extension_contracts::tool_adapter::{
-    RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
