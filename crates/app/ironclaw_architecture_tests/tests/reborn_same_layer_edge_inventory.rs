@@ -657,6 +657,16 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "domains/",
         decided_in: "WS6",
     },
+    // #7038: the suggestion-card doc store is a `RootFilesystem` mount,
+    // same shape as `ironclaw_secrets → ironclaw_filesystem` and
+    // `ironclaw_threads → ironclaw_filesystem` above.
+    SameLayerEdge {
+        crate_name: "ironclaw_suggestions",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "#7038",
+    },
 ];
 
 /// The same-layer edge count on `origin/main` @ `676d86ce02` (2026-08-04).
@@ -728,7 +738,11 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 71;
+/// ✎ **71 → 72 (#7038): `ironclaw_suggestions → ironclaw_filesystem` added** —
+/// the new suggestion-card doc store's `RootFilesystem` mount, same shape as
+/// the two `ironclaw_secrets`/`ironclaw_threads → ironclaw_filesystem` rows
+/// above.
+const SAME_LAYER_EDGE_BASELINE: usize = 72;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -819,6 +833,11 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_secrets", "substrates"),
     ("ironclaw_skills", "loops"),
     ("ironclaw_slack_extension", "products"),
+    // #7038: suggestion-card domain crate (records + `SuggestionsStore`),
+    // introduced at `substrates` alongside `ironclaw_triggers` — the same
+    // shape (a kernel-layer first-party tool and a products-layer service
+    // both need its record types directly).
+    ("ironclaw_suggestions", "substrates"),
     ("ironclaw_stress", "app"),
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),

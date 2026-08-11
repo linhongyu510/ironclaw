@@ -71,8 +71,11 @@ struct FrozenPathCount {
 /// profile wiring made `RebornRuntimeStores::capability_policy` production-used instead of
 /// test-support-only, then #7171 did the same for the skill mount view once
 /// `skill_mounts_for` began deriving it per gate.
-const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 274;
+/// ✎ **79/274 → 80/275 (#7038)**: one new `test-support` method,
+/// `generate_suggestions_for_test` in `suggestions_product_service.rs` — see
+/// its `FrozenPathCount` entry's comment.
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 80;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 275;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -206,6 +209,17 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_approvals/src/cas_record.rs",
         count: 3,
+    },
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        // #7038: `generate_suggestions_for_test` lets an integration test
+        // pre-mint the hidden thread id the production method otherwise
+        // mints internally, so it can register a scripted model gateway for
+        // the exact resolved `TurnScope` before submitting — same shape as
+        // `ironclaw_triggers`' `TrustedTriggerSubmitRequest::new_for_test`.
+        path: "crates/ironclaw_assistant/src/suggestions_product_service.rs",
+        count: 1,
     },
     FrozenPathCount {
         category: "test-support",
