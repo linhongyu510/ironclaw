@@ -56,6 +56,7 @@ mod runtime_mounts;
 mod sandbox;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
+mod suggestions;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;

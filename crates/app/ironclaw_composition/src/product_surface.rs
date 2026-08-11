@@ -9,7 +9,7 @@ use ironclaw_assistant::{
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductService,
+    RebornSkillTrustLevel, RebornSuggestionsProductService, SkillsProductService,
 };
 use ironclaw_attachments::ProjectScopedAttachmentLander;
 use ironclaw_auth::ChannelConnectionService;
@@ -240,6 +240,15 @@ pub(crate) fn build_product_surface_with_channel_connection(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
+    // Suggestion cards (#7038): the doc store rides the same composite
+    // filesystem the channel workflow factory mounts its own product state
+    // on (`extension_filesystem`), keyed per tenant/user by the store itself.
+    api = api.with_suggestions_product_service(Arc::new(RebornSuggestionsProductService::new(
+        ironclaw_suggestions::SuggestionsStore::new(Arc::clone(&runtime.extension_filesystem)
+            as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        runtime.product_thread_service(),
+        runtime.product_turn_coordinator(),
+    )));
     // First-class projects + membership (ACL). Built once per runtime over the
     // scoped substrate and shared by every deployment path.
     api = api.with_project_service(runtime.reborn_project_service());

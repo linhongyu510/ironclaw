@@ -341,6 +341,12 @@ mounts = "ambient"
 network = "default"
 
 [[grants]]
+capability = "builtin.render_suggestions"
+effects = ["dispatch_capability"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
 capability = "builtin.attach_workspace_file_to_reply"
 effects = ["read_filesystem", "external_write"]
 mounts = "workspace"

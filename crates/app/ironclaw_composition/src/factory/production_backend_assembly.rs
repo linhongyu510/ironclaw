@@ -1179,6 +1179,20 @@ pub(super) async fn build_backend_production(
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("explicit channel delivery handler is invalid: {error}"),
     })?;
+    // `render_suggestions` (#7038): writes through the same suggestions doc
+    // store the product surface reads (`product_surface.rs`), over the same
+    // composite filesystem.
+    ironclaw_host_runtime::register_render_suggestions_first_party_handler(
+        &mut first_party_registry,
+        Arc::new(crate::suggestions::StoreBackedRenderSuggestionsHook::new(
+            ironclaw_suggestions::SuggestionsStore::new(
+                Arc::clone(&stores.filesystem) as Arc<dyn RootFilesystem>
+            ),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("render_suggestions handler is invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     let admin_configuration_resolver_for_generic = Arc::clone(&admin_configuration_resolver);
     let channel_pairing_registry;
