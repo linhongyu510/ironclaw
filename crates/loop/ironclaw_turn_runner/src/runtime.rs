@@ -771,22 +771,12 @@ where
     // spawn decoration and before disclosure. Override `disabled_capability_ids`
     // to re-enable it in targeted regression harnesses.
     let global_denied = parts.config.disabled_capability_ids.clone();
-    // Issue #5505: a scheduled-trigger fire must not be able to create,
-    // remove, pause, or resume triggers (read-only trigger_list stays
-    // available). These ids are folded into that run's one resolved policy only
-    // for the `scheduled_trigger` capability-surface profile.
-    let scheduled_trigger_denied = SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS
-        .iter()
-        .map(|id| CapabilityId::new(*id))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
-    // Issue #7038: the suggestion-generation loop's allow-list — see the
-    // constant doc comment for why this is `narrow_to_capability_ids`
-    // rather than a deny-list.
-    let suggestion_generation_allowed = SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS
-        .iter()
-        .map(|id| CapabilityId::new(*id))
-        .collect::<Result<Vec<_>, _>>()
+    // Per-profile surface shapes (scheduled_trigger's deny-set from #5505,
+    // suggestion_generation's allow-list from #7038, and any future rows)
+    // are declared beside the profile definitions in
+    // `planned_driver_factory::BESPOKE_SURFACE_POLICY_SHAPES` and consumed
+    // here as data.
+    let profile_policy_shapes = resolved_bespoke_surface_policy_shapes()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
@@ -795,8 +785,7 @@ where
             spawn_decorator,
             tool_disclosure_decorator,
             global_denied,
-            scheduled_trigger_denied,
-            suggestion_generation_allowed,
+            profile_policy_shapes,
             tool_disclosure_profile_pins: parts.config.tool_disclosure_profile_pins,
         });
     let safety_context = parts
@@ -919,40 +908,42 @@ where
     )
 }
 
-/// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
-/// an interactive turn, but must not be able to create/remove/pause/resume
-/// triggers (a fire mutating the trigger fleet is exactly the reported "a
-/// routine that creates routines" bug). Read-only
-/// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
-/// excluded from this list. Folded into the one resolved host-API policy for
-/// the
-/// [`crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`]
-/// only.
-const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
-    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
-    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
-];
+/// [`crate::planned_driver_factory::SurfacePolicyShape`] with its capability
+/// ids parsed into [`CapabilityId`]s at build time, so an invalid id in a
+/// profile's declared shape fails the runtime build instead of a run.
+enum ResolvedSurfacePolicyShape {
+    ExtraDeny(Vec<CapabilityId>),
+    AllowOnly(Vec<CapabilityId>),
+}
 
-/// Suggestion-generation design doc §6 allow-list (#7038): the ONLY
-/// capabilities visible on a run resolved with
-/// [`crate::planned_driver_factory::SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID`].
-/// Unlike the scheduled-trigger deny-list above, this is a strict allow-list
-/// (`CapabilitySurfacePolicy::narrow_to_capability_ids`) — extension tools,
-/// trigger CRUD, and `spawn_subagent` are excluded by omission, not named
-/// individually.
-const SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS: &[&str] = &[
-    // `ironclaw_extension_manager::EXTENSION_SEARCH_CAPABILITY_ID` — spelled
-    // as a literal rather than imported: `ironclaw_extension_manager` is a
-    // product-layer crate and this loop-layer crate must not depend on it
-    // (layering: substrates < domains < kernel < loop < product). Pinned
-    // against the real constant by an architecture/integration test.
-    "builtin.extension_search",
-    ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
-    ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID,
-    ironclaw_host_runtime::RENDER_SUGGESTIONS_CAPABILITY_ID,
-];
+/// Resolve [`crate::planned_driver_factory::BESPOKE_SURFACE_POLICY_SHAPES`]
+/// into the per-profile map [`RuntimeProfiledCapabilityPortFactory`] consumes.
+/// The factory carries no per-profile knowledge — a new profile's surface
+/// shape is declared beside its profile definition, not added here.
+fn resolved_bespoke_surface_policy_shapes()
+-> Result<HashMap<String, ResolvedSurfacePolicyShape>, ironclaw_host_api::error::HostApiError> {
+    use crate::planned_driver_factory::{BESPOKE_SURFACE_POLICY_SHAPES, SurfacePolicyShape};
+
+    let parse = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| CapabilityId::new(*id))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    BESPOKE_SURFACE_POLICY_SHAPES
+        .iter()
+        .map(|(profile_id, shape)| {
+            let resolved = match shape {
+                SurfacePolicyShape::ExtraDeny(ids) => {
+                    ResolvedSurfacePolicyShape::ExtraDeny(parse(ids)?)
+                }
+                SurfacePolicyShape::AllowOnly(ids) => {
+                    ResolvedSurfacePolicyShape::AllowOnly(parse(ids)?)
+                }
+            };
+            Ok(((*profile_id).to_string(), resolved))
+        })
+        .collect()
+}
 
 /// Runner-private per-run factory that preserves the canonical wrapper order
 /// while passing one resolved policy directly to every consumer that needs
@@ -963,8 +954,10 @@ struct RuntimeProfiledCapabilityPortFactory {
     spawn_decorator: Arc<dyn LoopCapabilityPortDecorator>,
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
-    scheduled_trigger_denied: Vec<CapabilityId>,
-    suggestion_generation_allowed: Vec<CapabilityId>,
+    /// Per-profile policy shapes, keyed by capability-surface profile id —
+    /// the resolved form of `BESPOKE_SURFACE_POLICY_SHAPES`. Profiles absent
+    /// from this map get the default shape (global denies only).
+    profile_policy_shapes: HashMap<String, ResolvedSurfacePolicyShape>,
     tool_disclosure_profile_pins: HashMap<CapabilitySurfaceProfileId, Vec<CapabilityId>>,
 }
 
@@ -983,23 +976,21 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .resolved_run_profile
             .capability_surface_profile_id
             .as_str();
-        if profile_id
-            == crate::planned_driver_factory::SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID
-        {
-            // Strict allow-list: narrows to exactly this set regardless of
-            // what the resolved base policy would otherwise permit — no
-            // separate deny-list needed, everything not named is excluded.
-            policy =
-                policy.narrow_to_capability_ids(self.suggestion_generation_allowed.iter().cloned());
-        } else {
-            let mut denied = self.global_denied.clone();
-            if profile_id
-                == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
-            {
-                denied.extend(self.scheduled_trigger_denied.iter().cloned());
+        policy = match self.profile_policy_shapes.get(profile_id) {
+            // Strict allow-list: narrows to exactly the declared set
+            // regardless of what the resolved base policy would otherwise
+            // permit — deny-lists are irrelevant here, everything not named
+            // is already excluded by omission.
+            Some(ResolvedSurfacePolicyShape::AllowOnly(allowed)) => {
+                policy.narrow_to_capability_ids(allowed.iter().cloned())
             }
-            policy = policy.deny_capability_ids(denied);
-        }
+            Some(ResolvedSurfacePolicyShape::ExtraDeny(extra)) => {
+                let mut denied = self.global_denied.clone();
+                denied.extend(extra.iter().cloned());
+                policy.deny_capability_ids(denied)
+            }
+            None => policy.deny_capability_ids(self.global_denied.clone()),
+        };
         let policy = Arc::new(policy);
         let mut capabilities = self
             .inner
@@ -1088,9 +1079,9 @@ mod tests {
 
     use super::{
         DefaultPlannedRuntimeConfig, REBORN_TOOL_DISCLOSURE_PROFILE_PINS_ENV,
-        RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
-        ToolDisclosureMode, parse_tool_disclosure_profile_pins, scheduler_permit_count,
+        RuntimeProfiledCapabilityPortFactory, ToolDisclosureCapabilityDecorator,
+        ToolDisclosureMode, parse_tool_disclosure_profile_pins,
+        resolved_bespoke_surface_policy_shapes, scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -1529,8 +1520,8 @@ mod tests {
                 ToolDisclosureMode::Bridged,
             ))),
             global_denied: vec![denied_id.clone()],
-            scheduled_trigger_denied: Vec::new(),
-            suggestion_generation_allowed: Vec::new(),
+            profile_policy_shapes: resolved_bespoke_surface_policy_shapes()
+                .expect("bespoke surface policy shapes resolve"),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 
@@ -1622,19 +1613,6 @@ mod tests {
         }
     }
 
-    /// Derives the test-driven mutator id list directly from the production
-    /// `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` constant rather than
-    /// re-listing the four capability ids by name. Hand-duplicating the list
-    /// here would let the unit tests below keep passing even if the
-    /// production const accidentally dropped one of the mutators — deriving
-    /// from the const closes that drift risk (PR #5515 review comment).
-    fn scheduled_trigger_mutator_ids() -> Vec<CapabilityId> {
-        SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS
-            .iter()
-            .map(|id| CapabilityId::new(*id).expect("trigger mutator capability id is valid"))
-            .collect()
-    }
-
     async fn visible_capability_ids(
         factory: &dyn LoopCapabilityPortFactory,
         run_context: &LoopRunContext,
@@ -1672,8 +1650,8 @@ mod tests {
             }),
             tool_disclosure_decorator: None,
             global_denied,
-            scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
-            suggestion_generation_allowed: Vec::new(),
+            profile_policy_shapes: resolved_bespoke_surface_policy_shapes()
+                .expect("bespoke surface policy shapes resolve"),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 
@@ -1731,8 +1709,8 @@ mod tests {
             }),
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
-            scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
-            suggestion_generation_allowed: Vec::new(),
+            profile_policy_shapes: resolved_bespoke_surface_policy_shapes()
+                .expect("bespoke surface policy shapes resolve"),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 
@@ -1790,13 +1768,6 @@ mod tests {
         }
     }
 
-    fn suggestion_generation_allowed_ids() -> Vec<CapabilityId> {
-        SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS
-            .iter()
-            .map(|id| CapabilityId::new(*id).expect("suggestion generation capability id is valid"))
-            .collect()
-    }
-
     /// Anti-"silently doesn't bind" proof for the suggestion-generation
     /// capability lockdown (#7038, mirrors PR #5515's scheduled-trigger
     /// test): drives the SAME runner-private factory production wires,
@@ -1818,8 +1789,8 @@ mod tests {
             }),
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
-            scheduled_trigger_denied: Vec::new(),
-            suggestion_generation_allowed: suggestion_generation_allowed_ids(),
+            profile_policy_shapes: resolved_bespoke_surface_policy_shapes()
+                .expect("bespoke surface policy shapes resolve"),
             tool_disclosure_profile_pins: HashMap::new(),
         };
 

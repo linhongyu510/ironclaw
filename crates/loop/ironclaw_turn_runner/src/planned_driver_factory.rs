@@ -34,17 +34,77 @@ pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";
 const INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID: &str = "interactive_tools";
 pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
 /// Capability-surface profile id for scheduled-trigger fires (issue #5505).
-/// Shared with `runtime.rs`, which keys its per-profile deny-map on this
-/// string to strip the trigger mutator capabilities from a fire's
-/// model-visible surface.
+/// Its policy shape is declared in [`BESPOKE_SURFACE_POLICY_SHAPES`] below.
 pub const SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID: &str = "scheduled_trigger";
 /// Capability-surface profile id for the suggestion-generation loop (#7038).
-/// Shared with `runtime.rs`, which keys its per-profile allow-list on this
-/// string to narrow a suggestion-generation run's model-visible surface to
-/// exactly the catalog/connection-state/memory/`render_suggestions` tools.
+/// Its policy shape is declared in [`BESPOKE_SURFACE_POLICY_SHAPES`] below.
 pub const SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID: &str = "suggestion_generation";
 /// `RunProfileId` string for the suggestion-generation loop (#7038).
 pub const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
+
+/// How a capability-surface profile reshapes the run's one resolved policy.
+///
+/// A profile with no entry in [`BESPOKE_SURFACE_POLICY_SHAPES`] gets the
+/// default shape: the globally disabled capability ids are denied and nothing
+/// else changes. Declared here — next to the profile ids and definitions —
+/// so a new profile's surface shape lands in the same place the profile is
+/// born, instead of as another branch inside the runtime's capability-port
+/// factory.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SurfacePolicyShape {
+    /// Deny these ids in addition to the global disabled-capability list.
+    ExtraDeny(&'static [&'static str]),
+    /// Narrow the surface to exactly these ids. Deny-lists are irrelevant on
+    /// this shape: anything not named is already excluded by omission.
+    AllowOnly(&'static [&'static str]),
+}
+
+/// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
+/// an interactive turn, but must not be able to create/remove/pause/resume
+/// triggers (a fire mutating the trigger fleet is exactly the reported "a
+/// routine that creates routines" bug). Read-only
+/// [`ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID`] is intentionally
+/// excluded from this list.
+pub(crate) const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
+    ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_PAUSE_CAPABILITY_ID,
+    ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
+];
+
+/// Suggestion-generation design doc §6 allow-list (#7038): the ONLY
+/// capabilities visible on a run resolved with
+/// [`SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID`]. Unlike the
+/// scheduled-trigger deny-list above, this is a strict allow-list —
+/// extension tools, trigger CRUD, and `spawn_subagent` are excluded by
+/// omission, not named individually.
+pub(crate) const SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS: &[&str] = &[
+    // `ironclaw_extension_manager::EXTENSION_SEARCH_CAPABILITY_ID` — spelled
+    // as a literal rather than imported: `ironclaw_extension_manager` is a
+    // product-layer crate and this loop-layer crate must not depend on it
+    // (layering: substrates < domains < kernel < loop < product). Pinned
+    // against the real constant by an architecture/integration test.
+    "builtin.extension_search",
+    ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
+    ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID,
+    ironclaw_host_runtime::RENDER_SUGGESTIONS_CAPABILITY_ID,
+];
+
+/// Every capability-surface profile with a bespoke policy shape, keyed by its
+/// profile id. `runtime.rs`'s capability-port factory consumes this table as
+/// data and carries no per-profile knowledge of its own — adding a profile
+/// with a bespoke surface means adding one row here, beside the profile's
+/// definition.
+pub(crate) const BESPOKE_SURFACE_POLICY_SHAPES: &[(&str, SurfacePolicyShape)] = &[
+    (
+        SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
+        SurfacePolicyShape::ExtraDeny(SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS),
+    ),
+    (
+        SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID,
+        SurfacePolicyShape::AllowOnly(SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS),
+    ),
+];
 
 pub struct DefaultPlannedDriverBuild {
     pub driver: Arc<dyn AgentLoopDriver>,
