@@ -20,7 +20,7 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
     error::HostApiError,
-    ids::CapabilityId,
+    ids::{CapabilityId, RunId},
     resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_suggestions::SuggestionCard;
@@ -64,9 +64,16 @@ struct RenderSuggestionsInput {
 /// never depends on the product-layer store directly.
 #[async_trait]
 pub trait RenderSuggestionsHook: Send + Sync {
+    /// `run_id` is the acting loop run's own identity, forwarded verbatim
+    /// from `FirstPartyCapabilityRequest::run_id` (the dispatch chain stamps
+    /// it from the run context, not from anything the model supplies) so the
+    /// hook can bind these cards to the job THIS run claimed rather than to
+    /// whichever job happens to be active when the call lands — see the
+    /// module doc and #7498's stale-run race.
     async fn record_cards(
         &self,
         scope: &ResourceScope,
+        run_id: Option<RunId>,
         cards: Vec<SuggestionCard>,
     ) -> Result<(), RenderSuggestionsHookError>;
 }
@@ -135,7 +142,7 @@ impl FirstPartyCapabilityHandler for RenderSuggestionsHandler {
         }
         let card_count = input.cards.len();
         self.hook
-            .record_cards(&request.scope, input.cards)
+            .record_cards(&request.scope, request.run_id, input.cards)
             .await
             .map_err(map_hook_error)?;
         Ok(FirstPartyCapabilityResult::new(
@@ -156,6 +163,7 @@ impl RenderSuggestionsHook for UnavailableRenderSuggestionsHook {
     async fn record_cards(
         &self,
         _scope: &ResourceScope,
+        _run_id: Option<RunId>,
         _cards: Vec<SuggestionCard>,
     ) -> Result<(), RenderSuggestionsHookError> {
         Err(RenderSuggestionsHookError::Backend {
@@ -243,6 +251,7 @@ mod tests {
         async fn record_cards(
             &self,
             _scope: &ResourceScope,
+            _run_id: Option<RunId>,
             cards: Vec<SuggestionCard>,
         ) -> Result<(), RenderSuggestionsHookError> {
             self.seen.lock().unwrap().push(cards);
