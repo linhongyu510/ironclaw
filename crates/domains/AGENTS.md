@@ -1,8 +1,8 @@
 # `crates/domains/` — one crate per business-record grammar, no authority decisions
 
-**Layer(s):** `substrates` (all 13 manifests declare it; checked by
+**Layer(s):** `substrates` (all 14 manifests declare it; checked by
 `reborn_workspace_crates_declare_layers_and_follow_layer_matrix`) ·
-**Crates:** 13 · **May depend on:** `contracts/`, `substrates/`, `events/`,
+**Crates:** 14 · **May depend on:** `contracts/`, `substrates/`, `events/`,
 plus five inventoried in-family edges (below) · **Depended on by:** `kernel/`,
 `loop/`, `extensions/`, `product/`, `app/` — every tier above wires against
 these contracts.
@@ -33,6 +33,7 @@ no other crate in the family may acquire either property.
 | [`ironclaw_memory`](./ironclaw_memory) | The provider-neutral `MemoryService` contract, memory path/scope grammar, prompt-write-safety vocabulary, and the shared conformance suite | Changing what memory *means*; provider implementations live in `extensions/packages/memory-native` and `…/mem0` |
 | [`ironclaw_outbound`](./ironclaw_outbound) | Metadata-only outbound authority: sealed access grants, at-most-once delivery-attempt reservation, delivery resolution, preferences and subscription cursors — never a transport | Deciding *whether/where* something may be pushed, or recording a delivery attempt |
 | [`ironclaw_skills`](./ironclaw_skills) | Skill parsing, validation, deterministic selection scoring, scoped filesystem management, and the pure learning path | Changing skill grammar, selection, install records, or learning prompts |
+| [`ironclaw_suggestions`](./ironclaw_suggestions) | Automation suggestion cards domain: persisted record shapes, the derived wire view, and the single-writer `SuggestionsStore` (#7038) | Reading/writing persisted suggestion-card records, deriving the wire view, or claiming/completing a generation run |
 | [`ironclaw_threads`](./ironclaw_threads) | The canonical transcript service: `SessionThreadService` (filesystem + in-memory), message ordering/status/redaction, tool-result records, display projections | Reading or writing thread/message history or transcript-derived views |
 | [`ironclaw_trace_commons`](./ironclaw_trace_commons) | The Trace Commons client: envelope schema, deterministic redaction, submission queue/credits, device-key onboarding, and the autonomous capture pipeline | Contributing traces to the external Trace Commons service |
 | [`ironclaw_triggers`](./ironclaw_triggers) | Scheduled-trigger records, cron/timezone validation, deterministic fire identity, the poller tick, and sealed trusted-submission minting (prompt-scanned at the mint); SQL backends held under ADR 0003 | Trigger records/schedules, or anything on the host-trusted fire path |

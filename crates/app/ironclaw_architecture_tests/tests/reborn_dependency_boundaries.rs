@@ -677,7 +677,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
-        ("ironclaw_host_api", 18_994),
+        // 18_994 -> 18_998 (#7038 suggestion cards): `RunProfileId::
+        // suggestion_generation()` — a typed constructor for the suggestion
+        // generation run profile, replacing a hand-mirrored string literal
+        // at the call sites. Declaration only; the run itself is composed
+        // and scheduled in ironclaw_composition/ironclaw_assistant.
+        ("ironclaw_host_api", 18_998),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
