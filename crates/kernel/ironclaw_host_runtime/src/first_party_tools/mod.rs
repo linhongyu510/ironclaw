@@ -12,6 +12,7 @@ mod json;
 mod memory;
 mod model_visible_output;
 mod outbound_deliver;
+mod render_suggestions;
 mod reply_attachment;
 mod schemas;
 mod shell;
@@ -70,6 +71,9 @@ pub use memory::{
     register_native_memory_tools,
 };
 pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
+pub use render_suggestions::{
+    RENDER_SUGGESTIONS_CAPABILITY_ID, RenderSuggestionsHook, RenderSuggestionsHookError,
+};
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -236,6 +240,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::profile_set_manifest()?,
                     trace_commons::account_login_link_manifest()?,
                     outbound_deliver::manifest()?,
+                    render_suggestions::manifest()?,
                     reply_attachment::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
@@ -463,6 +468,15 @@ pub fn register_outbound_deliver_first_party_handler(
     outbound_deliver::insert_handler(registry, delivery)
 }
 
+/// Replace the fail-closed render_suggestions default with the product-owned
+/// hook selected by composition (writes through `SuggestionsStore`).
+pub fn register_render_suggestions_first_party_handler(
+    registry: &mut FirstPartyCapabilityRegistry,
+    hook: Arc<dyn render_suggestions::RenderSuggestionsHook>,
+) -> Result<(), HostApiError> {
+    render_suggestions::insert_handler(registry, hook)
+}
+
 /// Replace the fail-closed reply-attachment default with the durable,
 /// run-scoped intent store selected by composition.
 pub fn register_reply_attachment_first_party_handler(
@@ -570,6 +584,10 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         handler,
     );
     outbound_deliver::insert_handler(&mut registry, Arc::new(UnavailableModelChannelDelivery))?;
+    render_suggestions::insert_handler(
+        &mut registry,
+        Arc::new(render_suggestions::UnavailableRenderSuggestionsHook),
+    )?;
     reply_attachment::insert_unavailable_handler(&mut registry)?;
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)

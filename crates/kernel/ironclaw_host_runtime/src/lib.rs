@@ -94,7 +94,8 @@ pub use first_party_tools::{
     LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
     MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler, OUTBOUND_DELIVER_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RENDER_SUGGESTIONS_CAPABILITY_ID,
+    RenderSuggestionsHook, RenderSuggestionsHookError, SHELL_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
     TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
@@ -110,7 +111,8 @@ pub use first_party_tools::{
     ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
     register_memory_tool_handler, register_native_memory_tools,
-    register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
+    register_outbound_deliver_first_party_handler, register_render_suggestions_first_party_handler,
+    register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

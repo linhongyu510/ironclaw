@@ -227,6 +227,41 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["delivered", "provider_confirmed", "target_id", "channel", "display_name", "provider_message_refs", "durably_recorded", "already_delivered"],
             "additionalProperties": false
         }),
+        "schemas/builtin/render_suggestions.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "cards": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "format": "uuid", "description": "A fresh UUID you generate for this card." },
+                            "title": { "type": "string", "minLength": 1 },
+                            "description": { "type": "string", "minLength": 1 },
+                            "extension_id": { "type": "string", "description": "The extension this suggestion is about, if any." },
+                            "requires_connection": { "type": "boolean", "description": "True if the user must connect/authorize the extension before this suggestion can run." },
+                            "suggested_prompt": { "type": "string", "minLength": 1, "description": "The exact message to submit on the user's behalf if they click this card." },
+                            "category": { "type": "string", "minLength": 1 }
+                        },
+                        "required": ["id", "title", "description", "requires_connection", "suggested_prompt", "category"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["cards"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/render_suggestions.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "recorded": { "type": "boolean" },
+                "card_count": { "type": "integer" }
+            },
+            "required": ["recorded", "card_count"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({
             "type": "object",
             "properties": {
