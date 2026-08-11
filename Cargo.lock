@@ -3589,6 +3589,7 @@ dependencies = [
  "ironclaw_product_contracts",
  "ironclaw_safety",
  "ironclaw_secrets",
+ "ironclaw_suggestions",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_trace_commons",
@@ -3790,6 +3791,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_extension",
+ "ironclaw_suggestions",
  "ironclaw_threads",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
@@ -4254,6 +4256,7 @@ dependencies = [
  "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_skills",
+ "ironclaw_suggestions",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -4357,6 +4360,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_slack_extension",
+ "ironclaw_suggestions",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_trace_commons",
@@ -4915,6 +4919,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_suggestions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
  "uuid",
 ]
 
