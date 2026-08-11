@@ -18,7 +18,7 @@
 //! rejected (coexistence with shadow-rejection), so a caller cannot silently
 //! override a real capability.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::{
@@ -249,6 +249,12 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let surface = self.surface.lock().map_err(|_| surface_lock_error())?;
         if let Some(surface) = surface.as_ref() {
             for (capability_id, spec) in &surface.specs_by_capability_id {
+                if definitions
+                    .iter()
+                    .any(|definition| definition.name == spec.tool_name)
+                {
+                    return Err(external_tool_name_shadow_error());
+                }
                 if !definitions
                     .iter()
                     .any(|definition| &definition.capability_id == capability_id)
@@ -270,6 +276,14 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let surface = self.surface.lock().map_err(|_| surface_lock_error())?;
         if let Some(surface) = surface.as_ref() {
             for (capability_id, spec) in &surface.specs_by_capability_id {
+                if deferred_surface
+                    .eager
+                    .iter()
+                    .chain(&deferred_surface.deferred)
+                    .any(|definition| definition.name == spec.tool_name)
+                {
+                    return Err(external_tool_name_shadow_error());
+                }
                 if !deferred_surface
                     .eager
                     .iter()
@@ -387,6 +401,13 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
+        let deferred_host_tool_names = self
+            .inner
+            .deferred_tool_surface()?
+            .into_iter()
+            .flat_map(|surface| surface.eager.into_iter().chain(surface.deferred))
+            .map(|definition| definition.name)
+            .collect::<HashSet<_>>();
         let specs = self
             .catalog
             .specs(self.run_id)
@@ -403,11 +424,9 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.safe_name == provider_tool_name.as_str())
+                || deferred_host_tool_names.contains(&provider_tool_name)
             {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "external tool name shadows a host capability",
-                ));
+                return Err(external_tool_name_shadow_error());
             }
             let capability_id = external_tool_capability_id(&provider_tool_name)?;
             if surface
@@ -497,6 +516,13 @@ fn external_tool_gate_ref(call_id: &str) -> Result<LoopGateRef, AgentLoopHostErr
     })
 }
 
+fn external_tool_name_shadow_error() -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        "external tool name shadows a host capability",
+    )
+}
+
 fn surface_lock_error() -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Internal,
@@ -544,10 +570,47 @@ mod tests {
         ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog, TurnId, TurnScope,
     };
 
-    struct EmptyInnerPort;
+    #[derive(Default)]
+    struct EmptyInnerPort {
+        deferred_surface: StdMutex<Option<DeferredProviderToolSurface>>,
+    }
+
+    impl EmptyInnerPort {
+        fn with_deferred_host_tool(name: &str) -> Self {
+            let port = Self::default();
+            port.set_deferred_host_tool(name);
+            port
+        }
+
+        fn set_deferred_host_tool(&self, name: &str) {
+            let definition = ProviderToolDefinition {
+                capability_id: CapabilityId::new(format!("host.{name}"))
+                    .expect("valid host capability id"),
+                name: ProviderToolName::new(name).expect("valid provider tool name"),
+                description: "deferred host tool".to_string(),
+                description_trust: Default::default(),
+                parameters: serde_json::json!({"type": "object"}),
+            };
+            *self.deferred_surface.lock().expect("deferred surface lock") =
+                Some(DeferredProviderToolSurface {
+                    eager: Vec::new(),
+                    deferred: vec![definition],
+                });
+        }
+    }
 
     #[async_trait]
     impl LoopCapabilityPort for EmptyInnerPort {
+        fn deferred_tool_surface(
+            &self,
+        ) -> Result<Option<DeferredProviderToolSurface>, AgentLoopHostError> {
+            Ok(self
+                .deferred_surface
+                .lock()
+                .expect("deferred surface lock")
+                .clone())
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -879,7 +942,7 @@ mod tests {
         let catalog: Arc<dyn ExternalToolCatalog> = catalog;
         (
             wrap_external_tools(
-                Arc::new(EmptyInnerPort),
+                Arc::new(EmptyInnerPort::default()),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
                 Arc::new(TestResultWriter),
@@ -895,7 +958,7 @@ mod tests {
         let run_context = run_context().await;
         (
             wrap_external_tools(
-                Arc::new(EmptyInnerPort),
+                Arc::new(EmptyInnerPort::default()),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
                 Arc::new(TestResultWriter),
@@ -941,6 +1004,74 @@ mod tests {
         assert_eq!(
             ids.provider_capability_id.as_str(),
             "external_tool.client_tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn visible_surface_rejects_external_name_collision_with_deferred_host_tool() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(
+                run_context.run_id,
+                vec![external_tool_spec("deferred_host_tool")],
+            )
+            .await
+            .expect("register external tool");
+        let port = wrap_external_tools(
+            Arc::new(EmptyInnerPort::with_deferred_host_tool(
+                "deferred_host_tool",
+            )),
+            run_context,
+            Arc::new(TestInputResolver),
+            Arc::new(TestResultWriter),
+            catalog,
+        );
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect_err("external tools must not shadow deferred host tools");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.safe_summary,
+            "external tool name shadows a host capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_surface_rejects_external_name_collision_with_host_tool() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(
+                run_context.run_id,
+                vec![external_tool_spec("late_deferred_host_tool")],
+            )
+            .await
+            .expect("register external tool");
+        let inner = Arc::new(EmptyInnerPort::default());
+        let port = wrap_external_tools(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context,
+            Arc::new(TestInputResolver),
+            Arc::new(TestResultWriter),
+            catalog,
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("initial non-colliding surface");
+        inner.set_deferred_host_tool("late_deferred_host_tool");
+
+        let error = port
+            .deferred_tool_surface()
+            .expect_err("external tools must not shadow host deferred definitions");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.safe_summary,
+            "external tool name shadows a host capability"
         );
     }
 
@@ -1026,7 +1157,7 @@ mod tests {
             .await
             .expect("register external tool");
         let port = wrap_external_tools(
-            Arc::new(EmptyInnerPort),
+            Arc::new(EmptyInnerPort::default()),
             run_context.clone(),
             Arc::new(TestInputResolver),
             Arc::new(TestResultWriter),

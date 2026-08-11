@@ -1726,6 +1726,20 @@ fn deferred_tool_references(
     messages: &[ChatMessage],
     deferred_tool_names: &std::collections::BTreeSet<String>,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
+    let tool_call_targets = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flatten()
+        .filter(|tool_call| tool_call.name == "tool_call")
+        .filter_map(|tool_call| {
+            tool_call
+                .arguments
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| (tool_call.id.clone(), name.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
     let mut references = std::collections::BTreeMap::new();
     for message in messages {
         if message.role != Role::Tool {
@@ -1764,6 +1778,11 @@ fn deferred_tool_references(
                     .into_iter()
                     .collect()
             }
+            Some("tool_call") => tool_call_targets
+                .get(tool_call_id)
+                .cloned()
+                .into_iter()
+                .collect(),
             Some(name) if deferred_tool_names.contains(name) => vec![name.to_string()],
             _ => Vec::new(),
         };
@@ -1785,7 +1804,9 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
             "description": definition.description.as_str(),
             "parameters": &definition.parameters,
         });
-        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+        total.saturating_add(
+            crate::estimate_tokens_from_chars(&schema.to_string()).saturating_as_u32(),
+        )
     })
 }
 
@@ -1826,7 +1847,12 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
-        if let Some(guard) = unavailable_capability_guard {
+        if let Some(guard) = unavailable_capability_guard
+            && response
+                .tool_calls
+                .iter()
+                .any(|call| !guard.permits_policy_checked_call(call))
+        {
             debug!(
                 requested_capability_id = %guard.capability_id,
                 tool_call_count = response.tool_calls.len(),
@@ -2011,6 +2037,25 @@ fn provider_calls_are_advertised_or_resolvable(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnavailableCapabilityGuard {
     capability_id: CapabilityId,
+}
+
+impl UnavailableCapabilityGuard {
+    fn permits_policy_checked_call(&self, call: &ToolCall) -> bool {
+        if matches!(call.name.as_str(), "tool_search" | "tool_describe") {
+            return true;
+        }
+        let canonical = self.capability_id.as_str();
+        let encoded = canonical.replace('.', "__");
+        if call.name == canonical || call.name == encoded {
+            return true;
+        }
+        call.name == "tool_call"
+            && call
+                .arguments
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name == canonical || name == encoded)
+    }
 }
 
 fn unavailable_requested_capability_guard(

@@ -118,6 +118,14 @@ Codex auth reuse:
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
 - In ChatGPT mode the `/models` list is gated by the reported Codex `client_version`. It is auto-detected from the installed `codex` binary (`codex --version`), falling back to a bundled default. A stale value silently hides newer models (e.g. `gpt-5.5`) the account is entitled to.
 
+## Anthropic Messages Provider
+
+`anthropic_oauth.rs` owns the direct Anthropic Messages API adapter for both
+API-key and OAuth authentication, including the provider-specific deferred-tool
+and tool-reference wire formats.
+
+- **Anthropic deferred loading is model-gated.** Models supported by Anthropic tool search receive `defer_loading` and `tool_reference`; older configured models receive the same stable full tool array without those fields, preserving compatibility at the cost of rendering every schema.
+
 ## AWS Bedrock Provider
 
 Uses the native Converse API via `aws-sdk-bedrockruntime` (`bedrock.rs`). Requires `--features bedrock` at build time — not in default features due to heavy AWS SDK dependencies.
@@ -340,7 +348,6 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 ## rig_adapter.rs Details
 
 `RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for OpenAI, Ollama, Tinfoil, and OpenAI-compatible providers. Anthropic uses the direct Messages API adapter because its deferred-tool and tool-reference wire contract is not represented by the pinned rig-core request types. Key behaviors:
-- **Anthropic deferred loading is model-gated.** Models supported by Anthropic tool search receive `defer_loading` and `tool_reference`; older configured models receive the same stable full tool array without those fields, preserving compatibility at the cost of rendering every schema.
 - **Per-request model overrides** are forwarded through rig-core's typed request model field, preserving one serialized top-level `model` key.
 - **OpenAI strict-mode schema normalization** is applied to all tool definitions: `additionalProperties: false`, all properties added to `required`, optional fields made nullable via `"type": ["T", "null"]`. This happens transparently at the provider boundary.
 - **System messages** are extracted into the rig-core `preamble` field (concatenated with newlines if multiple).

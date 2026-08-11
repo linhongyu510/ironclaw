@@ -12,10 +12,11 @@ use ironclaw_host_api::ids::{
 };
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
-    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    LlmError, LlmProvider, Role, SmartRoutingConfig, SmartRoutingProvider, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, CapabilityInputRef,
     CapabilitySurfaceVersion, DeferredProviderToolSurface,
     EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
     InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
@@ -29,9 +30,11 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface,
 };
 use ironclaw_loop_host::{
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
+    CapabilityResultWrite, CapabilityWriteResult, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessage, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
+    HostManagedToolResultContent, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ThreadBackedLoopContextPort, wrap_external_tools,
 };
 use ironclaw_loop_host::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -45,6 +48,7 @@ use ironclaw_threads::{
     ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
     ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };
+use ironclaw_turns::{ExternalToolCatalog, ExternalToolSpec, InMemoryExternalToolCatalog};
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use ironclaw_turns::{LoopMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 use rust_decimal::Decimal;
@@ -372,6 +376,166 @@ async fn gateway_keeps_native_deferred_tool_surface_stable_across_promotion() {
     assert!(
         logs_contain("tool_definitions_changed=false"),
         "promotion must not change the cache signature for native deferred loading"
+    );
+}
+
+#[tokio::test]
+async fn gateway_uses_primary_deferred_capability_when_smart_router_cheap_supports_it() {
+    let primary = Arc::new(ToolAwareProvider::tool_stop_reply("primary response"));
+    let cheap =
+        Arc::new(ToolAwareProvider::tool_stop_reply("cheap response").with_deferred_tool_loading());
+    let provider = Arc::new(SmartRoutingProvider::new(
+        primary.clone(),
+        cheap.clone(),
+        SmartRoutingConfig::default(),
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    gateway
+        .stream_model_with_capabilities(
+            model_request(interactive_model()),
+            Arc::new(GatewayCapabilityPort::with_native_deferred_surface(false)),
+        )
+        .await
+        .expect("primary tool completion");
+
+    let primary_requests = primary.tool_requests.lock().expect("primary requests");
+    assert_eq!(primary_requests.len(), 1);
+    assert!(primary_requests[0].deferred_tool_names.is_empty());
+    assert!(primary_requests[0].tool_references.is_empty());
+    assert_eq!(
+        primary_requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["demo__echo"],
+        "the non-deferred primary must receive its dynamic fallback surface"
+    );
+    assert!(
+        cheap
+            .tool_requests
+            .lock()
+            .expect("cheap requests")
+            .is_empty(),
+        "tool-capable calls always dispatch through the primary model"
+    );
+}
+
+#[tokio::test]
+async fn gateway_surface_rejects_external_tool_that_shadows_native_deferred_tool() {
+    let request = model_request(interactive_model());
+    let run_profile = InMemoryRunProfileResolver::default()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("run profile resolves");
+    let run_context = LoopRunContext::new(
+        TurnScope::new(
+            TenantId::new("tenant-gateway-external-tools").expect("tenant id"),
+            None,
+            None,
+            ThreadId::new("thread-gateway-external-tools").expect("thread id"),
+        ),
+        request.turn_id,
+        request.run_id,
+        run_profile,
+    );
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .register(
+            run_context.run_id,
+            vec![
+                ExternalToolSpec::new(
+                    "demo__extra",
+                    "External tool that collides with the deferred host tool",
+                    serde_json::json!({"type": "object"}),
+                )
+                .expect("external tool spec"),
+            ],
+        )
+        .await
+        .expect("external tool registration");
+    let capabilities = wrap_external_tools(
+        Arc::new(GatewayCapabilityPort::with_native_deferred_surface(false)),
+        run_context,
+        Arc::new(NeverInvokedGatewayInputResolver),
+        Arc::new(NeverInvokedGatewayResultWriter),
+        catalog,
+    );
+
+    let error = capabilities
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .expect_err("external tools must not shadow native deferred host tools");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(
+        error.safe_summary,
+        "external tool name shadows a host capability"
+    );
+}
+
+#[tokio::test]
+async fn gateway_references_deferred_target_of_successful_tool_call_bridge() {
+    let provider = Arc::new(
+        ToolAwareProvider::tool_stop_reply("after bridge result").with_deferred_tool_loading(),
+    );
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let envelope = ToolResultReferenceEnvelope::new(
+        "result:tool-call-bridge",
+        ToolResultSafeSummary::new("tool_call completed").expect("safe summary"),
+    )
+    .expect("tool result envelope");
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_bridge".to_string(),
+        provider_call_id: "bridge-call".to_string(),
+        provider_tool_name: provider_name("tool_call"),
+        capability_id: CapabilityId::new("demo.extra").expect("capability id"),
+        arguments: serde_json::json!({
+            "name": "demo__extra",
+            "arguments": {"message": "hello"}
+        }),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&envelope).expect("tool result content"),
+        content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333")
+            .expect("message ref"),
+        tool_result_provider_call: Some(provider_call),
+        tool_result_content: tool_result_reference_content(&envelope),
+        image_parts: Vec::new(),
+    }];
+
+    gateway
+        .stream_model_with_capabilities(
+            request,
+            Arc::new(GatewayCapabilityPort::with_native_deferred_surface(false)),
+        )
+        .await
+        .expect("native deferred continuation");
+
+    let requests = provider.tool_requests.lock().expect("tool requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].tool_references.get("bridge-call"),
+        Some(&vec!["demo__extra".to_string()]),
+        "a successful tool_call bridge must expose its authorized deferred target"
     );
 }
 
@@ -827,6 +991,154 @@ async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() 
         "expected no-workaround reply, got {:?}",
         reply.content
     );
+}
+
+#[tokio::test]
+async fn gateway_allows_policy_filtered_discovery_for_named_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_search".to_string(),
+        name: "tool_search".to_string(),
+        arguments: serde_json::json!({"query": "demo.hidden"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let capability_port: Arc<dyn LoopCapabilityPort> = capabilities.clone();
+    let mut request = model_request(interactive_model());
+    request.messages[1].content =
+        "Use the demo.hidden capability; search for it first if tools are deferred.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capability_port)
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected policy-filtered discovery call");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].capability_id.as_str(), "ironclaw.tool_search");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn gateway_allows_exact_named_deferred_capability_for_policy_resolution() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_hidden".to_string(),
+        name: "demo__hidden".to_string(),
+        arguments: serde_json::json!({"message": "authorized at the capability port"}),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_hidden_resolvable_tool_surface());
+    let capability_port: Arc<dyn LoopCapabilityPort> = capabilities.clone();
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capability_port)
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected exact deferred capability call");
+    };
+    assert_eq!(calls[0].capability_id.as_str(), "demo.hidden");
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn gateway_allows_describe_and_wrapped_exact_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_describe".to_string(),
+            name: "tool_describe".to_string(),
+            arguments: serde_json::json!({"name": "demo__hidden"}),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+        ToolCall {
+            id: "call_wrapped".to_string(),
+            name: "tool_call".to_string(),
+            arguments: serde_json::json!({
+                "name": "demo__hidden",
+                "arguments": r#"{"message":"authorized at the capability port"}"#,
+            }),
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected policy-checked bridge calls");
+    };
+    assert_eq!(calls.len(), 2);
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn gateway_suppresses_wrapped_unrelated_deferred_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_wrapped".to_string(),
+        name: "tool_call".to_string(),
+        arguments: serde_json::json!({
+            "name": "demo__other",
+            "arguments": "{}",
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_discovery_bridge_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use the demo.hidden capability.".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
 }
 
 #[tokio::test]
@@ -4837,6 +5149,37 @@ struct GatewayCapabilityPort {
     deferred_surface: Option<DeferredProviderToolSurface>,
 }
 
+struct NeverInvokedGatewayInputResolver;
+
+#[async_trait]
+impl LoopCapabilityInputResolver for NeverInvokedGatewayInputResolver {
+    async fn resolve_capability_input(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "gateway collision test does not resolve capability inputs",
+        ))
+    }
+}
+
+struct NeverInvokedGatewayResultWriter;
+
+#[async_trait]
+impl LoopCapabilityResultWriter for NeverInvokedGatewayResultWriter {
+    async fn write_capability_result(
+        &self,
+        _write: CapabilityResultWrite<'_>,
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "gateway collision test does not write capability results",
+        ))
+    }
+}
+
 impl GatewayCapabilityPort {
     fn with_tool_surface() -> Self {
         let definitions = vec![ProviderToolDefinition {
@@ -4950,6 +5293,28 @@ impl GatewayCapabilityPort {
             }),
         });
         port
+    }
+
+    fn with_discovery_bridge_surface() -> Self {
+        let definitions = ["tool_search", "tool_describe", "tool_call"]
+            .into_iter()
+            .map(|name| ProviderToolDefinition {
+                capability_id: CapabilityId::new(format!("ironclaw.{name}"))
+                    .expect("valid bridge capability id"),
+                name: provider_name(name),
+                description: format!("Deferred-tool bridge {name}"),
+                description_trust: Default::default(),
+                parameters: serde_json::json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
+        Self {
+            resolvable_definitions: definitions.clone(),
+            definitions,
+            registered: Mutex::new(Vec::new()),
+            validation_error: None,
+            registration_error: None,
+            deferred_surface: None,
+        }
     }
 
     fn with_builtin_shell_surface() -> Self {

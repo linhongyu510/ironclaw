@@ -4,6 +4,7 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
+use crate::anthropic_oauth::supports_anthropic_prompt_cache;
 use crate::config::CacheRetention;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -299,7 +300,7 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// If the configured model does not support caching (e.g. claude-2),
     /// a warning is logged once at construction and caching is disabled.
     pub fn with_cache_retention(mut self, retention: CacheRetention) -> Self {
-        if retention != CacheRetention::None && !supports_prompt_cache(&self.model_name) {
+        if retention != CacheRetention::None && !supports_anthropic_prompt_cache(&self.model_name) {
             tracing::warn!(
                 model = %self.model_name,
                 "Prompt caching requested but model does not support it; disabling"
@@ -909,22 +910,6 @@ struct DrainedStreamingResponse {
 /// Saturate u64 to u32 for token counts.
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
-}
-
-/// Returns `true` if the model supports Anthropic prompt caching.
-///
-/// Per Anthropic docs, only Claude 3+ models support prompt caching.
-/// Unsupported: claude-2, claude-2.1, claude-instant-*.
-fn supports_prompt_cache(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    // Strip optional provider prefix (e.g. "anthropic/claude-...")
-    let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
-    // Only Claude 3+ families support prompt caching
-    model.starts_with("claude-3")
-        || model.starts_with("claude-4")
-        || model.starts_with("claude-sonnet")
-        || model.starts_with("claude-opus")
-        || model.starts_with("claude-haiku")
 }
 
 /// Serialize the raw provider response to JSON **once** per completion.
@@ -3675,30 +3660,34 @@ mod tests {
         }
     }
 
-    // -- supports_prompt_cache tests --
+    // -- supports_anthropic_prompt_cache tests --
 
     #[test]
-    fn test_supports_prompt_cache_supported_models() {
+    fn test_supports_anthropic_prompt_cache_supported_models() {
         // All Claude 3+ models per Anthropic docs
-        assert!(supports_prompt_cache("claude-opus-4-6"));
-        assert!(supports_prompt_cache("claude-sonnet-4-6"));
-        assert!(supports_prompt_cache("claude-sonnet-4"));
-        assert!(supports_prompt_cache("claude-haiku-4-5"));
-        assert!(supports_prompt_cache("claude-3-5-sonnet-20241022"));
-        assert!(supports_prompt_cache("claude-haiku-3"));
-        assert!(supports_prompt_cache("Claude-Opus-4-5")); // case-insensitive
-        assert!(supports_prompt_cache("anthropic/claude-sonnet-4-6")); // provider prefix
+        assert!(supports_anthropic_prompt_cache("claude-opus-4-6"));
+        assert!(supports_anthropic_prompt_cache("claude-sonnet-4-6"));
+        assert!(supports_anthropic_prompt_cache("claude-sonnet-4"));
+        assert!(supports_anthropic_prompt_cache("claude-haiku-4-5"));
+        assert!(supports_anthropic_prompt_cache(
+            "claude-3-5-sonnet-20241022"
+        ));
+        assert!(supports_anthropic_prompt_cache("claude-haiku-3"));
+        assert!(supports_anthropic_prompt_cache("Claude-Opus-4-5")); // case-insensitive
+        assert!(supports_anthropic_prompt_cache(
+            "anthropic/claude-sonnet-4-6"
+        )); // provider prefix
     }
 
     #[test]
-    fn test_supports_prompt_cache_unsupported_models() {
+    fn test_supports_anthropic_prompt_cache_unsupported_models() {
         // Legacy Claude models that predate caching
-        assert!(!supports_prompt_cache("claude-2"));
-        assert!(!supports_prompt_cache("claude-2.1"));
-        assert!(!supports_prompt_cache("claude-instant-1.2"));
+        assert!(!supports_anthropic_prompt_cache("claude-2"));
+        assert!(!supports_anthropic_prompt_cache("claude-2.1"));
+        assert!(!supports_anthropic_prompt_cache("claude-instant-1.2"));
         // Non-Claude models
-        assert!(!supports_prompt_cache("gpt-4o"));
-        assert!(!supports_prompt_cache("llama3"));
+        assert!(!supports_anthropic_prompt_cache("gpt-4o"));
+        assert!(!supports_anthropic_prompt_cache("llama3"));
     }
 
     #[test]

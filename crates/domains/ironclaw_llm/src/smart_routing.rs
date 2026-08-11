@@ -917,7 +917,7 @@ impl LlmProvider for SmartRoutingProvider {
     }
 
     fn supports_deferred_tool_loading(&self) -> bool {
-        self.primary.supports_deferred_tool_loading() || self.cheap.supports_deferred_tool_loading()
+        self.primary.supports_deferred_tool_loading()
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {

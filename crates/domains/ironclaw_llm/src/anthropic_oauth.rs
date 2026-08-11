@@ -97,6 +97,7 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 fn supports_anthropic_deferred_tools(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     [
+        "claude-opus-5",
         "claude-opus-4-5",
         "claude-opus-4-6",
         "claude-opus-4-7",
@@ -109,6 +110,40 @@ fn supports_anthropic_deferred_tools(model: &str) -> bool {
     ]
     .iter()
     .any(|supported| model.contains(supported))
+}
+
+/// Returns whether an Anthropic model supports automatic prompt caching.
+///
+/// Claude 2 and Claude Instant predate prompt caching. Keep this direct
+/// provider guard in lockstep with the Rig-backed fallback so an operator's
+/// retention setting never emits an unsupported wire field.
+pub(crate) fn supports_anthropic_prompt_cache(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    let model = model.strip_prefix("anthropic/").unwrap_or(&model);
+    model.starts_with("claude-3")
+        || model.starts_with("claude-4")
+        || model.starts_with("claude-sonnet")
+        || model.starts_with("claude-opus")
+        || model.starts_with("claude-haiku")
+}
+
+fn cache_retention_for_model(model: &str, retention: CacheRetention) -> CacheRetention {
+    if retention != CacheRetention::None && !supports_anthropic_prompt_cache(model) {
+        CacheRetention::None
+    } else {
+        retention
+    }
+}
+
+fn supported_cache_retention(model: &str, retention: CacheRetention) -> CacheRetention {
+    let supported_retention = cache_retention_for_model(model, retention);
+    if supported_retention != retention {
+        tracing::warn!(
+            model,
+            "Prompt caching requested but model does not support it; disabling"
+        );
+    }
+    supported_retention
 }
 
 enum AnthropicAuth {
@@ -201,6 +236,8 @@ impl AnthropicProvider {
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
 
+        let cache_retention = supported_cache_retention(&config.model, config.cache_retention);
+
         Ok(Self {
             client,
             streaming_client,
@@ -210,7 +247,7 @@ impl AnthropicProvider {
             model: config.model.clone(),
             base_url,
             active_model,
-            cache_retention: config.cache_retention,
+            cache_retention,
             models_endpoint: api_key_clients.map(|(_, endpoint)| endpoint),
             unsupported_params,
         })
@@ -574,6 +611,7 @@ impl LlmProvider for AnthropicProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages, &BTreeMap::new());
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let cache_retention = cache_retention_for_model(&model, self.cache_retention);
 
         let request = AnthropicRequest {
             stream: false,
@@ -586,7 +624,7 @@ impl LlmProvider for AnthropicProvider {
             stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
-            cache_control: anthropic_cache_control(self.cache_retention),
+            cache_control: anthropic_cache_control(cache_retention),
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -621,6 +659,7 @@ impl LlmProvider for AnthropicProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages, &BTreeMap::new());
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let cache_retention = cache_retention_for_model(&model, self.cache_retention);
         let request = AnthropicRequest {
             stream: true,
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
@@ -632,7 +671,7 @@ impl LlmProvider for AnthropicProvider {
             stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
-            cache_control: anthropic_cache_control(self.cache_retention),
+            cache_control: anthropic_cache_control(cache_retention),
         };
         let response = self.send_streaming_request(&request, sink).await?;
         Ok(CompletionResponse {
@@ -673,6 +712,7 @@ impl LlmProvider for AnthropicProvider {
         let tools = convert_anthropic_tools(req.tools, deferred_tool_names);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let cache_retention = cache_retention_for_model(&model, self.cache_retention);
 
         // Suppress thinking for tool-capable requests to avoid signature round-trip issues.
         // Anthropic requires signed thinking blocks to be echoed back on subsequent tool_result
@@ -696,7 +736,7 @@ impl LlmProvider for AnthropicProvider {
             stop_sequences: req.stop_sequences,
             tools: opt_tools,
             tool_choice,
-            cache_control: anthropic_cache_control(self.cache_retention),
+            cache_control: anthropic_cache_control(cache_retention),
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -760,6 +800,7 @@ impl LlmProvider for AnthropicProvider {
         let tools = convert_anthropic_tools(req.tools, deferred_tool_names);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let cache_retention = cache_retention_for_model(&model, self.cache_retention);
         let has_tools = !tools.is_empty();
         let request = AnthropicRequest {
             stream: true,
@@ -776,7 +817,7 @@ impl LlmProvider for AnthropicProvider {
             stop_sequences: req.stop_sequences,
             tools: has_tools.then_some(tools),
             tool_choice,
-            cache_control: anthropic_cache_control(self.cache_retention),
+            cache_control: anthropic_cache_control(cache_retention),
         };
         let mut response = self.send_streaming_request(&request, sink).await?;
         crate::tool_schema::strip_unset_optional_fields(
@@ -949,6 +990,8 @@ enum AnthropicToolResultContent {
 enum AnthropicToolResultContentBlock {
     #[serde(rename = "tool_reference")]
     ToolReference { tool_name: String },
+    #[serde(rename = "text")]
+    Text { text: String },
 }
 
 /// Inline base64 image source for an Anthropic `image` content block.
@@ -1376,12 +1419,17 @@ fn convert_messages(
                 // Tool results go into a user message with tool_result blocks
                 let content = match tool_references.get(&tool_call_id) {
                     Some(references) if !references.is_empty() => {
-                        let blocks = references
-                            .iter()
-                            .map(|tool_name| AnthropicToolResultContentBlock::ToolReference {
+                        let text_block_capacity = if msg.content.is_empty() { 0 } else { 1 };
+                        let mut blocks = Vec::with_capacity(references.len() + text_block_capacity);
+                        blocks.extend(references.iter().map(|tool_name| {
+                            AnthropicToolResultContentBlock::ToolReference {
                                 tool_name: tool_name.clone(),
-                            })
-                            .collect::<Vec<_>>();
+                            }
+                        }));
+                        if !msg.content.is_empty() {
+                            blocks
+                                .push(AnthropicToolResultContentBlock::Text { text: msg.content });
+                        }
                         AnthropicToolResultContent::Blocks(blocks)
                     }
                     _ => AnthropicToolResultContent::Text(msg.content),
@@ -1734,15 +1782,33 @@ mod tests {
             crate::registry::ProviderProtocol::Anthropic,
             "anthropic",
             Some(SecretString::from("test-api-key".to_string())),
-            base_url,
+            base_url.clone(),
             "claude-sonnet-4-6",
         );
-        let provider = AnthropicProvider::new_with_auth(
+        let models_url = format!("{base_url}/v1/models");
+        let provider = AnthropicProvider::new_api_key(
             &config,
-            AnthropicAuth::ApiKey(SecretString::from("test-api-key".to_string())),
-            None,
+            crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+            crate::rig_adapter::ModelsEndpoint {
+                provider_id: config.provider_id.clone(),
+                url: models_url.clone(),
+                auth: crate::rig_adapter::ModelsAuth::AnthropicKey {
+                    api_key: "test-api-key".to_string(),
+                    version: ANTHROPIC_API_VERSION.to_string(),
+                },
+                shape: crate::rig_adapter::ModelsShape::OpenAiData,
+                extra_headers: reqwest::header::HeaderMap::new(),
+            },
         )
         .expect("provider");
+        assert_eq!(
+            provider
+                .models_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.url.as_str()),
+            Some(models_url.as_str()),
+            "the public API-key constructor must retain model discovery wiring"
+        );
         let mut request = ToolCompletionRequest::new(
             vec![ChatMessage::tool_result(
                 "search-call",
@@ -1789,6 +1855,93 @@ mod tests {
                 "type": "tool_reference",
                 "tool_name": "calendar_create"
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_legacy_model_disables_prompt_cache_control() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = socket.read(&mut chunk).await.expect("read request");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .expect("content length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let body = r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request).expect("UTF-8 request")
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic",
+            Some(SecretString::from("test-api-key".to_string())),
+            base_url.clone(),
+            "claude-2.1",
+        );
+        config.cache_retention = CacheRetention::Short;
+        let provider = AnthropicProvider::new_api_key(
+            &config,
+            crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+            crate::rig_adapter::ModelsEndpoint {
+                provider_id: config.provider_id.clone(),
+                url: format!("{base_url}/v1/models"),
+                auth: crate::rig_adapter::ModelsAuth::AnthropicKey {
+                    api_key: "test-api-key".to_string(),
+                    version: ANTHROPIC_API_VERSION.to_string(),
+                },
+                shape: crate::rig_adapter::ModelsShape::OpenAiData,
+                extra_headers: reqwest::header::HeaderMap::new(),
+            },
+        )
+        .expect("provider");
+
+        provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect("completion");
+        let raw_request = server.await.expect("loopback server");
+        let (_, body) = raw_request.split_once("\r\n\r\n").expect("HTTP request");
+        let body: serde_json::Value = serde_json::from_str(body).expect("request body JSON");
+        assert!(
+            body.get("cache_control").is_none(),
+            "legacy Claude models must not receive unsupported cache_control"
         );
     }
 
@@ -2004,6 +2157,7 @@ mod tests {
 
     #[test]
     fn deferred_loading_is_gated_to_supported_anthropic_models() {
+        assert!(supports_anthropic_deferred_tools("claude-opus-5"));
         assert!(supports_anthropic_deferred_tools("claude-sonnet-4-6"));
         assert!(supports_anthropic_deferred_tools(
             "claude-haiku-4-5-20251001"
@@ -2040,8 +2194,41 @@ mod tests {
             })
         );
         assert_eq!(
-            encoded["content"][0]["content"].as_array().unwrap().len(),
-            1
+            encoded["content"][0]["content"][1],
+            serde_json::json!({
+                "type": "text",
+                "text": r#"{"results":[{"name":"calendar_create"}]}"#
+            })
+        );
+    }
+
+    #[test]
+    fn direct_deferred_tool_results_preserve_text_alongside_references() {
+        let messages = vec![ChatMessage::tool_result(
+            "direct-call",
+            "calendar_create",
+            r#"{"event_id":"evt_123"}"#,
+        )];
+        let references = BTreeMap::from([(
+            "direct-call".to_string(),
+            vec!["calendar_create".to_string()],
+        )]);
+
+        let (_, encoded_messages) = convert_messages(messages, &references);
+        let encoded = serde_json::to_value(&encoded_messages[0]).expect("serialize message");
+
+        assert_eq!(
+            encoded["content"][0]["content"],
+            serde_json::json!([
+                {
+                    "type": "tool_reference",
+                    "tool_name": "calendar_create"
+                },
+                {
+                    "type": "text",
+                    "text": r#"{"event_id":"evt_123"}"#
+                }
+            ])
         );
     }
 
