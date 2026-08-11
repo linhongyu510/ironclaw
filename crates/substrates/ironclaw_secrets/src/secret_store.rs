@@ -195,14 +195,18 @@ where
                 }
                 Some(CREDENTIAL_ACCOUNT_KIND) => {
                     let stored: StoredAccount = match deserialize_credential(&versioned.entry.body)
-                        .map_err(|error| SecretStoreError::StoreUnavailable {
-                            reason: format!(
-                                "failed to inspect encrypted credential record: {error}"
-                            ),
-                        }) {
+                    {
                         Ok(stored) => stored,
-                        Err(error) => {
-                            record_verification_error.get_or_insert(error);
+                        // Serde's diagnostic can quote the malformed record's
+                        // input. This verification error reaches the startup
+                        // operator, so retain the record category but never
+                        // surface the untrusted parse detail.
+                        Err(_) => {
+                            record_verification_error.get_or_insert(
+                                SecretStoreError::StoreUnavailable {
+                                    reason: "encrypted credential record is malformed".to_string(),
+                                },
+                            );
                             continue;
                         }
                     };
@@ -1605,7 +1609,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         action::NetworkMethod,
         ids::{
@@ -1733,6 +1737,55 @@ mod tests {
         verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
             .await
             .expect_err("every encrypted credential account must authenticate before cutover");
+    }
+
+    #[tokio::test]
+    async fn encrypted_credential_verification_hides_malformed_record_details() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(
+            Arc::clone(&backend),
+            "/tenants/tenant-a/users/user-a/secrets",
+        );
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("malformed-account").expect("account id");
+        let broker = CredentialBroker::new(Arc::clone(&scoped), test_crypto());
+        broker
+            .put_account(sample_account(
+                scope.clone(),
+                account_id.clone(),
+                SecretHandle::new("provider-key").expect("secret handle"),
+            ))
+            .await
+            .expect("seed encrypted credential account");
+
+        let scoped_path = credential_account_path(&scope, &account_id).expect("account path");
+        let virtual_path = scoped.resolve(&scope, &scoped_path).expect("virtual path");
+        let versioned = backend
+            .get(&virtual_path)
+            .await
+            .expect("read credential entry")
+            .expect("credential entry exists");
+        let mut malformed: serde_json::Value =
+            serde_json::from_slice(&versioned.entry.body).expect("stored credential JSON");
+        malformed["status"] = json!("operator-input-sentinel-91c4");
+        let mut entry = versioned.entry;
+        entry.body = serde_json::to_vec(&malformed).expect("malformed credential JSON");
+        backend
+            .put(&virtual_path, entry, CasExpectation::Any)
+            .await
+            .expect("replace credential entry with malformed record");
+
+        let error = verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect_err("malformed encrypted credential record must stop verification");
+        assert_eq!(
+            error.to_string(),
+            "secret store state is unavailable: encrypted credential record is malformed"
+        );
+        assert!(
+            !error.to_string().contains("operator-input-sentinel-91c4"),
+            "operator-facing error must not contain malformed credential input: {error}"
+        );
     }
 
     #[tokio::test]
