@@ -6,7 +6,8 @@
 //! listing projection does not need to understand any of it.
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, Filter, Page, RecordKind, RootFilesystem,
+    CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter, Page,
+    RecordKind, RootFilesystem, SeqNo,
 };
 use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 
@@ -16,13 +17,17 @@ use crate::{
 };
 
 use super::{
-    IndexDeclarationPolicy, deserialize, invalid_path, is_not_found, messages_root,
-    scope_axes_string, scoped_path, summaries_root,
+    IndexDeclarationPolicy, deserialize, invalid_path, is_not_found, message_record_path,
+    messages_root, scope_axes_string, scoped_path, summaries_root, thread_root_string,
 };
 
 /// Bounded retries for a transcript-migration page that lost a CAS or
 /// writer-contention race against live turn writes.
 const TRANSCRIPT_PAGE_CONFLICT_RETRIES: u32 = 5;
+const TRANSCRIPT_MIGRATION_MARKER_BODY: &[u8] = b"transcript-index-v2";
+
+/// Bounded read size for the append log written by IronClaw 1.0.
+const LEGACY_APPEND_PAGE_LIMIT: usize = 256;
 
 /// Outcome of one transactional transcript-migration page.
 enum TranscriptPageOutcome {
@@ -123,6 +128,97 @@ where
         Ok(migrated)
     }
 
+    /// Materialize finalized messages that IronClaw 1.0 persisted only in the
+    /// per-thread append log. Existing message rows remain authoritative so a
+    /// later update or redaction is never overwritten during migration.
+    async fn migrate_legacy_append_logs_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let thread_ids = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for thread_id in thread_ids {
+            let append_path = legacy_message_append_log_path(scope, &thread_id)?;
+            let mut after = SeqNo::ZERO;
+            loop {
+                let events = match self
+                    .filesystem
+                    .tail_bounded(
+                        &scope.to_resource_scope(),
+                        &append_path,
+                        after,
+                        LEGACY_APPEND_PAGE_LIMIT,
+                    )
+                    .await
+                {
+                    Ok(events) => events,
+                    Err(FilesystemError::NotFound { .. }) => break,
+                    // IronClaw 1.0 fell back to per-message rows when append
+                    // storage was unavailable, so there is nothing to import
+                    // on a backend without tail support.
+                    Err(FilesystemError::Unsupported {
+                        operation: FilesystemOperation::Tail,
+                        ..
+                    }) => break,
+                    Err(error) => return Err(error.into()),
+                };
+                if events.is_empty() {
+                    break;
+                }
+                let received = events.len();
+                for event in events {
+                    after = event.seq;
+                    let message = deserialize::<ThreadMessageRecord>(&event.payload)?;
+                    if message.thread_id != thread_id {
+                        return Err(SessionThreadError::Backend(
+                            "legacy append event references a different thread".to_string(),
+                        ));
+                    }
+                    let message_path = message_record_path(scope, &thread_id, message.message_id)?;
+                    if self
+                        .filesystem
+                        .get(&scope.to_resource_scope(), &message_path)
+                        .await?
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    match self
+                        .filesystem
+                        .put(
+                            &scope.to_resource_scope(),
+                            &message_path,
+                            Self::message_entry(&message)?,
+                            CasExpectation::Absent,
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if received < LEGACY_APPEND_PAGE_LIMIT {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// One transactional page of [`Self::migrate_transcript_indexes_for_scope`].
     ///
     /// Returns `Conflict` instead of an error when the transaction lost a CAS
@@ -220,20 +316,25 @@ where
         scope: &ThreadScope,
     ) -> Result<(), SessionThreadError> {
         let marker = transcript_index_migration_marker_path(scope)?;
-        if self
+        if let Some(existing_marker) = self
             .filesystem
             .get(&scope.to_resource_scope(), &marker)
             .await?
-            .is_some()
         {
+            if existing_marker.entry.body != TRANSCRIPT_MIGRATION_MARKER_BODY {
+                return Err(SessionThreadError::Backend(
+                    "transcript index migration marker has an unexpected body".to_string(),
+                ));
+            }
             return Ok(());
         }
+        self.migrate_legacy_append_logs_for_scope(scope).await?;
         self.migrate_transcript_indexes_for_scope(scope).await?;
         self.filesystem
             .put(
                 &scope.to_resource_scope(),
                 &marker,
-                Entry::bytes(b"transcript-index-v2".to_vec()),
+                Entry::bytes(TRANSCRIPT_MIGRATION_MARKER_BODY.to_vec()),
                 CasExpectation::Any,
             )
             .await?;
@@ -241,10 +342,10 @@ where
             .filesystem
             .get(&scope.to_resource_scope(), &marker)
             .await?
-            .is_none()
+            .is_none_or(|entry| entry.entry.body != TRANSCRIPT_MIGRATION_MARKER_BODY)
         {
             return Err(SessionThreadError::Backend(
-                "transcript index migration marker was not durable after write".to_string(),
+                "transcript index migration marker failed exact readback".to_string(),
             ));
         }
         Ok(())
@@ -257,5 +358,15 @@ fn transcript_index_migration_marker_path(
     scoped_path(&format!(
         "{}/index-migrations/transcript-index-v2.complete",
         scope_axes_string(scope)
+    ))
+}
+
+fn legacy_message_append_log_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/message_appends",
+        thread_root_string(scope, thread_id)
     ))
 }

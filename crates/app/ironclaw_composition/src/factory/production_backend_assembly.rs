@@ -359,6 +359,7 @@ pub(super) async fn build_backend_production(
         workspace_filesystems,
         standalone_storage_root,
         default_system_prompt_path,
+        legacy_workspace_snapshot: _,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
