@@ -198,6 +198,13 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     ("SKILL_SEARCH_VIEW", "inventory"),
     ("SKILL_UPDATE_CAPABILITY", "inventory"),
     ("SUBMIT_TURN_COMMAND", "inventory"),
+    // #7038: same shape as AUTOMATIONS_VIEW/AUTOMATION_* above — concrete
+    // descriptor constants stay in product per §6.1.3. Their request/response
+    // DTOs (`RebornSuggestionsGenerateRequest`/`RebornSuggestionsResponse`)
+    // are NOT here: the webui route consumes `serde_json::Value` for both,
+    // so those two types never cross the transport boundary by name.
+    ("SUGGESTIONS_GENERATE_COMMAND", "inventory"),
+    ("SUGGESTIONS_VIEW", "inventory"),
     ("THREADS_VIEW", "inventory"),
     ("THREAD_ARTIFACT_VIEW", "inventory"),
     ("THREAD_DELETE_CAPABILITY", "inventory"),
@@ -223,7 +230,9 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 // `product_attachment_capabilities` to `ironclaw_attachments` as
 // `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
 // list called out by name as that row's to own. Shrink-only.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 103;
+// 103 -> 105: #7038 added SUGGESTIONS_VIEW / SUGGESTIONS_GENERATE_COMMAND
+// (concrete descriptor constants, §6.1.3's tolerated inventory shape).
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 105;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`

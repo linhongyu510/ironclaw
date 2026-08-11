@@ -58,13 +58,12 @@ use ironclaw_assistant::{
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND,
     RebornCreateThreadResponse, RebornExtensionListResponse, RebornListThreadsResponse,
-    RebornSuggestionsGenerateRequest, RebornSuggestionsResponse, RebornTimelineResponse,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
-    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SUBMIT_TURN_COMMAND, SUGGESTIONS_GENERATE_COMMAND,
-    SUGGESTIONS_VIEW, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    TRACE_HOLD_AUTHORIZE_COMMAND,
+    RebornTimelineResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
+    SUBMIT_TURN_COMMAND, SUGGESTIONS_GENERATE_COMMAND, SUGGESTIONS_VIEW, THREAD_DELETE_CAPABILITY,
+    THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
 };
 use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product_contracts::admin_users::{
@@ -1904,7 +1903,7 @@ pub async fn list_automations(
 pub async fn get_suggestions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let surface = state.bind_services(caller);
     let response = SUGGESTIONS_VIEW
         .query_on(&surface, serde_json::Value::Null, None)
@@ -1921,12 +1920,12 @@ pub async fn get_suggestions(
 pub async fn generate_suggestions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
     let response = invoke_product_command(
         state.services(),
         caller,
         SUGGESTIONS_GENERATE_COMMAND,
-        RebornSuggestionsGenerateRequest::default(),
+        serde_json::Value::Null,
     )
     .await?;
     Ok(Json(response))

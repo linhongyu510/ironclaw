@@ -98,10 +98,9 @@ use crate::{
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
     ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
-    ProductSurfaceFailure, RebornSuggestionsGenerateRequest, RebornSuggestionsResponse,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductService,
+    ProductSurfaceFailure, RebornSuggestionsResponse, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -555,11 +554,19 @@ pub const AUTOMATIONS_VIEW: ProductView<
     ProductListAutomationsRequest,
     RebornListAutomationsResponse,
 > = ProductView::unpaginated("automations");
-pub const SUGGESTIONS_VIEW: ProductView<serde_json::Value, RebornSuggestionsResponse> =
+// Both type params are `serde_json::Value`, not the strongly-typed
+// `RebornSuggestionsGenerateRequest`/`RebornSuggestionsResponse` (still used
+// internally by `SuggestionsProductService`) — every descriptor here crosses
+// the wire as JSON regardless (`ProductView`/`ProductSurfaceCommandDescriptor`
+// serialize through `Value` either way, see `descriptors.rs`), and keeping
+// these two `Value`-typed is what lets `ironclaw_webui` consume this command
+// without naming a product-crate type directly (WS5 transport
+// port-inversion rule, `reborn_transport_product_boundary.rs`).
+pub const SUGGESTIONS_VIEW: ProductView<serde_json::Value, serde_json::Value> =
     ProductView::unpaginated(crate::suggestions_product_service::SUGGESTIONS_VIEW_ID);
 pub const SUGGESTIONS_GENERATE_COMMAND: ProductSurfaceCommandDescriptor<
-    RebornSuggestionsGenerateRequest,
-    RebornSuggestionsResponse,
+    serde_json::Value,
+    serde_json::Value,
 > = ProductSurfaceCommandDescriptor::new(
     crate::suggestions_product_service::SUGGESTIONS_GENERATE_COMMAND_ID,
 );
