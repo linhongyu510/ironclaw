@@ -66,6 +66,23 @@ impl RebornSuggestionsProductService {
         }
     }
 
+    /// Read the current doc (or the empty default) and derive its view
+    /// under the assumption the caller already knows a claim is live — the
+    /// shared tail of both the dedupe-onto-the-winner path and the
+    /// just-accepted-a-turn path in `generate_suggestions_with_thread_id`.
+    async fn read_live_view(
+        &self,
+        caller: &ProductAgentBoundCaller,
+    ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
+        let doc = self
+            .store
+            .read_doc(&caller.tenant_id, &caller.user_id)
+            .await
+            .map_err(ProductSurfaceError::internal_from)?
+            .unwrap_or_else(ironclaw_suggestions::SuggestionsDoc::empty);
+        Ok(derive_suggestions_view(&doc, Some(RunLiveness::Live)))
+    }
+
     async fn run_liveness(
         &self,
         scope: &TurnScope,
@@ -191,13 +208,7 @@ impl RebornSuggestionsProductService {
                 // Lost a concurrent race after the pre-check above — dedupe
                 // onto whichever claim just won (spec §4: both racers must
                 // observe the same job_id / one loop).
-                let doc = self
-                    .store
-                    .read_doc(&caller.tenant_id, &caller.user_id)
-                    .await
-                    .map_err(ProductSurfaceError::internal_from)?
-                    .unwrap_or_else(ironclaw_suggestions::SuggestionsDoc::empty);
-                return Ok(derive_suggestions_view(&doc, Some(RunLiveness::Live)));
+                return self.read_live_view(&caller).await;
             }
         };
 
@@ -224,13 +235,7 @@ impl RebornSuggestionsProductService {
                         .await
                         .map_err(ProductSurfaceError::internal_from)?;
                 }
-                let doc = self
-                    .store
-                    .read_doc(&caller.tenant_id, &caller.user_id)
-                    .await
-                    .map_err(ProductSurfaceError::internal_from)?
-                    .unwrap_or_else(ironclaw_suggestions::SuggestionsDoc::empty);
-                Ok(derive_suggestions_view(&doc, Some(RunLiveness::Live)))
+                self.read_live_view(&caller).await
             }
             Err(error) => {
                 // Release the claim so the next POST can retry cleanly
