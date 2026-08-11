@@ -92,6 +92,11 @@ impl SuggestionGenerationFinalizerSink {
 #[async_trait]
 impl TurnEventSink for SuggestionGenerationFinalizerSink {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        // Cheap filter only, same shape as every sibling `TurnEventSink`
+        // (`trace_capture.rs`, `skill_learning.rs`): the actual store I/O is
+        // spawned below so this fan-out (which fires on EVERY turn's
+        // terminal transition, not just suggestion-generation ones) never
+        // adds synchronous latency to an unrelated turn's completion path.
         if !matches!(
             event.kind,
             TurnEventKind::Completed | TurnEventKind::Failed | TurnEventKind::Cancelled
@@ -105,52 +110,67 @@ impl TurnEventSink for SuggestionGenerationFinalizerSink {
         else {
             return Ok(());
         };
-        let doc = match self.store.read_doc(&event.scope.tenant_id, &user_id).await {
-            Ok(doc) => doc,
-            // Best-effort, same posture as every sibling `TurnEventSink`
-            // (`trace_capture.rs`, `skill_learning.rs`): a backend hiccup
-            // here must never fail the turn commit. The claim is still
-            // recoverable via `MIN_CLAIM_AGE_BEFORE_RECLAIM` on the next
-            // request if this specific finalize is lost.
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    tenant_id = %event.scope.tenant_id,
-                    run_id = %event.run_id,
-                    "suggestion-generation finalizer: read_doc failed, deferring to the claim-age mitigation"
-                );
-                return Ok(());
-            }
-        };
-        let Some(active_job) = doc.and_then(|doc| doc.active_job) else {
-            return Ok(());
-        };
-        if active_job.run_id != event.run_id {
-            // Not the run this claim is waiting on — either an unrelated
-            // chat turn, or a stale event for a claim already superseded.
-            return Ok(());
-        }
-        if let Err(error) = self
-            .store
-            .record_failure(
-                &event.scope.tenant_id,
-                &user_id,
-                active_job.job_id,
-                format!(
-                    "generation run ended ({:?}) without calling render_suggestions",
-                    event.status
-                ),
-            )
-            .await
-        {
+        let store = self.store.clone();
+        let tenant_id = event.scope.tenant_id.clone();
+        let run_id = event.run_id;
+        let status = event.status;
+        tokio::spawn(async move {
+            finalize_claim_if_owned(&store, &tenant_id, &user_id, run_id, status).await;
+        });
+        Ok(())
+    }
+}
+
+/// The actual finalize work, extracted so it can be spawned off the fast
+/// `publish` path (see [`SuggestionGenerationFinalizerSink::publish`]) while
+/// staying directly callable — synchronously, no spawn-completion race — from
+/// tests.
+async fn finalize_claim_if_owned(
+    store: &SuggestionsStore,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
+    user_id: &ironclaw_host_api::ids::UserId,
+    run_id: ironclaw_host_api::turn::TurnRunId,
+    status: ironclaw_host_api::turn::TurnStatus,
+) {
+    let doc = match store.read_doc(tenant_id, user_id).await {
+        Ok(doc) => doc,
+        // Best-effort: a backend hiccup here must never fail the turn
+        // commit. The claim is still recoverable via
+        // `MIN_CLAIM_AGE_BEFORE_RECLAIM` on the next request if this
+        // specific finalize is lost.
+        Err(error) => {
             tracing::debug!(
                 %error,
-                tenant_id = %event.scope.tenant_id,
-                run_id = %event.run_id,
-                "suggestion-generation finalizer: record_failure failed, deferring to the claim-age mitigation"
+                %tenant_id,
+                %run_id,
+                "suggestion-generation finalizer: read_doc failed, deferring to the claim-age mitigation"
             );
+            return;
         }
-        Ok(())
+    };
+    let Some(active_job) = doc.and_then(|doc| doc.active_job) else {
+        return;
+    };
+    if active_job.run_id != run_id {
+        // Not the run this claim is waiting on — either an unrelated chat
+        // turn, or a stale event for a claim already superseded.
+        return;
+    }
+    if let Err(error) = store
+        .record_failure(
+            tenant_id,
+            user_id,
+            active_job.job_id,
+            format!("generation run ended ({status:?}) without calling render_suggestions"),
+        )
+        .await
+    {
+        tracing::debug!(
+            %error,
+            %tenant_id,
+            %run_id,
+            "suggestion-generation finalizer: record_failure failed, deferring to the claim-age mitigation"
+        );
     }
 }
 
@@ -300,10 +320,17 @@ mod tests {
             panic!("expected claim");
         };
 
-        let sink = SuggestionGenerationFinalizerSink::new(store.clone());
-        sink.publish(terminal_event(TurnEventKind::Failed, "t", "u", run_id))
-            .await
-            .unwrap();
+        // Calls the extracted finalize work directly (not through
+        // `publish`, which now spawns it) so the assertion below doesn't
+        // race a background task.
+        finalize_claim_if_owned(
+            &store,
+            &TenantId::new("t").unwrap(),
+            &UserId::new("u").unwrap(),
+            run_id,
+            ironclaw_host_api::turn::TurnStatus::Failed,
+        )
+        .await;
 
         let doc = store
             .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
@@ -332,15 +359,14 @@ mod tests {
 
         // An ordinary chat turn (or any other unrelated run) reaching this
         // sink must never touch a claim it doesn't own.
-        let sink = SuggestionGenerationFinalizerSink::new(store.clone());
-        sink.publish(terminal_event(
-            TurnEventKind::Completed,
-            "t",
-            "u",
+        finalize_claim_if_owned(
+            &store,
+            &TenantId::new("t").unwrap(),
+            &UserId::new("u").unwrap(),
             unrelated_run_id,
-        ))
-        .await
-        .unwrap();
+            ironclaw_host_api::turn::TurnStatus::Completed,
+        )
+        .await;
 
         let doc = store
             .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
@@ -379,10 +405,14 @@ mod tests {
         // The run's Completed event arrives AFTER render_suggestions already
         // recorded the result and cleared active_job — the finalizer must not
         // clobber the successful result with a synthetic failure.
-        let sink = SuggestionGenerationFinalizerSink::new(store.clone());
-        sink.publish(terminal_event(TurnEventKind::Completed, "t", "u", run_id))
-            .await
-            .unwrap();
+        finalize_claim_if_owned(
+            &store,
+            &TenantId::new("t").unwrap(),
+            &UserId::new("u").unwrap(),
+            run_id,
+            ironclaw_host_api::turn::TurnStatus::Completed,
+        )
+        .await;
 
         let doc = store
             .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
@@ -422,5 +452,45 @@ mod tests {
             doc.active_job.is_some(),
             "a non-terminal event must never touch the claim"
         );
+    }
+
+    /// Test-through-the-caller proof (not just `finalize_claim_if_owned` in
+    /// isolation): `publish` itself must actually spawn and complete the
+    /// finalize work, matching the sibling `TraceCaptureTurnEventSink`'s own
+    /// "capture task is detached; poll briefly" pattern.
+    #[tokio::test]
+    async fn publish_spawns_the_finalize_work_and_it_completes() {
+        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let run_id = TurnRunId::new();
+        store
+            .claim_active_job(
+                &TenantId::new("t").unwrap(),
+                &UserId::new("u").unwrap(),
+                ThreadId::new("t1").unwrap(),
+                run_id,
+            )
+            .await
+            .unwrap();
+
+        let sink = SuggestionGenerationFinalizerSink::new(store.clone());
+        sink.publish(terminal_event(TurnEventKind::Failed, "t", "u", run_id))
+            .await
+            .unwrap();
+
+        // The finalize work is detached; poll briefly for it to land.
+        let mut doc = None;
+        for _ in 0..100 {
+            let current = store
+                .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
+                .await
+                .unwrap();
+            if current.as_ref().is_some_and(|doc| doc.active_job.is_none()) {
+                doc = current;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let doc = doc.expect("spawned finalize work clears active_job within the poll window");
+        assert!(doc.last_error.unwrap().message.contains("Failed"));
     }
 }
