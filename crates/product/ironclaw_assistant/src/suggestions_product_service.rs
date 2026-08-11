@@ -173,7 +173,7 @@ impl SuggestionsProductService for RebornSuggestionsProductService {
         &self,
         caller: ProductAgentBoundCaller,
     ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
-        self.generate_suggestions_with_thread_id(caller, fresh_suggestion_generation_thread_id())
+        self.generate_suggestions_with_thread_id(caller, fresh_suggestion_generation_thread_id()?)
             .await
     }
 }
@@ -532,10 +532,12 @@ fn turn_scope(caller: &ProductAgentBoundCaller, thread_id: ThreadId) -> TurnScop
     )
 }
 
-fn fresh_suggestion_generation_thread_id() -> ThreadId {
+fn fresh_suggestion_generation_thread_id() -> Result<ThreadId, ProductSurfaceError> {
     // Random per generation — a fresh hidden thread every run (spec §5:
     // "Regeneration overwrites the doc but creates a NEW hidden thread; old
-    // transcripts remain").
+    // transcripts remain"). The literal prefix and UUID text always satisfy
+    // `ThreadId`'s validation, so the error arm is unreachable in practice —
+    // surfaced rather than panicked so production carries no panic path.
     ThreadId::new(format!("suggestion-gen-{}", Uuid::new_v4()))
-        .unwrap_or_else(|_| unreachable!("uuid-suffixed thread id is always valid"))
+        .map_err(ProductSurfaceError::internal_from)
 }
