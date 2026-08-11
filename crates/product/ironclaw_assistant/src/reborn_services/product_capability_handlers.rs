@@ -76,9 +76,7 @@ impl ProductCommandHandler {
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
-            crate::suggestions_product_service::SUGGESTIONS_GENERATE_COMMAND_ID => {
-                Some(Self::SuggestionsGenerate)
-            }
+            SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
             WEB_PUSH_SUBSCRIBE_COMMAND_ID => Some(Self::WebPushSubscribe),
             WEB_PUSH_UNSUBSCRIBE_COMMAND_ID => Some(Self::WebPushUnsubscribe),

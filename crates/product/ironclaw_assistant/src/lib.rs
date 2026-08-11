@@ -184,7 +184,6 @@ pub use scoped_fs::{
 };
 pub use suggestions_product_service::{
     RebornSuggestionsGenerateRequest, RebornSuggestionsProductService, RebornSuggestionsResponse,
-    SUGGESTIONS_GENERATE_COMMAND_ID, SUGGESTIONS_VIEW_ID,
 };
 
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;

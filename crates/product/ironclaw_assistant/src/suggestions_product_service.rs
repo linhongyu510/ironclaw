@@ -34,9 +34,6 @@ const SUGGESTION_GENERATION_PROMPT: &str = include_str!("../prompts/suggestion_g
 /// response (spec §4), so no separate DTO is declared here.
 pub type RebornSuggestionsResponse = SuggestionsView;
 
-pub const SUGGESTIONS_VIEW_ID: &str = "suggestions";
-pub const SUGGESTIONS_GENERATE_COMMAND_ID: &str = "suggestions.generate";
-
 /// Minimum age an `active_job` must reach before a concurrent caller's
 /// crash-recovery pre-check is allowed to treat it as dead and supersede it.
 ///

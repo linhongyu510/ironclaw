@@ -562,14 +562,14 @@ pub const AUTOMATIONS_VIEW: ProductView<
 // these two `Value`-typed is what lets `ironclaw_webui` consume this command
 // without naming a product-crate type directly (WS5 transport
 // port-inversion rule, `reborn_transport_product_boundary.rs`).
+pub const SUGGESTIONS_VIEW_ID: &str = "suggestions";
 pub const SUGGESTIONS_VIEW: ProductView<serde_json::Value, serde_json::Value> =
-    ProductView::unpaginated(crate::suggestions_product_service::SUGGESTIONS_VIEW_ID);
+    ProductView::unpaginated(SUGGESTIONS_VIEW_ID);
+pub const SUGGESTIONS_GENERATE_COMMAND_ID: &str = "suggestions.generate";
 pub const SUGGESTIONS_GENERATE_COMMAND: ProductSurfaceCommandDescriptor<
     serde_json::Value,
     serde_json::Value,
-> = ProductSurfaceCommandDescriptor::new(
-    crate::suggestions_product_service::SUGGESTIONS_GENERATE_COMMAND_ID,
-);
+> = ProductSurfaceCommandDescriptor::new(SUGGESTIONS_GENERATE_COMMAND_ID);
 pub const PROJECT_FS_LIST_VIEW: ProductView<
     RebornProjectFsListRequest,
     RebornProjectFsListResponse,
