@@ -426,6 +426,12 @@ pub enum DefaultPlannedRuntimeBuildError {
     DriverRegistry(DriverRegistryError),
     PlannedDriver(DefaultPlannedDriverRegistrationError),
     RunProfile(String),
+    /// Resolving the per-profile capability-surface policy shapes
+    /// (`resolved_bespoke_surface_policy_shapes`) failed. A distinct variant
+    /// from [`RunProfile`](Self::RunProfile) (a different call site, a
+    /// different error type) so the source `HostApiError` can be preserved
+    /// instead of collapsed to a string (PR review: coderabbitai).
+    SurfacePolicyShapes(ironclaw_host_api::error::HostApiError),
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
 }
@@ -436,6 +442,9 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::DriverRegistry(error) => write!(formatter, "driver registry failed: {error}"),
             Self::PlannedDriver(error) => write!(formatter, "planned driver failed: {error}"),
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
+            Self::SurfacePolicyShapes(error) => {
+                write!(formatter, "surface policy shapes resolution failed: {error}")
+            }
             Self::SubagentCompletion(error) => {
                 write!(formatter, "subagent completion wiring failed: {error}")
             }
@@ -449,7 +458,18 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
     }
 }
 
-impl Error for DefaultPlannedRuntimeBuildError {}
+impl Error for DefaultPlannedRuntimeBuildError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DriverRegistry(error) => Some(error),
+            Self::PlannedDriver(error) => Some(error),
+            Self::SurfacePolicyShapes(error) => Some(error),
+            Self::RunProfile(_)
+            | Self::SubagentCompletion(_)
+            | Self::SteeringReconcileObserver(_) => None,
+        }
+    }
+}
 
 impl From<DriverRegistryError> for DefaultPlannedRuntimeBuildError {
     fn from(error: DriverRegistryError) -> Self {
@@ -777,7 +797,7 @@ where
     // `planned_driver_factory::BESPOKE_SURFACE_POLICY_SHAPES` and consumed
     // here as data.
     let profile_policy_shapes = resolved_bespoke_surface_policy_shapes()
-        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+        .map_err(DefaultPlannedRuntimeBuildError::SurfacePolicyShapes)?;
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
             inner: parts.capability_factory,
@@ -979,11 +999,15 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
         policy = match self.profile_policy_shapes.get(profile_id) {
             // Strict allow-list: narrows to exactly the declared set
             // regardless of what the resolved base policy would otherwise
-            // permit — deny-lists are irrelevant here, everything not named
-            // is already excluded by omission.
-            Some(ResolvedSurfacePolicyShape::AllowOnly(allowed)) => {
-                policy.narrow_to_capability_ids(allowed.iter().cloned())
-            }
+            // permit. Deny-lists are irrelevant to capabilities NOT on this
+            // list — they're already excluded by omission — but a capability
+            // that IS allow-listed here can still be globally denied by
+            // deployment config (e.g. compliance/incident response), so
+            // `global_denied` must still apply on top of the narrow (PR
+            // review: coderabbitai).
+            Some(ResolvedSurfacePolicyShape::AllowOnly(allowed)) => policy
+                .narrow_to_capability_ids(allowed.iter().cloned())
+                .deny_capability_ids(self.global_denied.clone()),
             Some(ResolvedSurfacePolicyShape::ExtraDeny(extra)) => {
                 let mut denied = self.global_denied.clone();
                 denied.extend(extra.iter().cloned());
@@ -1826,6 +1850,48 @@ mod tests {
         // allow-list (it takes the deny-list branch instead).
         let interactive_ids = visible_capability_ids(&factory, &test_run_context().await).await;
         assert!(interactive_ids.contains(&"builtin.echo".to_string()));
+    }
+
+    /// A capability that is both allow-listed for suggestion-generation AND
+    /// globally denied by deployment config must stay absent — the
+    /// `AllowOnly` shape narrows the surface but must not bypass
+    /// `global_denied` (PR review: coderabbitai; regression for the fix
+    /// alongside `suggestion_generation_surface_is_allow_listed`).
+    #[tokio::test]
+    async fn suggestion_generation_surface_still_honors_global_denied() {
+        let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
+            surface: full_suggestion_generation_candidate_surface(),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: vec![
+                CapabilityId::new(ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID)
+                    .expect("valid capability id"),
+            ],
+            profile_policy_shapes: resolved_bespoke_surface_policy_shapes()
+                .expect("bespoke surface policy shapes resolve"),
+            tool_disclosure_profile_pins: HashMap::new(),
+        };
+
+        let allowed_ids =
+            visible_capability_ids(&factory, &suggestion_generation_run_context().await).await;
+
+        assert!(
+            !allowed_ids.contains(&ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID.to_string()),
+            "globally denied capability must stay absent from the suggestion-generation \
+             allow-list surface even though it's statically allow-listed: {allowed_ids:?}"
+        );
+        assert!(
+            allowed_ids.contains(&ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID.to_string()),
+            "an allow-listed capability that is NOT globally denied must remain visible"
+        );
     }
 
     // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
