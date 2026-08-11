@@ -293,6 +293,8 @@ The operator provides high-level intent. The sanctioned runtime-policy resolver 
 
 `runtime.process.backend` initially supports `none`, `host`, `docker-sandbox`, and `railway-sandbox`. `sandbox_required = true` makes backend initialization a startup requirement and forbids fallback.
 
+`host` is local trusted-operator only. A hosted deployment must select `none`, `docker-sandbox`, or `railway-sandbox`; validation rejects `deployment.mode = "hosted"` with `runtime.process.backend = "host"` before opening stores or constructing runtime services.
+
 Minimal approvals and unrestricted host execution require a separate explicit acknowledgement captured by the initialization or validation workflow. A permanent `true` boolean copied casually into a hosted file is insufficient. The acknowledgement is scoped to a local trusted-operator deployment and recorded in auditable startup evidence.
 
 ### Capabilities
@@ -393,6 +395,7 @@ The following combinations are rejected before store construction:
 |---|---|---|
 | Multi-user tenancy + single-trusted-operator workspace | Reject | A user could address sibling workspace data |
 | Multi-user tenancy + host process backend | Reject | Host execution cannot enforce sibling workspace isolation |
+| Hosted deployment + host process backend | Reject | Unrestricted host execution is local trusted-operator only, even for a single-tenant hosted deployment |
 | `sandbox_required = true` + `backend = "host"` or `"none"` | Reject | Required isolation is unavailable |
 | Railway sandbox backend without referenced Railway configuration | Reject | Backend cannot be constructed safely |
 | Docker sandbox backend without a reachable validated Docker boundary | Reject readiness/startup | Never fall back to host execution |
