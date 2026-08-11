@@ -3833,3 +3833,285 @@ async fn triggered_all_catalog_lookups_failing_is_not_reported_as_no_configurati
         "nothing is delivered when no channel resolves"
     );
 }
+
+use ironclaw_assistant::{
+    DeliveryIntent, ProductOutboundTargetResolver, ProductSurfaceFailure,
+    VerifiedProductOutboundTargetMetadata,
+};
+use ironclaw_outbound::{ReplyTargetBindingValidator, RunNotificationEventKind};
+use ironclaw_turns::TurnActor;
+
+// ─── §7a facade: notify_user fan-out ────────────────────────────────────────
+//
+// `notify_user` resolves a user's configured notification channels and
+// delivers to each, returning per-target results. Two observable contracts
+// the driver's single-target `notify` path cannot reach: an empty target set
+// is an empty result rather than an error, and one failing target is isolated
+// into its own `Err` while the others still deliver.
+
+/// Permits exactly the binding refs it was seeded with; anything else is
+/// `AccessDenied`, the same shape the real authority produces for a target
+/// the caller no longer owns.
+#[derive(Default)]
+struct AllowListedTargets {
+    allowed: Mutex<std::collections::HashSet<ReplyTargetBindingRef>>,
+}
+
+#[async_trait]
+impl ReplyTargetBindingValidator for AllowListedTargets {
+    async fn validate_reply_target(
+        &self,
+        request: ironclaw_outbound::ReplyTargetValidationRequest,
+    ) -> Result<ironclaw_outbound::ReplyTargetBindingClaim, OutboundError> {
+        if self
+            .allowed
+            .lock()
+            .expect("allowlist")
+            .contains(&request.candidate.target)
+        {
+            Ok(ironclaw_outbound::ReplyTargetBindingClaim::new(
+                request.candidate.target,
+            ))
+        } else {
+            Err(OutboundError::AccessDenied)
+        }
+    }
+}
+
+struct StaticOutboundTargetMetadata;
+
+#[async_trait]
+impl ProductOutboundTargetResolver for StaticOutboundTargetMetadata {
+    async fn resolve_product_outbound_target_metadata(
+        &self,
+        _target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        _require_direct_message: bool,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
+        Ok(VerifiedProductOutboundTargetMetadata {
+            external_conversation_ref: ExternalConversationRef::new(None, "conv-1", None, None)
+                .expect("conversation ref"),
+            external_actor_ref: None,
+        })
+    }
+}
+
+/// Resolves every channel except one — the shape of a target whose channel
+/// was deactivated since the user picked it.
+struct ResolverMissingOneExtension {
+    adapter: Arc<RecordingChannelAdapter>,
+    missing: &'static str,
+}
+
+impl ChannelDeliveryResolver for ResolverMissingOneExtension {
+    fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        if extension_id == self.missing {
+            return None;
+        }
+        Some(ResolvedChannelDelivery {
+            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+            installation_id: AdapterInstallationId::new("install_alpha")
+                .expect("valid installation id"),
+            adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
+            egress: Arc::new(DenyAllEgress),
+            reply_mode: Default::default(),
+        })
+    }
+}
+
+struct NotifyUserFixture {
+    services: RunDeliveryServices,
+    authority: Arc<AllowListedTargets>,
+    resolver: StaticOutboundTargetMetadata,
+    adapter: Arc<RecordingChannelAdapter>,
+    codecs: Vec<Arc<dyn PreferenceTargetCodec>>,
+    store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+fn notify_user_fixture(
+    catalog: Vec<TestNotificationTarget>,
+    missing_extension: Option<&'static str>,
+) -> NotifyUserFixture {
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let channel_resolver: Arc<dyn ChannelDeliveryResolver> = match missing_extension {
+        Some(missing) => Arc::new(ResolverMissingOneExtension {
+            adapter: Arc::clone(&adapter),
+            missing,
+        }),
+        None => Arc::new(StaticResolver {
+            adapter: Arc::clone(&adapter),
+        }),
+    };
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        channel_resolver,
+        Arc::new(NoStoredReplyContext),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    let authority = Arc::new(AllowListedTargets::default());
+    for entry in &catalog {
+        authority
+            .allowed
+            .lock()
+            .expect("allowlist")
+            .insert(ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"));
+    }
+    let services = RunDeliveryServices {
+        binding_service: Arc::new(StaticBindingService {
+            binding: binding(),
+            fail: true,
+        }),
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        // notify_user never reads run state; the coordinator double just has
+        // to exist, and its constructor requires a non-empty script.
+        turn_coordinator: Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+            TurnStatus::Completed,
+            None,
+        )])) as Arc<dyn TurnCoordinator>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        delivery_targets: Arc::new(StaticTargetCatalog {
+            targets: catalog.clone(),
+        }) as Arc<dyn OutboundDeliveryTargetProvider>,
+        coordinator,
+        extension_id: EXTENSION_ID.to_string(),
+        fallback_notice_scope: fallback_scope(),
+        approval_context: None,
+        blocked_auth_prompts: None,
+        auth_flow_cancel: None,
+    };
+    NotifyUserFixture {
+        services,
+        authority,
+        resolver: StaticOutboundTargetMetadata,
+        adapter,
+        codecs: vec![Arc::new(CatalogCodec { targets: catalog }) as Arc<dyn PreferenceTargetCodec>],
+        store,
+    }
+}
+
+fn fan_out_notification() -> ironclaw_assistant::ChannelNotification {
+    ironclaw_assistant::ChannelNotification {
+        event_kind: RunNotificationEventKind::RunBlocked,
+        intent: DeliveryIntent::BackgroundRunNotice,
+        text: "routine failed".to_string(),
+        require_direct_message_target: false,
+        notice_discriminator: None,
+    }
+}
+
+#[tokio::test]
+async fn notify_user_with_no_configured_channels_is_an_empty_result_not_an_error() {
+    let fixture = notify_user_fixture(vec![DM_TARGET], None);
+    // Deliberately seed NO notification targets: the user has configured none.
+    let scope = binding_scope();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant(),
+        agent_id: agent(),
+        project_id: None,
+        owner_user_id: Some(user()),
+        mission_id: None,
+    };
+    let actor = TurnActor::new(user());
+    let context = ironclaw_assistant::ChannelNotificationContext {
+        scope: &scope,
+        thread_scope: &thread_scope,
+        actor: &actor,
+        run_id: TurnRunId::new(),
+        reply_target_authority: fixture.authority.as_ref(),
+        target_resolver: &fixture.resolver,
+    };
+
+    let outcomes = ironclaw_assistant::notify_user(
+        &fixture.services,
+        &fixture.codecs,
+        &context,
+        &fan_out_notification(),
+        &tenant(),
+        &user(),
+        "notify-user-empty",
+    )
+    .await
+    .expect("an unconfigured user is not an error");
+
+    assert!(
+        outcomes.is_empty(),
+        "no configured channel must yield no per-target results, got {}",
+        outcomes.len()
+    );
+    assert_eq!(
+        fixture.adapter.envelopes().len(),
+        0,
+        "nothing may be delivered when no channel is configured"
+    );
+}
+
+#[tokio::test]
+async fn notify_user_isolates_one_failing_target_and_still_delivers_the_rest() {
+    // Two configured channels; the SECOND one's extension no longer resolves.
+    let catalog = vec![DM_TARGET, LATE_ACTIVATED_TARGET];
+    let fixture = notify_user_fixture(catalog.clone(), Some(LATE_EXTENSION_ID));
+    seed_notification_targets(&fixture.store, &catalog).await;
+    let scope = binding_scope();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant(),
+        agent_id: agent(),
+        project_id: None,
+        owner_user_id: Some(user()),
+        mission_id: None,
+    };
+    let actor = TurnActor::new(user());
+    let context = ironclaw_assistant::ChannelNotificationContext {
+        scope: &scope,
+        thread_scope: &thread_scope,
+        actor: &actor,
+        run_id: TurnRunId::new(),
+        reply_target_authority: fixture.authority.as_ref(),
+        target_resolver: &fixture.resolver,
+    };
+
+    let outcomes = ironclaw_assistant::notify_user(
+        &fixture.services,
+        &fixture.codecs,
+        &context,
+        &fan_out_notification(),
+        &tenant(),
+        &user(),
+        "notify-user-isolation",
+    )
+    .await
+    .expect("a per-target failure must not fail the whole fan-out");
+
+    assert_eq!(outcomes.len(), 2, "one result per configured channel");
+    let healthy = outcomes
+        .iter()
+        .find(|(target, _)| target.extension_id == EXTENSION_ID)
+        .expect("the resolvable channel is represented");
+    assert!(
+        healthy.1.is_ok(),
+        "a healthy channel must still deliver when a sibling fails: {:?}",
+        healthy.1.as_ref().err().map(|_| "err")
+    );
+    let broken = outcomes
+        .iter()
+        .find(|(target, _)| target.extension_id == LATE_EXTENSION_ID)
+        .expect("the unresolvable channel is represented, not dropped");
+    assert!(
+        broken.1.is_err(),
+        "an unresolvable channel must surface its own Err, not be silently skipped"
+    );
+    assert_eq!(
+        fixture.adapter.envelopes().len(),
+        1,
+        "exactly the healthy channel received a delivery"
+    );
+}

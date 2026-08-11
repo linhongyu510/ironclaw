@@ -1101,20 +1101,58 @@ impl RunDeliveryObserver {
     /// Scope for notices raised outside a resolved delivery loop: the
     /// conversation's binding scope when it resolves, else the host's
     /// fallback notice scope (never silent, always attributed).
-    async fn notice_scope(&self, envelope: &ProductInboundEnvelope) -> TurnScope {
-        let Ok(binding_request) = ResolveBindingRequest::from_envelope(envelope) else {
-            return self.services.fallback_notice_scope.clone();
+    /// Resolve this envelope's conversation binding for the notice paths that
+    /// DEGRADE rather than fail: an envelope that cannot even produce a
+    /// binding request and a binding that does not resolve are the same
+    /// answer here — no usable conversation — so both collapse to `None`.
+    ///
+    /// Two call sites deliberately do not use this, and the difference is
+    /// behavioral rather than stylistic. The delivery path propagates a
+    /// malformed binding request as an error, because a send with no binding
+    /// is a fault and not a degrade. And `post_rejection_hint_if_authorized`
+    /// keeps the two apart on purpose: an unparseable envelope means it
+    /// posted nothing (`false`), while an unauthorized conversation means it
+    /// handled the case by deliberately staying silent (`true`).
+    async fn degradable_binding(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        degrade: &'static str,
+    ) -> Option<ResolvedBinding> {
+        let request = match ResolveBindingRequest::from_envelope(envelope) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "envelope produced no binding request"
+                );
+                return None;
+            }
         };
+        match self.services.binding_service.lookup_binding(request).await {
+            Ok(binding) => Some(binding),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "conversation binding did not resolve"
+                );
+                None
+            }
+        }
+    }
+
+    async fn notice_scope(&self, envelope: &ProductInboundEnvelope) -> TurnScope {
         match self
-            .services
-            .binding_service
-            .lookup_binding(binding_request)
+            .degradable_binding(envelope, "notice scope falls back to the host scope")
             .await
         {
-            Ok(binding) => thread_scope_from_binding(&binding)
+            Some(binding) => thread_scope_from_binding(&binding)
                 .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                 .unwrap_or_else(|_| self.services.fallback_notice_scope.clone()),
-            Err(_) => self.services.fallback_notice_scope.clone(),
+            None => self.services.fallback_notice_scope.clone(),
         }
     }
 
@@ -1353,38 +1391,24 @@ impl RunDeliveryObserver {
         // state-specific. When the conversation has no resolvable binding,
         // fall back to the generic copy rather than going silent — the hint
         // replies to the sender's own conversation and leaks nothing.
-        let binding_lookup = match ResolveBindingRequest::from_envelope(envelope) {
-            Ok(binding_request) => {
-                self.services
-                    .binding_service
-                    .lookup_binding(binding_request)
-                    .await
-            }
-            Err(error) => Err(
-                ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest {
-                    reason: error.to_string(),
-                },
-            ),
-        };
-        let (hint, scope) = match binding_lookup {
-            Ok(binding) => {
+        let (hint, scope) = match self
+            .degradable_binding(envelope, "busy-thread hint falls back to generic copy")
+            .await
+        {
+            Some(binding) => {
                 let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
                 let scope = thread_scope_from_binding(&binding)
                     .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                     .unwrap_or_else(|_| self.services.fallback_notice_scope.clone());
                 (hint, scope)
             }
-            Err(error) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::run_delivery",
-                    error = %error,
-                    "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
-                );
-                (
-                    prompts::BUSY_GENERIC_MESSAGE.to_string(),
-                    self.services.fallback_notice_scope.clone(),
-                )
-            }
+            // The helper already logged why; the degrade is the generic copy
+            // on the host's fallback scope, which leaks nothing about a
+            // conversation this caller could not resolve.
+            None => (
+                prompts::BUSY_GENERIC_MESSAGE.to_string(),
+                self.services.fallback_notice_scope.clone(),
+            ),
         };
         self.services
             .post_notice(
