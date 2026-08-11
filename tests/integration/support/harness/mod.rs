@@ -913,7 +913,11 @@ impl HostRuntimeCapabilityHarness {
         // granted at the harness-authority layer.
         for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .publish_bundled_extension_for_test(
+                    package,
+                    resolved.as_ref(),
+                    ironclaw_extension_registry::InstallationOwner::user(user_id.clone()),
+                )
                 .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
@@ -1880,13 +1884,10 @@ impl HostRuntimeCapabilityHarness {
         // queried the SAME way `build_extension_management_for_test`
         // -> `extension_surface_source` will read it downstream in
         // `create_refreshing_capability_port_for_test`. NOT the same
-        // as "this harness has `reborn_services` wired": a harness can have
-        // `reborn_services` (so `new_with_options`) while only ever calling
-        // the `publish_bundled_extension_for_test` SHORTCUT (registers the
-        // package in the active registry but creates no enabled
-        // installation), which `active_model_visible_capabilities()` requires
-        // -- such a provider has NO production trust decision to protect, so
-        // this must be an empty set for it, not treated as activation-backed.
+        // as "this harness has `reborn_services` wired": only providers the
+        // lifecycle facade reports as active belong here. The bundled-fixture
+        // shortcut now creates the caller-owned durable installation row and
+        // activates it, so those providers intentionally use production trust.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
                 // #6520 folded caller-scoping into the lifecycle facade the
@@ -2151,20 +2152,12 @@ impl HostRuntimeCapabilityHarness {
     /// clobber that (potentially narrower) production ceiling.
     ///
     /// The gate is PER-PROVIDER (`activation_backed_providers`), not a
-    /// harness-wide `reborn_services.is_some()` boolean: a harness can have
-    /// `reborn_services` wired (`new_with_options`) while its provider only
-    /// ever reached the registry through the
-    /// `publish_bundled_extension_for_test` SHORTCUT (upserts the package
-    /// into the active registry but creates no ENABLED INSTALLATION) --
-    /// `active_model_visible_capabilities()` requires an enabled
-    /// installation, so such a provider has NO production trust decision at
-    /// all and this entry is the ONLY thing that ever trusts it (see
-    /// `file_and_github_auth_tools_profile` / `extension_visibility_probe_tools_profile`,
-    /// neither of which runs the real install/readiness path). A provider
-    /// IS activation-backed (must be excluded here) only once
+    /// harness-wide `reborn_services.is_some()` boolean: a provider is
+    /// activation-backed (and must be excluded here) only once
     /// `standalone_active_extension_authority_for_test` actually reports a
-    /// trust entry for it -- e.g. `extension_lifecycle_tools_profile`'s real
-    /// credentialed install flow. See `harness_trust_tests` below
+    /// trust entry for it. This includes both the real credentialed install
+    /// flow and the bundled-fixture shortcut, which creates a caller-owned
+    /// durable installation before activation. See `harness_trust_tests` below
     /// for the regression pin covering both shapes.
     fn build_additional_provider_trust(
         provider_id: &ExtensionId,
@@ -2390,32 +2383,19 @@ mod harness_trust_tests {
         );
     }
 
-    /// The gap this fix closes (CI diagnostician finding, post-#5902
-    /// rebase): `file_and_github_auth_tools_profile` /
-    /// `extension_visibility_probe_tools_profile` build through
-    /// `new_with_options` (so `reborn_services` IS wired) but only ever call
-    /// the `publish_bundled_extension_for_test` shortcut for their provider
-    /// -- no enabled installation, so `standalone_active_extension_authority_for_test`
-    /// never reports a trust entry for it. The OLD `has_reborn_services: bool`
-    /// gate treated "reborn_services wired" as "activation-backed" and
-    /// wrongly suppressed this provider's only trust source. The per-provider
-    /// `activation_backed_providers` set must NOT contain such a
-    /// shortcut-only provider, so its synthetic entry is still minted.
+    /// Bundled fixture publication now creates a durable caller-owned
+    /// installation and activation. Its production trust decision must remain
+    /// authoritative rather than being overwritten by the harness override.
     #[test]
-    fn shortcut_published_provider_without_activation_still_gets_trust_entry() {
+    fn shortcut_published_provider_with_activation_gets_no_synthetic_trust_entry() {
         let builtin_provider =
             ExtensionId::new(ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER)
                 .expect("builtin provider id");
         let visprobe_provider = ExtensionId::new("visprobe").expect("visprobe provider id");
         let effects = standalone_all_effects();
         let additional = vec![(visprobe_provider.clone(), effects.clone())];
-        // reborn_services is wired for this harness shape (`new_with_options`)
-        // but `visprobe` was only ever `publish_bundled_extension_for_test`'d,
-        // never installed to active -- so it must be ABSENT from
-        // `activation_backed_providers`, not folded in via a blanket
-        // `reborn_services.is_some()` check.
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
-            std::collections::HashSet::new();
+            [visprobe_provider.clone()].into_iter().collect();
 
         let result = HostRuntimeCapabilityHarness::build_additional_provider_trust(
             &builtin_provider,
@@ -2424,14 +2404,9 @@ mod harness_trust_tests {
             &activation_backed_providers,
         );
 
-        assert_eq!(
-            result
-                .get(&visprobe_provider)
-                .map(|decision| &decision.authority_ceiling.allowed_effects),
-            Some(&effects),
-            "a publish-only (never installed to active) provider must still get its \
-             synthetic trust entry even when the harness has `reborn_services` wired, \
-             or its capabilities become invisible: {result:?}"
+        assert!(
+            !result.contains_key(&visprobe_provider),
+            "an activated bundled fixture must retain its production trust decision: {result:?}"
         );
     }
 }

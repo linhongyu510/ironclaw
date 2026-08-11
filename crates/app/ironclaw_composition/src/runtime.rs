@@ -1386,10 +1386,11 @@ impl RebornRuntime {
         &self,
         package: &ironclaw_extension_registry::ExtensionPackage,
         resolved: Option<&ironclaw_extension_registry::ResolvedExtensionManifest>,
+        owner: ironclaw_extension_registry::InstallationOwner,
     ) -> Option<Result<(), ironclaw_assistant::ProductSurfaceFailure>> {
         Some(
             self.extension_management
-                .publish_bundled_package_for_test(package, resolved)
+                .publish_bundled_package_for_test(package, resolved, owner)
                 .await
                 .map_err(ironclaw_assistant::ProductSurfaceFailure::from),
         )

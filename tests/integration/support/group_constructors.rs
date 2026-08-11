@@ -666,10 +666,13 @@ impl RebornIntegrationGroupBuilder {
     /// Build a visibility-probe group. See
     /// [`RebornIntegrationGroup::extension_visibility_probe`].
     pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime =
-            super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
+        let base = self.build_base().await?;
+        let mut profile =
+            super::super::harness::profiles::extension::extension_visibility_probe_tools_profile()?;
+        profile.user_id = base.canonical_actor_user()?;
+        let host_runtime = build_group_capability_with_base(profile, &base).await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build a prompt-description trust probe group. See
@@ -677,11 +680,13 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_prompt_description_trust_probe(
         self,
     ) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime = super::super::harness::profiles::extension::
-            extension_prompt_description_trust_probe_tools()
-        .await?;
+        let base = self.build_base().await?;
+        let mut profile = super::super::harness::profiles::extension::
+            extension_prompt_description_trust_probe_tools_profile()?;
+        profile.user_id = base.canonical_actor_user()?;
+        let host_runtime = build_group_capability_with_base(profile, &base).await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build an auth-gate group. See [`RebornIntegrationGroup::live_auth_gate`].
