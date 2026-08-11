@@ -1925,7 +1925,7 @@ pub async fn generate_suggestions(
         state.services(),
         caller,
         SUGGESTIONS_GENERATE_COMMAND,
-        serde_json::Value::Null,
+        serde_json::json!({}),
     )
     .await?;
     Ok(Json(response))

@@ -317,8 +317,8 @@ impl ProductCommandHandler {
                 )
             }
             Self::SuggestionsGenerate => {
-                // Takes no fields — nothing to deserialize out of `input`.
-                let _ = input;
+                let _: crate::suggestions_product_service::RebornSuggestionsGenerateRequest =
+                    product_command_input(input)?;
                 command_output(services.generate_suggestions(caller).await?)
             }
             Self::NotificationChannelsSet => {
