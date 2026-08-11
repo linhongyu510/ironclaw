@@ -12,7 +12,7 @@ use ironclaw_product_contracts::command::ProductCommandContext;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, ProductTriggerReason};
+use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, ProductTriggerReason};
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::product_adapter::{
@@ -178,13 +178,13 @@ impl DefaultProductSurface {
     async fn submit_inbound_with_channel_attachment_transfer(
         &self,
         envelope: ProductInboundEnvelope,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_ingress: Arc<dyn ChannelIngress>,
         channel_egress: Arc<dyn RestrictedEgress>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         self.submit_inbound_inner(
             envelope,
             InboundAttachmentAdmission::Channel {
-                adapter: channel_adapter,
+                adapter: channel_ingress,
                 egress: channel_egress,
             },
         )
@@ -274,7 +274,7 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
     async fn admit_channel_inbound_with_attachment_transfer(
         &self,
         request: ChannelInboundSurfaceRequest,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_ingress: Arc<dyn ChannelIngress>,
         channel_egress: Arc<dyn RestrictedEgress>,
     ) -> ChannelInboundSurfaceOutcome {
         // Preserve the vendor transfer references beside the descriptors the
@@ -291,7 +291,7 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
             envelope.clone(),
             Box::pin(self.submit_inbound_with_channel_attachment_transfer(
                 envelope,
-                channel_adapter,
+                channel_ingress,
                 channel_egress,
             ))
             .await,
@@ -404,7 +404,7 @@ fn admission_outcome(
 enum InboundAttachmentAdmission {
     Inline(Vec<InboundAttachment>),
     Channel {
-        adapter: Arc<dyn ChannelAdapter>,
+        adapter: Arc<dyn ChannelIngress>,
         egress: Arc<dyn RestrictedEgress>,
     },
 }

@@ -396,6 +396,14 @@ pub type PostgresProductionHostRuntimeServices =
 /// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
+/// The web-app channel's registration document, at its pre-§8 address.
+///
+/// Both halves of this path are persisted identity: the `/web-push` alias
+/// resolves to a physical per-user subpath, and `subscriptions.json` is the
+/// name every existing enrollment already lives under. The store's shape
+/// migrated forward; its address deliberately did not.
+pub(crate) const WEB_APP_SUBSCRIPTIONS_DOCUMENT: &str = "/web-push/subscriptions.json";
+
 const PER_USER_ALIASES: &[&str] = &[
     "/product-results",
     "/processes",
@@ -408,6 +416,10 @@ const PER_USER_ALIASES: &[&str] = &[
     // orphan every persisted browser enrollment. Pinned as sanctioned
     // residue by the web-push-vocabulary retirement gate.
     "/web-push",
+    // Generic per-channel delivery registrations for every OTHER channel.
+    // The web-app channel keeps its own alias above rather than moving here,
+    // because moving it would relocate live enrollment documents.
+    "/delivery-registrations",
     "/run-state",
     "/checkpoint-state",
     "/approvals",

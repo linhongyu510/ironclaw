@@ -483,7 +483,7 @@ impl GenericChannelHostAssembly {
         for extension_id in snapshot.extension_ids() {
             if let Some(active) = snapshot.extension(&extension_id)
                 && let Some(channel) = active.resolved.channel.as_ref()
-                && channel.inbound
+                && channel.supports_inbound()
                 && channel.ingress.is_some()
             {
                 desired

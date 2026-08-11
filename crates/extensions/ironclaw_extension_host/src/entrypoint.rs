@@ -9,7 +9,8 @@
 
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel::ReplyTransport;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifest};
 
@@ -18,7 +19,10 @@ use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifes
 #[derive(Clone, Default)]
 pub struct ExtensionBindings {
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    pub channel: Option<Arc<dyn ChannelAdapter>>,
+    /// The channel halves this extension implements. An all-`None` value is
+    /// the same fact as a missing `[channel]` section, and [`check_binding`]
+    /// proves the two agree axis by axis.
+    pub channel: ChannelSurfaces,
 }
 
 /// Side-effect-free binding context handed to an entrypoint.
@@ -44,9 +48,17 @@ pub enum BindError {
     #[error("extension declares tools but bound no tool adapter")]
     MissingToolAdapter,
     /// The manifest declares a channel but the entrypoint bound no channel
-    /// adapter.
+    /// half at all.
     #[error("extension declares a channel but bound no channel adapter")]
     MissingChannelAdapter,
+    /// One `[channel.*]` section has no implementing half, or one bound half
+    /// has no declaring section. Carries the axis so the operator is told
+    /// which declaration to fix rather than that "the channel is wrong".
+    #[error("channel {axis} section and adapter half disagree: {detail}")]
+    ChannelHalfMismatch {
+        axis: &'static str,
+        detail: &'static str,
+    },
     /// The entrypoint bound a tool adapter the manifest does not declare.
     #[error("extension bound a tool adapter but declares no tools")]
     UndeclaredToolAdapter,
@@ -81,10 +93,15 @@ pub fn check_binding(
         (false, true) => return Err(BindError::UndeclaredToolAdapter),
         _ => {}
     }
-    match (declares_channel, bindings.channel.is_some()) {
+    let binds_any_channel_half =
+        bindings.channel.ingress.is_some() || bindings.channel.has_outbound();
+    match (declares_channel, binds_any_channel_half) {
         (true, false) => return Err(BindError::MissingChannelAdapter),
         (false, true) => return Err(BindError::UndeclaredChannelAdapter),
         _ => {}
+    }
+    if let Some(channel) = &resolved.channel {
+        check_channel_halves(channel, &bindings.channel)?;
     }
     if resolved.mcp.is_some()
         && !resolved
@@ -100,19 +117,93 @@ pub fn check_binding(
     Ok(())
 }
 
+/// Each `[channel.*]` section must have exactly the implementing half it
+/// declares — this is the check that makes [`ChannelSurfaces`]' three
+/// `Option`s worth more than the manifest booleans they replaced. Without it
+/// a `None` half is a second copy of a manifest fact with nothing keeping the
+/// two in agreement (`.claude/rules/architecture.md` §3); with it, a
+/// declaration and its code cannot disagree past activation.
+///
+/// Two axes are required to be **absent**, and that is the point rather than
+/// an exception:
+///
+/// - `[channel.reply] transport = "stream"` means the host publishes to the
+///   durable projection pipeline and the adapter is never called. Binding a
+///   reply half there would be dead code that reads as live.
+/// - `authenticated_session` ingress is normalized at the host session door,
+///   whose actor authority an adapter may never mint. There is no vendor
+///   payload to parse, so there is nothing for an ingress half to do.
+fn check_channel_halves(
+    channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
+    bound: &ChannelSurfaces,
+) -> Result<(), BindError> {
+    let expects_ingress_half = channel
+        .ingress
+        .as_ref()
+        .is_some_and(|ingress| !ingress.verification.is_authenticated_session());
+    check_half(
+        "ingress",
+        expects_ingress_half,
+        bound.ingress.is_some(),
+        "webhook ingress needs an adapter to parse the vendor payload",
+        "authenticated_session ingress is normalized at the host session door",
+    )?;
+
+    let expects_reply_half = channel.reply_transport() == Some(ReplyTransport::Message);
+    check_half(
+        "reply",
+        expects_reply_half,
+        bound.reply.is_some(),
+        "a message reply transport needs an adapter to render and send it",
+        "a stream reply (or no reply section) is published by the host",
+    )?;
+
+    check_half(
+        "delivery",
+        channel.supports_delivery(),
+        bound.delivery.is_some(),
+        "[channel.delivery] needs an adapter half to send out of band",
+        "no [channel.delivery] section declares this channel a delivery target",
+    )?;
+    Ok(())
+}
+
+fn check_half(
+    axis: &'static str,
+    declared: bool,
+    bound: bool,
+    missing_detail: &'static str,
+    undeclared_detail: &'static str,
+) -> Result<(), BindError> {
+    match (declared, bound) {
+        (true, false) => Err(BindError::ChannelHalfMismatch {
+            axis,
+            detail: missing_detail,
+        }),
+        (false, true) => Err(BindError::ChannelHalfMismatch {
+            axis,
+            detail: undeclared_detail,
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{
         FakeChannelAdapter, FakeToolAdapter, channel_only_manifest, mcp_manifest,
-        tool_and_channel_manifest,
+        session_channel_manifest, tool_and_channel_manifest,
     };
 
     fn tools_only(tool: bool, channel: bool) -> ExtensionBindings {
         ExtensionBindings {
             tools: tool.then(|| Arc::new(FakeToolAdapter) as Arc<dyn ToolAdapter>),
-            channel: channel
-                .then(|| Arc::new(FakeChannelAdapter::default()) as Arc<dyn ChannelAdapter>),
+            channel: if channel {
+                FakeChannelAdapter::all_halves()
+            } else {
+                ChannelSurfaces::default()
+            },
         }
     }
 
@@ -172,6 +263,94 @@ mod tests {
         let error = check_binding(&resolved, &tools_only(false, false))
             .expect_err("an extension with no operational surface must not activate");
         assert_eq!(error, BindError::MissingOperationalSurface);
+    }
+
+    /// The check that makes three `Option`s worth more than the manifest
+    /// booleans they replaced. Each arm drops or adds exactly one half against
+    /// a manifest that declares the other two, so a failure names the axis.
+    #[test]
+    fn each_channel_section_must_have_exactly_its_implementing_half() {
+        let resolved = channel_only_manifest();
+        let adapter = || Arc::new(FakeChannelAdapter::default());
+
+        // Declared but unbound, one axis at a time.
+        for (axis, bindings) in [
+            (
+                "ingress",
+                ChannelSurfaces::default()
+                    .with_reply(adapter())
+                    .with_delivery(adapter()),
+            ),
+            (
+                "reply",
+                ChannelSurfaces::default()
+                    .with_ingress(adapter())
+                    .with_delivery(adapter()),
+            ),
+            (
+                "delivery",
+                ChannelSurfaces::default()
+                    .with_ingress(adapter())
+                    .with_reply(adapter()),
+            ),
+        ] {
+            let error = check_binding(
+                &resolved,
+                &ExtensionBindings {
+                    tools: None,
+                    channel: bindings,
+                },
+            )
+            .expect_err("a declared section with no implementing half must fail activation");
+            assert!(
+                matches!(error, BindError::ChannelHalfMismatch { axis: reported, .. } if reported == axis),
+                "expected a {axis} mismatch, got {error:?}"
+            );
+        }
+    }
+
+    /// The two absences that are the point rather than an exception: a
+    /// `stream` reply is published by the host, and `authenticated_session`
+    /// ingress is normalized at the host session door. Binding a half for
+    /// either is dead code that reads as live, so it fails closed.
+    #[test]
+    fn a_stream_reply_and_session_ingress_must_bind_no_half() {
+        let resolved = session_channel_manifest();
+
+        check_binding(
+            &resolved,
+            &ExtensionBindings {
+                tools: None,
+                channel: FakeChannelAdapter::delivery_only(),
+            },
+        )
+        .expect("delivery alone is the exact binding for a stream/session channel");
+
+        for (axis, bindings) in [
+            (
+                "ingress",
+                FakeChannelAdapter::delivery_only()
+                    .with_ingress(Arc::new(FakeChannelAdapter::default())),
+            ),
+            (
+                "reply",
+                FakeChannelAdapter::delivery_only()
+                    .with_reply(Arc::new(FakeChannelAdapter::default())),
+            ),
+        ] {
+            let error = check_binding(
+                &resolved,
+                &ExtensionBindings {
+                    tools: None,
+                    channel: bindings,
+                },
+            )
+            .expect_err("binding a half the manifest publishes host-side must fail activation");
+            assert!(
+                matches!(error, BindError::ChannelHalfMismatch { axis: reported, .. } if reported == axis),
+                "expected a {axis} mismatch, got {error:?}"
+            );
+        }
     }
 
     #[test]

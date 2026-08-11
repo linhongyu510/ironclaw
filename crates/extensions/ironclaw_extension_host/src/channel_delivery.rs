@@ -107,14 +107,14 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             return Some(ResolvedChannelDelivery {
                 extension_id,
                 installation_id,
-                adapter: Arc::clone(&extension.adapter),
+                surfaces: extension.surfaces.clone(),
                 egress,
                 reply_transport,
             });
         }
         let snapshot = self.watch.current();
         let extension = snapshot.extension(extension_id)?;
-        let adapter = extension.channel.clone()?;
+        let surfaces = extension.channel.clone();
         let declared: Vec<DeclaredChannelEgress> = extension
             .resolved
             .channel
@@ -143,7 +143,7 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
         Some(ResolvedChannelDelivery {
             extension_id,
             installation_id,
-            adapter,
+            surfaces,
             egress,
             reply_transport,
         })

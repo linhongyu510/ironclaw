@@ -167,8 +167,13 @@ async fn provision_dm_target(
     let Some(channel) = delivery.resolve_channel_delivery(extension_id) else {
         return Err(DmTargetProvisioningError::ExtensionInactive);
     };
-    let candidates = match channel
-        .adapter
+    // Target listing is a delivery-half capability. A channel with no
+    // delivery half cannot provision a DM target, which is the same "nothing
+    // to do here" answer its `Unsupported` arm gives below — not an error.
+    let Some(delivery_half) = channel.surfaces.delivery.as_ref() else {
+        return Ok(false);
+    };
+    let candidates = match delivery_half
         .list_targets(
             TargetQuery {
                 extension_id: channel.extension_id.as_str().to_string(),

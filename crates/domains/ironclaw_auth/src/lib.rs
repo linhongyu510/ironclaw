@@ -13,6 +13,7 @@ mod account_state;
 mod channel_connection;
 mod cleanup;
 mod credential;
+pub mod delivery_registrations;
 pub mod domain;
 mod engine;
 mod error;
@@ -48,6 +49,10 @@ pub use credential::{
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
     binding_scope_owns_account,
+};
+pub use delivery_registrations::{
+    DeliveryRegistrationPaths, FilesystemDeliveryRegistrationStore, registration_id_for,
+    validate_registration_endpoint,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use engine::admission::{

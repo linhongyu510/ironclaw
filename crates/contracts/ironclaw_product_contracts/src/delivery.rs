@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{ChannelSurfaces, DeliveryRegistration};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
 /// One channel's delivery half, resolved from a single active-snapshot read
@@ -36,7 +37,10 @@ use ironclaw_host_api::product_adapter::AdapterInstallationId;
 pub struct ResolvedChannelDelivery {
     pub extension_id: ExtensionId,
     pub installation_id: AdapterInstallationId,
-    pub adapter: Arc<dyn ChannelAdapter>,
+    /// The halves this channel implements. The coordinator picks one by the
+    /// [`OutboundRoute`] it already decided; it never picks by content.
+    /// A `None` half is the same fact as a missing manifest section.
+    pub surfaces: ChannelSurfaces,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
     /// The channel's declared reply transport (`[channel.reply]`). `None`
@@ -77,6 +81,100 @@ pub trait ChannelDeliveryResolver: Send + Sync {
     fn requires_enrollment(&self, _extension_id: &str) -> Option<bool> {
         None
     }
+
+    /// The hosts this channel declares in `[[channel.egress]]`. The
+    /// enrollment path checks a submitted endpoint against them **before
+    /// storage** (design §8): without that check, enrollment is an SSRF
+    /// primitive that makes the host POST to an attacker's URL. `None` =
+    /// unknown extension, which fails enrollment closed.
+    ///
+    /// It lives on this resolver rather than beside the store because the
+    /// allowlist is manifest data the host already resolved here, and reading
+    /// it twice from two places is how the two copies drift apart.
+    fn declared_egress_hosts(&self, _extension_id: &str) -> Option<Vec<String>> {
+        None
+    }
+}
+
+/// The user one delivery registration belongs to. Both halves come from the
+/// authenticated caller (enrollment) or the run's scope owner (delivery) —
+/// never from a payload or a vendor-supplied conversation id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeliveryRegistrationScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub extension_id: ExtensionId,
+}
+
+/// Host-owned per-user delivery registrations (design §8).
+///
+/// Declared here because the delivery coordinator and the notification-setup
+/// product surface are both consumers while the implementation sits below
+/// product — the same inversion the two ports above use. The **records** and
+/// the persisted store live in `ironclaw_auth`, which is where a per-user,
+/// per-vendor grant that a user can revoke from settings already belongs;
+/// it is also the only one of the two candidate domains that can already name
+/// `ironclaw_extension_contracts`, which the registration view requires.
+#[async_trait]
+pub trait DeliveryRegistrationService: Send + Sync {
+    /// Every registration this user holds on this channel. An empty list is a
+    /// resolvable "no target" *before* any adapter call — not a failure
+    /// discovered inside the vendor path.
+    async fn list(
+        &self,
+        scope: &DeliveryRegistrationScope,
+    ) -> Result<Vec<DeliveryRegistration>, DeliveryRegistrationError>;
+
+    /// Store one registration, replacing any earlier one for the same
+    /// endpoint. `endpoint` is checked against `declared_egress_hosts`
+    /// **before** anything is written; `document` is opaque and only bounded.
+    async fn enroll(
+        &self,
+        scope: &DeliveryRegistrationScope,
+        request: DeliveryRegistrationRequest,
+    ) -> Result<DeliveryRegistration, DeliveryRegistrationError>;
+
+    /// Drop the registration for one endpoint. `false` = there was none.
+    async fn remove(
+        &self,
+        scope: &DeliveryRegistrationScope,
+        endpoint: &str,
+    ) -> Result<bool, DeliveryRegistrationError>;
+
+    /// Drop registrations the vendor reported gone, by host-minted id.
+    /// Best-effort: pruning failure never fails the delivery that found it.
+    async fn prune(
+        &self,
+        scope: &DeliveryRegistrationScope,
+        registration_ids: &[String],
+    ) -> Result<usize, DeliveryRegistrationError>;
+}
+
+/// One enrollment submission. Untrusted: every field arrives from a browser
+/// or client and is validated host-side before storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryRegistrationRequest {
+    /// Absolute URL the channel will deliver to. Checked against the
+    /// channel's declared egress hosts before storage — the one
+    /// security-critical, generic, pre-storage check (design §8).
+    pub endpoint: String,
+    /// Channel-opaque remainder (key material, client metadata). Size-bounded
+    /// host-side; never parsed by generic code.
+    pub document: String,
+}
+
+/// Opaque registration-store failure. Deliberately carries a classification
+/// and a sanitized reason only: an endpoint URL is user data and must not
+/// travel in an error string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeliveryRegistrationError {
+    /// Caller-correctable: malformed endpoint, undeclared egress host, an
+    /// oversized document, or the per-user registration limit.
+    #[error("delivery registration is not acceptable: {reason}")]
+    Rejected { reason: String },
+    /// Storage trouble; the caller may retry.
+    #[error("delivery registration storage is unavailable: {reason}")]
+    Unavailable { reason: String },
 }
 
 /// Read half of the host-side `reply_context` storage (ING-11): the opaque
@@ -109,7 +207,11 @@ mod tests {
     // Every consumer holds these as `Arc<dyn _>`, so dyn-safety is part of the
     // contract, not an implementation detail: a signature change that breaks it
     // fails here rather than at the far-away wiring site.
-    static_assertions::assert_obj_safe!(ChannelDeliveryResolver, DeliveryReplyContextSource);
+    static_assertions::assert_obj_safe!(
+        ChannelDeliveryResolver,
+        DeliveryReplyContextSource,
+        DeliveryRegistrationService
+    );
 
     /// Records the coordinates each port is asked about. The point under test
     /// is the *seam*, not the lookup: both ports key on identifiers the

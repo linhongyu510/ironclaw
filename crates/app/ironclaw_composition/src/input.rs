@@ -251,8 +251,12 @@ pub struct ChannelExtensionBinding {
     /// `ironclaw_hooks::identity::ExtensionId` — the two coexist by design and
     /// resolve by crate, never by name (see `ironclaw_hooks/src/identity.rs`).
     pub extension_id: ironclaw_host_api::ids::ExtensionId,
-    /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
+    /// The channel halves this extension implements, linked into the
+    /// deployment. Which halves are present is checked against the manifest's
+    /// `[channel.*]` sections at activation, so a binding that claims an axis
+    /// its manifest does not declare (or omits one it does) fails there
+    /// rather than at first send.
+    pub surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec: Option<

@@ -1,19 +1,26 @@
-//! The Telegram [`ChannelAdapter`] (generic ingress, extension-runtime P4).
+//! The Telegram channel halves (generic ingress, extension-runtime P4).
 //!
-//! `inbound` parses one HOST-VERIFIED Bot API webhook update (the manifest's
+//! `receive` parses one HOST-VERIFIED Bot API webhook update (the manifest's
 //! `shared_secret_header` recipe — Telegram's `X-Telegram-Bot-Api-Secret-Token`
 //! — runs in the host's generic verifier; this adapter never sees the
-//! secret). `activate`/`cleanup` own the vendor-side webhook wiring
-//! (`setWebhook` with the secret token, `deleteWebhook`) through restricted
-//! egress: the bot token is a declared credential handle the HOST injects —
-//! never token bytes in adapter scope.
+//! secret).
+//!
+//! **Vendor-side webhook wiring is not here any more.** `setWebhook` /
+//! `deleteWebhook` were the only `activate`/`cleanup` implementations in the
+//! workspace, and every input they needed was already host-known: the host
+//! owns the webhook route, so it owns the URL. They are now the manifest's
+//! `[channel.ingress.registration]` / `[channel.ingress.deregistration]`
+//! recipes, run by the generic host executor through the same restricted
+//! egress with the same host-side credential injection. Two method bodies
+//! became zero lines, and a manifest field can no longer drift from an
+//! implementation because there is no implementation.
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport,
-    InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
-    RunReaction, VerifiedInbound,
+    ChannelAttachmentRef, ChannelDelivery, ChannelError, ChannelIngress, ChannelReply,
+    DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
+    ReactionAction, RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
@@ -97,82 +104,8 @@ impl TelegramChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelAdapter for TelegramChannelAdapter {
-    /// Register the webhook with the vendor: `setWebhook` carrying the public
-    /// webhook URL and the shared secret token. Idempotent (Telegram
-    /// overwrites the previous webhook). The bot token is injected host-side
-    /// via the declared credential handle.
-    async fn activate(
-        &self,
-        ctx: &ChannelContext<'_>,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        self.receiving_bot_username(ctx.config)
-            .map_err(|reason| ChannelError::VendorWiring {
-                reason: reason.to_string(),
-            })?;
-        let webhook_url = ctx
-            .config
-            .iter()
-            .find(|(handle, _)| handle == TELEGRAM_WEBHOOK_URL_CONFIG)
-            .map(|(_, value)| value.clone())
-            .ok_or_else(|| ChannelError::VendorWiring {
-                reason: format!("missing {TELEGRAM_WEBHOOK_URL_CONFIG} config value"),
-            })?;
-        let body = serde_json::json!({
-            "url": webhook_url,
-        });
-        // Telegram's contract wants `secret_token` — the VALUE it will echo
-        // back on every webhook delivery, which the host's
-        // shared_secret_header recipe then verifies. The adapter only names
-        // the handle; the manifest's `[[channel.egress]] body_credentials`
-        // binding tells restricted egress to resolve it and insert the value
-        // at `/secret_token` host-side. Secret bytes never enter adapter
-        // scope.
-        let mut request = bot_api_request("setWebhook", body);
-        request.body_credentials = vec![
-            SecretHandle::new(TELEGRAM_WEBHOOK_SECRET_HANDLE).map_err(|error| {
-                ChannelError::VendorWiring {
-                    reason: format!("invalid webhook secret handle: {error}"),
-                }
-            })?,
-        ];
-        let response = egress
-            .send(request)
-            .await
-            .map_err(|error| ChannelError::VendorWiring {
-                reason: format!("setWebhook egress failed: {error}"),
-            })?;
-        if !(200..300).contains(&response.status) {
-            return Err(ChannelError::VendorWiring {
-                reason: format!("setWebhook returned status {}", response.status),
-            });
-        }
-        Ok(())
-    }
-
-    /// Unregister the webhook (`deleteWebhook`). Idempotent and best-effort:
-    /// the host records failures as `RemovalPending` and retries.
-    async fn cleanup(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        let response = egress
-            .send(bot_api_request("deleteWebhook", serde_json::json!({})))
-            .await
-            .map_err(|error| ChannelError::VendorWiring {
-                reason: format!("deleteWebhook egress failed: {error}"),
-            })?;
-        if !(200..300).contains(&response.status) {
-            return Err(ChannelError::VendorWiring {
-                reason: format!("deleteWebhook returned status {}", response.status),
-            });
-        }
-        Ok(())
-    }
-
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for TelegramChannelAdapter {
+    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         let installation_id =
             AdapterInstallationId::new(request.installation_id).map_err(|error| {
                 ChannelError::Parse {
@@ -199,13 +132,20 @@ impl ChannelAdapter for TelegramChannelAdapter {
     ) -> Result<InboundAttachment, ChannelError> {
         crate::attachment_transfer::fetch_attachment(attachment, egress).await
     }
+}
 
+/// One vendor mechanism serves both output axes here, as it does for every
+/// conversational vendor — which is exactly why the reply/delivery
+/// distinction stayed invisible until a streaming channel existed. The halves
+/// stay separate because the coordinator picks one by route; the sharing is
+/// an implementation fact, recorded here rather than folded into the contract.
+impl TelegramChannelAdapter {
     /// Render one coordinator envelope as Bot API `sendMessage` calls: plain
     /// text split at the vendor's 4096-char limit, `chat_id` from the
     /// conversation ref, forum-topic threading when the anchor is numeric.
     /// The bot token rides the declared path placeholder — injected
     /// host-side, never adapter-visible.
-    async fn deliver(
+    async fn send(
         &self,
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
@@ -355,7 +295,29 @@ impl ChannelAdapter for TelegramChannelAdapter {
                 }
             }
         }
-        Ok(DeliveryReport { parts })
+        Ok(DeliveryReport::from_parts(parts))
+    }
+}
+
+#[async_trait]
+impl ChannelReply for TelegramChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.send(envelope, egress).await
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for TelegramChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.send(envelope, egress).await
     }
 }
 

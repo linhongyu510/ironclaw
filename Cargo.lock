@@ -5175,7 +5175,7 @@ name = "ironclaw_web_app_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
+ "base64 0.22.1",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
  "ironclaw_outbound",

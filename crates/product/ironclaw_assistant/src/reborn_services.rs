@@ -256,8 +256,8 @@ pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use notification_setup::{
-    AdapterChannelNotificationSetupService, ChannelNotificationSetupService,
-    UnsupportedChannelNotificationSetupService,
+    ChannelNotificationSetupService, DeliveryClientBootstrap, NoDeliveryClientBootstrap,
+    RegistrationChannelNotificationSetupService, UnsupportedChannelNotificationSetupService,
 };
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,

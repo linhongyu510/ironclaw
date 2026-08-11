@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, ChannelSurfaces, DeliveryReport,
+    InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -64,7 +64,7 @@ pub struct GenericExtensionHost {
 pub struct GenericExtensionHostParams {
     pub binder: ExtensionLaneToolBinder,
     pub native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
-    pub channel_adapters: Vec<(ExtensionId, Arc<dyn ChannelAdapter>)>,
+    pub channel_adapters: Vec<(ExtensionId, ChannelSurfaces)>,
     pub installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub boot_installations: Vec<InstallationRecord>,
     pub governor: Arc<dyn ResourceGovernor>,
@@ -294,7 +294,7 @@ struct CompositionExtensionLoader {
     /// extensions whose TOOLS load via the runtime lanes (P4 ingress cutover).
     /// An extension without an entry binds the transitional bridge until its
     /// adapter lands.
-    channel_adapters: HashMap<ExtensionId, Arc<dyn ChannelAdapter>>,
+    channel_adapters: HashMap<ExtensionId, ChannelSurfaces>,
     governor: Arc<dyn ResourceGovernor>,
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
@@ -380,12 +380,19 @@ impl ExtensionLoader for CompositionExtensionLoader {
             // when the binary/composition assembled one (the P4 inbound
             // cutover); otherwise the transitional bridge keeps the binding
             // rule satisfied until the adapter lands.
-            channel: declares_channel.then(|| {
-                self.channel_adapters
-                    .get(&extension_id)
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>)
-            }),
+            channel: match (
+                &ctx.resolved.channel,
+                self.channel_adapters.get(&extension_id),
+            ) {
+                (Some(_), Some(surfaces)) => surfaces.clone(),
+                // Until a real adapter is assembled, the bridge stands in —
+                // but only for the halves this manifest declares, because the
+                // per-axis binding rule now checks declaration against code.
+                // A bridge with a half nobody declared would fail activation,
+                // which is the rule doing its job.
+                (Some(channel), None) => host_served_bridge(channel),
+                (None, _) => ChannelSurfaces::default(),
+            },
         })))
     }
 }
@@ -568,7 +575,7 @@ fn resolve_package_root(
 /// there is nothing to report as bound.
 struct LaneEntrypoint {
     adapter: Option<Arc<dyn ToolAdapter>>,
-    channel: Option<Arc<dyn ChannelAdapter>>,
+    channel: ChannelSurfaces,
 }
 
 impl ExtensionEntrypoint for LaneEntrypoint {
@@ -669,28 +676,55 @@ fn release_reservation(
 /// cutovers). Routes nothing; deleted when the real channel adapters bind.
 struct HostServedChannelBridge;
 
+/// Bind the bridge to exactly the halves this manifest declares.
+///
+/// The per-axis binding rule checks declaration against code, so a blanket
+/// bridge implementing everything would fail activation for any channel that
+/// declares only some halves — and a bridge implementing nothing would fail
+/// for any channel that declares any. Deriving the set from the descriptor is
+/// the only shape that stays correct as manifests differ.
+fn host_served_bridge(
+    channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
+) -> ChannelSurfaces {
+    use ironclaw_extension_contracts::channel::ReplyTransport;
+    let bridge = Arc::new(HostServedChannelBridge);
+    let mut surfaces = ChannelSurfaces::default();
+    if channel
+        .ingress
+        .as_ref()
+        .is_some_and(|ingress| !ingress.verification.is_authenticated_session())
+    {
+        surfaces = surfaces.with_ingress(bridge.clone());
+    }
+    if channel.reply_transport() == Some(ReplyTransport::Message) {
+        surfaces = surfaces.with_reply(bridge.clone());
+    }
+    if channel.supports_delivery() {
+        surfaces = surfaces.with_delivery(bridge);
+    }
+    surfaces
+}
+
 #[async_trait]
-impl ChannelAdapter for HostServedChannelBridge {
-    async fn activate(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    async fn cleanup(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for HostServedChannelBridge {
+    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)
     }
+}
 
+#[async_trait]
+impl ChannelReply for HostServedChannelBridge {
+    async fn send_reply(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for HostServedChannelBridge {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
@@ -810,7 +844,7 @@ input_schema_ref = "schemas/echo.input.json"
             Ok(Box::new(FakeEntrypoint {
                 bindings: ExtensionBindings {
                     tools: Some(Arc::new(FakeToolAdapter)),
-                    channel: None,
+                    channel: ChannelSurfaces::default(),
                 },
             }))
         }

@@ -943,8 +943,8 @@ fn channel_directions_from_manifest_record(
     // Manifest v3: the resolved channel descriptor declares its directions.
     if let Some(channel) = &record.resolved().channel {
         return Ok(Some(LifecycleChannelDirections {
-            inbound: channel.inbound,
-            outbound: channel.outbound,
+            inbound: channel.supports_inbound(),
+            outbound: channel.supports_outbound(),
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.

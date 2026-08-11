@@ -59,6 +59,7 @@ fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
         },
         parts,
         reply_context: None,
+        registrations: Vec::new(),
     }
 }
 

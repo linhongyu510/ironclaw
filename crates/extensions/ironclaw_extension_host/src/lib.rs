@@ -41,6 +41,7 @@ pub mod channel_outbound_targets;
 pub mod channel_pairing;
 pub mod channel_shared_admission;
 pub mod channel_triggered_delivery;
+pub mod channel_vendor_calls;
 pub mod deployment_channels;
 pub mod egress;
 pub mod entrypoint;

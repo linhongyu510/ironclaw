@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
+    ChannelIngress, MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES, NormalizedInboundMessage,
     ProductTriggerReason,
 };
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
@@ -651,7 +651,7 @@ fn is_shared_channel_trigger(trigger: ProductTriggerReason) -> bool {
 /// capability, vendor/egress failure, or unusable text — returns `None`; this
 /// helper must never fail the sink.
 async fn fetch_channel_conversation_context(
-    channel_adapter: &dyn ChannelAdapter,
+    channel_adapter: &dyn ChannelIngress,
     channel_egress: Option<&dyn RestrictedEgress>,
     message: &NormalizedInboundMessage,
 ) -> Option<String> {
@@ -1122,7 +1122,7 @@ mod tests {
         async fn admit_channel_inbound_with_attachment_transfer(
             &self,
             request: ChannelInboundSurfaceRequest,
-            _channel_adapter: Arc<dyn ChannelAdapter>,
+            _channel_adapter: Arc<dyn ChannelIngress>,
             _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
         ) -> ChannelInboundSurfaceOutcome {
             self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
@@ -1553,7 +1553,7 @@ mod tests {
             "must never be fetched".to_string(),
         ))));
         let mut admission = admission_for("hello");
-        admission.channel_adapter = Arc::clone(&adapter) as Arc<dyn ChannelAdapter>;
+        admission.channel_adapter = Arc::clone(&adapter) as Arc<dyn ChannelIngress>;
         admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
 
         sink.admit(admission).await.expect("admitted");

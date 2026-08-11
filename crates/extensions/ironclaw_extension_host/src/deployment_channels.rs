@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_registry::ResolvedExtensionManifest;
 
 /// One manifest-declared channel paired with the adapter linked by the
@@ -16,33 +16,32 @@ use ironclaw_extension_registry::ResolvedExtensionManifest;
 pub struct DeploymentChannelBinding {
     pub extension_id: String,
     pub resolved: Arc<ResolvedExtensionManifest>,
-    pub adapter: Arc<dyn ChannelAdapter>,
+    pub surfaces: ChannelSurfaces,
 }
 
 impl DeploymentChannelBinding {
     pub fn new(
         resolved: Arc<ResolvedExtensionManifest>,
-        adapter: Arc<dyn ChannelAdapter>,
+        surfaces: ChannelSurfaces,
     ) -> Result<Self, DeploymentChannelRegistryError> {
         let extension_id = resolved.id.as_str().to_string();
         let Some(channel) = resolved.channel.as_ref() else {
             return Err(DeploymentChannelRegistryError::MissingChannel { extension_id });
         };
-        // An inbound channel is only mountable with its ingress declared. An
-        // outbound-only channel (web push) is a legitimate deployment binding
-        // with nothing to mount — delivery resolution still needs its adapter
-        // + egress declarations, and `resolve_channel_ingress` already guards
-        // the inbound/ingress pair at lookup.
-        if channel.inbound && channel.ingress.is_none() {
-            return Err(DeploymentChannelRegistryError::MissingInboundIngress { extension_id });
-        }
-        if !channel.inbound && !channel.outbound {
+        // Presence of `[channel.ingress]` IS the inbound declaration now, so
+        // the old "claims inbound but declares no ingress" contradiction is
+        // unrepresentable. What remains worth checking is that the binding
+        // does *something*: an outbound-only channel (browser push) is a
+        // legitimate deployment binding with nothing to mount — delivery
+        // resolution still needs its egress declarations — but a channel that
+        // neither receives nor emits is a manifest mistake.
+        if !channel.supports_inbound() && !channel.supports_outbound() {
             return Err(DeploymentChannelRegistryError::MissingInboundIngress { extension_id });
         }
         Ok(Self {
             extension_id,
             resolved,
-            adapter,
+            surfaces,
         })
     }
 }
@@ -90,7 +89,7 @@ impl DeploymentChannelRegistry {
         // authenticated_session ingress carries no route_suffix and never
         // matches a mounted webhook route — fail closed.
         let declared_suffix = ingress.route_suffix.as_ref()?;
-        if !channel.inbound || declared_suffix.as_str() != route_suffix {
+        if !channel.supports_inbound() || declared_suffix.as_str() != route_suffix {
             return None;
         }
         Some(Arc::clone(binding))
@@ -116,7 +115,7 @@ mod tests {
         let manifest = Arc::new(crate::test_support::channel_only_manifest());
         let registry = DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
             Arc::clone(&manifest),
-            Arc::new(crate::test_support::FakeChannelAdapter::default()),
+            crate::test_support::FakeChannelAdapter::all_halves(),
         )
         .expect("channel binding validates")])
         .expect("deployment registry validates");
@@ -137,7 +136,7 @@ mod tests {
         let manifest = Arc::new(crate::test_support::outbound_only_channel_manifest());
         let registry = DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
             Arc::clone(&manifest),
-            Arc::new(crate::test_support::FakeChannelAdapter::default()),
+            crate::test_support::FakeChannelAdapter::all_halves(),
         )
         .expect("an outbound-only channel is a legitimate deployment binding")])
         .expect("deployment registry validates");
@@ -160,7 +159,7 @@ mod tests {
         let binding = || {
             DeploymentChannelBinding::new(
                 Arc::clone(&manifest),
-                Arc::new(crate::test_support::FakeChannelAdapter::default()),
+                crate::test_support::FakeChannelAdapter::all_halves(),
             )
             .expect("channel binding validates")
         };

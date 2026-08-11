@@ -35,7 +35,7 @@ impl SessionChannelDirectory for DeploymentSessionChannelDirectory {
         let Some(ingress) = channel.ingress.as_ref() else {
             return false;
         };
-        channel.inbound && ingress.verification.is_authenticated_session()
+        channel.supports_inbound() && ingress.verification.is_authenticated_session()
     }
 }
 
@@ -52,12 +52,12 @@ mod tests {
             DeploymentChannelRegistry::try_new([
                 DeploymentChannelBinding::new(
                     Arc::clone(&session_manifest),
-                    Arc::new(crate::test_support::FakeChannelAdapter::default()),
+                    crate::test_support::FakeChannelAdapter::all_halves(),
                 )
                 .expect("session channel binding validates"),
                 DeploymentChannelBinding::new(
                     Arc::clone(&webhook_manifest),
-                    Arc::new(crate::test_support::FakeChannelAdapter::default()),
+                    crate::test_support::FakeChannelAdapter::all_halves(),
                 )
                 .expect("webhook channel binding validates"),
             ])

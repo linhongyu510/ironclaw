@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, NormalizedInboundMessage};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::{
     attachment::InboundAttachment,
@@ -141,7 +141,7 @@ pub trait ChannelInboundProductSurface: Send + Sync {
     async fn admit_channel_inbound_with_attachment_transfer(
         &self,
         request: ChannelInboundSurfaceRequest,
-        _channel_adapter: Arc<dyn ChannelAdapter>,
+        _channel_ingress: Arc<dyn ChannelIngress>,
         _channel_egress: Arc<dyn RestrictedEgress>,
     ) -> ChannelInboundSurfaceOutcome {
         if request.message.attachments.is_empty() {

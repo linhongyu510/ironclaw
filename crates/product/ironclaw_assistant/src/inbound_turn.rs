@@ -13,7 +13,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::ChannelIngress;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelAttachmentRef, ChannelError, ProductTriggerReason,
 };
@@ -286,7 +286,7 @@ pub trait InboundTurnService: Send + Sync {
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
-        _channel_adapter: Arc<dyn ChannelAdapter>,
+        _channel_ingress: Arc<dyn ChannelIngress>,
         _channel_egress: Arc<dyn RestrictedEgress>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         if !envelope.channel_attachment_refs().is_empty() {
@@ -504,14 +504,14 @@ where
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_ingress: Arc<dyn ChannelIngress>,
         channel_egress: Arc<dyn RestrictedEgress>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         self.accept_with_before_policy_inner(
             envelope,
             before_inbound_policy,
             Vec::new(),
-            Some(channel_adapter),
+            Some(channel_ingress),
             Some(channel_egress),
         )
         .await
@@ -529,7 +529,7 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
-        pinned_channel_adapter: Option<Arc<dyn ChannelAdapter>>,
+        pinned_channel_ingress: Option<Arc<dyn ChannelIngress>>,
         pinned_channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
@@ -588,7 +588,7 @@ where
             .resolve_inbound_attachments(
                 envelope_for_turn,
                 attachments,
-                pinned_channel_adapter.as_deref(),
+                pinned_channel_ingress.as_deref(),
                 pinned_channel_egress.as_deref(),
             )
             .await?;
@@ -602,7 +602,7 @@ where
         &self,
         envelope: &ProductInboundEnvelope,
         inline_attachments: Vec<InboundAttachment>,
-        pinned_channel_adapter: Option<&dyn ChannelAdapter>,
+        pinned_channel_ingress: Option<&dyn ChannelIngress>,
         pinned_channel_egress: Option<&dyn RestrictedEgress>,
     ) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
@@ -629,7 +629,7 @@ where
         }
         validate_attachment_sources(payload.attachments.as_slice(), sources)?;
 
-        let adapter = pinned_channel_adapter.ok_or_else(|| {
+        let adapter = pinned_channel_ingress.ok_or_else(|| {
             permanent_attachment_failure("channel attachment transfer is not configured")
         })?;
         let egress = pinned_channel_egress.ok_or_else(|| {

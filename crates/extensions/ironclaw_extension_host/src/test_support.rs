@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, ChannelSurfaces, DeliveryReport,
+    InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -107,9 +107,10 @@ module = "wasm/acme_push.wasm"
 [channel]
 id = "notifications"
 display_name = "Acme push"
-inbound = false
-outbound = true
 conversation_model = "continuous"
+
+[channel.delivery]
+transport = "message"
 "#;
 
 const CHANNEL_MANIFEST: &str = r#"
@@ -127,9 +128,13 @@ module = "wasm/acme_chat.wasm"
 [channel]
 id = "messages"
 display_name = "Acme chat"
-inbound = true
-outbound = true
 conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.ingress]
 route_suffix = "events"
@@ -183,9 +188,13 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel]
 id = "messages"
 display_name = "Acme messages"
-inbound = true
-outbound = true
 conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
 
 [channel.ingress]
 route_suffix = "hooks"
@@ -276,9 +285,13 @@ service = "acme-app.extension/v1"
 [channel]
 id = "chat"
 display_name = "Acme app"
-inbound = true
-outbound = true
 conversation_model = "isolated"
+
+[channel.reply]
+transport = "stream"
+
+[channel.delivery]
+transport = "push"
 
 [channel.ingress]
 method = "post"
@@ -384,60 +397,67 @@ impl ToolAdapter for FakeToolAdapter {
     }
 }
 
-/// A channel adapter that records its activate/cleanup calls and never wires
-/// a real vendor.
+/// A channel fake implementing all three halves, so a fixture can hand
+/// `check_binding` whichever subset its manifest declares.
+///
+/// It records nothing about activation any more: vendor-side ingress wiring
+/// stopped being adapter behavior when `activate`/`cleanup` became the
+/// `[channel.ingress.registration]` recipes, so the host-side executor is
+/// what a lifecycle test observes now — through the egress it drives.
 #[derive(Default)]
 pub struct FakeChannelAdapter {
-    pub activate_calls: Arc<AtomicUsize>,
-    pub cleanup_calls: Arc<AtomicUsize>,
-    /// When set, `activate` fails (to test activation abort).
-    pub fail_activate: bool,
-    /// When set, `cleanup` fails (to test `RemovalPending`).
-    pub fail_cleanup: bool,
+    /// Counts `send_reply` + `deliver` calls, so a test can prove the
+    /// coordinator picked an axis rather than that "something was sent".
+    pub reply_calls: Arc<AtomicUsize>,
+    pub delivery_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl ChannelAdapter for FakeChannelAdapter {
-    async fn activate(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        self.activate_calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail_activate {
-            Err(ChannelError::VendorWiring {
-                reason: "scripted activate failure".to_string(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn cleanup(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail_cleanup {
-            Err(ChannelError::VendorWiring {
-                reason: "scripted cleanup failure".to_string(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for FakeChannelAdapter {
+    async fn receive(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         Ok(InboundOutcome::Ignore)
     }
+}
 
+#[async_trait]
+impl ChannelReply for FakeChannelAdapter {
+    async fn send_reply(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.reply_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(DeliveryReport::default())
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for FakeChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
         _egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
-        Ok(DeliveryReport { parts: Vec::new() })
+        self.delivery_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(DeliveryReport::default())
+    }
+}
+
+impl FakeChannelAdapter {
+    /// Every half bound — matches the fixture manifests that declare a
+    /// webhook ingress, a message reply, and a delivery section.
+    pub fn all_halves() -> ChannelSurfaces {
+        let adapter = Arc::new(Self::default());
+        ChannelSurfaces::default()
+            .with_ingress(adapter.clone())
+            .with_reply(adapter.clone())
+            .with_delivery(adapter)
+    }
+
+    /// The delivery-only shape: what an outbound-only manifest declares, and
+    /// what a `transport = "stream"` reply plus session ingress leaves.
+    pub fn delivery_only() -> ChannelSurfaces {
+        ChannelSurfaces::default().with_delivery(Arc::new(Self::default()))
     }
 }
 

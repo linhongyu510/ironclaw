@@ -631,6 +631,17 @@ pub struct RebornRuntime {
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
     pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
+    /// Host-owned per-user delivery registrations (design §8). Always wired:
+    /// a coordinator that cannot answer "is this user enrolled?" must still
+    /// answer it, and a deployment with no enrollment-requiring channel gets
+    /// the no-op that answers "nobody is".
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes the non-secret bootstrap document a channel's client needs
+    /// in order to enroll — the public half of a credential the host already
+    /// holds, published generically rather than through a per-channel status
+    /// document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -4435,6 +4446,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         deployment_channels: services.deployment_channels.clone(),
         channel_pairing: services.channel_pairing.clone(),
         channel_delivery_resolver: services.channel_delivery_resolver.clone(),
+        delivery_registrations: services.delivery_registrations.clone(),
+        delivery_client_bootstrap: services.delivery_client_bootstrap.clone(),
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: services.channel_egress_credential_bridges.clone(),
         turn_coordinator,

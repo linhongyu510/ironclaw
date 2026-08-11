@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use ironclaw_composition::ChannelExtensionBinding;
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
     NativeExtensionFactory,
@@ -36,7 +37,16 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
     let bindings = vec![
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
-            adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+            // Every half: a webhook ingress, a message reply, a message
+            // delivery. One vendor mechanism serves both output axes, which
+            // is why the distinction stayed invisible until web-app existed.
+            surfaces: {
+                let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+                ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
             preference_target_codec: Some(Arc::new(
                 ironclaw_slack_extension::SlackPreferenceTargetCodec,
             )),
@@ -44,14 +54,25 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("telegram".to_string()),
-            adapter: Arc::new(TelegramChannelAdapter::default()),
+            surfaces: {
+                let adapter = Arc::new(TelegramChannelAdapter::default());
+                ChannelSurfaces::default()
+                    .with_ingress(adapter.clone())
+                    .with_reply(adapter.clone())
+                    .with_delivery(adapter)
+            },
             preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
             outbound_target_provider: None,
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
-            adapter: Arc::new(ironclaw_web_app_extension::WebAppChannelAdapter::new(
-                web_app_runtime.clone(),
+            // DELIVERY ONLY, and both absences are load-bearing: input
+            // arrives on the authenticated session door (whose actor
+            // authority an adapter may never mint), and the manifest's
+            // `transport = "stream"` reply is published by the host. Adding a
+            // half here fails activation — see `check_binding`.
+            surfaces: ChannelSurfaces::default().with_delivery(Arc::new(
+                ironclaw_web_app_extension::WebAppChannelAdapter::new(),
             )),
             preference_target_codec: Some(Arc::new(
                 ironclaw_web_app_extension::WebAppPreferenceTargetCodec,
@@ -91,9 +112,13 @@ struct TelegramExtensionEntrypoint;
 
 impl ExtensionEntrypoint for TelegramExtensionEntrypoint {
     fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+        let adapter = Arc::new(TelegramChannelAdapter::default());
         Ok(ExtensionBindings {
             tools: None,
-            channel: Some(Arc::new(TelegramChannelAdapter::default())),
+            channel: ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter),
         })
     }
 }

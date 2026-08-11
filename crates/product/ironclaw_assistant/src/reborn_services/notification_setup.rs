@@ -1,25 +1,60 @@
-//! Generic notification-setup product surface (§7b of the unified channel
-//! model): status/enable/disable by `extension_id`, dispatched to the
-//! channel's own adapter. This is the surface that replaced the web app's
-//! bespoke, now-retired per-channel enrollment routes — generic code
-//! here knows
-//! nothing about push endpoints, subscriptions, or VAPID; it resolves the
-//! adapter, forwards the channel-opaque payload, and projects the sanitized
-//! status back onto the wire.
+//! Generic notification-setup product surface: status/enable/disable by
+//! `extension_id`, against **host-owned** per-user delivery registrations.
+//!
+//! This module used to resolve the channel's adapter and forward a
+//! channel-opaque payload to three adapter methods. Design §8 deleted those
+//! methods, and the reason was not surface area: while the adapter owned
+//! enrollment storage the host could not answer "is this user set up?", so
+//! there was no guardrail before a delivery — the send simply failed inside
+//! the vendor path.
+//!
+//! What generic code does here now, and nothing more:
+//!
+//! 1. Resolve the channel's declared `[[channel.egress]]` hosts and **admit
+//!    the submitted endpoint against them before storage**. That is the one
+//!    security-critical check (§8), and it is generic because the host owns
+//!    the allowlist: without it, enrollment is an SSRF primitive that makes
+//!    the host POST to an attacker's URL.
+//! 2. Bound the opaque document and store it.
+//! 3. Publish the channel's client bootstrap document — the public half of a
+//!    credential the host already holds — so a client can enroll without the
+//!    channel exposing a bespoke status endpoint.
+//!
+//! It still knows nothing about push endpoints, key material, or VAPID. What
+//! changed is that the ignorance is now *host-side* rather than delegated.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_adapter::{
-    ChannelContext, ChannelError, MAX_NOTIFICATION_SETUP_DETAIL_BYTES,
-    MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES, NotificationSetupScope, NotificationSetupStatus,
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryRegistrationError, DeliveryRegistrationRequest,
+    DeliveryRegistrationScope, DeliveryRegistrationService,
 };
-use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 use super::{
     ProductSurfaceCaller, ProductSurfaceError, RebornNotificationSetupMutationRequest,
     RebornNotificationSetupRequest, RebornNotificationSetupStatusResponse,
 };
+
+/// Publishes the non-secret bootstrap document a channel's client needs to
+/// enroll (e.g. the public half of a signing key the host holds).
+///
+/// A port rather than a lookup because the *material* is host-held credential
+/// state and the *shape* is channel-specific: the host publishes it
+/// generically instead of the channel exposing its own status document.
+/// Absence is a legitimate answer — most channels need no bootstrap at all.
+pub trait DeliveryClientBootstrap: Send + Sync {
+    fn bootstrap(&self, extension_id: &str) -> Option<serde_json::Value>;
+}
+
+/// Fail-closed default: no channel publishes bootstrap data.
+pub struct NoDeliveryClientBootstrap;
+
+impl DeliveryClientBootstrap for NoDeliveryClientBootstrap {
+    fn bootstrap(&self, _extension_id: &str) -> Option<serde_json::Value> {
+        None
+    }
+}
 
 /// Per-channel notification-setup operations for the authenticated caller.
 #[async_trait]
@@ -43,7 +78,8 @@ pub trait ChannelNotificationSetupService: Send + Sync {
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError>;
 }
 
-/// Fail-closed default until composition wires the adapter-backed service.
+/// Fail-closed default until composition wires the registration-backed
+/// service.
 pub struct UnsupportedChannelNotificationSetupService;
 
 #[async_trait]
@@ -73,15 +109,24 @@ impl ChannelNotificationSetupService for UnsupportedChannelNotificationSetupServ
     }
 }
 
-/// Production service: resolve the channel from the same registry delivery
-/// uses, then dispatch to the adapter's setup operations.
-pub struct AdapterChannelNotificationSetupService {
+/// Production service over the host-owned registration store.
+pub struct RegistrationChannelNotificationSetupService {
     resolver: Arc<dyn ChannelDeliveryResolver>,
+    registrations: Arc<dyn DeliveryRegistrationService>,
+    bootstrap: Arc<dyn DeliveryClientBootstrap>,
 }
 
-impl AdapterChannelNotificationSetupService {
-    pub fn new(resolver: Arc<dyn ChannelDeliveryResolver>) -> Self {
-        Self { resolver }
+impl RegistrationChannelNotificationSetupService {
+    pub fn new(
+        resolver: Arc<dyn ChannelDeliveryResolver>,
+        registrations: Arc<dyn DeliveryRegistrationService>,
+        bootstrap: Arc<dyn DeliveryClientBootstrap>,
+    ) -> Self {
+        Self {
+            resolver,
+            registrations,
+            bootstrap,
+        }
     }
 
     /// The channel's declared setup requirement, failing closed as NotFound
@@ -93,100 +138,110 @@ impl AdapterChannelNotificationSetupService {
             .ok_or_else(ProductSurfaceError::not_found)
     }
 
-    async fn dispatch(
+    fn scope(
         &self,
         caller: &ProductSurfaceCaller,
         extension_id: &str,
-        operation: SetupOperation,
-        payload: serde_json::Value,
-    ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        let requires_setup = self.requires_setup(extension_id)?;
-        if !requires_setup {
-            return match operation {
-                // A channel without per-user setup is deliverable as-is.
-                SetupOperation::Status => Ok(RebornNotificationSetupStatusResponse {
-                    extension_id: extension_id.to_string(),
-                    requires_setup: false,
-                    enabled: true,
-                    detail: serde_json::Value::Null,
-                }),
-                SetupOperation::Enable | SetupOperation::Disable => {
-                    Err(ProductSurfaceError::validation(
-                        "extension_id",
-                        super::ProductSurfaceValidationCode::InvalidValue,
-                    ))
-                }
-            };
-        }
-        let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
-            return Err(ProductSurfaceError::not_found());
-        };
-        let scope = NotificationSetupScope {
+    ) -> Result<DeliveryRegistrationScope, ProductSurfaceError> {
+        let extension_id = ironclaw_host_api::ids::ExtensionId::new(extension_id)
+            .map_err(|_| ProductSurfaceError::not_found())?;
+        Ok(DeliveryRegistrationScope {
+            // Both halves come from the AUTHENTICATED caller, never from the
+            // request body: an enrollment that could name its own user would
+            // let anyone add a delivery endpoint to anyone's account.
             tenant_id: caller.tenant_id.clone(),
             user_id: caller.user_id.clone(),
-        };
-        let context = ChannelContext {
-            extension_id: channel.extension_id.as_str(),
-            installation_id: channel.installation_id.as_str(),
-            config: &[],
-        };
-        let payload_text = if payload.is_null() {
-            String::from("{}")
-        } else {
-            payload.to_string()
-        };
-        if payload_text.len() > MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES {
+            extension_id,
+        })
+    }
+
+    /// Project the stored set into the sanitized wire shape.
+    ///
+    /// Endpoints never cross this boundary — an endpoint URL is a capability
+    /// to send to a user's device. What a settings UI needs is enough to tell
+    /// its own registrations apart, which is the host-minted id plus the
+    /// non-secret client metadata the channel chose to record.
+    async fn project(
+        &self,
+        extension_id: &str,
+        scope: &DeliveryRegistrationScope,
+    ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
+        let registrations = self
+            .registrations
+            .list(scope)
+            .await
+            .map_err(|error| map_registration_error(extension_id, error))?;
+        let clients: Vec<serde_json::Value> = registrations
+            .iter()
+            .map(|registration| {
+                serde_json::json!({
+                    "registration_id": registration.registration_id,
+                    "created_at": registration.created_at,
+                })
+            })
+            .collect();
+        let mut detail = serde_json::json!({
+            "registration_count": registrations.len(),
+            "registrations": clients,
+        });
+        if let Some(bootstrap) = self.bootstrap.bootstrap(extension_id) {
+            detail["bootstrap"] = bootstrap;
+        }
+        Ok(RebornNotificationSetupStatusResponse {
+            extension_id: extension_id.to_string(),
+            requires_setup: true,
+            enabled: !registrations.is_empty(),
+            detail,
+        })
+    }
+
+    /// Shared prologue: unknown channels are not-found, and a channel with no
+    /// per-user setup is deliverable as-is (so a mutation on it is a caller
+    /// error, not a silent no-op).
+    fn admit(
+        &self,
+        extension_id: &str,
+        mutating: bool,
+    ) -> Result<Option<RebornNotificationSetupStatusResponse>, ProductSurfaceError> {
+        if self.requires_setup(extension_id)? {
+            return Ok(None);
+        }
+        if mutating {
             return Err(ProductSurfaceError::validation(
-                "payload",
-                super::ProductSurfaceValidationCode::TooLong,
+                "extension_id",
+                super::ProductSurfaceValidationCode::InvalidValue,
             ));
         }
-        let status = match operation {
-            SetupOperation::Status => {
-                channel
-                    .adapter
-                    .notification_setup_status(&context, &scope)
-                    .await
-            }
-            SetupOperation::Enable => {
-                channel
-                    .adapter
-                    .enable_notifications(&context, &scope, &payload_text)
-                    .await
-            }
-            SetupOperation::Disable => {
-                channel
-                    .adapter
-                    .disable_notifications(&context, &scope, &payload_text)
-                    .await
-            }
-        }
-        .map_err(map_setup_channel_error)?;
-        project_status(extension_id, status)
+        Ok(Some(RebornNotificationSetupStatusResponse {
+            extension_id: extension_id.to_string(),
+            requires_setup: false,
+            enabled: true,
+            detail: serde_json::Value::Null,
+        }))
     }
 }
 
-#[derive(Clone, Copy)]
-enum SetupOperation {
-    Status,
-    Enable,
-    Disable,
+/// The submitted enrollment document, split into the one field the host must
+/// see and the opaque remainder it must not interpret.
+#[derive(serde::Deserialize)]
+struct EnrollmentSubmission {
+    endpoint: String,
+    #[serde(flatten)]
+    document: serde_json::Map<String, serde_json::Value>,
 }
 
 #[async_trait]
-impl ChannelNotificationSetupService for AdapterChannelNotificationSetupService {
+impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupService {
     async fn status(
         &self,
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        self.dispatch(
-            &caller,
-            &request.extension_id,
-            SetupOperation::Status,
-            serde_json::Value::Null,
-        )
-        .await
+        if let Some(response) = self.admit(&request.extension_id, false)? {
+            return Ok(response);
+        }
+        let scope = self.scope(&caller, &request.extension_id)?;
+        self.project(&request.extension_id, &scope).await
     }
 
     async fn enable(
@@ -194,13 +249,34 @@ impl ChannelNotificationSetupService for AdapterChannelNotificationSetupService 
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupMutationRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        self.dispatch(
-            &caller,
-            &request.extension_id,
-            SetupOperation::Enable,
-            request.payload,
-        )
-        .await
+        self.admit(&request.extension_id, true)?;
+        let scope = self.scope(&caller, &request.extension_id)?;
+        let submission: EnrollmentSubmission =
+            serde_json::from_value(request.payload).map_err(|_| invalid_payload())?;
+
+        // THE security-critical check, and it happens before anything is
+        // stored: the endpoint must target a host this channel declares in
+        // `[[channel.egress]]`. The allowlist is read from the same resolved
+        // manifest egress policy enforces with, so there is no second copy to
+        // drift.
+        let declared_hosts = self
+            .resolver
+            .declared_egress_hosts(&request.extension_id)
+            .ok_or_else(ProductSurfaceError::not_found)?;
+        ironclaw_auth::validate_registration_endpoint(&submission.endpoint, &declared_hosts)
+            .map_err(|error| map_registration_error(&request.extension_id, error))?;
+
+        self.registrations
+            .enroll(
+                &scope,
+                DeliveryRegistrationRequest {
+                    endpoint: submission.endpoint,
+                    document: serde_json::Value::Object(submission.document).to_string(),
+                },
+            )
+            .await
+            .map_err(|error| map_registration_error(&request.extension_id, error))?;
+        self.project(&request.extension_id, &scope).await
     }
 
     async fn disable(
@@ -208,67 +284,42 @@ impl ChannelNotificationSetupService for AdapterChannelNotificationSetupService 
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupMutationRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        self.dispatch(
-            &caller,
-            &request.extension_id,
-            SetupOperation::Disable,
-            request.payload,
-        )
-        .await
+        self.admit(&request.extension_id, true)?;
+        let scope = self.scope(&caller, &request.extension_id)?;
+        let submission: EnrollmentSubmission =
+            serde_json::from_value(request.payload).map_err(|_| invalid_payload())?;
+        self.registrations
+            .remove(&scope, &submission.endpoint)
+            .await
+            .map_err(|error| map_registration_error(&request.extension_id, error))?;
+        self.project(&request.extension_id, &scope).await
     }
 }
 
-fn project_status(
-    extension_id: &str,
-    status: NotificationSetupStatus,
-) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-    if status.detail.len() > MAX_NOTIFICATION_SETUP_DETAIL_BYTES {
-        tracing::error!(
-            extension_id,
-            "channel setup detail exceeded its bound; refusing to project"
-        );
-        return Err(ProductSurfaceError::internal());
-    }
-    let detail: serde_json::Value = serde_json::from_str(&status.detail).map_err(|error| {
-        tracing::error!(
-            extension_id,
-            %error,
-            "channel setup detail is not valid JSON"
-        );
-        ProductSurfaceError::internal()
-    })?;
-    Ok(RebornNotificationSetupStatusResponse {
-        extension_id: extension_id.to_string(),
-        requires_setup: true,
-        enabled: status.enabled,
-        detail,
-    })
+fn invalid_payload() -> ProductSurfaceError {
+    ProductSurfaceError::validation("payload", super::ProductSurfaceValidationCode::InvalidValue)
 }
 
 pub(super) fn notification_setup_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::service_unavailable(false)
 }
 
-/// Map adapter setup failures onto the sanitized product taxonomy:
-/// caller-correctable payload problems are validation errors; configuration
-/// and store trouble is a retryable service failure; an adapter without
-/// setup operations is not-found-shaped (the surface is not an oracle).
-fn map_setup_channel_error(error: ChannelError) -> ProductSurfaceError {
+/// Map registration-store failures onto the sanitized product taxonomy.
+/// `Rejected` is caller-correctable — a bad endpoint, an undeclared host, an
+/// oversized document, the per-user cap — and its reason is already
+/// endpoint-free by construction. `Unavailable` is retryable storage trouble.
+fn map_registration_error(
+    extension_id: &str,
+    error: DeliveryRegistrationError,
+) -> ProductSurfaceError {
     match &error {
-        ChannelError::Parse { .. } => ProductSurfaceError::validation(
-            "payload",
-            super::ProductSurfaceValidationCode::InvalidValue,
-        ),
-        ChannelError::Configuration { .. } => {
-            tracing::warn!(%error, "channel notification setup unavailable");
-            ProductSurfaceError::service_unavailable(true)
+        DeliveryRegistrationError::Rejected { .. } => {
+            tracing::debug!(extension_id, %error, "delivery registration rejected");
+            invalid_payload()
         }
-        ChannelError::Unsupported => ProductSurfaceError::not_found(),
-        ChannelError::Render { .. }
-        | ChannelError::VendorWiring { .. }
-        | ChannelError::AttachmentTransfer { .. } => {
-            tracing::error!(%error, "unexpected channel setup failure");
-            ProductSurfaceError::internal()
+        DeliveryRegistrationError::Unavailable { .. } => {
+            tracing::warn!(extension_id, %error, "delivery registration storage unavailable");
+            ProductSurfaceError::service_unavailable(true)
         }
     }
 }

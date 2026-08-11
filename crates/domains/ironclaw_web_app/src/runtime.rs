@@ -1,27 +1,29 @@
-//! Late-bound runtime state for the web-app channel.
+//! Late-bound client-bootstrap material for the web-app channel.
 //!
-//! The channel adapter is constructed by the binary's binding table before
-//! composition has built storage, so the adapter holds this slot and
-//! composition installs the runtime exactly once at assembly (the same boot
-//! ordering the trigger poller's buffered post-submit hook resolves). Until
-//! installed, consumers fail closed with `WebAppError::RuntimeUnavailable`.
+//! The binary builds its binding table before composition has read the
+//! deployment's VAPID keypair, so the slot is filled at assembly and read by
+//! the host's generic client-bootstrap publisher. Until installed, consumers
+//! fail closed with `WebAppError::RuntimeUnavailable`.
+//!
+//! **Two things left this struct when enrollment moved host-side (design
+//! §8).** The subscription store became the host's generic per-user
+//! delivery-registration store (`ironclaw_auth::delivery_registrations`), and
+//! the push-service allowlist became the generic pre-storage endpoint check
+//! against `[[channel.egress]]` — the host owns that allowlist, so the host
+//! performs the check. What remains is the one thing that is genuinely
+//! channel-shaped and genuinely late-bound: the public key a browser needs in
+//! order to subscribe at all.
 
 use std::sync::{Arc, RwLock};
 
 use crate::error::WebAppError;
-use crate::store::WebAppSubscriptionStore;
 
-/// Everything the channel adapter needs at send and enrollment time.
+/// The channel's client-bootstrap material.
 pub struct WebAppRuntime {
-    pub subscriptions: Arc<dyn WebAppSubscriptionStore>,
     /// The advertised RFC 8292 application-server public key (URL-safe
     /// base64). Public by definition — the signing half stays host-seeded in
-    /// the secret store and never reaches the adapter.
+    /// the secret store and is injected only at the egress boundary.
     pub vapid_public_key: String,
-    /// Push-service hosts enrollments may target — the manifest's
-    /// `[[channel.egress]]` host list, the same allowlist restricted egress
-    /// enforces at send time.
-    pub allowed_push_hosts: Vec<String>,
 }
 
 /// Cloneable installer/consumer handle around the runtime.
@@ -68,56 +70,32 @@ impl WebAppRuntimeSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{PushSubscriptionUpsertOutcome, WebAppSubscriptionStore};
-    use crate::subscription::{PushEndpoint, PushSubscriptionRecord};
-    use async_trait::async_trait;
-    use ironclaw_host_api::resource::ResourceScope;
 
-    struct NullStore;
-
-    #[async_trait]
-    impl WebAppSubscriptionStore for NullStore {
-        async fn upsert_subscription(
-            &self,
-            _scope: &ResourceScope,
-            _record: PushSubscriptionRecord,
-        ) -> Result<PushSubscriptionUpsertOutcome, WebAppError> {
-            Ok(PushSubscriptionUpsertOutcome::Enrolled)
-        }
-
-        async fn remove_subscription(
-            &self,
-            _scope: &ResourceScope,
-            _endpoint: &PushEndpoint,
-        ) -> Result<bool, WebAppError> {
-            Ok(false)
-        }
-
-        async fn list_subscriptions(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<PushSubscriptionRecord>, WebAppError> {
-            Ok(Vec::new())
-        }
+    fn runtime() -> Arc<WebAppRuntime> {
+        Arc::new(WebAppRuntime {
+            vapid_public_key: "public-key".to_string(),
+        })
     }
 
     #[test]
-    fn slot_fails_closed_then_installs_exactly_once() {
+    fn the_slot_fails_closed_until_installed_and_refuses_a_second_install() {
         let slot = WebAppRuntimeSlot::new();
-        assert!(matches!(slot.get(), Err(WebAppError::RuntimeUnavailable)));
         assert!(!slot.is_installed());
+        assert!(matches!(slot.get(), Err(WebAppError::RuntimeUnavailable)));
 
-        let runtime = Arc::new(WebAppRuntime {
-            subscriptions: Arc::new(NullStore),
-            vapid_public_key: "test-public-key".to_string(),
-            allowed_push_hosts: vec!["push.example".to_string()],
-        });
-        slot.install(Arc::clone(&runtime)).expect("first install");
+        slot.install(runtime()).expect("first install");
         assert!(slot.is_installed());
-        assert!(slot.get().is_ok());
-        assert!(matches!(
-            slot.install(runtime),
-            Err(WebAppError::RuntimeAlreadyInstalled)
-        ));
+        assert_eq!(
+            slot.get().expect("installed").vapid_public_key,
+            "public-key"
+        );
+
+        assert!(
+            matches!(
+                slot.install(runtime()),
+                Err(WebAppError::RuntimeAlreadyInstalled)
+            ),
+            "a second install is a wiring bug and must fail loudly"
+        );
     }
 }

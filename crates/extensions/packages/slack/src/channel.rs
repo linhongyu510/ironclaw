@@ -1,4 +1,4 @@
-//! The Slack [`ChannelAdapter`] (generic ingress cutover P4; delivery
+//! The Slack channel halves (generic ingress cutover P4; delivery
 //! coordinator cutover P5).
 //!
 //! `inbound` parses one HOST-VERIFIED Slack Events API request into a
@@ -13,9 +13,9 @@
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
-    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
-    RunReaction, TargetCandidate, TargetQuery, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, ImmediateResponse,
+    InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
+    ReactionAction, RunReaction, TargetCandidate, TargetQuery, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -41,8 +41,8 @@ const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 pub struct SlackChannelAdapter;
 
 #[async_trait]
-impl ChannelAdapter for SlackChannelAdapter {
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+impl ChannelIngress for SlackChannelAdapter {
+    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
         let installation_id =
             AdapterInstallationId::new(request.installation_id).map_err(|error| {
                 ChannelError::Parse {
@@ -97,8 +97,16 @@ impl ChannelAdapter for SlackChannelAdapter {
     > {
         crate::conversation_context::fetch_conversation_context(conversation, egress).await
     }
+}
 
-    async fn deliver(
+/// For a conversational vendor the two output axes happen to share one
+/// mechanism — a message in the channel — which is exactly why the
+/// reply/delivery distinction stayed invisible until a streaming channel
+/// existed. They are still two halves: the coordinator decides the axis and
+/// calls one of them, and the sharing is an implementation fact recorded here
+/// rather than a collapse of the contract.
+impl SlackChannelAdapter {
+    async fn send(
         &self,
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
@@ -228,7 +236,29 @@ impl ChannelAdapter for SlackChannelAdapter {
             }
             part_index += 1;
         }
-        Ok(DeliveryReport { parts })
+        Ok(DeliveryReport::from_parts(parts))
+    }
+}
+
+#[async_trait]
+impl ChannelReply for SlackChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.send(envelope, egress).await
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for SlackChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.send(envelope, egress).await
     }
 
     /// Target listing. The `im:<slack_user_id>` query provisions (or reuses)
@@ -604,11 +634,11 @@ mod tests {
 
     use super::*;
 
-    fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
-        inbound_with_headers(body, &[])
+    async fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+        inbound_with_headers(body, &[]).await
     }
 
-    fn inbound_with_headers(
+    async fn inbound_with_headers(
         body: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<InboundOutcome, ChannelError> {
@@ -616,19 +646,22 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        SlackChannelAdapter.inbound(VerifiedInbound {
-            extension_id: "slack",
-            installation_id: "install_alpha",
-            config: &[],
-            body,
-            headers: &owned_headers,
-            can_reply_in_threads: true,
-        })
+        SlackChannelAdapter
+            .receive(VerifiedInbound {
+                extension_id: "slack",
+                installation_id: "install_alpha",
+                config: &[],
+                body,
+                headers: &owned_headers,
+                can_reply_in_threads: true,
+            })
+            .await
     }
 
-    #[test]
-    fn url_verification_challenge_becomes_an_immediate_response() {
+    #[tokio::test]
+    async fn url_verification_challenge_becomes_an_immediate_response() {
         let outcome = inbound(br#"{"type":"url_verification","challenge":"challenge-token"}"#)
+            .await
             .expect("challenge parses");
         let InboundOutcome::Respond(response) = outcome else {
             panic!("expected Respond");
@@ -637,8 +670,8 @@ mod tests {
         assert_eq!(response.body, b"challenge-token");
     }
 
-    #[test]
-    fn dm_message_normalizes_with_text_trigger_and_event_identity() {
+    #[tokio::test]
+    async fn dm_message_normalizes_with_text_trigger_and_event_identity() {
         let outcome = inbound(
             br#"{
                 "type": "event_callback",
@@ -654,6 +687,7 @@ mod tests {
                 }
             }"#,
         )
+        .await
         .expect("dm parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -668,8 +702,8 @@ mod tests {
         assert!(message.reply_context.is_none());
     }
 
-    #[test]
-    fn app_mention_strips_the_leading_mention_and_keeps_thread_anchor() {
+    #[tokio::test]
+    async fn app_mention_strips_the_leading_mention_and_keeps_thread_anchor() {
         let outcome = inbound(
             br#"{
                 "type": "event_callback",
@@ -684,6 +718,7 @@ mod tests {
                 }
             }"#,
         )
+        .await
         .expect("mention parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -700,18 +735,20 @@ mod tests {
     /// `inbound` with an explicit `can_reply_in_threads` (the helpers above
     /// pin `true`, Slack's shipped manifest value) — the seam for proving the
     /// flag drives placement rather than decorating the manifest.
-    fn inbound_with_threading(
+    async fn inbound_with_threading(
         body: &[u8],
         can_reply_in_threads: bool,
     ) -> Result<InboundOutcome, ChannelError> {
-        SlackChannelAdapter.inbound(VerifiedInbound {
-            extension_id: "slack",
-            installation_id: "install_alpha",
-            config: &[],
-            body,
-            headers: &[],
-            can_reply_in_threads,
-        })
+        SlackChannelAdapter
+            .receive(VerifiedInbound {
+                extension_id: "slack",
+                installation_id: "install_alpha",
+                config: &[],
+                body,
+                headers: &[],
+                can_reply_in_threads,
+            })
+            .await
     }
 
     /// Pin for #7377: `presentation.can_reply_in_threads` is LOAD-BEARING.
@@ -721,8 +758,8 @@ mod tests {
     /// anchor) when the flag is false. If `flatten_self_rooted_topic` were a
     /// no-op — or the `inbound` dispatch stopped consulting the flag — the
     /// false arm would still carry the self-rooted topic and fail here.
-    #[test]
-    fn can_reply_in_threads_decides_whether_a_top_level_mention_roots_a_thread() {
+    #[tokio::test]
+    async fn can_reply_in_threads_decides_whether_a_top_level_mention_roots_a_thread() {
         let top_level_mention: &[u8] = br#"{
             "type": "event_callback",
             "event_id": "Ev301",
@@ -736,8 +773,9 @@ mod tests {
             }
         }"#;
 
-        let InboundOutcome::Messages(rooted) =
-            inbound_with_threading(top_level_mention, true).expect("mention parses")
+        let InboundOutcome::Messages(rooted) = inbound_with_threading(top_level_mention, true)
+            .await
+            .expect("mention parses")
         else {
             panic!("expected Messages");
         };
@@ -747,8 +785,9 @@ mod tests {
             "threading channel: a top-level mention roots its own thread"
         );
 
-        let InboundOutcome::Messages(flat) =
-            inbound_with_threading(top_level_mention, false).expect("mention parses")
+        let InboundOutcome::Messages(flat) = inbound_with_threading(top_level_mention, false)
+            .await
+            .expect("mention parses")
         else {
             panic!("expected Messages");
         };
@@ -773,8 +812,8 @@ mod tests {
     /// inside a genuine vendor thread (thread_ts = an EARLIER message) keeps
     /// its thread even when the channel does not open new ones — the reply
     /// must go where the conversation already is.
-    #[test]
-    fn can_reply_in_threads_false_keeps_a_genuine_in_thread_mention_threaded() {
+    #[tokio::test]
+    async fn can_reply_in_threads_false_keeps_a_genuine_in_thread_mention_threaded() {
         let in_thread_mention: &[u8] = br#"{
             "type": "event_callback",
             "event_id": "Ev302",
@@ -789,8 +828,9 @@ mod tests {
             }
         }"#;
 
-        let InboundOutcome::Messages(messages) =
-            inbound_with_threading(in_thread_mention, false).expect("mention parses")
+        let InboundOutcome::Messages(messages) = inbound_with_threading(in_thread_mention, false)
+            .await
+            .expect("mention parses")
         else {
             panic!("expected Messages");
         };
@@ -801,8 +841,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gate_resolution_text_stays_a_plain_message_for_host_reclassification() {
+    #[tokio::test]
+    async fn gate_resolution_text_stays_a_plain_message_for_host_reclassification() {
         // The adapter must NOT classify gate resolutions — the shared host
         // sink applies the channel-neutral interaction grammar.
         let outcome = inbound(
@@ -820,6 +860,7 @@ mod tests {
                 }
             }"#,
         )
+        .await
         .expect("resolution text parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -827,8 +868,8 @@ mod tests {
         assert!(messages[0].text.starts_with("approve gate:"));
     }
 
-    #[test]
-    fn ignored_events_and_bot_echoes_are_authenticated_noops() {
+    #[tokio::test]
+    async fn ignored_events_and_bot_echoes_are_authenticated_noops() {
         for body in [
             // Non event_callback wrapper.
             br#"{"type":"team_join","event_id":"Ev1"}"#.as_slice(),
@@ -861,22 +902,22 @@ mod tests {
             .as_slice(),
         ] {
             assert!(
-                matches!(inbound(body), Ok(InboundOutcome::Ignore)),
+                matches!(inbound(body).await, Ok(InboundOutcome::Ignore)),
                 "expected Ignore for {}",
                 String::from_utf8_lossy(body)
             );
         }
     }
 
-    #[test]
-    fn malformed_payloads_are_typed_parse_errors() {
+    #[tokio::test]
+    async fn malformed_payloads_are_typed_parse_errors() {
         assert!(matches!(
-            inbound(br#"{"type":"event_callback""#),
+            inbound(br#"{"type":"event_callback""#).await,
             Err(ChannelError::Parse { .. })
         ));
         // event_callback without event_id would collide dedupe keys.
         assert!(matches!(
-            inbound(br#"{"type":"event_callback","event":{"type":"message"}}"#),
+            inbound(br#"{"type":"event_callback","event":{"type":"message"}}"#).await,
             Err(ChannelError::Parse { .. })
         ));
     }
@@ -886,12 +927,12 @@ mod tests {
     const SLASH_FORM_HEADERS: &[(&str, &str)] =
         &[("content-type", "application/x-www-form-urlencoded")];
 
-    #[test]
-    fn slash_dm_command_normalizes_with_status_text_and_direct_chat_trigger() {
+    #[tokio::test]
+    async fn slash_dm_command_normalizes_with_status_text_and_direct_chat_trigger() {
         let outcome = inbound_with_headers(
             b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T1&trigger_id=111.222.abc",
             SLASH_FORM_HEADERS,
-        )
+        ).await
         .expect("slash command parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -907,12 +948,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn slash_dispatcher_args_join_with_spaces() {
+    #[tokio::test]
+    async fn slash_dispatcher_args_join_with_spaces() {
         let outcome = inbound_with_headers(
             b"command=%2Fironclaw&text=model+set-provider+openai&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.arg",
             SLASH_FORM_HEADERS,
-        )
+        ).await
         .expect("slash command parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -920,12 +961,12 @@ mod tests {
         assert_eq!(messages[0].text, "/model set-provider openai");
     }
 
-    #[test]
-    fn slash_defensive_strip_avoids_double_slash() {
+    #[tokio::test]
+    async fn slash_defensive_strip_avoids_double_slash() {
         let outcome = inbound_with_headers(
             b"command=%2Fironclaw&text=%2Fstatus&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.strip",
             SLASH_FORM_HEADERS,
-        )
+        ).await
         .expect("slash command parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -936,14 +977,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn slash_bare_and_help_map_to_help() {
+    #[tokio::test]
+    async fn slash_bare_and_help_map_to_help() {
         for body in [
             b"command=%2Fironclaw&text=&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.bare".as_slice(),
             b"command=%2Fironclaw&text=help&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.help".as_slice(),
         ] {
             let outcome =
-                inbound_with_headers(body, SLASH_FORM_HEADERS).expect("slash command parses");
+                inbound_with_headers(body, SLASH_FORM_HEADERS).await.expect("slash command parses");
             let InboundOutcome::Messages(messages) = outcome else {
                 panic!("expected Messages");
             };
@@ -951,12 +992,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn slash_non_dm_channel_maps_to_bot_command_trigger() {
+    #[tokio::test]
+    async fn slash_non_dm_channel_maps_to_bot_command_trigger() {
         let outcome = inbound_with_headers(
             b"command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&trigger_id=111.222.pub",
             SLASH_FORM_HEADERS,
-        )
+        ).await
         .expect("slash command parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -964,12 +1005,12 @@ mod tests {
         assert_eq!(messages[0].trigger, ProductTriggerReason::BotCommand);
     }
 
-    #[test]
-    fn slash_foreign_command_name_is_passed_through_verbatim() {
+    #[tokio::test]
+    async fn slash_foreign_command_name_is_passed_through_verbatim() {
         let outcome = inbound_with_headers(
             b"command=%2Fsomethingelse&text=hi&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.foreign",
             SLASH_FORM_HEADERS,
-        )
+        ).await
         .expect("slash command parses");
         let InboundOutcome::Messages(messages) = outcome else {
             panic!("expected Messages");
@@ -977,12 +1018,13 @@ mod tests {
         assert_eq!(messages[0].text, "/somethingelse hi");
     }
 
-    #[test]
-    fn slash_ssl_check_probe_gets_immediate_empty_200() {
+    #[tokio::test]
+    async fn slash_ssl_check_probe_gets_immediate_empty_200() {
         let outcome = inbound_with_headers(
             b"ssl_check=1&token=deprecated-verification-token",
             SLASH_FORM_HEADERS,
         )
+        .await
         .expect("ssl_check probe parses");
         let InboundOutcome::Respond(response) = outcome else {
             panic!("expected Respond");
@@ -991,23 +1033,24 @@ mod tests {
         assert!(response.body.is_empty());
     }
 
-    #[test]
-    fn slash_malformed_form_missing_user_id_is_typed_parse_error() {
+    #[tokio::test]
+    async fn slash_malformed_form_missing_user_id_is_typed_parse_error() {
         let result = inbound_with_headers(
             b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&trigger_id=111.222.bad",
             SLASH_FORM_HEADERS,
-        );
+        ).await;
         assert!(matches!(result, Err(ChannelError::Parse { .. })));
     }
 
-    #[test]
-    fn json_body_still_normalizes_through_the_header_aware_helper() {
+    #[tokio::test]
+    async fn json_body_still_normalizes_through_the_header_aware_helper() {
         // Same two existing JSON scenarios, driven through the new
         // header-aware entry point — byte-identical outcomes.
         let challenge = inbound_with_headers(
             br#"{"type":"url_verification","challenge":"challenge-token"}"#,
             &[("content-type", "application/json")],
         )
+        .await
         .expect("challenge parses");
         let InboundOutcome::Respond(response) = challenge else {
             panic!("expected Respond");
@@ -1031,6 +1074,7 @@ mod tests {
             }"#,
             &[],
         )
+        .await
         .expect("dm parses with no content-type header");
         let InboundOutcome::Messages(messages) = dm else {
             panic!("expected Messages");
@@ -1119,6 +1163,7 @@ mod tests {
             },
             parts,
             reply_context: None,
+            registrations: Vec::new(),
         }
     }
 

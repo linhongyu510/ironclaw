@@ -54,12 +54,48 @@ pub trait ChannelIngress: Send + Sync {
     ///
     /// Async so a channel is not artificially barred from awaiting — but it
     /// must NOT fetch attachment bytes or conversation history here. Both are
-    /// declarative recipes the host runs **after** the webhook ack
-    /// (`[channel.attachments]`), because the ack is ack-after-commit and
-    /// anything awaited here lands inside the pre-ack window. Committing refs
-    /// instead of bytes is what moves the round trip later; inlining a fetch
-    /// here moves it *earlier*.
+    /// deferred to the host's **post-ack** fetch pass, because the ack is
+    /// ack-after-commit and anything awaited here lands inside the pre-ack
+    /// window. Committing refs instead of bytes is what moves the round trip
+    /// later; inlining a fetch here moves it *earlier*.
     async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+
+    /// Deferred handle (design §7.3): fetch one inbound attachment's bytes
+    /// through the channel's restricted egress.
+    ///
+    /// **Never call this before the ack.** The host commits the message with
+    /// the vendor *ref* — already in the parsed payload, needing no network —
+    /// acks, and only then runs this. `[channel.attachments]` is the manifest
+    /// declaration that a channel has fetchable attachments at all; the fetch
+    /// itself stays here because neither shipped vendor's transfer is one
+    /// templated request (see that descriptor's doc for the measurement).
+    ///
+    /// Default `Unsupported`: a channel whose messages carry no attachments —
+    /// or whose attachments arrive inline on an authenticated session — never
+    /// implements it.
+    async fn fetch_attachment(
+        &self,
+        _attachment: &ChannelAttachmentRef,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
+    /// Deferred handle (design §7.3): recent vendor-side conversation history
+    /// for one inbound shared message. `topic`-bearing conversations fetch
+    /// that thread's messages; top-level conversations fetch recent channel
+    /// history.
+    ///
+    /// Advisory context that must never fail admission: `Ok(None)` covers the
+    /// default, missing scopes, and vendor failure alike. Like
+    /// [`Self::fetch_attachment`] it runs post-ack, for the same reason.
+    async fn fetch_conversation_context(
+        &self,
+        _conversation: &ExternalConversationRef,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<Option<ChannelConversationContext>, ChannelError> {
+        Ok(None)
+    }
 }
 
 /// **Reply** — answering the run's input, source-routed. Pairs with
@@ -120,11 +156,15 @@ pub trait ChannelDelivery: Send + Sync {
 /// - `activate`/`cleanup` → `[channel.ingress.registration]` /
 ///   `[channel.ingress.deregistration]` recipes the host runs through
 ///   existing restricted egress with existing credential injection.
-/// - `fetch_attachment`/`fetch_conversation_context` →
-///   `[channel.attachments]`, run post-ack.
+/// - `deliver_notification` → the second trait. One run can stream an answer
+///   into an open tab *and* fire a push; those are two axes, not two intents.
 /// - the three notification-setup methods → host-owned per-user delivery
 ///   registrations, so the host can answer "is this user set up?" before a
 ///   send instead of discovering it inside the vendor path.
+///
+/// `fetch_attachment`/`fetch_conversation_context` stayed, on
+/// [`ChannelIngress`], but **moved after the webhook ack** — which was the
+/// point of design §7. They are the deferred handles §7.3 sanctions.
 #[derive(Clone, Default)]
 pub struct ChannelSurfaces {
     pub ingress: Option<Arc<dyn ChannelIngress>>,
@@ -165,40 +205,42 @@ impl std::fmt::Debug for ChannelSurfaces {
     }
 }
 
-/// Activation/cleanup context: installation identity, the extension's
-/// non-secret config values, and the resolved channel descriptor. Secrets
-/// exist only behind host egress injection.
-pub struct ChannelContext<'a> {
-    pub extension_id: &'a str,
-    pub installation_id: &'a str,
-    /// Non-secret operator config values keyed by field handle.
-    pub config: &'a [(String, String)],
+/// One per-user delivery registration, as the adapter sees it at delivery.
+///
+/// This is what replaced the three notification-setup adapter methods
+/// (design §8). The host owns the records; the adapter parses one at the
+/// moment it needs the endpoint and the key material anyway, so there is no
+/// `validate_enrollment` and no setup surface on any trait.
+///
+/// **Two fields, two trust stories.** `endpoint` is host-visible on purpose —
+/// the host checks it against the channel's declared `[[channel.egress]]`
+/// hosts *before storage*, because without that check enrollment is an SSRF
+/// primitive that makes the host POST wherever an attacker names. `document`
+/// is channel-opaque: the host bounds its size and never interprets it, and a
+/// malformed one fails that single delivery and is pruned on the same path
+/// that already prunes an expired endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryRegistration {
+    /// Host-minted, stable for one endpoint. Adapters echo it back in
+    /// [`DeliveryReport::prune_registrations`]; they never mint one.
+    pub registration_id: String,
+    /// The absolute URL this registration delivers to. Host-checked against
+    /// the channel's declared egress hosts before it is ever stored.
+    pub endpoint: String,
+    /// Channel-opaque remainder (key material, client metadata). Bounded by
+    /// [`MAX_DELIVERY_REGISTRATION_DOCUMENT_BYTES`]; never interpreted by
+    /// generic code.
+    pub document: String,
+    /// RFC 3339, host-stamped at first storage.
+    pub created_at: String,
 }
 
-/// The authenticated user one notification-setup operation acts for. Comes
-/// from the trusted caller at the product boundary, never from the payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotificationSetupScope {
-    pub tenant_id: ironclaw_host_api::ids::TenantId,
-    pub user_id: ironclaw_host_api::ids::UserId,
-}
-
-/// One channel's per-user notification-setup state (§7b).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotificationSetupStatus {
-    /// Whether notification delivery is enabled for this user on this
-    /// channel right now.
-    pub enabled: bool,
-    /// Channel-opaque JSON detail for the channel's own client (e.g. the
-    /// web app's enrolled-browser digests and its enrollment public key).
-    /// Bounded; generic code passes it through without interpretation.
-    pub detail: String,
-}
-
-/// Bound on the opaque `detail` document a setup status may carry.
-pub const MAX_NOTIFICATION_SETUP_DETAIL_BYTES: usize = 16 * 1024;
-/// Bound on the opaque payload one enable/disable operation may carry.
-pub const MAX_NOTIFICATION_SETUP_PAYLOAD_BYTES: usize = 16 * 1024;
+/// Bound on one registration's opaque `document`.
+pub const MAX_DELIVERY_REGISTRATION_DOCUMENT_BYTES: usize = 16 * 1024;
+/// Bound on one registration's `endpoint` URL.
+pub const MAX_DELIVERY_REGISTRATION_ENDPOINT_BYTES: usize = 2 * 1024;
+/// Bound on how many registrations one user may hold per channel.
+pub const MAX_DELIVERY_REGISTRATIONS_PER_USER: usize = 20;
 
 /// One host-verified inbound request. Signing secrets are never in scope —
 /// the host executed the verification recipe before calling `inbound`.
@@ -400,6 +442,14 @@ pub struct OutboundEnvelope {
     /// The stored `reply_context` from the originating inbound message, if
     /// this delivery replies to one.
     pub reply_context: Option<Vec<u8>>,
+    /// The recipient's per-user delivery registrations, resolved host-side
+    /// (design §8). Empty for every channel that declares no
+    /// `requires_enrollment` — and for one that does, the coordinator resolves
+    /// zero registrations to a "no target" outcome *before* calling the
+    /// adapter, so a non-empty list is what an enrollment-gated adapter can
+    /// rely on rather than discovering the emptiness inside the vendor path.
+    #[allow(clippy::doc_markdown)]
+    pub registrations: Vec<DeliveryRegistration>,
 }
 
 /// A resolved outbound target for one delivery.
@@ -472,9 +522,25 @@ pub enum ReactionAction {
 
 /// Structured per-attempt delivery report. The adapter cannot mark anything
 /// delivered in a store; it only describes what the vendor did.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DeliveryReport {
     pub parts: Vec<PartDeliveryOutcome>,
+    /// Registration ids the vendor reported gone (an expired push
+    /// subscription, a revoked device). The **host** prunes them — the
+    /// adapter reports, exactly as it reports part outcomes without touching
+    /// the delivery store. Ids the host did not hand this adapter in
+    /// [`OutboundEnvelope::registrations`] are ignored.
+    pub prune_registrations: Vec<String>,
+}
+
+impl DeliveryReport {
+    /// The common case: per-part outcomes with nothing to prune.
+    pub fn from_parts(parts: Vec<PartDeliveryOutcome>) -> Self {
+        Self {
+            parts,
+            prune_registrations: Vec::new(),
+        }
+    }
 }
 
 /// The outcome of delivering one part.

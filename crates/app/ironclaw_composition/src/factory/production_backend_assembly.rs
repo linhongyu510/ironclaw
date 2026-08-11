@@ -891,7 +891,8 @@ pub(super) async fn build_backend_production(
                 // installation exists; outbound-only channels (web push) need
                 // the same deployment binding so delivery resolution finds
                 // their adapter without an installation record.
-                (channel.inbound && channel.ingress.is_some()) || channel.outbound
+                (channel.supports_inbound() && channel.ingress.is_some())
+                    || channel.supports_outbound()
             })
         })
         .filter_map(|manifest| {
@@ -901,7 +902,7 @@ pub(super) async fn build_backend_production(
                 .map(|binding| {
                     ironclaw_extension_host::DeploymentChannelBinding::new(
                         Arc::clone(manifest),
-                        Arc::clone(&binding.adapter),
+                        binding.surfaces.clone(),
                     )
                 })
         })
@@ -1020,12 +1021,25 @@ pub(super) async fn build_backend_production(
     assemble_web_app(
         web_app_runtime_slot.as_ref(),
         web_app_vapid_subject.as_deref(),
-        &stores.filesystem,
         &secret_store,
         &channel_egress_scope,
-        &deployment_channels,
     )
     .await?;
+    // Host-owned per-user delivery registrations (design §8). The document
+    // path is deployment data supplied here rather than derived generically,
+    // for one reason worth stating: one channel's document predates this
+    // store, and a generic default would have renamed it and orphaned every
+    // persisted enrollment. See `DeploymentRegistrationPaths`.
+    let delivery_registrations: Arc<
+        dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService,
+    > = Arc::new(ironclaw_auth::FilesystemDeliveryRegistrationStore::new(
+        crate::wrap_scoped(Arc::clone(&stores.filesystem)),
+        Arc::new(DeploymentRegistrationPaths),
+    ));
+    let delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap> =
+        Arc::new(SlotBackedClientBootstrap {
+            web_app: web_app_runtime_slot.clone(),
+        });
     let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
         ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
@@ -1199,6 +1213,7 @@ pub(super) async fn build_backend_production(
                 binder: services.extension_lane_tool_binder(),
                 native_factories: native_extension_factories,
                 channel_bindings: channel_extension_bindings.clone(),
+                delivery_registrations: Arc::clone(&delivery_registrations),
                 installation_store: generic_installation_store,
                 admin_configuration_resolver: Arc::clone(&admin_configuration_resolver_for_generic),
                 resource_governor: Arc::clone(&resource_governor)
@@ -1309,6 +1324,8 @@ pub(super) async fn build_backend_production(
     };
 
     Ok(RebornRuntimeStores {
+        delivery_registrations,
+        delivery_client_bootstrap,
         host_runtime,
         user_sandbox_process_port,
         #[cfg(test)]
@@ -1393,13 +1410,53 @@ pub(super) async fn build_backend_production(
 /// and ensure the deployment VAPID credential exists. Installs the complete
 /// runtime into the slot; a no-op when the binary supplied no slot
 /// (compositions without the web-app channel).
+/// Where each channel's registration document lives.
+///
+/// Composition owns this because the path is deployment data, and because the
+/// web-app channel's document predates the generic store: the `/web-push`
+/// alias resolves to a PHYSICAL per-user subpath and the document name is the
+/// one persisted enrollments already carry, so both keep their exact bytes.
+/// Renaming either would orphan every browser that ever subscribed — the
+/// forward migration in `ironclaw_auth::delivery_registrations` handles the
+/// document's *shape*, not its address.
+struct DeploymentRegistrationPaths;
+
+impl ironclaw_auth::DeliveryRegistrationPaths for DeploymentRegistrationPaths {
+    fn document_path(&self, extension_id: &str) -> Option<ironclaw_host_api::path::ScopedPath> {
+        let path = if extension_id == ironclaw_web_app::WEB_APP_EXTENSION_ID {
+            crate::WEB_APP_SUBSCRIPTIONS_DOCUMENT.to_string()
+        } else {
+            format!("/delivery-registrations/{extension_id}.json")
+        };
+        ironclaw_host_api::path::ScopedPath::new(path).ok()
+    }
+}
+
+/// Publishes each channel's non-secret client-bootstrap document from the
+/// late-bound material composition installed at assembly.
+struct SlotBackedClientBootstrap {
+    web_app: Option<ironclaw_web_app::WebAppRuntimeSlot>,
+}
+
+impl ironclaw_assistant::DeliveryClientBootstrap for SlotBackedClientBootstrap {
+    fn bootstrap(&self, extension_id: &str) -> Option<serde_json::Value> {
+        if extension_id != ironclaw_web_app::WEB_APP_EXTENSION_ID {
+            return None;
+        }
+        let runtime = self.web_app.as_ref()?.get().ok()?;
+        // The PUBLIC half only. The signing half stays in the secret store and
+        // is injected at the egress boundary.
+        Some(serde_json::json!({
+            "vapid_public_key": runtime.vapid_public_key,
+        }))
+    }
+}
+
 async fn assemble_web_app<S>(
     slot: Option<&ironclaw_web_app::WebAppRuntimeSlot>,
     vapid_subject: Option<&str>,
-    filesystem: &Arc<CompositeRootFilesystem>,
     secret_store: &Arc<S>,
     channel_egress_scope: &ironclaw_host_api::resource::ResourceScope,
-    deployment_channels: &Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
 ) -> Result<(), RebornBuildError>
 where
     S: ironclaw_secrets::SecretStorePort + ?Sized,
@@ -1407,34 +1464,10 @@ where
     let Some(slot) = slot else {
         return Ok(());
     };
-    // One source of truth for admissible push-service hosts: the channel's
-    // own manifest egress declarations. An absent deployment binding leaves
-    // the list empty, so enrollment fails closed rather than admitting
-    // endpoints delivery could never reach.
-    let allowed_push_hosts: Vec<String> = deployment_channels
-        .extension(ironclaw_web_app::WEB_APP_EXTENSION_ID)
-        .and_then(|binding| {
-            binding.resolved.channel.as_ref().map(|channel| {
-                channel
-                    .egress
-                    .iter()
-                    .map(|egress| egress.host.clone())
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
-    if allowed_push_hosts.is_empty() {
-        tracing::debug!(
-            target: "ironclaw::web_app",
-            "web-app deployment binding is missing or declares no egress hosts; browser \
-             enrollment will fail closed"
-        );
-    }
-    let subscriptions: Arc<dyn ironclaw_web_app::WebAppSubscriptionStore> =
-        Arc::new(ironclaw_web_app::FilesystemWebAppSubscriptionStore::new(
-            crate::wrap_scoped(Arc::clone(filesystem)),
-        ));
-
+    // The push-service host allowlist that used to be derived here is now
+    // read generically, at enrollment, from the same resolved manifest egress
+    // policy enforces with (`ChannelDeliveryResolver::declared_egress_hosts`).
+    // Deriving it a second time here would be the copy that drifts.
     let vapid_handle = ironclaw_host_api::ids::SecretHandle::new(
         ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE,
     )
@@ -1522,9 +1555,7 @@ where
     // after the canonical key read-back so the adapter always advertises the
     // key the deployment actually signs with.
     slot.install(Arc::new(ironclaw_web_app::WebAppRuntime {
-        subscriptions,
         vapid_public_key,
-        allowed_push_hosts,
     }))
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("web push runtime slot could not be installed: {error}"),

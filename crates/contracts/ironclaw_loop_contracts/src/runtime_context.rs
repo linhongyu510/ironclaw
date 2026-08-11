@@ -235,12 +235,7 @@ impl LoopRuntimeContext {
                         let presentation = channel
                             .presentation
                             .as_ref()
-                            .map(|p| {
-                                format!(
-                                    ", {}",
-                                    render_presentation_hint(p, channel.max_message_chars)
-                                )
-                            })
+                            .map(|facts| format!(", {}", render_presentation_hint(facts)))
                             .unwrap_or_default();
                         let entry = format!(
                             "{} ({auth}, {active}{presentation})",

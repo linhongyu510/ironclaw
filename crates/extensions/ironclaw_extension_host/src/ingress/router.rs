@@ -7,8 +7,9 @@
 //! durable staging before 2xx, then one leased background worker admits the
 //! merged message after the provider-selected quiet window (checklist ING-8).
 
+use futures::FutureExt as _;
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,10 +17,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel::{ChannelIngressDescriptor, ChannelIngressMethod};
-use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, InboundBatchFragment, InboundOutcome, VerifiedInbound,
 };
+use ironclaw_extension_contracts::channel_adapter::{ChannelIngress, NormalizedInboundMessage};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_extension_registry::ResolvedExtensionManifest;
 use ironclaw_host_api::ids::SecretHandle;
@@ -85,7 +86,7 @@ pub struct InboundAdmission {
     /// The exact adapter that parsed this request. Host-only and transient:
     /// admission keeps this `Arc` across replay/policy so an activation swap
     /// cannot fetch attachment bytes through a different generation.
-    pub channel_adapter: Arc<dyn ChannelAdapter>,
+    pub channel_adapter: Arc<dyn ChannelIngress>,
     /// Manifest-restricted egress built from the same resolved ingress
     /// binding as `channel_adapter`. `None` means the host has no channel
     /// transport; attachment-bearing admission then fails closed.
@@ -445,7 +446,16 @@ impl ExtensionIngressRouter {
                 headers: &forwarded_headers,
                 can_reply_in_threads,
             };
-            match catch_unwind(AssertUnwindSafe(|| channel.inbound(inbound))) {
+            // `receive` is async now, so panic isolation wraps the FUTURE
+            // rather than the call: a panic inside an awaited adapter parse
+            // must still be a 503 for this request and never unwind the
+            // ingress task. `AssertUnwindSafe` is sound here for the same
+            // reason it was before — the adapter holds no host state that a
+            // partial parse could leave observably broken.
+            match AssertUnwindSafe(channel.receive(inbound))
+                .catch_unwind()
+                .await
+            {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(ChannelError::Configuration { .. })) => {
                     tracing::debug!(
@@ -560,7 +570,7 @@ async fn admit_messages(
     deps: &ExtensionIngressRouterDeps,
     extension_id: &str,
     installation_id: &str,
-    channel_adapter: Arc<dyn ChannelAdapter>,
+    channel_adapter: Arc<dyn ChannelIngress>,
     channel_egress: Option<Arc<dyn RestrictedEgress>>,
     messages: Vec<NormalizedInboundMessage>,
 ) -> IngressResponse {
@@ -638,7 +648,7 @@ struct InboundBatchProcessor {
     admission_deadline: Duration,
 }
 
-type ResolvedBatchBinding = (Arc<dyn ChannelAdapter>, Option<Arc<dyn RestrictedEgress>>);
+type ResolvedBatchBinding = (Arc<dyn ChannelIngress>, Option<Arc<dyn RestrictedEgress>>);
 
 impl InboundBatchProcessor {
     async fn stage_and_schedule(
@@ -646,7 +656,7 @@ impl InboundBatchProcessor {
         extension_id: &str,
         installation_id: &str,
         binding_fingerprint: String,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_adapter: Arc<dyn ChannelIngress>,
         channel_egress: Option<Arc<dyn RestrictedEgress>>,
         fragment: InboundBatchFragment,
     ) -> IngressResponse {
@@ -701,7 +711,7 @@ impl InboundBatchProcessor {
     fn spawn_schedule(
         &self,
         schedule: InboundBatchSchedule,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_adapter: Arc<dyn ChannelIngress>,
         channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) {
         let processor = self.clone();
@@ -715,7 +725,7 @@ impl InboundBatchProcessor {
     async fn process_schedule(
         &self,
         mut schedule: InboundBatchSchedule,
-        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_adapter: Arc<dyn ChannelIngress>,
         channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) {
         let mut retry_attempt = 0u32;
@@ -881,14 +891,14 @@ impl InboundBatchProcessor {
                 &schedule.key.installation_id,
                 binding.resolved.as_ref(),
             );
-            return Some((Arc::clone(&binding.adapter), egress));
+            return Some((binding.surfaces.ingress.clone()?, egress));
         }
         let active = self.watch.current().extension(&schedule.key.extension_id)?;
         let fingerprint = resolved_binding_fingerprint("active", active.resolved.as_ref()).ok()?;
         if fingerprint != schedule.binding_fingerprint {
             return None;
         }
-        let adapter = active.channel.clone()?;
+        let adapter = active.channel.ingress.clone()?;
         let egress = self.channel_egress_for_resolved(
             &schedule.key.extension_id,
             &schedule.key.installation_id,
@@ -1031,10 +1041,10 @@ impl ResolvedIngressBinding {
         }
     }
 
-    fn adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+    fn adapter(&self) -> Option<Arc<dyn ChannelIngress>> {
         match self {
-            Self::Deployment(binding) => Some(Arc::clone(&binding.adapter)),
-            Self::Active(active) => active.channel.clone(),
+            Self::Deployment(binding) => binding.surfaces.ingress.clone(),
+            Self::Active(active) => active.channel.ingress.clone(),
         }
     }
 
