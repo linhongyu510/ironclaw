@@ -598,6 +598,9 @@ pub struct RebornRuntime {
     /// registration gate; the same option controls facade and route wiring.
     pub(crate) ironhub_link_service:
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
+    /// Always present: it is what reports the gate above as off.
+    pub(crate) ironhub_link_admin:
+        Arc<ironclaw_extension_manager::ironhub::RebornIronhubLinkAdminService>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
@@ -874,6 +877,12 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>> {
         self.ironhub_link_service.as_ref().map(Arc::clone)
+    }
+
+    pub fn ironhub_link_admin(
+        &self,
+    ) -> Arc<ironclaw_extension_manager::ironhub::RebornIronhubLinkAdminService> {
+        Arc::clone(&self.ironhub_link_admin)
     }
 
     /// Build the public registration mount from the same optional service
@@ -2981,6 +2990,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         boot,
         ironhub_agent_shared_key,
         ironhub_manifest_url,
+        ironhub_agent_base_url,
         runner,
         tool_disclosure,
         trigger_poller,
@@ -4305,6 +4315,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
         None => None,
     };
+    let ironhub_link_admin = Arc::new(
+        ironclaw_extension_manager::ironhub::RebornIronhubLinkAdminService::new(
+            crate::ironhub_link_serve::ironhub_register_url(ironhub_agent_base_url),
+            ironhub_link_service.is_some(),
+            Arc::clone(&services.secret_store),
+        ),
+    );
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
@@ -4336,6 +4353,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_state,
         ironhub_manifest_url,
         ironhub_link_service,
+        ironhub_link_admin,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
         workspace_mount_policy: services.workspace_mounts.clone(),

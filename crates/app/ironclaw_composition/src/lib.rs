@@ -209,8 +209,9 @@ pub use runtime_input::{
 pub mod ironhub {
     pub use ironclaw_extension_manager::ironhub::{
         IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse,
-        IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError,
-        execute_reborn_ironhub_command, render_reborn_ironhub_response, validated_manifest_url,
+        IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError, IronhubSharedKeyStore,
+        IronhubSharedKeyStoreError, execute_reborn_ironhub_command, render_reborn_ironhub_response,
+        validated_manifest_url,
     };
 }
 

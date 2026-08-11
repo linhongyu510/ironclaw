@@ -599,19 +599,15 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
-    if caller == RuntimeInputCaller::Serve {
-        match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
-            Ok(shared_key) => {
-                runtime_input = runtime_input.with_ironhub_agent_shared_key(
-                    ironclaw_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
-                        .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
-                );
-            }
-            Err(std::env::VarError::NotPresent) => {}
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid");
-            }
-        }
+    if caller == RuntimeInputCaller::Serve
+        && let Some(shared_key) = ironhub_agent_shared_key(config)?
+    {
+        runtime_input = runtime_input.with_ironhub_agent_shared_key(shared_key);
+    }
+    if caller == RuntimeInputCaller::Serve
+        && let Some(base_url) = crate::commands::serve_sso::webui_public_base_url_from_env()?
+    {
+        runtime_input = runtime_input.with_ironhub_agent_base_url(base_url);
     }
     if let Some(manifest_url) = ironhub_manifest_url_from_env()? {
         runtime_input = runtime_input.with_ironhub_manifest_url(manifest_url);
@@ -635,6 +631,50 @@ pub(crate) fn ironhub_manifest_url_from_env()
             anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
         }
     }
+}
+
+/// Env wins; the stored key is the fallback; neither leaves the gateway off.
+fn ironhub_agent_shared_key(
+    config: &RebornBootConfig,
+) -> anyhow::Result<Option<ironclaw_composition::ironhub::IronhubSharedKey>> {
+    match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
+        Ok(shared_key) => {
+            return ironclaw_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
+                .context("IRONHUB_AGENT_SHARED_KEY is invalid")
+                .map(Some);
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid");
+        }
+    }
+
+    let Some(stored) = ironhub_shared_key_from_store(config)? else {
+        return Ok(None);
+    };
+    ironclaw_composition::ironhub::IronhubSharedKey::new(
+        secrecy::ExposeSecret::expose_secret(&stored).trim(),
+    )
+    .context("the stored IronHub agent shared key is invalid")
+    .map(Some)
+}
+
+fn ironhub_shared_key_from_store(
+    config: &RebornBootConfig,
+) -> anyhow::Result<Option<SecretString>> {
+    let storage_root = local_runtime_storage_root(config, config.profile());
+    if !ironclaw_composition::standalone_db_path(&storage_root).exists() {
+        return Ok(None);
+    }
+    block_on_cli(async move {
+        let store = ironclaw_composition::open_standalone_secret_store(&storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_composition::ironhub::IronhubSharedKeyStore::new(store)
+            .read()
+            .await
+            .map_err(anyhow::Error::from)
+    })
 }
 
 pub(crate) fn with_binary_host_extension_bindings(

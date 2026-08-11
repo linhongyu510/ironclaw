@@ -85,7 +85,8 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
 use ironclaw_product_contracts::ironhub::{
-    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+    IRONHUB_DELIVER_INSTALL_COMMAND, IRONHUB_LINK_CLEAR_KEY_COMMAND, IRONHUB_LINK_SET_KEY_COMMAND,
+    IRONHUB_LINK_VIEW, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
@@ -115,8 +116,9 @@ use ironclaw_product_contracts::product_wire::{
     SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
-    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
-    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+    RebornIronhubLinkResponse, RebornIronhubLinkSetKeyRequest, RebornWebPushStatusResponse,
+    RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse, RebornWebPushUnsubscribeRequest,
+    RebornWebPushUnsubscribeResponse,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::web_push::{
@@ -2663,6 +2665,55 @@ pub async fn ironhub_deliver_install(
         caller,
         IRONHUB_DELIVER_INSTALL_COMMAND,
         body,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/ironhub/link`
+pub async fn ironhub_link(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        IRONHUB_LINK_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/ironhub/link/key`
+pub async fn ironhub_link_set_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<RebornIronhubLinkSetKeyRequest>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response =
+        invoke_product_command(state.services(), caller, IRONHUB_LINK_SET_KEY_COMMAND, body)
+            .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/ironhub/link/key`
+pub async fn ironhub_link_clear_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        IRONHUB_LINK_CLEAR_KEY_COMMAND,
+        EmptyProductCommandInput {},
     )
     .await?;
     Ok(Json(response))

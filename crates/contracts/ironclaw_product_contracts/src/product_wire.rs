@@ -1032,6 +1032,28 @@ pub struct RebornWebPushStatusResponse {
     pub subscriptions: Vec<RebornWebPushSubscriptionInfo>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RebornIronhubLinkSetKeyRequest {
+    pub shared_key: String,
+}
+
+impl std::fmt::Debug for RebornIronhubLinkSetKeyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornIronhubLinkSetKeyRequest")
+            .field("shared_key", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornIronhubLinkResponse {
+    pub register_url: Option<String>,
+    pub key_stored: bool,
+    pub key_active: bool,
+}
+
 /// Allowlisted terminal status exposed by automation list projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

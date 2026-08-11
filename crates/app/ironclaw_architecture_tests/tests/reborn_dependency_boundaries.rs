@@ -763,7 +763,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // thread, carried through the wire contract), net of the ephemeral-per-ping
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
-        ("ironclaw_product_contracts", 15_909),
+        // 15_909 -> 15_970: the IronHub agent-link admin port
+        // (`IronhubLinkAdminService` with status/set/clear, the `ironhub_link` view
+        // and the set-key and clear-key command ids) plus its two wire DTOs,
+        // `RebornIronhubLinkResponse` and `RebornIronhubLinkSetKeyRequest`, whose
+        // hand-written `Debug` redacts the key. Declaration only: the
+        // implementation is
+        // `ironclaw_extension_manager::ironhub::RebornIronhubLinkAdminService`, and
+        // the port is separate from `IronhubLinkService` because the admin surface
+        // must answer before a key exists, while the register gateway is `None`
+        // until one does. Count read from failure.
+        ("ironclaw_product_contracts", 15_970),
         ("ironclaw_prompt_envelope", 832),
     ];
 

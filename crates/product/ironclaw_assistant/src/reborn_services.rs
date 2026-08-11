@@ -199,8 +199,9 @@ pub use ironclaw_product_contracts::descriptors::{
     ProductView,
 };
 use ironclaw_product_contracts::ironhub::{
-    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
-    IronhubInstallDeliveryResult, IronhubLinkService,
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IRONHUB_LINK_CLEAR_KEY_COMMAND_ID,
+    IRONHUB_LINK_SET_KEY_COMMAND_ID, IRONHUB_LINK_VIEW, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkAdminService, IronhubLinkService,
 };
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
@@ -215,11 +216,11 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
     RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornNotificationChannel, RebornNotificationChannelsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornIronhubLinkResponse, RebornIronhubLinkSetKeyRequest, RebornListAutomationsResponse,
+    RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse, RebornNotificationChannel,
+    RebornNotificationChannelsResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -1475,6 +1476,7 @@ fn product_view_requires_operator_config(view_id: &str) -> bool {
             || id == INSPECTOR_PROMPT_VIEW.id
             || id == INSPECTOR_TOOL_VIEW.id
             || id == INSPECTOR_UPDATES_VIEW.id
+            || id == IRONHUB_LINK_VIEW.id
     )
 }
 
@@ -2249,6 +2251,7 @@ pub struct RebornServices<
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     ironhub_link: Option<Arc<dyn IronhubLinkService>>,
+    ironhub_link_admin: Arc<dyn IronhubLinkAdminService>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2333,6 +2336,7 @@ where
             skill_activation_clearer: None,
             llm_config: None,
             ironhub_link: None,
+            ironhub_link_admin: Arc::new(ironhub_link::UnsupportedIronhubLinkAdminService),
             active_model_reader: None,
             operator_approval_config: None,
             diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
@@ -2418,6 +2422,14 @@ where
         self
     }
 
+    pub fn with_ironhub_link_admin_service(
+        mut self,
+        ironhub_link_admin: Arc<dyn IronhubLinkAdminService>,
+    ) -> Self {
+        self.ironhub_link_admin = ironhub_link_admin;
+        self
+    }
+
     pub fn with_ironhub_link_service(mut self, ironhub_link: Arc<dyn IronhubLinkService>) -> Self {
         self.ironhub_link = Some(ironhub_link);
         self
@@ -2434,6 +2446,40 @@ where
             .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
         service
             .deliver_install(caller, request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    pub async fn ironhub_link(&self) -> Result<RebornIronhubLinkResponse, ProductSurfaceError> {
+        self.ironhub_link_admin
+            .status()
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    pub async fn ironhub_link_set_key(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornIronhubLinkSetKeyRequest,
+    ) -> Result<RebornIronhubLinkResponse, ProductSurfaceError> {
+        if !caller.operator_config {
+            return Err(operator_config_capability_forbidden());
+        }
+        self.ironhub_link_admin
+            .set_shared_key(caller, SecretString::from(request.shared_key))
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    pub async fn ironhub_link_clear_key(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornIronhubLinkResponse, ProductSurfaceError> {
+        if !caller.operator_config {
+            return Err(operator_config_capability_forbidden());
+        }
+        self.ironhub_link_admin
+            .clear_shared_key(caller)
             .await
             .map_err(ironhub_link::map_ironhub_link_error)
     }
@@ -4163,6 +4209,10 @@ where
                 views::parse_empty_view_params(query.params)?;
                 let response = self.web_push_service.status(caller).await?;
                 views::view_page(response)
+            }
+            id if id == IRONHUB_LINK_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                views::view_page(self.ironhub_link().await?)
             }
             id if id == TRACE_CREDITS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;

@@ -3,6 +3,7 @@ import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
 import { useFilePicker } from "../../../hooks/useFilePicker";
 import { ExtensionCard, RegistryCard } from "./extension-card";
+import { IronhubLinkPanel } from "./ironhub-link-panel";
 import type {
   ConfigureFocusHandler,
   InstallFocusHandler,
@@ -119,6 +120,7 @@ export function RegistryTab({
 
   return (
     <div className="space-y-4">
+      {isAdmin ? (<IronhubLinkPanel />) : null}
       <div className="flex items-center gap-3">
         <input
           type="text"
