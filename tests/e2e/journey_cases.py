@@ -501,6 +501,15 @@ def _production_channel_capabilities(
             assert isinstance(surface, str) and surface, (
                 f"{manifest_path}: channel manifest declares no non-empty id"
             )
+            # The unified channel model folds the browser send path into the
+            # session channel's inbound surface: a channel whose ingress
+            # verification is `authenticated_session` has no webhook mount —
+            # its inbound IS the WebUI session route, so the `webui` journey
+            # cases are its evidence. Map it onto that built-in ingress
+            # instead of demanding a per-channel journey label.
+            verification = (channel.get("ingress") or {}).get("verification") or {}
+            if direction == "inbound" and verification.get("kind") == "authenticated_session":
+                surface = str(JourneyIngress.WEBUI)
             capabilities[surface] = channel.get("presentation") or {}
     return capabilities
 

@@ -644,15 +644,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // read from this test's failure message. 7_885 -> 7_892 after merging
         // #7076's Basic credential target declaration and validator vocabulary;
         // composition and injection remain in ironclaw_host_runtime.
-        // 7_892 -> 8_006 (2026-08-10, unified-channel-model merge): +114 lines
-        // for the `IngressVerificationRecipe::AuthenticatedSession` trust class
-        // (recipe.rs) and the `route_suffix` -> Option change with its
-        // trust-class<->mount validation, two paired errors, and their inline
-        // `#[cfg(test)]` coverage (channel.rs). Ingress-trust vocabulary +
-        // validation on the descriptor's own shape; the shared inbound
-        // pipeline that consumes it lives in ironclaw_extension_host /
-        // product, not here.
-        ("ironclaw_extension_contracts", 8_006),
+        // 7_892 -> 8_157 (2026-08-11, unified channel model): the
+        // `IngressVerificationRecipe::AuthenticatedSession` trust class
+        // (recipe.rs), the `route_suffix` -> Option change with its
+        // trust-class<->mount validation and paired errors (channel.rs), the
+        // `ChannelReplyMode` declaration, and the §7b notification-setup
+        // adapter surface (`deliver_notification` default + the three setup
+        // methods, `NotificationSetupScope`/`Status`, payload/detail byte
+        // bounds). Declarations and shape validation only; dispatch lives in
+        // ironclaw_assistant and behavior behind each adapter. Count read
+        // from this test's failure on the merged branch.
+        ("ironclaw_extension_contracts", 8_157),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -685,7 +687,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
         // ironclaw_host_runtime.
-        ("ironclaw_host_api", 18_994),
+        // 18_994 -> 19_003 (2026-08-11, unified channel model): +9 lines of
+        // VAPID credential-target doc corrections referencing the renamed
+        // `ironclaw_web_app` domain crate. Comment-adjacent churn only.
+        ("ironclaw_host_api", 19_003),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -767,7 +772,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // thread, carried through the wire contract), net of the ephemeral-per-ping
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
-        ("ironclaw_product_contracts", 15_909),
+        // 15_909 -> 16_119 (2026-08-11, unified channel model): the inbound
+        // trust/binding enums (`ChannelInboundSurfaceTrust`/`Binding` +
+        // `requested_model`), the `SessionChannelDirectory` port
+        // (session_ingress), the reply-mode + notifications-require-setup
+        // delivery-port defaults, and the generic notification-setup
+        // descriptors + `RebornNotificationSetup*` wire family that replaced
+        // the web_push module. Declarations only — admission, dispatch, and
+        // storage stay in their owning crates. Count read from this test's
+        // failure on the merged branch.
+        ("ironclaw_product_contracts", 16_119),
         ("ironclaw_prompt_envelope", 832),
     ];
 

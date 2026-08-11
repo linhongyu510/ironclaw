@@ -672,7 +672,7 @@ impl InboundTurnService for FakeInboundTurnService {
     ) -> Result<crate::inbound_turn::InboundUserMessageDispatch, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(crate::inbound_turn::InboundUserMessageDispatch::Accepted(
-                outcome,
+                Box::new(outcome),
             ));
         }
 
@@ -706,7 +706,9 @@ impl InboundTurnService for FakeInboundTurnService {
         };
 
         self.accept_fresh_user_message(envelope_for_turn)
-            .map(crate::inbound_turn::InboundUserMessageDispatch::Accepted)
+            .map(|outcome| {
+                crate::inbound_turn::InboundUserMessageDispatch::Accepted(Box::new(outcome))
+            })
     }
 }
 

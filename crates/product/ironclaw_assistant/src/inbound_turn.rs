@@ -158,8 +158,10 @@ impl InboundTurnOutcome {
 }
 
 /// Result of running replay, before-inbound policy, and fresh user-message acceptance.
+/// The accepted arm is boxed: `InboundTurnOutcome` carries the full ack +
+/// resolution payload (~280 bytes) while a rejection is a slim reason.
 pub enum InboundUserMessageDispatch {
-    Accepted(InboundTurnOutcome),
+    Accepted(Box<InboundTurnOutcome>),
     Rejected(ProductRejection),
 }
 
@@ -458,7 +460,7 @@ where
             .accept_user_message_with_before_policy(envelope, &policy)
             .await?
         {
-            InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
+            InboundUserMessageDispatch::Accepted(outcome) => Ok(*outcome),
             InboundUserMessageDispatch::Rejected(_) => {
                 Err(ProductSurfaceFailure::TurnSubmissionRejected {
                     reason: "noop before-inbound policy unexpectedly rejected message".into(),
@@ -541,7 +543,7 @@ where
             .replay_prepared_user_message(envelope, &prepared)
             .await?
         {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
         // Bound the original untrusted channel descriptor set before it
@@ -593,7 +595,7 @@ where
 
         self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
             .await
-            .map(InboundUserMessageDispatch::Accepted)
+            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 
     async fn resolve_inbound_attachments(

@@ -954,7 +954,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+            return Ok(InboundUserMessageDispatch::Accepted(Box::new(outcome)));
         }
 
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
@@ -988,7 +988,7 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         };
 
         self.accept_fresh_user_message(envelope_for_turn)
-            .map(InboundUserMessageDispatch::Accepted)
+            .map(|outcome| InboundUserMessageDispatch::Accepted(Box::new(outcome)))
     }
 }
 

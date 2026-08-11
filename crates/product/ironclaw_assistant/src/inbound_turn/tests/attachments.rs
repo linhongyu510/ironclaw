@@ -1129,9 +1129,11 @@ async fn native_attachment_path_without_lander_fails_closed() {
     assert!(
         matches!(
             result,
-            Err(ProductSurfaceFailure::TurnSubmissionRejected { .. })
+            Err(ProductSurfaceFailure::AttachmentLanderUnavailable)
         ),
-        "a missing lander must reject the turn, never silently drop the attachment"
+        "a missing lander must reject the turn (503, never settling the \
+         idempotency reservation so a retry can succeed once wired), never \
+         silently drop the attachment"
     );
 }
 

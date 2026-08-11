@@ -992,12 +992,26 @@ async fn create_thread(router: &axum::Router, client_action_id: &str) -> String 
 }
 
 async fn send_message(router: &axum::Router, thread_id: &str, client_action_id: &str) {
+    // The unified channel model routes browser sends through the generic
+    // session-inbound route keyed by the `GET /session`-advertised channel —
+    // the same discovery the SPA performs.
+    let session = router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/session"))
+        .await
+        .expect("session oneshot");
+    let session_json = read_json(session).await;
+    let session_channel = session_json["session_channel_extension_id"]
+        .as_str()
+        .expect("session advertises the session channel extension id")
+        .to_string();
     let send = router
         .clone()
         .oneshot(bearer_post(
-            &format!("/api/webchat/v2/threads/{thread_id}/messages"),
+            &format!("/api/webchat/v2/channels/{session_channel}/messages"),
             json!({
                 "client_action_id": client_action_id,
+                "thread_id": thread_id,
                 "content": "please call the echo tool",
             }),
         ))
