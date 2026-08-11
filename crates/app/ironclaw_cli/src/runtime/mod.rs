@@ -1357,9 +1357,10 @@ pub(crate) fn local_runtime_storage_root(config: &RebornBootConfig) -> PathBuf {
 fn storage_layout_requirement_for_profile(
     profile: RebornProfile,
 ) -> anyhow::Result<ironclaw_config::LayoutRequirement> {
+    let yolo_disclosure_acknowledged = false;
     let deployment = ironclaw_composition::deployment::DeploymentConfig::for_profile(
         composition_profile(profile),
-        false,
+        yolo_disclosure_acknowledged,
     );
     deployment.storage_layout_requirement().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1367,6 +1368,19 @@ fn storage_layout_requirement_for_profile(
             profile
         )
     })
+}
+
+fn startup_adoption_authority_from_environment()
+-> anyhow::Result<storage_layout::StartupAdoptionAuthority> {
+    let cutover_value = match std::env::var(storage_layout::StartupAdoptionAuthority::ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "{} is invalid: the value must be valid UTF-8",
+            storage_layout::StartupAdoptionAuthority::ENV
+        ),
+    };
+    storage_layout::StartupAdoptionAuthority::from_environment_value(cutover_value.as_deref())
 }
 
 pub(crate) fn ensure_ready_layout_for_profile(
@@ -1392,10 +1406,7 @@ fn ensure_startup_layout(
     match storage_layout::admit_startup_layout(config.home(), requirement)? {
         storage_layout::StartupLayoutAdmission::Ready(paths) => Ok(paths),
         storage_layout::StartupLayoutAdmission::AdoptionRequired => {
-            let cutover_value = std::env::var(storage_layout::StartupAdoptionAuthority::ENV).ok();
-            let authority = storage_layout::StartupAdoptionAuthority::from_environment_value(
-                cutover_value.as_deref(),
-            )?;
+            let authority = startup_adoption_authority_from_environment()?;
             let permit =
                 storage_layout::prepare_automatic_adoption(config.home(), requirement, authority)?;
             let store_verification = canonical_store_verification_for_adoption(
@@ -1413,6 +1424,36 @@ fn ensure_startup_layout(
             storage_layout::ensure_ready_layout(config.home(), requirement)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnboardingSecretStoreMode {
+    Embedded,
+    HostedExternal,
+}
+
+/// Admit the active layout before onboarding writes home-local configuration.
+/// Only embedded profiles may provision the standalone master key or encrypted
+/// secret store; hosted onboarding leaves credentials to its hosted surface.
+pub(crate) fn prepare_onboarding_layout(
+    config: &RebornBootConfig,
+) -> anyhow::Result<OnboardingSecretStoreMode> {
+    let config_file = read_config_file(config)?;
+    let profile = effective_profile(config, config_file.as_ref())?;
+    let requirement = storage_layout_requirement_for_profile(profile)?;
+    ensure_ready_layout_for_profile(config, profile)?;
+    Ok(match requirement.durable_state {
+        ironclaw_config::DurableStateKind::EmbeddedLibSql => OnboardingSecretStoreMode::Embedded,
+        ironclaw_config::DurableStateKind::ExternalPostgres => {
+            OnboardingSecretStoreMode::HostedExternal
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageAdoptionOutcome {
+    Adopted,
+    MigrationDryRunValidated,
 }
 
 /// Admit the active profile's durable layout before a CLI command opens a
@@ -1449,13 +1490,14 @@ pub(crate) fn adopt_storage_layout(
     confirm_processes_stopped: bool,
     confirm_backup_snapshot: bool,
     workspace_import: Option<storage_layout::WorkspaceImportOptions>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<StorageAdoptionOutcome> {
     let config = context.boot_config();
     let config_file = read_config_file(config)?;
     let profile = effective_profile(config, config_file.as_ref())?;
     let requirement = storage_layout_requirement_for_profile(profile)?;
     if profile == RebornProfile::MigrationDryRun {
-        return ensure_ready_layout_for_profile(config, profile).map(|_| ());
+        return storage_layout::inspect_ready_layout(config.home(), requirement)
+            .map(|_| StorageAdoptionOutcome::MigrationDryRunValidated);
     }
     let options = storage_layout::AdoptOptions {
         confirm_processes_stopped,
@@ -1477,7 +1519,8 @@ pub(crate) fn adopt_storage_layout(
     )?;
     // The adoption command does not start a runtime. Validate the manifest
     // through the same normal-boot prerequisite before reporting completion.
-    storage_layout::ensure_ready_layout(config.home(), requirement).map(|_| ())
+    storage_layout::ensure_ready_layout(config.home(), requirement)
+        .map(|_| StorageAdoptionOutcome::Adopted)
 }
 
 fn canonical_store_verification_for_adoption(
@@ -2389,6 +2432,29 @@ mod tests {
                     .contains("IRONHUB_MANIFEST_URL is invalid")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_adoption_authority_rejects_a_non_utf8_cutover_value() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = lock_runtime_env();
+        let invalid = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let _cutover = EnvGuard::set_os(
+            super::storage_layout::StartupAdoptionAuthority::ENV,
+            &invalid,
+        );
+
+        let error = super::startup_adoption_authority_from_environment()
+            .expect_err("non-UTF-8 cutover authority must fail loudly");
+        assert!(
+            error
+                .to_string()
+                .contains(super::storage_layout::StartupAdoptionAuthority::ENV),
+            "{error:#}"
+        );
+        assert!(error.to_string().contains("UTF-8"), "{error:#}");
     }
 
     #[test]
@@ -3901,6 +3967,15 @@ deployment_mode = "hosted_multi_tenant"
 default_profile = "secure_default"
 "#,
         );
+        let requirement =
+            super::storage_layout_requirement_for_profile(RebornProfile::MigrationDryRun)
+                .expect("migration dry-run layout requirement");
+        let admission = super::storage_layout::admit_startup_layout(config.home(), requirement)
+            .expect("seed the already-ready layout that migration dry-run inspects");
+        assert!(matches!(
+            admission,
+            super::storage_layout::StartupLayoutAdmission::Ready(_)
+        ));
 
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");

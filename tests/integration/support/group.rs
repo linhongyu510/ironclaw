@@ -413,6 +413,17 @@ impl GroupCapability {
         &self,
         extension_id: &str,
     ) -> HarnessResult<()> {
+        self.reopened_installation(extension_id).await?;
+        Ok(())
+    }
+
+    /// Reopen the on-disk installation store independently and resolve
+    /// `extension_id`, so durable assertions share one reopen shape and
+    /// missing-installation diagnostic.
+    async fn reopened_installation(
+        &self,
+        extension_id: &str,
+    ) -> HarnessResult<ironclaw_extension_registry::ExtensionInstallation> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
@@ -425,20 +436,20 @@ impl GroupCapability {
             )
             .await?;
         let installations = store.list_installations().await?;
-        if installations
+        installations
             .iter()
-            .any(|installation| installation.extension_id().as_str() == extension_id)
-        {
-            return Ok(());
-        }
-        let seen: Vec<&str> = installations
-            .iter()
-            .map(|installation| installation.extension_id().as_str())
-            .collect();
-        Err(
-            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
-                .into(),
-        )
+            .find(|installation| installation.extension_id().as_str() == extension_id)
+            .cloned()
+            .ok_or_else(|| {
+                let seen: Vec<&str> = installations
+                    .iter()
+                    .map(|installation| installation.extension_id().as_str())
+                    .collect();
+                format!(
+                    "extension {extension_id:?} not found after independent reopen; saw {seen:?}"
+                )
+                .into()
+            })
     }
 
     /// E-DURABLE membership: the independently reopened installation must
@@ -449,31 +460,7 @@ impl GroupCapability {
         expected_member: &UserId,
         rejected_member: &UserId,
     ) -> HarnessResult<()> {
-        let harness = match self {
-            Self::HostRuntime(arc) => arc,
-            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
-                return Err("no host-runtime capability backend for durable reopen".into());
-            }
-        };
-        let store =
-            ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
-                &harness.storage_root_for_test(),
-            )
-            .await?;
-        let installations = store.list_installations().await?;
-        let Some(installation) = installations
-            .iter()
-            .find(|installation| installation.extension_id().as_str() == extension_id)
-        else {
-            let seen: Vec<&str> = installations
-                .iter()
-                .map(|installation| installation.extension_id().as_str())
-                .collect();
-            return Err(format!(
-                "extension {extension_id:?} not found after independent reopen; saw {seen:?}"
-            )
-            .into());
-        };
+        let installation = self.reopened_installation(extension_id).await?;
         assert_exact_installation_owner(
             installation.owner(),
             expected_member,

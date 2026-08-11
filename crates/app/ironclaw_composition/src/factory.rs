@@ -789,6 +789,25 @@ pub async fn open_standalone_secret_store(
     Ok(store as Arc<dyn SecretStorePort>)
 }
 
+/// Verify the standalone libSQL secrets store during layout adoption.
+///
+/// Normal store opens deliberately do not perform this verification: adoption
+/// needs a fail-closed master-key witness before it commits a durable layout,
+/// whereas normal runtime startup preserves its established open semantics.
+pub async fn verify_standalone_secret_store_for_adoption(
+    root: &Path,
+) -> Result<(), RebornBuildError> {
+    let db = open_standalone_libsql_database(root).await?;
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db)?);
+    filesystem.run_migrations().await?;
+    let scoped = crate::wrap_scoped(Arc::clone(&filesystem));
+    let (_store, crypto) = build_secret_store(root, scoped, None).await?;
+    ironclaw_secrets::verify_existing_encrypted_records(filesystem.as_ref(), crypto.as_ref())
+        .await
+        .map_err(RebornBuildError::SecretStateVerification)?;
+    Ok(())
+}
+
 /// Verify the configured hosted PostgreSQL store and secrets master key before
 /// an offline filesystem adoption is allowed to commit its ready manifest.
 ///

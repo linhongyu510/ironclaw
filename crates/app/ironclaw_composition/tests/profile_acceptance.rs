@@ -792,7 +792,7 @@ fn storage_layout_requirement_is_exhaustive_per_deployment_profile() {
                 durable_state: DurableStateKind::ExternalPostgres,
                 security: DeploymentSecurityEnvelope {
                     tenancy: TenancyModel::SingleUser,
-                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
                 },
             }),
         ),

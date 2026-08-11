@@ -252,7 +252,7 @@ there is no second profile-policy table in `ironclaw_config`.
 
 ### `ironclaw_cli`: installation-layout adoption and boot orchestration
 
-Add `runtime/storage_layout.rs` as the sole physical adoption owner. Startup
+Add `runtime/storage_layout/` as the sole physical adoption owner. Startup
 uses a valid ready manifest, initializes a genuinely fresh empty layout, or
 classifies legacy state. A single supported source or compatible journal may
 enter the bounded adoption state machine only with the exact deployment

@@ -5279,9 +5279,11 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
         requests,
     });
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input("runtime-overlap-owner", storage_root)
-            .with_local_runtime_workspace_root(workspace_root)
-            .with_runtime_policy(standalone_runtime_policy()),
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::deployment::local_filesystem_build_input("runtime-overlap-owner", storage_root)
+                .with_runtime_policy(standalone_runtime_policy()),
+            workspace_root,
+        ),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-overlap-tenant".to_string(),
@@ -5381,12 +5383,14 @@ async fn standalone_runtime_maps_workspace_to_configured_root() {
     let gateway = Arc::new(WorkspaceListingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input(
-            "runtime-workspace-owner",
-            root.path().join("standalone"),
-        )
-        .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
-        .with_runtime_policy(standalone_runtime_policy()),
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::deployment::local_filesystem_build_input(
+                "runtime-workspace-owner",
+                root.path().join("standalone"),
+            )
+            .with_runtime_policy(standalone_runtime_policy()),
+            workspace_root.path().to_path_buf(),
+        ),
     )
     .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {

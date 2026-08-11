@@ -55,34 +55,41 @@ impl OnboardCommand {
             return Ok(());
         }
 
-        // Onboarding may create a master-key cache and an encrypted secret
-        // store. Admit the active profile's durable layout before it writes
-        // any operator state.
-        crate::runtime::ensure_embedded_secret_store_for_active_profile(context.boot_config())?;
+        let secret_store_mode = crate::runtime::prepare_onboarding_layout(context.boot_config())?;
 
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
         // Independent of `--force`: a valid existing token is never regenerated
         // (see `ensure_webui_token_file`), so repeated `onboard --force` can't
         // invalidate sessions or an operator-copied env var.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
-        let master_key_outcome = provision_master_key(context.boot_config())?;
         let mut prompts = StdinPromptSource;
-        let llm_outcome = match provision_llm_credentials(
-            home,
-            context.boot_config(),
-            &mut prompts,
-            &EncryptedLlmKeyStoreOpener,
-            &LiveLlmProbe,
-            self.force,
-        ) {
-            Ok(outcome) => outcome,
-            // Non-interactive session (headless CI, piped/scripted) is expected —
-            // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
-            // remains the non-interactive path to configure a provider.
-            Err(LlmCredentialPromptError::NonInteractive) => {
-                LlmCredentialProvisionOutcome::SkippedNonInteractive
+        let interactive = prompts.is_interactive();
+        let (master_key_outcome, llm_outcome) = match secret_store_mode {
+            crate::runtime::OnboardingSecretStoreMode::Embedded => {
+                let master_key_outcome = provision_master_key(context.boot_config())?;
+                let llm_outcome = match provision_llm_credentials(
+                    home,
+                    context.boot_config(),
+                    &mut prompts,
+                    &EncryptedLlmKeyStoreOpener,
+                    &LiveLlmProbe,
+                    self.force,
+                ) {
+                    Ok(outcome) => outcome,
+                    // Non-interactive session (headless CI, piped/scripted) is expected.
+                    Err(LlmCredentialPromptError::NonInteractive) => {
+                        LlmCredentialProvisionOutcome::SkippedNonInteractive
+                    }
+                    Err(LlmCredentialPromptError::Other(error)) => return Err(error),
+                };
+                (Some(master_key_outcome), llm_outcome)
             }
-            Err(LlmCredentialPromptError::Other(error)) => return Err(error),
+            crate::runtime::OnboardingSecretStoreMode::HostedExternal => (
+                None,
+                LlmCredentialProvisionOutcome::SkippedNonInteractivePartialEnv {
+                    reason: "hosted profile uses an external secret store; configure credentials through deployment secrets or the hosted operator surface".to_string(),
+                },
+            ),
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
         // happened this run, not an unconditional `llm_credentials` pending.
@@ -115,8 +122,15 @@ impl OnboardCommand {
             marker_path.display(),
             marker_action
         );
-        println!("master_key: {}", master_key_outcome.display_line());
-        if let MasterKeyProvisionOutcome::Suppressed = master_key_outcome {
+        if let Some(master_key_outcome) = master_key_outcome {
+            println!("master_key: {}", master_key_outcome.display_line());
+        } else {
+            println!("master_key: skipped (hosted profile uses an external secret store)");
+        }
+        if matches!(
+            master_key_outcome,
+            Some(MasterKeyProvisionOutcome::Suppressed)
+        ) {
             println!(
                 "master_key_note: OS keychain unavailable; set SECRETS_MASTER_KEY yourself or \
                  let the first `serve`/`onboard` run auto-generate and cache \
@@ -161,7 +175,7 @@ impl OnboardCommand {
             println!("- history import not requested");
         }
 
-        self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
+        self.finish_with_service_and_login_link(&context, home, interactive)?;
 
         Ok(())
     }

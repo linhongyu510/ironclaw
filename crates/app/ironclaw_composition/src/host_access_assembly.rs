@@ -279,8 +279,10 @@ fn reject_existing_namespace_symlinks(
             .map_err(|_| RebornBuildError::InvalidConfig {
                 reason: format!("{label} must be beneath the selected installation root"),
             })?;
-    let mut current = installation_root.to_path_buf();
-    inspect_namespace_component(&current, label)?;
+    // The selected installation root may legitimately be an operator-managed
+    // symlink onto a durable volume. Its descendants are still forbidden from
+    // being aliases, so the walk begins at the resolved root.
+    let mut current = canonicalize_planned_path(installation_root, "installation root")?;
     for component in relative.components() {
         current.push(component.as_os_str());
         if !inspect_namespace_component(&current, label)? {
@@ -427,6 +429,25 @@ mod tests {
     use ironclaw_config::RebornStoragePaths;
 
     #[test]
+    fn host_access_initializes_a_missing_installation_root() {
+        let temp = tempfile::tempdir().expect("temporary parent");
+        let home = temp.path().join("reborn-home");
+
+        build_host_access(
+            RebornStoragePaths::from_installation_root(&home),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("first boot must initialize a missing installation root");
+
+        assert!(home.join("state").is_dir());
+        assert!(home.join("system/prompts").is_dir());
+        assert!(home.join("workspaces").is_dir());
+    }
+
+    #[test]
     fn host_access_rejects_canonical_namespace_aliases() {
         let temp = tempfile::tempdir().expect("temporary installation root");
         let home = temp.path().join("reborn-home");
@@ -481,5 +502,27 @@ mod tests {
                 "host access must not create {child} through an external system symlink"
             );
         }
+    }
+
+    #[test]
+    fn host_access_accepts_a_symlinked_installation_root() {
+        let temp = tempfile::tempdir().expect("temporary parent");
+        let target = temp.path().join("volume-backed-reborn-home");
+        let alias = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&target).expect("create installation target");
+        std::os::unix::fs::symlink(&target, &alias).expect("alias installation root");
+
+        build_host_access(
+            RebornStoragePaths::from_installation_root(&alias),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("an operator-managed installation-root symlink must be accepted");
+
+        assert!(target.join("state").is_dir());
+        assert!(target.join("system/prompts").is_dir());
+        assert!(target.join("workspaces").is_dir());
     }
 }

@@ -121,7 +121,7 @@ pub enum StorageShape {
     LocalFilesystemRoot,
     /// A hosted single-tenant PostgreSQL pool plus a workspace root.
     HostedSingleTenantPool,
-    /// An operator-supplied durable store (libSQL or PostgreSQL).
+    /// An operator-supplied durable PostgreSQL store.
     OperatorSupplied,
 }
 
@@ -609,20 +609,22 @@ impl DeploymentConfig {
             }
         };
 
-        let security = match self
+        let tenancy = match self
             .policy_request
             .as_ref()
             .map(|request| request.deployment)
         {
-            Some(DeploymentMode::LocalSingleUser) => DeploymentSecurityEnvelope {
-                tenancy: TenancyModel::SingleUser,
-                workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-            },
+            Some(DeploymentMode::LocalSingleUser) => TenancyModel::SingleUser,
             // `DeploymentMode` is non-exhaustive. A new mode must not silently
             // receive the weaker single-operator assumption.
-            _ => DeploymentSecurityEnvelope {
-                tenancy: TenancyModel::MultiUser,
-                workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            _ => TenancyModel::MultiUser,
+        };
+        let security = DeploymentSecurityEnvelope {
+            tenancy,
+            workspace_access_floor: if self.workspace_scoped_per_caller {
+                WorkspaceAccessFloor::PerCallerIsolated
+            } else {
+                WorkspaceAccessFloor::SingleTrustedOperator
             },
         };
 

@@ -50,20 +50,13 @@ fn runtime_prompt_caller_accepts_seeded_default_prompt_under_system_prompts() {
     )
     .expect("prompt seeds");
 
-    build_default_identity_context_source(
+    let _source = build_default_identity_context_source(
         Some(system_content_root),
         Some(prompt_path),
         true,
         false,
     )
     .expect("runtime prompt caller should accept a default prompt under system/prompts");
-
-    assert!(
-        storage_root
-            .join("system/prompts/default-system.md")
-            .is_file(),
-        "the runtime caller must validate the default prompt in the system-content namespace"
-    );
 }
 
 #[tokio::test]

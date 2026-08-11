@@ -25,7 +25,7 @@ use ironclaw_host_api::{
     },
 };
 
-use super::worker_spec::DOCKER_WORKER_USER as WORKER_USER;
+use super::{sandbox_user_container_name, worker_spec::DOCKER_WORKER_USER as WORKER_USER};
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 5;
 // Pin the exact multi-platform manifest exercised by the Railway preview
@@ -1069,12 +1069,6 @@ fn railway_workspace_path(key: &TenantUserWorkspaceKey) -> String {
 
 fn checkpoint_name(key: &TenantUserWorkspaceKey) -> String {
     format!("{}-checkpoint", sandbox_user_container_name(key))
-}
-
-fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
-    let digest = key.digest_segment();
-    let prefix = digest.get(..24).unwrap_or(digest);
-    format!("ironclaw-reborn-sandbox-user-{prefix}")
 }
 
 fn request_timeout(requested: Option<u64>) -> Duration {

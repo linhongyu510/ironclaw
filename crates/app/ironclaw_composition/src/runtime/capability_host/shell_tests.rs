@@ -62,17 +62,19 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = crate::factory::build_runtime_substrate(
-        crate::local_runtime_build_input_with_options(
-            crate::RebornCompositionProfile::StandaloneUnrestricted,
-            "standalone-shell-owner",
-            ironclaw_config::RebornStoragePaths::from_installation_root(storage_root),
-            crate::RebornRuntimeProfileOptions {
-                confirm_host_access: true,
-            },
-        )
-        .expect("local yolo input")
-        .with_local_runtime_workspace_root(workspace_root)
-        .with_local_runtime_confirmed_host_home_root(host_home),
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::local_runtime_build_input_with_options(
+                crate::RebornCompositionProfile::StandaloneUnrestricted,
+                "standalone-shell-owner",
+                ironclaw_config::RebornStoragePaths::from_installation_root(storage_root),
+                crate::RebornRuntimeProfileOptions {
+                    confirm_host_access: true,
+                },
+            )
+            .expect("local yolo input")
+            .with_local_runtime_confirmed_host_home_root(host_home),
+            workspace_root,
+        ),
     )
     .await
     .expect("standalone services build");

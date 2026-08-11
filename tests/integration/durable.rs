@@ -302,7 +302,7 @@ async fn durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownershi
     .expect("reopened installation has exactly the original personal owner");
 
     let (reopened_overrides, _, _) =
-        open_standalone_approval_settings_stores_for_test(storage_paths.state_root())
+        open_standalone_approval_settings_stores_for_test(storage_paths.installation_root())
             .await
             .expect("fresh approval-settings opener");
     let setting = reopened_overrides

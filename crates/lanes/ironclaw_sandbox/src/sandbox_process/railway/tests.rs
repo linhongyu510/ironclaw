@@ -1122,6 +1122,14 @@ fn railway_exec_exit_124_is_a_timeout_but_other_operations_are_provider_failures
     ));
 }
 
+#[test]
+fn checkpoint_name_preserves_the_released_tenant_user_codec() {
+    assert_eq!(
+        checkpoint_name(&user_key("acme", "alice")),
+        "ironclaw-reborn-sandbox-user-c711caa52fd730885e365ba8-checkpoint"
+    );
+}
+
 async fn assert_rejected(
     transport: &RailwayPreviewSandboxTransport,
     request: CommandExecutionRequest,

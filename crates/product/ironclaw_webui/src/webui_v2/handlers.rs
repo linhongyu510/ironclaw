@@ -806,7 +806,7 @@ pub async fn browse_fs_dir(
     let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
-        path: served_path,
+        path: served_path.clone(),
         project_id: query.project_id,
     };
     let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
@@ -828,7 +828,7 @@ pub async fn browse_fs_dir(
         }
         other => other?,
     };
-    response.path = requested_path;
+    response.path = served_path;
     Ok(Json(response))
 }
 
@@ -905,6 +905,7 @@ fn workspace_served_path(mount: &FsMount, requested: &str) -> Result<String, Web
             )
             .into());
         }
+        return Ok(trimmed.to_string());
     }
     Ok(requested.to_string())
 }

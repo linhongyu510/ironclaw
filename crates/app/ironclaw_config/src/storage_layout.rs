@@ -15,7 +15,9 @@ impl Serialize for StateLayoutVersion {
     where
         S: Serializer,
     {
-        serializer.serialize_u8(1)
+        serializer.serialize_u8(match self {
+            Self::V1 => 1,
+        })
     }
 }
 

@@ -179,7 +179,7 @@ does not delete any source, snapshot, journal, or workspace.
 ## Regression commands
 
 The bounded layout state machine is covered by
-`crates/app/ironclaw_cli/src/runtime/storage_layout.rs` tests. The canonical
+`crates/app/ironclaw_cli/src/runtime/storage_layout/` tests. The canonical
 path and transition contract is covered by
 `crates/app/ironclaw_config/tests/profile_contract.rs`; run:
 

@@ -10,6 +10,7 @@ pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
 pub use factory::open_standalone_secret_store;
 pub use factory::production_first_party_trust_policy;
 pub use factory::verify_hosted_postgres_store_for_adoption;
+pub use factory::verify_standalone_secret_store_for_adoption;
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
 pub use filesystem_assembly::standalone_db_path;
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};

@@ -2,7 +2,7 @@
 //! process restart: extension installs (E-DURABLE), approval requests +
 //! triggers (C-DURABLE), outbound preferences (W6-COLD-SPOTS), and
 //! tool-permission/auto-approve/approval-policy settings (W5-WEBUI-API-1).
-//! All reopen at the SAME on-disk standalone `storage_root`.
+//! All reopen at the SAME on-disk standalone installation root.
 
 /// Test-support entry point (E-DURABLE seam): reopen a fresh, independent
 /// extension-installation store at an existing standalone `storage_root`. Lets
@@ -59,10 +59,10 @@ pub async fn open_standalone_skill_management_for_test(
 /// records instead of extension installs. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_approval_request_store_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<std::sync::Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>, crate::RebornBuildError>
 {
-    crate::factory::open_standalone_approval_request_store_for_test(storage_root).await
+    crate::factory::open_standalone_approval_request_store_for_test(installation_root).await
 }
 
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
@@ -71,9 +71,9 @@ pub async fn open_standalone_approval_request_store_for_test(
 /// instead of extension installs. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_trigger_repository_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<std::sync::Arc<dyn ironclaw_triggers::TriggerRepository>, crate::RebornBuildError> {
-    crate::factory::open_standalone_trigger_repository_for_test(storage_root).await
+    crate::factory::open_standalone_trigger_repository_for_test(installation_root).await
 }
 
 /// Test-support entry point (W6-COLD-SPOTS): reopen a fresh, independent
@@ -82,12 +82,12 @@ pub async fn open_standalone_trigger_repository_for_test(
 /// preferences instead of approval-gate records. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_outbound_preferences_store_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     crate::RebornBuildError,
 > {
-    crate::factory::open_standalone_outbound_preferences_store_for_test(storage_root).await
+    crate::factory::open_standalone_outbound_preferences_store_for_test(installation_root).await
 }
 
 /// Test-support entry point (W5-WEBUI-API-1 seam): reopen FRESH, independent
@@ -99,7 +99,7 @@ pub async fn open_standalone_outbound_preferences_store_for_test(
 /// store reopen rather than re-reading the same live `Arc`s. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_approval_settings_stores_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<
     (
         std::sync::Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
@@ -108,5 +108,5 @@ pub async fn open_standalone_approval_settings_stores_for_test(
     ),
     crate::RebornBuildError,
 > {
-    crate::factory::open_standalone_approval_settings_stores_for_test(storage_root).await
+    crate::factory::open_standalone_approval_settings_stores_for_test(installation_root).await
 }

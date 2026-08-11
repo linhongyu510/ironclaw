@@ -34,7 +34,7 @@ use ironclaw_composition::{
     RebornRuntimeInput, RebornRuntimeProfileOptions, RebornTurnDriveOutcome, TriggerPollerSettings,
     build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
 };
-use ironclaw_config::{RebornConfigFile, RebornHome};
+use ironclaw_config::{RebornConfigFile, RebornHome, RebornStoragePaths};
 use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
@@ -356,10 +356,11 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
 ) -> RebornRuntime {
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
+    let storage_paths = RebornStoragePaths::from_installation_root(root.path().join("reborn-home"));
     let mut input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         QA_USER,
-        root.path().join("local-dev"),
+        storage_paths,
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
@@ -494,7 +495,7 @@ async fn seed_live_credentials_for_fixture(
         "[RebornQaTrace] importing {} credential account(s) from Reborn source root {} \
          tenant={} user={} agent={}",
         seeds.len(),
-        source.standalone_root.display(),
+        source.installation_root.display(),
         source.tenant,
         source.user,
         source.agent
@@ -783,7 +784,7 @@ fn qa_runtime_credential_binding(
 }
 
 struct RebornQaCredentialSource {
-    standalone_root: PathBuf,
+    installation_root: PathBuf,
     tenant: String,
     user: String,
     agent: String,
@@ -797,9 +798,9 @@ impl RebornQaCredentialSource {
             .unwrap_or_else(|error| panic!("load Reborn QA credential source config: {error}"));
         let identity = config_file.as_ref().and_then(|file| file.identity.as_ref());
         let default_identity = RebornRuntimeIdentity::reborn_cli();
-        let standalone_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
+        let installation_root = std::env::var_os(QA_CREDENTIAL_SOURCE_ROOT_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.path().join("local-dev"));
+            .unwrap_or_else(|| home.path().to_path_buf());
         let tenant = env_or_config_identity(
             QA_CREDENTIAL_SOURCE_TENANT_ENV,
             identity.and_then(|identity| identity.tenant.as_deref()),
@@ -816,7 +817,7 @@ impl RebornQaCredentialSource {
             &default_identity.agent_id,
         );
         Self {
-            standalone_root,
+            installation_root,
             tenant,
             user,
             agent,
@@ -839,7 +840,7 @@ impl RebornQaCredentialSource {
         let input = local_runtime_build_input_with_options(
             RebornCompositionProfile::Standalone,
             &self.user,
-            self.standalone_root.clone(),
+            self.storage_paths(),
             RebornRuntimeProfileOptions::default(),
         )
         .expect("Reborn QA credential source input")
@@ -850,6 +851,14 @@ impl RebornQaCredentialSource {
         build_runtime(RebornRuntimeInput::from_build_input(input))
             .await
             .expect("build Reborn QA credential source services")
+    }
+
+    fn storage_paths(&self) -> RebornStoragePaths {
+        RebornStoragePaths::from_installation_root(&self.installation_root)
+    }
+
+    fn state_root(&self) -> PathBuf {
+        self.storage_paths().state_root().to_path_buf()
     }
 
     fn matches_account_owner(&self, account: &CredentialAccount) -> bool {
@@ -913,7 +922,7 @@ async fn select_source_credential_account(
                         "[RebornQaTrace] product-auth record source did not select provider {} \
                          ({selection_error}); using matching local-dev account record from {}",
                         provider.as_str(),
-                        source.standalone_root.display()
+                        source.installation_root.display()
                     );
                     return account;
                 }
@@ -924,7 +933,7 @@ async fn select_source_credential_account(
                          accounts for provider {:?} in {} after selection failed: \
                          {selection_error}; scan error: {error}",
                         provider.as_str(),
-                        source.standalone_root.display()
+                        source.installation_root.display()
                     );
                 }
             }
@@ -933,7 +942,7 @@ async fn select_source_credential_account(
                  Reborn product-auth account for provider {:?} in source root {} \
                  tenant={} user={} agent={}: {selection_error}. Visible accounts: {}",
                 provider.as_str(),
-                source.standalone_root.display(),
+                source.installation_root.display(),
                 source.tenant,
                 source.user,
                 source.agent,
@@ -966,7 +975,7 @@ async fn scan_standalone_db_for_source_account(
     source: &RebornQaCredentialSource,
     provider: &AuthProviderId,
 ) -> Result<Option<CredentialAccount>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1063,7 +1072,7 @@ async fn scan_standalone_db_for_secret_scope(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<ResourceScope>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1133,7 +1142,7 @@ async fn read_standalone_db_secret_material(
             format!(
                 "no matching encrypted local-dev secret metadata for handle {} in {}",
                 handle.as_str(),
-                source.standalone_root.display()
+                source.installation_root.display()
             )
         })?;
     let key = read_standalone_secret_master_key(source)?;
@@ -1157,7 +1166,7 @@ async fn scan_standalone_db_for_secret_material_record(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
 ) -> Result<Option<StoredSecretMaterialRecord>, String> {
-    let db_path = source.standalone_root.join("reborn-local-dev.db");
+    let db_path = source.state_root().join("reborn-local-dev.db");
     if !db_path.exists() {
         return Ok(None);
     }
@@ -1218,9 +1227,7 @@ async fn scan_standalone_db_for_secret_material_record(
 }
 
 fn read_standalone_secret_master_key(source: &RebornQaCredentialSource) -> Result<String, String> {
-    let key_path = source
-        .standalone_root
-        .join(STANDALONE_SECRETS_MASTER_KEY_PATH);
+    let key_path = source.state_root().join(STANDALONE_SECRETS_MASTER_KEY_PATH);
     let key = match std::fs::read_to_string(&key_path) {
         Ok(existing) => existing.trim().to_string(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1955,14 +1962,16 @@ mod tests {
     async fn standalone_db_secret_material_reader_decrypts_record() {
         let dir = tempfile::tempdir().unwrap();
         let source = RebornQaCredentialSource {
-            standalone_root: dir.path().to_path_buf(),
+            installation_root: dir.path().to_path_buf(),
             tenant: "reborn-cli".to_string(),
             user: "reborn-cli".to_string(),
             agent: "reborn-cli-agent".to_string(),
         };
+        let state_root = source.state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
         let master_key = ironclaw_secrets::keychain::generate_master_key_hex();
         std::fs::write(
-            dir.path().join(STANDALONE_SECRETS_MASTER_KEY_PATH),
+            state_root.join(STANDALONE_SECRETS_MASTER_KEY_PATH),
             &master_key,
         )
         .unwrap();
@@ -1981,7 +1990,7 @@ mod tests {
             "key_salt": key_salt,
         });
 
-        let db = libsql::Builder::new_local(dir.path().join("reborn-local-dev.db"))
+        let db = libsql::Builder::new_local(state_root.join("reborn-local-dev.db"))
             .build()
             .await
             .unwrap();

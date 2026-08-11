@@ -1,5 +1,11 @@
 use super::*;
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
+use sha2::{Digest as _, Sha256};
+
+fn implicit_memory_provider_app_id(installation_root: &std::path::Path) -> String {
+    let digest = Sha256::digest(installation_root.as_os_str().as_encoded_bytes());
+    format!("ws-{}", hex::encode(digest))
+}
 
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
@@ -43,10 +49,8 @@ pub(super) async fn build_production_shaped(
         if memory_provider_connection.app_id.is_none()
             && let crate::input::RebornStorageInput::LocalFilesystem { paths, .. } = &storage
         {
-            use std::hash::{DefaultHasher, Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            paths.installation_root().hash(&mut hasher);
-            memory_provider_connection.app_id = Some(format!("ws-{:016x}", hasher.finish()));
+            memory_provider_connection.app_id =
+                Some(implicit_memory_provider_app_id(paths.installation_root()));
         }
         crate::resolve_memory_provider(
             memory_binding_policy,
@@ -327,6 +331,8 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
+    // agent install) left on the host disk has to be brought across or it is silently lost.
     if let Some(snapshot_root) = legacy_skill_snapshot.as_deref() {
         crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(
             snapshot_root,
@@ -335,8 +341,6 @@ async fn build_local_storage_production_shaped(
         )
         .await?;
     }
-    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
-    // agent install) left on the host disk has to be brought across or it is silently lost.
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,
@@ -526,3 +530,17 @@ pub(super) fn planned_run_profile_resolver()
 
 pub(super) type FilesystemProductionHostRuntimeServices<F> =
     HostRuntimeServices<F, FilesystemResourceGovernor<F>>;
+
+#[cfg(test)]
+mod tests {
+    use super::implicit_memory_provider_app_id;
+    use std::path::Path;
+
+    #[test]
+    fn implicit_memory_provider_app_id_is_a_stable_sha256_derivation() {
+        assert_eq!(
+            implicit_memory_provider_app_id(Path::new("/var/lib/ironclaw")),
+            "ws-f0d6f77ada36695664007e305f03546485e25e5f295cb273657c4370f4aaab01"
+        );
+    }
+}

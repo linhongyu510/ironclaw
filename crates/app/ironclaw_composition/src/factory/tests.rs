@@ -1234,6 +1234,61 @@ async fn open_standalone_secret_store_is_visible_across_reopens_of_the_same_root
     );
 }
 
+#[tokio::test]
+async fn standalone_adoption_verifier_rejects_an_existing_store_under_a_different_master_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let valid = ironclaw_secrets::keychain::generate_master_key_hex();
+    let key_path = root.join(STANDALONE_SECRETS_MASTER_KEY_PATH);
+    std::fs::write(&key_path, &valid).expect("seed cached master key");
+
+    let first = open_standalone_secret_store(root)
+        .await
+        .expect("first open must succeed");
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(first))
+        .put(
+            "nearai",
+            ironclaw_secrets::SecretMaterial::from("sk-reopen-value"),
+        )
+        .await
+        .expect("put through the first open");
+
+    verify_standalone_secret_store_for_adoption(root)
+        .await
+        .expect("the configured key must authenticate an existing secret before adoption");
+
+    std::fs::write(
+        &key_path,
+        ironclaw_secrets::keychain::generate_master_key_hex(),
+    )
+    .expect("replace cached master key");
+    let error = verify_standalone_secret_store_for_adoption(root)
+        .await
+        .expect_err("a mismatched master key must fail before adoption commits durable state");
+    assert!(matches!(
+        error,
+        RebornBuildError::SecretStateVerification(_)
+    ));
+}
+
+#[tokio::test]
+async fn hosted_postgres_adoption_verifier_rejects_non_postgres_bindings() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let error =
+        verify_hosted_postgres_store_for_adoption(crate::deployment::local_filesystem_build_input(
+            "adoption-verifier-owner",
+            dir.path().to_path_buf(),
+        ))
+        .await
+        .expect_err("a local filesystem binding is not a hosted PostgreSQL adoption target");
+
+    assert!(matches!(
+        error,
+        RebornBuildError::InvalidConfig { reason }
+            if reason.contains("requires hosted single-tenant PostgreSQL bindings")
+    ));
+}
+
 // The keychain-fallthrough + idempotency test for
 // `resolve_standalone_secret_master_key_with_env` lives in
 // `tests/facade_factory.rs`

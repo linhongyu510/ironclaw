@@ -1646,6 +1646,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_encrypted_store_accepts_a_valid_master_key() {
+        let backend = Arc::new(InMemoryBackend::new());
+
+        verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect("a fresh store has no ciphertext to authenticate");
+    }
+
+    #[tokio::test]
     async fn existing_encrypted_credential_accounts_reject_a_different_valid_master_key() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = build_scoped_fs(
@@ -1709,6 +1718,7 @@ mod tests {
                 max_uses: Some(1),
             })
             .expect("mint session");
+        let session_correlation_id = session.correlation_id().to_string();
         broker
             .issue_session(session)
             .await
@@ -1724,6 +1734,7 @@ mod tests {
                 .contains("credential-session"),
             "{original_key_error}"
         );
+        let original_rendered = original_key_error.to_string();
         let wrong_key = SecretsCrypto::new(SecretMaterial::from(
             "fedcba9876543210fedcba9876543210".to_string(),
         ))
@@ -1732,6 +1743,22 @@ mod tests {
             .await
             .expect_err("a different key must fail for a session-only store");
         assert!(error.to_string().contains("credential-session"), "{error}");
+        let wrong_key_rendered = error.to_string();
+        for identifier in [
+            session_correlation_id,
+            scope.invocation_id.to_string(),
+            scope.mission_id.as_ref().expect("mission id").to_string(),
+            scope.thread_id.as_ref().expect("thread id").to_string(),
+        ] {
+            assert!(
+                !original_rendered.contains(&identifier),
+                "session AAD identity must stay out of the error: {original_rendered}"
+            );
+            assert!(
+                !wrong_key_rendered.contains(&identifier),
+                "session AAD identity must stay out of the error: {wrong_key_rendered}"
+            );
+        }
     }
 
     /// Build a `ScopedFilesystem` over `backend` whose `/secrets` alias

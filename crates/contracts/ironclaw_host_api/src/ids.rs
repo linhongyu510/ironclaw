@@ -208,45 +208,6 @@ macro_rules! uuid_id {
 
 string_id!(TenantId, "tenant", validate_scope_id);
 string_id!(UserId, "user", validate_scope_id);
-
-/// Stable opaque identity for one tenant/user workspace leaf.
-///
-/// This preserves the released length-prefixed SHA-256 codec used by the
-/// Docker and Railway sandbox backends while keeping host-path construction
-/// outside the neutral host API contract.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TenantUserWorkspaceKey {
-    digest: String,
-}
-
-impl TenantUserWorkspaceKey {
-    pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
-        let encoded = format!(
-            "{}:tenant={}:{};{}:user={}:{};",
-            "tenant".len(),
-            tenant_id.as_str().len(),
-            tenant_id.as_str(),
-            "user".len(),
-            user_id.as_str().len(),
-            user_id.as_str(),
-        );
-        let digest = Sha256::digest(encoded.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        Self { digest }
-    }
-
-    pub fn from_scope(scope: &crate::resource::ResourceScope) -> Self {
-        Self::from_tenant_user(&scope.tenant_id, &scope.user_id)
-    }
-
-    /// A validated, single-segment digest suitable for neutral naming.
-    pub fn digest_segment(&self) -> &str {
-        &self.digest
-    }
-}
-
 string_id!(AgentId, "agent", validate_scope_id);
 string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);
@@ -264,6 +225,51 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+
+/// Stable opaque identity for one tenant/user workspace leaf.
+///
+/// This preserves the released length-prefixed SHA-256 codec used by the
+/// Docker and Railway sandbox backends while keeping host-path construction
+/// outside the neutral host API contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TenantUserWorkspaceKey {
+    digest: String,
+}
+
+impl TenantUserWorkspaceKey {
+    pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
+        // FROZEN PERSISTED FORMAT: this digest names on-disk workspace leaves
+        // and is recomputed against adoption journals. Changing it orphans
+        // existing leaves and invalidates those journals; the fixed-vector test
+        // below is the compatibility guard.
+        let encoded = format!(
+            "{}:tenant={}:{};{}:user={}:{};",
+            "tenant".len(),
+            tenant_id.as_str().len(),
+            tenant_id.as_str(),
+            "user".len(),
+            user_id.as_str().len(),
+            user_id.as_str(),
+        );
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes = Sha256::digest(encoded.as_bytes());
+        let mut digest = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            digest.push(HEX[(byte >> 4) as usize] as char);
+            digest.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        Self { digest }
+    }
+
+    pub fn from_scope(scope: &crate::resource::ResourceScope) -> Self {
+        Self::from_tenant_user(&scope.tenant_id, &scope.user_id)
+    }
+
+    /// A validated, single-segment digest suitable for neutral naming.
+    pub fn digest_segment(&self) -> &str {
+        &self.digest
+    }
+}
 // Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
 // handle to a durably-stored host-error record. The recoverability *class* rides
 // the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays

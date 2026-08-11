@@ -656,7 +656,12 @@ jobs:
       - name: Verify production local-sandbox profile wiring
         env:
           IRONCLAW_REQUIRE_DOCKER_TESTS: "1"
-        run: cargo test -p ironclaw runtime::tests::cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding -- --exact --nocapture
+        run: |
+          set -euo pipefail
+          output="$(mktemp)"
+          trap 'rm -f "$output"' EXIT
+          cargo test -p ironclaw runtime::tests::cli_sandbox_profile_uses_canonical_workspace_root_and_user_sandbox_binding -- --exact --nocapture 2>&1 | tee "$output"
+          grep -Eq 'test result: ok\. 1 passed;' "$output"
 
       - name: Run real-Docker user sandbox contract
         run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture

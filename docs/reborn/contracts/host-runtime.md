@@ -76,7 +76,7 @@ between Railway and Docker, or between Railway environments, requires a
 separate operator migration; no profile change copies or merges workspace
 contents. Railway control credentials remain in the host control service and
 are absent from the inner worker. The local regression evidence is
-`ironclaw_sandbox/tests/user_sandbox_docker_live.rs` and
+`crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs` and
 `tests/integration/reborn_sandbox_shell_turn.rs`; run
 `IRONCLAW_REQUIRE_DOCKER_TESTS=1 cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture`
 and

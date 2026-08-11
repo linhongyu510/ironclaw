@@ -832,9 +832,9 @@ pub(crate) async fn mount_default_database_roots(
 /// absence. Tests only; zero bytes in production.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_root_filesystem_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn RootFilesystem>, RebornBuildError> {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let bundle = build_filesystem(
         paths.state_root(),
         paths.system_root(),
@@ -852,12 +852,12 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
 /// standalone boot, without reconstructing a scheduler or runtime process.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_thread_service_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<
     Arc<ironclaw_threads::FilesystemSessionThreadService<CompositeRootFilesystem>>,
     RebornBuildError,
 > {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let bundle = build_filesystem(
         paths.state_root(),
         paths.system_root(),
@@ -878,10 +878,10 @@ pub(crate) async fn open_standalone_thread_service_for_test(
 /// one-time legacy host-disk import source.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_skill_management_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
     owner_user_id: ironclaw_host_api::ids::UserId,
 ) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let bundle = build_filesystem(
         paths.state_root(),
         paths.system_root(),
@@ -913,10 +913,10 @@ pub(crate) async fn open_standalone_skill_management_for_test(
 /// tenant/user context is needed. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_extension_installation_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>, RebornBuildError>
 {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(storage_root);
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let bundle = build_filesystem(
         paths.state_root(),
         paths.system_root(),
@@ -961,10 +961,11 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
 /// production. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_approval_request_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     Ok(Arc::new(ApprovalRequestStore::new(scoped)))
 }
@@ -978,10 +979,11 @@ pub(crate) async fn open_standalone_approval_request_store_for_test(
 /// Tests only.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_outbound_preferences_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn CommunicationPreferenceRepository>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     Ok(
         crate::outbound_store_assembly::build_outbound_stores(Arc::new(composite))
             .outbound_preferences,
@@ -1002,7 +1004,7 @@ pub(crate) async fn open_standalone_outbound_preferences_store_for_test(
 /// production. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_approval_settings_stores_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<
     (
         Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
@@ -1011,8 +1013,9 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     ),
     RebornBuildError,
 > {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     let tool_permission_overrides: Arc<
         dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
@@ -1042,10 +1045,11 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
 /// production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_trigger_repository_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    let backend = build_default_database_roots(storage_root, &mut composite).await?;
+    let backend = build_default_database_roots(paths.state_root(), &mut composite).await?;
     trigger_repository_for_durable_backend(&backend).await
 }
 

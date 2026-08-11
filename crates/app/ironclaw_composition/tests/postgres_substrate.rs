@@ -6,10 +6,12 @@ use std::{sync::Arc, time::Duration};
 
 use deadpool_postgres::tokio_postgres;
 use ironclaw_composition::{
-    PostgresProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
-    build_postgres_production_host_runtime_services,
+    PostgresProductionSubstrateConfig, RebornBuildError, RebornCompositionError,
+    RebornCompositionProfile, RebornHostBindings, RebornProductionRuntimePolicy,
+    build_postgres_production_host_runtime_services, verify_hosted_postgres_store_for_adoption,
 };
 use ironclaw_event_store::RebornEventStoreConfig;
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
 };
@@ -17,7 +19,12 @@ use ironclaw_host_api::runtime_policy::{
     AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
+use ironclaw_host_api::{
+    ids::{InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
@@ -119,6 +126,53 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
         Err(RebornCompositionError::Secret(
             ironclaw_secrets::SecretError::InvalidMasterKey
         ))
+    ));
+}
+
+#[tokio::test]
+async fn postgres_adoption_verifier_accepts_empty_and_existing_correct_secret_state() {
+    let Some((_container, pool, _database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let root = tempfile::tempdir().expect("tempdir");
+    let key = "01234567890123456789012345678901";
+
+    verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(
+        pool.clone(),
+        root.path(),
+        key,
+    ))
+    .await
+    .expect("an empty hosted store accepts its configured master key");
+
+    seed_postgres_secret(&pool, key).await;
+
+    verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(pool, root.path(), key))
+        .await
+        .expect("an existing hosted secret authenticates with its configured master key");
+}
+
+#[tokio::test]
+async fn postgres_adoption_verifier_rejects_existing_state_under_a_wrong_master_key() {
+    let Some((_container, pool, _database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let root = tempfile::tempdir().expect("tempdir");
+    let valid_key = "01234567890123456789012345678901";
+
+    seed_postgres_secret(&pool, valid_key).await;
+
+    let error = verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(
+        pool,
+        root.path(),
+        "abcdef0123456789abcdef0123456789",
+    ))
+    .await
+    .expect_err("a hosted store must reject a different valid master key during adoption");
+
+    assert!(matches!(
+        error,
+        RebornBuildError::SecretStateVerification(_)
     ));
 }
 
@@ -230,6 +284,47 @@ async fn build_postgres_test_services(
     })
     .await
     .unwrap()
+}
+
+fn postgres_adoption_bindings(
+    pool: deadpool_postgres::Pool,
+    root: &std::path::Path,
+    master_key: &str,
+) -> RebornHostBindings {
+    RebornHostBindings::hosted_single_tenant_postgres(
+        RebornCompositionProfile::HostedSingleTenant,
+        "postgres-adoption-owner",
+        ironclaw_config::RebornStoragePaths::from_installation_root(root),
+        pool,
+        SecretMaterial::from(master_key),
+    )
+    .expect("hosted PostgreSQL test bindings")
+}
+
+async fn seed_postgres_secret(pool: &deadpool_postgres::Pool, master_key: &str) {
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
+    filesystem
+        .run_migrations()
+        .await
+        .expect("seed filesystem migrations");
+    let crypto = Arc::new(
+        SecretsCrypto::new(SecretMaterial::from(master_key)).expect("valid seed master key"),
+    );
+    let store = SecretStore::new(ironclaw_composition::wrap_scoped(filesystem), crypto);
+    let scope = ResourceScope::local_default(
+        UserId::new("postgres-adoption-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("local scope");
+    store
+        .put(
+            scope,
+            SecretHandle::new("postgres-adoption-secret").expect("secret handle"),
+            SecretMaterial::from("seed secret"),
+            None,
+        )
+        .await
+        .expect("seed encrypted Postgres secret");
 }
 
 fn sandbox_process_port() -> Arc<ironclaw_host_runtime::UserSandboxProcessPort> {

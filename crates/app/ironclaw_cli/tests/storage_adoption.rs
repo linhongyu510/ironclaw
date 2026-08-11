@@ -7,12 +7,12 @@ use ironclaw_approvals::{
     CapabilityPermissionOverride, CapabilityPermissionOverrideInput,
     CapabilityPermissionOverrideKey,
 };
-use ironclaw_composition::open_standalone_secret_store;
 use ironclaw_composition::test_support::{
     open_standalone_approval_settings_stores_for_test,
     open_standalone_extension_installation_store_for_test,
     open_standalone_skill_management_for_test, open_standalone_thread_service_for_test,
 };
+use ironclaw_composition::{STANDALONE_SECRETS_MASTER_KEY_PATH, open_standalone_secret_store};
 use ironclaw_config::RebornStoragePaths;
 use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord, ExtensionManifestRef,
@@ -30,7 +30,7 @@ use ironclaw_threads::{
 };
 use secrecy::ExposeSecret as _;
 
-const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
+const MASTER_KEY_FILE: &str = STANDALONE_SECRETS_MASTER_KEY_PATH;
 
 fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw")
@@ -307,7 +307,7 @@ output_schema_ref = "schemas/read.output.json"
         .expect("seed durable extension installation");
 
     let (settings, _, _) =
-        open_standalone_approval_settings_stores_for_test(seed_paths.state_root())
+        open_standalone_approval_settings_stores_for_test(seed_paths.installation_root())
             .await
             .expect("open production approval settings store");
     settings
@@ -457,7 +457,7 @@ output_schema_ref = "schemas/read.output.json"
     assert!(!installation.owner().visible_to(&rejected_owner));
 
     let (reopened_settings, _, _) =
-        open_standalone_approval_settings_stores_for_test(adopted_paths.state_root())
+        open_standalone_approval_settings_stores_for_test(adopted_paths.installation_root())
             .await
             .expect("fresh settings-store reopen after adoption");
     let setting = reopened_settings

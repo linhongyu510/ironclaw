@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use ironclaw_host_api::{
     ids::TenantUserWorkspaceKey,
     mount::{MountGrant, MountView},
-    path::VirtualPath,
     resource::ResourceScope,
 };
 
@@ -30,17 +29,6 @@ enum DockerBindMode {
 }
 
 impl RebornSandboxMountSources {
-    pub(super) fn add_local_source(
-        &mut self,
-        _virtual_root: VirtualPath,
-        _host_root: impl Into<PathBuf>,
-    ) -> Result<(), RuntimeProcessError> {
-        Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox accepts only the mandatory /workspace caller workspace leaf and no trusted extra mount sources"
-                .to_string(),
-        ))
-    }
-
     pub(super) async fn prepare_container_binds(
         &self,
         workspace_root: &Path,
@@ -93,12 +81,13 @@ impl RebornSandboxMountSources {
         let workspace_bind = mounts
             .and_then(|mounts| mounts.mounts.first())
             .map(|grant| resolve_mandatory_workspace_grant(&workspace, scope, grant))
-            .transpose()?
-            .unwrap_or(ContainerBind::new(
-                workspace,
-                CONTAINER_WORKSPACE_ROOT,
-                DockerBindMode::ReadWrite,
-            )?);
+            .unwrap_or_else(|| {
+                ContainerBind::new(
+                    workspace,
+                    CONTAINER_WORKSPACE_ROOT,
+                    DockerBindMode::ReadWrite,
+                )
+            })?;
         Ok(vec![workspace_bind])
     }
 }
@@ -247,7 +236,7 @@ mod tests {
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
         mount::MountPermissions,
-        path::MountAlias,
+        path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
 
@@ -272,27 +261,6 @@ mod tests {
             key.digest_segment()
         ))
         .expect("workspace target")
-    }
-
-    #[test]
-    fn sandbox_rejects_every_trusted_mount_source() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut sources = RebornSandboxMountSources;
-        for virtual_root in [
-            "/projects",
-            "/projects/workspace",
-            "/artifacts/test-fixture",
-            "/system/extensions",
-        ] {
-            let error = sources
-                .add_local_source(VirtualPath::new(virtual_root).unwrap(), temp.path())
-                .expect_err("only the caller workspace leaf may be mounted into a sandbox");
-
-            assert!(
-                format!("{error}").contains("only the mandatory /workspace"),
-                "{virtual_root}: {error}"
-            );
-        }
     }
 
     #[tokio::test]

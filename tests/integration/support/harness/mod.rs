@@ -297,6 +297,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// thread service is available.
     durable_capability_io_requested: bool,
     root: Arc<tempfile::TempDir>,
+    storage_paths: Option<RebornStoragePaths>,
     workspace_root: PathBuf,
     mounts: MountView,
     capability_mount_overrides: Vec<(CapabilityId, MountView)>,
@@ -825,7 +826,10 @@ impl HostRuntimeCapabilityHarness {
                 storage_paths.clone(),
             )?
         };
-        input = input.with_local_runtime_workspace_root(workspace_root.clone());
+        input = ironclaw_composition::test_support::with_local_runtime_workspace_root_for_test(
+            input,
+            workspace_root.clone(),
+        );
         if let Some((tenant_id, agent_id)) = &local_runtime_identity {
             input = input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
         }
@@ -1034,6 +1038,7 @@ impl HostRuntimeCapabilityHarness {
             durable_capability_io_thread_service: Mutex::new(None),
             durable_capability_io_requested: durable_capability_io,
             root,
+            storage_paths: Some(storage_paths),
             workspace_root,
             mounts,
             capability_mount_overrides: Vec::new(),
@@ -1613,14 +1618,15 @@ impl HostRuntimeCapabilityHarness {
     }
 
     /// E-DURABLE: the canonical on-disk installation root this harness's capability
-    /// stores persist under (`<tempdir>/reborn-home`). Mirrors the `RebornStoragePaths`
-    /// computed inline in `new_with_options`. A durability test reopens a fresh,
+    /// stores persist under (`<tempdir>/reborn-home`). A durability test reopens a fresh,
     /// independent store at this path (see
     /// `open_standalone_extension_installation_store_for_test`) to prove capability
     /// state survives a reopen, paralleling `assert_reply_persists_after_reopen`.
     /// Tests only.
     pub(crate) fn storage_root_for_test(&self) -> PathBuf {
-        RebornStoragePaths::from_installation_root(self.root.path().join("reborn-home"))
+        self.storage_paths
+            .as_ref()
+            .expect("durable reopen is available only on composition-built harnesses")
             .installation_root()
             .to_path_buf()
     }
@@ -1665,7 +1671,10 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        let paths = RebornStoragePaths::from_installation_root(self.storage_root_for_test());
+        let paths = self
+            .storage_paths
+            .as_ref()
+            .expect("system skill fixtures require a composition-built harness");
         write_system_skill_fixture(paths.system_root(), name, description, prompt)?;
         Ok(())
     }

@@ -63,6 +63,34 @@
 //!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
 //!     issue #6105).
 
+use std::path::PathBuf;
+
+/// Override the local runtime workspace root for a test-built composition.
+///
+/// This is intentionally a test-support free function rather than a method on
+/// [`crate::RebornHostBindings`]: production input construction must not grow
+/// test-only configuration seams. It mirrors the workspace-root value supplied
+/// by the local deployment builder before production mount assembly runs.
+pub fn with_local_runtime_workspace_root_for_test(
+    mut bindings: crate::RebornHostBindings,
+    workspace_root: PathBuf,
+) -> crate::RebornHostBindings {
+    match &mut bindings.storage {
+        crate::input::RebornStorageInput::LocalFilesystem {
+            workspace_root_for_test,
+            ..
+        }
+        | crate::input::RebornStorageInput::HostedSingleTenantPostgres {
+            workspace_root_for_test,
+            ..
+        } => {
+            *workspace_root_for_test = Some(workspace_root);
+        }
+        _ => {}
+    }
+    bindings
+}
+
 /// Build the production runtime and return the exact resource governor wired
 /// into its capability path.
 ///

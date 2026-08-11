@@ -4836,17 +4836,19 @@ mod tests {
             .into_owned();
 
         let services = crate::factory::build_runtime_substrate(
-            crate::deployment::local_filesystem_build_input_with_profile(
-                crate::RebornCompositionProfile::StandaloneUnrestricted,
-                "standalone-unrestricted-host-owner",
-                storage_root,
-            )
-            .with_runtime_policy(
-                crate::standalone_unrestricted_runtime_policy(true)
-                    .expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
-            )
-            .with_local_runtime_workspace_root(workspace_root.clone())
-            .with_local_runtime_confirmed_host_home_root(host_home.clone()),
+            crate::test_support::with_local_runtime_workspace_root_for_test(
+                crate::deployment::local_filesystem_build_input_with_profile(
+                    crate::RebornCompositionProfile::StandaloneUnrestricted,
+                    "standalone-unrestricted-host-owner",
+                    storage_root,
+                )
+                .with_runtime_policy(
+                    crate::standalone_unrestricted_runtime_policy(true)
+                        .expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
+                )
+                .with_local_runtime_confirmed_host_home_root(host_home.clone()),
+                workspace_root.clone(),
+            ),
         )
         .await
         .expect("standalone-unrestricted services build"); // safety: test-only assertion in #[cfg(test)] module.
@@ -5224,11 +5226,13 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let services = crate::factory::build_runtime_substrate(
-            crate::deployment::local_filesystem_build_input(
-                "standalone-no-host-owner",
-                storage_root,
-            )
-            .with_local_runtime_workspace_root(workspace_root.clone()),
+            crate::test_support::with_local_runtime_workspace_root_for_test(
+                crate::deployment::local_filesystem_build_input(
+                    "standalone-no-host-owner",
+                    storage_root,
+                ),
+                workspace_root.clone(),
+            ),
         )
         .await
         .expect("standalone services build"); // safety: test-only assertion in #[cfg(test)] module.

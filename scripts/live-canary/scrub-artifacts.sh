@@ -180,7 +180,9 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     skill_dir="$(dirname "${marker}")"
     case "${skill_dir}" in
       "${ARTIFACT_DIR}"/*/reborn-home/*/system/skills/*|\
-      "${ARTIFACT_DIR}"/reborn-home/*/system/skills/*)
+      "${ARTIFACT_DIR}"/*/reborn-home/system/skills/*|\
+      "${ARTIFACT_DIR}"/reborn-home/*/system/skills/*|\
+      "${ARTIFACT_DIR}"/reborn-home/system/skills/*)
         if is_verified_bundled_skill "${marker}" "${skill_dir}"; then
           rm -rf -- "${skill_dir}"
         fi
@@ -188,7 +190,8 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     esac
   done < <(
     find "${ARTIFACT_DIR}" -type f \
-      -path '*/reborn-home/*/system/skills/*/.ironclaw-reborn-bundled.json' \
+      \( -path '*/reborn-home/*/system/skills/*/.ironclaw-reborn-bundled.json' \
+      -o -path '*/reborn-home/system/skills/*/.ironclaw-reborn-bundled.json' \) \
       -print0
   )
 
@@ -205,7 +208,8 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
     fi
   done < <(
     find "${ARTIFACT_DIR}" -type f \
-      -path '*/reborn-home/*/system/extensions/*/manifest.toml' \
+      \( -path '*/reborn-home/*/system/extensions/*/manifest.toml' \
+      -o -path '*/reborn-home/system/extensions/*/manifest.toml' \) \
       -print0
   )
 fi

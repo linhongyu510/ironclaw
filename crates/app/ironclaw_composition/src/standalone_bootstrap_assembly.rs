@@ -10,8 +10,8 @@ const DEFAULT_SYSTEM_PROMPT_PATH: &str = "prompts/default-system.md";
 pub(crate) use ironclaw_extension_host::bundled_skills::LEGACY_SKILLS_BACKFILL_MARKER;
 const STANDALONE_LEGACY_SKILL_TENANTS: [&str; 2] = ["default", "reborn-cli"];
 
-/// Apply the legacy standalone skill-tree migration to every tenant identity
-/// this standalone host profile supports.
+/// Test-only compatibility helper retained to pin the released legacy
+/// standalone skill-tree migration shape for every supported tenant identity.
 #[cfg(test)]
 pub(crate) fn backfill_legacy_user_skills(
     storage_root: &Path,
@@ -238,13 +238,90 @@ fn collect_files_under(
     Ok(())
 }
 
-/// Rejects every symlink in a completed legacy snapshot before any host file is read.
+/// Rejects symlinks in the completed legacy skill roots before any host file is read.
 ///
 /// The migration source is an operator-selected legacy tree, so following even one entry would
-/// allow a snapshot to import data from outside that tree. The later shape-specific walker repeats
-/// the no-follow check while it reads the selected `skills` paths.
+/// allow a snapshot to import data from outside that tree. Only selected
+/// `skills` roots matter: unrelated archived state in the snapshot is never
+/// read and must not block this one-time import.
 fn validate_legacy_skill_snapshot_tree(storage_root: &Path) -> Result<(), RebornBuildError> {
-    validate_legacy_skill_snapshot_entry(storage_root)
+    validate_legacy_skill_snapshot_directory(storage_root)?;
+    validate_legacy_skill_snapshot_root(&storage_root.join("skills"))?;
+
+    let tenants_root = storage_root.join("tenants");
+    let tenants = match std::fs::read_dir(&tenants_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(snapshot_io_error(
+                "read tenants directory",
+                &tenants_root,
+                error,
+            ));
+        }
+    };
+    for tenant in tenants {
+        let tenant = tenant.map_err(|error| {
+            snapshot_io_error("read tenant directory entry", &tenants_root, error)
+        })?;
+        validate_legacy_skill_snapshot_directory(&tenant.path())?;
+        let users_root = tenant.path().join("users");
+        if !validate_legacy_skill_snapshot_directory_if_present(&users_root)? {
+            continue;
+        }
+        for user in std::fs::read_dir(&users_root)
+            .map_err(|error| snapshot_io_error("read users directory", &users_root, error))?
+        {
+            let user = user.map_err(|error| {
+                snapshot_io_error("read user directory entry", &users_root, error)
+            })?;
+            validate_legacy_skill_snapshot_directory(&user.path())?;
+            validate_legacy_skill_snapshot_root(&user.path().join("skills"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_legacy_skill_snapshot_root(path: &Path) -> Result<(), RebornBuildError> {
+    if validate_legacy_skill_snapshot_directory_if_present(path)? {
+        validate_legacy_skill_snapshot_entry(path)?;
+    }
+    Ok(())
+}
+
+fn validate_legacy_skill_snapshot_directory_if_present(
+    path: &Path,
+) -> Result<bool, RebornBuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            validate_legacy_skill_snapshot_directory(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(snapshot_io_error(
+            "inspect legacy skill snapshot",
+            path,
+            error,
+        )),
+    }
+}
+
+fn validate_legacy_skill_snapshot_directory(path: &Path) -> Result<(), RebornBuildError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| snapshot_io_error("inspect legacy skill snapshot", path, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(snapshot_symlink_error(path));
+    }
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "legacy skill snapshot entry is not a directory: {}",
+                path.display()
+            ),
+        })
+    }
 }
 
 fn validate_legacy_skill_snapshot_entry(path: &Path) -> Result<(), RebornBuildError> {
@@ -545,6 +622,29 @@ mod skill_disk_import_tests {
                 .await
                 .is_err(),
             "a rejected snapshot must not import an outside subtree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_skill_snapshot_import_ignores_symlinks_outside_selected_skill_roots() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let outside = tempfile::tempdir().expect("outside unrelated state root");
+        let filesystem = database_filesystem();
+        seed_skill_on_disk(storage.path(), "kept-skill");
+        symlink(outside.path(), storage.path().join("state")).expect("unrelated state symlink");
+
+        import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+            .await
+            .expect("only imported skill roots should be validated");
+
+        assert!(
+            RootFilesystem::stat(filesystem.as_ref(), &virtual_skill_path("kept-skill"))
+                .await
+                .is_ok(),
+            "an unrelated snapshot alias must not prevent importing a selected skill root"
         );
     }
 }

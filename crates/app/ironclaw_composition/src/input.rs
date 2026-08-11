@@ -578,24 +578,6 @@ impl RebornHostBindings {
         ))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
-        match &mut self.storage {
-            RebornStorageInput::LocalFilesystem {
-                workspace_root_for_test,
-                ..
-            }
-            | RebornStorageInput::HostedSingleTenantPostgres {
-                workspace_root_for_test,
-                ..
-            } => {
-                *workspace_root_for_test = Some(workspace_root);
-            }
-            _ => {}
-        }
-        self
-    }
-
     /// Attach the one fixed snapshot source admitted by the CLI's completed
     /// layout-adoption journal. The value is an enum instead of a path so this
     /// public input cannot be used to import active or arbitrary host content.

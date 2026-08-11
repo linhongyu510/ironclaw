@@ -680,7 +680,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // workspace identity as neutral host-api vocabulary. Host path
         // construction, bind admission, and provider execution remain in
         // composition and ironclaw_sandbox.
-        ("ironclaw_host_api", 19_081),
+        // 19_081 -> 19_087 (2026-08-10, profile-stable state review): document
+        // the persisted workspace-key codec and render its fixed digest without
+        // per-byte allocation. Identity vocabulary only; path ownership remains
+        // in filesystem/composition and sandbox admission.
+        ("ironclaw_host_api", 19_087),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

@@ -4436,6 +4436,47 @@ fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
     let _ = child.wait();
 }
 
+#[test]
+fn onboard_hosted_profile_initializes_home_without_opening_a_standalone_secret_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let output = reborn_command()
+        .arg("onboard")
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant")
+        .output()
+        .expect("hosted onboard runs");
+
+    assert!(
+        output.status.success(),
+        "hosted onboarding must configure the home without a standalone secret store: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("external secret store"),
+        "hosted onboarding must explain credential admission: {stdout}"
+    );
+    assert!(reborn_home.join("config.toml").is_file());
+    assert!(reborn_home.join("providers.json").is_file());
+    assert!(reborn_home.join("webui-token").is_file());
+    assert!(reborn_home.join(".onboard-completed.json").is_file());
+    assert!(
+        !reborn_home.join("state/reborn-local-dev.db").exists(),
+        "hosted onboarding must not create a shadow standalone libSQL store"
+    );
+    assert!(
+        !reborn_home
+            .join("state/.reborn-local-dev-secrets-master-key")
+            .exists(),
+        "hosted onboarding must not create a standalone master-key cache"
+    );
+}
+
 /// Sibling of `onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment`:
 /// a headless onboard run WITH a complete `openai`-shape env (API key +
 /// model) must silently WRITE `[llm.default]` to config.toml, and a later
@@ -4990,7 +5031,7 @@ fn stored_key_reaches_real_turn_via_product_surface() {
     // The stored key lives ONLY in the encrypted secret store — this is the
     // onboard-style credential path (`onboard`'s interactive prompt / the
     // webui settings surface), never an env var.
-    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+    seed_stored_llm_key(&reborn_home, "nearai", STORED_KEY);
 
     let (stub_base_url, auth_rx) = spawn_chat_completion_stub();
     patch_config_base_url(&reborn_home, &stub_base_url);
@@ -5087,7 +5128,7 @@ fn stored_key_reaches_real_turn_across_fresh_boots() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    seed_stored_llm_key_at_runtime_root(&reborn_home, "nearai", STORED_KEY);
+    seed_stored_llm_key(&reborn_home, "nearai", STORED_KEY);
 
     let _serve_port_guard = SERVE_PORT_LOCK
         .lock()
@@ -5198,13 +5239,6 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
     });
 }
 
-/// Seed the stored LLM key at the canonical Reborn-home secret-store root
-/// `serve` and `onboard` share. The named helper preserves the real-turn
-/// call sites while asserting the same fixed layout as the runtime.
-fn seed_stored_llm_key_at_runtime_root(reborn_home: &Path, provider_id: &str, key: &str) {
-    seed_stored_llm_key(reborn_home, provider_id, key);
-}
-
 /// A key stored via `onboard`/`models set-provider` for an
 /// `api_key_required = true` provider (openai/anthropic) must reach
 /// `serve`'s runtime resolution — `apply_startup_stored_llm_key` must run
@@ -5258,7 +5292,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    seed_stored_llm_key_at_runtime_root(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
+    seed_stored_llm_key(&reborn_home, "openai", "sk-smoke-test-stored-openai-key");
 
     let _serve_port_guard = SERVE_PORT_LOCK
         .lock()
@@ -5454,7 +5488,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         String::from_utf8_lossy(&set_provider_output.stderr)
     );
 
-    seed_stored_llm_key_at_runtime_root(
+    seed_stored_llm_key(
         &reborn_home,
         "nearai",
         "session-smoke-test-stored-nearai-key",

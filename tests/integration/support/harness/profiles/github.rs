@@ -134,6 +134,7 @@ fn github_issue_tools_with_credential_result(
     let root = Arc::new(tempfile::tempdir()?);
     let storage_root = root.path().join("state");
     let workspace_root = root.path().join("workspaces");
+    std::fs::create_dir_all(&storage_root)?;
     std::fs::create_dir_all(&workspace_root)?;
     let github_fixture_response =
         br#"{"object":{"sha":"abc123def4567890abc123def4567890abc123de"},"ok":true}"#.to_vec();
@@ -164,6 +165,7 @@ fn github_issue_tools_with_credential_result(
         durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
+        storage_paths: None,
         workspace_root,
         mounts,
         capability_mount_overrides: Vec::new(),
