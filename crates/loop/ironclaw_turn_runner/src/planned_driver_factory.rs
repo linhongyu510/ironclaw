@@ -38,6 +38,13 @@ pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
 /// string to strip the trigger mutator capabilities from a fire's
 /// model-visible surface.
 pub const SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID: &str = "scheduled_trigger";
+/// Capability-surface profile id for the suggestion-generation loop (#7038).
+/// Shared with `runtime.rs`, which keys its per-profile allow-list on this
+/// string to narrow a suggestion-generation run's model-visible surface to
+/// exactly the catalog/connection-state/memory/`render_suggestions` tools.
+pub const SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID: &str = "suggestion_generation";
+/// `RunProfileId` string for the suggestion-generation loop (#7038).
+pub const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
 
 pub struct DefaultPlannedDriverBuild {
     pub driver: Arc<dyn AgentLoopDriver>,
@@ -285,6 +292,24 @@ pub fn scheduled_trigger_planned_profile_definition()
     )
 }
 
+/// Dedicated run profile for suggestion-generation runs (#7038). Reuses the
+/// default planned driver/family unchanged — only the capability surface
+/// differs — so `runtime.rs`'s host allow-list can narrow the run to
+/// exactly the tools named in the design doc §6, keyed on
+/// `capability_surface_profile_id`.
+pub fn suggestion_generation_planned_profile_definition()
+-> Result<RunProfileDefinition, RunProfileRegistryError> {
+    let descriptor = planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let profile_id = RunProfileId::new(SUGGESTION_GENERATION_RUN_PROFILE_ID)
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    planned_like_profile_definition(
+        profile_id,
+        descriptor,
+        SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID,
+    )
+}
+
 pub fn register_default_planned_profile(
     registry: &mut InMemoryRunProfileRegistry,
 ) -> Result<(), RunProfileRegistryError> {
@@ -303,12 +328,19 @@ pub fn register_scheduled_trigger_planned_profile(
     registry.register(scheduled_trigger_planned_profile_definition()?)
 }
 
+pub fn register_suggestion_generation_planned_profile(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(suggestion_generation_planned_profile_definition()?)
+}
+
 pub fn default_planned_run_profile_resolver()
 -> Result<InMemoryRunProfileResolver, RunProfileRegistryError> {
     let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
     register_default_planned_profile(&mut registry)?;
     register_subagent_planned_profile(&mut registry)?;
     register_scheduled_trigger_planned_profile(&mut registry)?;
+    register_suggestion_generation_planned_profile(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(InMemoryRunProfileResolver::new_with_implicit_default(

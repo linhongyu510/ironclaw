@@ -687,6 +687,14 @@ where
         .map(|id| CapabilityId::new(*id))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    // Issue #7038: the suggestion-generation loop's allow-list — see the
+    // constant doc comment for why this is `narrow_to_capability_ids`
+    // rather than a deny-list.
+    let suggestion_generation_allowed = SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RuntimeProfiledCapabilityPortFactory {
             inner: parts.capability_factory,
@@ -695,6 +703,7 @@ where
             tool_disclosure_decorator,
             global_denied,
             scheduled_trigger_denied,
+            suggestion_generation_allowed,
         });
     let safety_context = parts
         .safety_context
@@ -832,6 +841,25 @@ const SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS: &[&str] = &[
     ironclaw_host_runtime::TRIGGER_RESUME_CAPABILITY_ID,
 ];
 
+/// Suggestion-generation design doc §6 allow-list (#7038): the ONLY
+/// capabilities visible on a run resolved with
+/// [`crate::planned_driver_factory::SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID`].
+/// Unlike the scheduled-trigger deny-list above, this is a strict allow-list
+/// (`CapabilitySurfacePolicy::narrow_to_capability_ids`) — extension tools,
+/// trigger CRUD, and `spawn_subagent` are excluded by omission, not named
+/// individually.
+const SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS: &[&str] = &[
+    // `ironclaw_extension_manager::EXTENSION_SEARCH_CAPABILITY_ID` — spelled
+    // as a literal rather than imported: `ironclaw_extension_manager` is a
+    // product-layer crate and this loop-layer crate must not depend on it
+    // (layering: substrates < domains < kernel < loop < product). Pinned
+    // against the real constant by an architecture/integration test.
+    "builtin.extension_search",
+    ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID,
+    ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID,
+    ironclaw_host_runtime::RENDER_SUGGESTIONS_CAPABILITY_ID,
+];
+
 /// Runner-private per-run factory that preserves the canonical wrapper order
 /// while passing one resolved policy directly to every consumer that needs
 /// it. The neutral loop-host decorator contract remains synchronous.
@@ -842,6 +870,7 @@ struct RuntimeProfiledCapabilityPortFactory {
     tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>>,
     global_denied: Vec<CapabilityId>,
     scheduled_trigger_denied: Vec<CapabilityId>,
+    suggestion_generation_allowed: Vec<CapabilityId>,
 }
 
 #[async_trait::async_trait]
@@ -855,16 +884,27 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
             .resolve(run_context)
             .await
             .map_err(capability_resolve_error_to_agent_host_error)?;
-        let mut denied = self.global_denied.clone();
-        if run_context
+        let profile_id = run_context
             .resolved_run_profile
             .capability_surface_profile_id
-            .as_str()
-            == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+            .as_str();
+        if profile_id
+            == crate::planned_driver_factory::SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID
         {
-            denied.extend(self.scheduled_trigger_denied.iter().cloned());
+            // Strict allow-list: narrows to exactly this set regardless of
+            // what the resolved base policy would otherwise permit — no
+            // separate deny-list needed, everything not named is excluded.
+            policy =
+                policy.narrow_to_capability_ids(self.suggestion_generation_allowed.iter().cloned());
+        } else {
+            let mut denied = self.global_denied.clone();
+            if profile_id
+                == crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+            {
+                denied.extend(self.scheduled_trigger_denied.iter().cloned());
+            }
+            policy = policy.deny_capability_ids(denied);
         }
-        policy = policy.deny_capability_ids(denied);
         let policy = Arc::new(policy);
         let mut capabilities = self
             .inner
@@ -939,7 +979,8 @@ mod tests {
 
     use super::{
         RuntimeProfiledCapabilityPortFactory, SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS,
-        ToolDisclosureCapabilityDecorator, scheduler_permit_count,
+        SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS, ToolDisclosureCapabilityDecorator,
+        scheduler_permit_count,
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -1311,6 +1352,7 @@ mod tests {
             ))),
             global_denied: vec![denied_id.clone()],
             scheduled_trigger_denied: Vec::new(),
+            suggestion_generation_allowed: Vec::new(),
         };
 
         factory
@@ -1452,6 +1494,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied,
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            suggestion_generation_allowed: Vec::new(),
         };
 
         let scheduled_ids =
@@ -1509,6 +1552,7 @@ mod tests {
             tool_disclosure_decorator: None,
             global_denied: Vec::new(),
             scheduled_trigger_denied: scheduled_trigger_mutator_ids(),
+            suggestion_generation_allowed: Vec::new(),
         };
 
         let scheduled_ids =
@@ -1526,6 +1570,110 @@ mod tests {
             scheduled_ids
                 .contains(&ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string())
         );
+    }
+
+    async fn suggestion_generation_run_context() -> LoopRunContext {
+        use crate::planned_driver_factory::{
+            SUGGESTION_GENERATION_RUN_PROFILE_ID, default_planned_run_profile_resolver,
+        };
+        use ironclaw_turns::RunProfileRequest;
+
+        let resolver =
+            default_planned_run_profile_resolver().expect("planned resolver should build");
+        let resolved = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(SUGGESTION_GENERATION_RUN_PROFILE_ID).unwrap(),
+                ),
+            )
+            .await
+            .expect("suggestion_generation profile should resolve");
+        test_run_context_with_resolved_profile(resolved)
+    }
+
+    fn full_suggestion_generation_candidate_surface() -> VisibleCapabilitySurface {
+        VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-v1").expect("test version is valid"),
+            descriptors: vec![
+                descriptor(ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                descriptor(TRIGGER_CREATE_CAPABILITY_ID),
+                descriptor(TRIGGER_LIST_CAPABILITY_ID),
+                descriptor("builtin.echo"),
+                descriptor("builtin.shell"),
+                descriptor("builtin.extension_search"),
+                descriptor(ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID),
+                descriptor(ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID),
+                descriptor(ironclaw_host_runtime::RENDER_SUGGESTIONS_CAPABILITY_ID),
+            ],
+            callable_capability_ids: None,
+        }
+    }
+
+    fn suggestion_generation_allowed_ids() -> Vec<CapabilityId> {
+        SUGGESTION_GENERATION_ALLOWED_CAPABILITY_IDS
+            .iter()
+            .map(|id| CapabilityId::new(*id).expect("suggestion generation capability id is valid"))
+            .collect()
+    }
+
+    /// Anti-"silently doesn't bind" proof for the suggestion-generation
+    /// capability lockdown (#7038, mirrors PR #5515's scheduled-trigger
+    /// test): drives the SAME runner-private factory production wires,
+    /// asserting the allow-list narrows the surface to exactly the four
+    /// named tools even though the underlying host surface offers far more
+    /// (spawn_subagent, trigger_create, shell, ...).
+    #[tokio::test]
+    async fn suggestion_generation_surface_is_allow_listed() {
+        let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
+            surface: full_suggestion_generation_candidate_surface(),
+        });
+        let factory = RuntimeProfiledCapabilityPortFactory {
+            inner: Arc::new(StaticFactory { port: inner }),
+            surface_resolver: Arc::new(CountingSurfaceResolver {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            spawn_decorator: Arc::new(NoopDecorator {
+                decorate_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            tool_disclosure_decorator: None,
+            global_denied: Vec::new(),
+            scheduled_trigger_denied: Vec::new(),
+            suggestion_generation_allowed: suggestion_generation_allowed_ids(),
+        };
+
+        let allowed_ids =
+            visible_capability_ids(&factory, &suggestion_generation_run_context().await).await;
+
+        assert!(
+            !allowed_ids
+                .contains(&ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()),
+            "spawn_subagent must not be visible on the suggestion-generation surface: {allowed_ids:?}"
+        );
+        assert!(!allowed_ids.contains(&TRIGGER_CREATE_CAPABILITY_ID.to_string()));
+        assert!(!allowed_ids.contains(&TRIGGER_LIST_CAPABILITY_ID.to_string()));
+        assert!(!allowed_ids.contains(&"builtin.echo".to_string()));
+        assert!(!allowed_ids.contains(&"builtin.shell".to_string()));
+        assert!(allowed_ids.contains(&"builtin.extension_search".to_string()));
+        assert!(
+            allowed_ids.contains(&ironclaw_host_runtime::MEMORY_SEARCH_CAPABILITY_ID.to_string())
+        );
+        assert!(
+            allowed_ids.contains(&ironclaw_host_runtime::MEMORY_READ_CAPABILITY_ID.to_string())
+        );
+        assert!(
+            allowed_ids
+                .contains(&ironclaw_host_runtime::RENDER_SUGGESTIONS_CAPABILITY_ID.to_string())
+        );
+        assert_eq!(
+            allowed_ids.len(),
+            4,
+            "the surface must be exactly the four allow-listed tools: {allowed_ids:?}"
+        );
+
+        // The interactive/default profile must be unaffected by this
+        // allow-list (it takes the deny-list branch instead).
+        let interactive_ids = visible_capability_ids(&factory, &test_run_context().await).await;
+        assert!(interactive_ids.contains(&"builtin.echo".to_string()));
     }
 
     // ── Gap 3: decorator non-empty catalog → schema enum present ─────────────
