@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **55** flat integration bins (49 in
+Totals: **51** group scenarios · **56** flat integration bins (50 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**869** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -160,7 +160,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (55)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (56)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -176,6 +176,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
+| Generate cards dedupes/recovers via CAS claim; render/list/click round-trips through the real API | `suggestion_cards.rs` |
 
 **Tools**
 | Behavior | Evidence |
