@@ -784,7 +784,7 @@ pub(crate) fn build_services_input_with_options(
     // here, before the runtime is built.
     let memory_binding_policy = ironclaw_composition::resolve_memory_binding_policy(
         config_file.as_ref().and_then(|file| file.memory.as_ref()),
-        composition_profile(profile),
+        profile.into(),
     )?;
     for diagnostic in ironclaw_composition::memory_binding_diagnostics(&memory_binding_policy) {
         // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
@@ -954,7 +954,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let mut services_input = local_runtime_build_input_with_options(
-        composition_profile(profile),
+        profile.into(),
         owner_id,
         paths,
         RebornRuntimeProfileOptions {
@@ -986,7 +986,7 @@ fn build_hosted_single_tenant_services_input(
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     let mut services_input = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
-        composition_profile(profile),
+        profile.into(),
         owner_id,
         paths,
         config_file,
@@ -1007,12 +1007,8 @@ fn build_production_services_input(
     owner_id: &str,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    RebornHostBindings::postgres_from_config_and_env(
-        composition_profile(profile),
-        owner_id,
-        config_file,
-    )
-    .map_err(anyhow::Error::from)
+    RebornHostBindings::postgres_from_config_and_env(profile.into(), owner_id, config_file)
+        .map_err(anyhow::Error::from)
 }
 /// Resolve the Google OAuth backend config for boot, merging env vars with
 /// the operator's `[google]` config.toml section and the encrypted
@@ -1359,7 +1355,7 @@ fn storage_layout_requirement_for_profile(
 ) -> anyhow::Result<ironclaw_config::LayoutRequirement> {
     let yolo_disclosure_acknowledged = false;
     let deployment = ironclaw_composition::deployment::DeploymentConfig::for_profile(
-        composition_profile(profile),
+        profile.into(),
         yolo_disclosure_acknowledged,
     );
     deployment.storage_layout_requirement().ok_or_else(|| {
@@ -1411,7 +1407,10 @@ fn ensure_startup_layout(
                 storage_layout::prepare_automatic_adoption(config.home(), requirement, authority)?;
             let store_verification = canonical_store_verification_for_adoption(
                 config,
-                profile,
+                &ironclaw_composition::deployment::DeploymentConfig::for_profile(
+                    profile.into(),
+                    false,
+                ),
                 config_file,
                 requirement,
             )?;
@@ -1507,7 +1506,7 @@ pub(crate) fn adopt_storage_layout(
     storage_layout::validate_adopt_options(&options)?;
     let store_verification = canonical_store_verification_for_adoption(
         config,
-        profile,
+        &ironclaw_composition::deployment::DeploymentConfig::for_profile(profile.into(), false),
         config_file.as_ref(),
         requirement,
     )?;
@@ -1525,7 +1524,7 @@ pub(crate) fn adopt_storage_layout(
 
 fn canonical_store_verification_for_adoption(
     config: &RebornBootConfig,
-    profile: RebornProfile,
+    deployment: &ironclaw_composition::deployment::DeploymentConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
     requirement: ironclaw_config::LayoutRequirement,
 ) -> anyhow::Result<storage_layout::CanonicalStoreVerification> {
@@ -1533,49 +1532,35 @@ fn canonical_store_verification_for_adoption(
         ironclaw_config::DurableStateKind::EmbeddedLibSql => {
             Ok(storage_layout::CanonicalStoreVerification::EmbeddedLibSql)
         }
-        ironclaw_config::DurableStateKind::ExternalPostgres => {
-            if profile != RebornProfile::HostedSingleTenant {
+        ironclaw_config::DurableStateKind::ExternalPostgres => match deployment.storage_shape() {
+            ironclaw_composition::deployment::StorageShape::HostedSingleTenantPool => {
+                let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
+                let bindings = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
+                        deployment.profile(),
+                        default_owner_id(config_file),
+                        paths,
+                        config_file,
+                    )
+                    .context(
+                        "verify canonical external PostgreSQL store and secret resolver before adoption",
+                    )?;
+                block_on_cli(
+                        ironclaw_composition::verify_hosted_postgres_store_for_adoption(bindings),
+                    )
+                    .context(
+                        "verify canonical external PostgreSQL store and secret resolver before adoption",
+                    )?;
+                Ok(storage_layout::CanonicalStoreVerification::ExternalPostgresVerified)
+            }
+            ironclaw_composition::deployment::StorageShape::OperatorSupplied => {
                 anyhow::bail!(
-                    "external PostgreSQL layout adoption is supported only for the hosted-single-tenant profile"
+                    "external PostgreSQL layout adoption remains unsupported for operator-supplied storage"
                 );
             }
-            let paths = ironclaw_config::RebornStoragePaths::from_home(config.home());
-            let bindings = RebornHostBindings::hosted_single_tenant_postgres_from_config_and_env(
-                composition_profile(profile),
-                default_owner_id(config_file),
-                paths,
-                config_file,
-            )
-            .context(
-                "verify canonical external PostgreSQL store and secret resolver before adoption",
-            )?;
-            block_on_cli(
-                ironclaw_composition::verify_hosted_postgres_store_for_adoption(bindings),
-            )
-            .context(
-                "verify canonical external PostgreSQL store and secret resolver before adoption",
-            )?;
-            Ok(storage_layout::CanonicalStoreVerification::ExternalPostgresVerified)
-        }
-    }
-}
-
-fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
-    match profile {
-        RebornProfile::Standalone => RebornCompositionProfile::Standalone,
-        RebornProfile::StandaloneUnrestricted => RebornCompositionProfile::StandaloneUnrestricted,
-        RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
-        RebornProfile::HostedSingleTenantVolume => {
-            RebornCompositionProfile::HostedSingleTenantVolume
-        }
-        RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-        }
-        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
-        }
-        RebornProfile::Production => RebornCompositionProfile::Production,
-        RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
+            storage_shape => anyhow::bail!(
+                "external PostgreSQL layout adoption requires a hosted pool or operator-supplied storage shape; got {storage_shape:?}"
+            ),
+        },
     }
 }
 
@@ -3300,6 +3285,59 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
                 .join("runtime/layout-adoption/journal.toml")
                 .exists(),
             "external verification precedes every adoption mutation"
+        );
+    }
+
+    #[test]
+    fn storage_adopt_external_postgres_classifies_hosted_pool_and_operator_store() {
+        let _lock = lock_runtime_env();
+        let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
+        let (_temp, config) = boot_config_with_config_toml("hosted-single-tenant", "");
+        let requirement =
+            super::storage_layout_requirement_for_profile(RebornProfile::HostedSingleTenant)
+                .expect("hosted profile has external PostgreSQL storage");
+        let hosted_pool = ironclaw_composition::deployment::DeploymentConfig::for_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            false,
+        );
+        let operator_store = ironclaw_composition::deployment::DeploymentConfig::for_profile(
+            RebornCompositionProfile::Production,
+            false,
+        );
+
+        assert_eq!(
+            hosted_pool.storage_shape(),
+            ironclaw_composition::deployment::StorageShape::HostedSingleTenantPool
+        );
+        assert_eq!(
+            operator_store.storage_shape(),
+            ironclaw_composition::deployment::StorageShape::OperatorSupplied
+        );
+
+        let hosted_error = super::canonical_store_verification_for_adoption(
+            &config,
+            &hosted_pool,
+            None,
+            requirement,
+        )
+        .expect_err("hosted pool verification reaches its PostgreSQL boot path");
+        assert!(
+            hosted_error
+                .to_string()
+                .contains("verify canonical external PostgreSQL store"),
+            "{hosted_error:#}"
+        );
+
+        let operator_error = super::canonical_store_verification_for_adoption(
+            &config,
+            &operator_store,
+            None,
+            requirement,
+        )
+        .expect_err("operator-supplied PostgreSQL remains fail closed for adoption");
+        assert!(
+            operator_error.to_string().contains("operator-supplied"),
+            "{operator_error:#}"
         );
     }
 

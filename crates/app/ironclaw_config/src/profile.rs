@@ -85,17 +85,6 @@ impl RebornProfile {
         )
     }
 
-    pub fn uses_standalone_local_runtime_volume(self) -> bool {
-        matches!(
-            self,
-            Self::Standalone
-                | Self::StandaloneUnrestricted
-                | Self::HostedSingleTenantVolume
-                | Self::HostedSingleTenantVolumeSandboxed
-                | Self::HostedSingleTenantVolumeSandboxedRailway
-        )
-    }
-
     pub fn supports_local_runtime_skill_management(self) -> bool {
         matches!(
             self,

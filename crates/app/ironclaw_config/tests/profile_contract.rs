@@ -88,7 +88,7 @@ fn profile_parsing_accepts_expected_values() {
 }
 
 #[test]
-fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
+fn profile_predicates_capture_hosted_listener_and_skill_management_contract() {
     assert!(!RebornProfile::Standalone.starts_hosted_single_tenant_listener());
     assert!(!RebornProfile::StandaloneUnrestricted.starts_hosted_single_tenant_listener());
     assert!(RebornProfile::HostedSingleTenant.starts_hosted_single_tenant_listener());
@@ -102,20 +102,6 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     );
     assert!(!RebornProfile::Production.starts_hosted_single_tenant_listener());
     assert!(!RebornProfile::MigrationDryRun.starts_hosted_single_tenant_listener());
-
-    assert!(RebornProfile::Standalone.uses_standalone_local_runtime_volume());
-    assert!(RebornProfile::StandaloneUnrestricted.uses_standalone_local_runtime_volume());
-    assert!(!RebornProfile::HostedSingleTenant.uses_standalone_local_runtime_volume());
-    assert!(RebornProfile::HostedSingleTenantVolume.uses_standalone_local_runtime_volume());
-    assert!(
-        RebornProfile::HostedSingleTenantVolumeSandboxed.uses_standalone_local_runtime_volume()
-    );
-    assert!(
-        RebornProfile::HostedSingleTenantVolumeSandboxedRailway
-            .uses_standalone_local_runtime_volume()
-    );
-    assert!(!RebornProfile::Production.uses_standalone_local_runtime_volume());
-    assert!(!RebornProfile::MigrationDryRun.uses_standalone_local_runtime_volume());
 
     assert!(RebornProfile::Standalone.supports_local_runtime_skill_management());
     assert!(RebornProfile::StandaloneUnrestricted.supports_local_runtime_skill_management());

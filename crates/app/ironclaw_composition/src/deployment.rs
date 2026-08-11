@@ -722,17 +722,6 @@ pub fn local_runtime_build_input_with_options(
     paths: ironclaw_config::RebornStoragePaths,
     options: RebornRuntimeProfileOptions,
 ) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
-    match profile {
-        RebornCompositionProfile::HostedSingleTenantVolume => {
-            return hosted_single_tenant_volume_build_input(owner_id, paths);
-        }
-        RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-        | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            return hosted_single_tenant_volume_sandboxed_build_input(profile, owner_id, paths);
-        }
-        _ => {}
-    }
-
     // Build the deployment once, here, where the operator's host-access
     // confirmation is known, and carry it on the input rather than letting
     // downstream re-derive it from the profile name (§4.4).
@@ -744,40 +733,6 @@ pub fn local_runtime_build_input_with_options(
         RebornHostBindings::local_filesystem_from_deployment(deployment, owner_id, paths)
             .with_runtime_policy(policy),
     )
-}
-
-/// Build the hosted single-tenant volume substrate input with the matching
-/// secure hosted runtime policy.
-pub(crate) fn hosted_single_tenant_volume_build_input(
-    owner_id: impl Into<String>,
-    paths: ironclaw_config::RebornStoragePaths,
-) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
-    let policy =
-        hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    Ok(RebornHostBindings::local_filesystem_from_deployment(
-        DeploymentConfig::for_profile(RebornCompositionProfile::HostedSingleTenantVolume, false),
-        owner_id,
-        paths,
-    )
-    .with_runtime_policy(policy))
-}
-
-/// Build either explicit sandbox-provider profile with the shared hosted
-/// user-sandbox policy. The caller still has to supply the matching concrete
-/// process binding; production assembly validates that fail closed.
-pub(crate) fn hosted_single_tenant_volume_sandboxed_build_input(
-    profile: RebornCompositionProfile,
-    owner_id: impl Into<String>,
-    paths: ironclaw_config::RebornStoragePaths,
-) -> Result<RebornHostBindings, RebornRuntimeProfileError> {
-    let policy = hosted_single_tenant_volume_sandboxed_runtime_policy()
-        .map_err(RebornRuntimeProfileError::Policy)?;
-    Ok(RebornHostBindings::local_filesystem_from_deployment(
-        DeploymentConfig::for_profile(profile, false),
-        owner_id,
-        paths,
-    )
-    .with_runtime_policy(policy))
 }
 
 /// Test-support constructor for a local-filesystem build input.

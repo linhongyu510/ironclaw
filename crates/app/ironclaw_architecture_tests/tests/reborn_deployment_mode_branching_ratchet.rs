@@ -59,6 +59,7 @@ use std::path::Path;
 // without editing the literals. Identity on today's tree - pinned by
 // `reborn_crate_inventory.rs` (CHECKLIST WS10).
 use ratchet_support::{crate_path, strip_comments_and_strings, workspace_root};
+use syn::visit::{self, Visit};
 
 /// Production files under composition `src/` allowed to name a
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
@@ -80,6 +81,231 @@ const ALLOWLIST: &[(&str, &str)] = &[
          when it grows a memory-binding axis (#5264).",
     ),
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileControlKind {
+    Match,
+    MatchesMacro,
+    IfLet,
+    Equality,
+}
+
+#[derive(Debug)]
+struct ProfileControl {
+    kind: ProfileControlKind,
+    in_deployment_config_for_profile: bool,
+}
+
+#[derive(Default)]
+struct ProfileControlVisitor {
+    deployment_config_impl_depth: usize,
+    for_profile_depth: usize,
+    controls: Vec<ProfileControl>,
+}
+
+impl ProfileControlVisitor {
+    fn record(&mut self, kind: ProfileControlKind) {
+        self.controls.push(ProfileControl {
+            kind,
+            in_deployment_config_for_profile: self.deployment_config_impl_depth > 0
+                && self.for_profile_depth > 0,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for ProfileControlVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        let deployment_config = matches!(
+            node.self_ty.as_ref(),
+            syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("DeploymentConfig")
+        );
+        if deployment_config {
+            self.deployment_config_impl_depth += 1;
+        }
+        visit::visit_item_impl(self, node);
+        if deployment_config {
+            self.deployment_config_impl_depth -= 1;
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        let for_profile = self.deployment_config_impl_depth > 0 && node.sig.ident == "for_profile";
+        if for_profile {
+            self.for_profile_depth += 1;
+        }
+        visit::visit_impl_item_fn(self, node);
+        if for_profile {
+            self.for_profile_depth -= 1;
+        }
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        if node
+            .arms
+            .iter()
+            .any(|arm| pattern_contains_reborn_profile_variant(&arm.pat))
+        {
+            self.record(ProfileControlKind::Match);
+        }
+        visit::visit_expr_match(self, node);
+    }
+
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        if node.mac.path.is_ident("matches")
+            && token_stream_contains_reborn_profile_variant(node.mac.tokens.clone())
+        {
+            self.record(ProfileControlKind::MatchesMacro);
+        }
+        visit::visit_expr_macro(self, node);
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        if pattern_contains_reborn_profile_variant(&node.pat) {
+            self.record(ProfileControlKind::IfLet);
+        }
+        visit::visit_expr_let(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+            && (expression_contains_reborn_profile_variant(&node.left)
+                || expression_contains_reborn_profile_variant(&node.right))
+        {
+            self.record(ProfileControlKind::Equality);
+        }
+        visit::visit_expr_binary(self, node);
+    }
+}
+
+fn is_cfg_test_item(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        let syn::Meta::List(list) = &attribute.meta else {
+            return false;
+        };
+        list.path.is_ident("cfg")
+            && matches!(
+                syn::parse2::<syn::Meta>(list.tokens.clone()),
+                Ok(syn::Meta::Path(path)) if path.is_ident("test")
+            )
+    })
+}
+
+fn path_is_reborn_profile_variant(path: &syn::Path) -> bool {
+    path.segments
+        .iter()
+        .position(|segment| segment.ident == "RebornCompositionProfile")
+        .is_some_and(|profile_segment| profile_segment + 1 < path.segments.len())
+}
+
+#[derive(Default)]
+struct PatternProfileVariantFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for PatternProfileVariantFinder {
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if let syn::Pat::Path(path) = node {
+            self.found |= path_is_reborn_profile_variant(&path.path);
+        }
+        visit::visit_pat(self, node);
+    }
+}
+
+fn pattern_contains_reborn_profile_variant(pattern: &syn::Pat) -> bool {
+    let mut finder = PatternProfileVariantFinder::default();
+    finder.visit_pat(pattern);
+    finder.found
+}
+
+#[derive(Default)]
+struct ExpressionProfileVariantFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for ExpressionProfileVariantFinder {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.found |= path_is_reborn_profile_variant(&node.path);
+        visit::visit_expr_path(self, node);
+    }
+}
+
+fn expression_contains_reborn_profile_variant(expression: &syn::Expr) -> bool {
+    let mut finder = ExpressionProfileVariantFinder::default();
+    finder.visit_expr(expression);
+    finder.found
+}
+
+fn token_stream_contains_reborn_profile_variant(tokens: proc_macro2::TokenStream) -> bool {
+    let tokens: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    for index in 0..tokens.len().saturating_sub(3) {
+        let (
+            proc_macro2::TokenTree::Ident(profile),
+            proc_macro2::TokenTree::Punct(first_colon),
+            proc_macro2::TokenTree::Punct(second_colon),
+            proc_macro2::TokenTree::Ident(_variant),
+        ) = (
+            &tokens[index],
+            &tokens[index + 1],
+            &tokens[index + 2],
+            &tokens[index + 3],
+        )
+        else {
+            continue;
+        };
+        if profile == "RebornCompositionProfile"
+            && first_colon.as_char() == ':'
+            && second_colon.as_char() == ':'
+        {
+            return true;
+        }
+    }
+    tokens.into_iter().any(|token| {
+        matches!(token, proc_macro2::TokenTree::Group(group) if token_stream_contains_reborn_profile_variant(group.stream()))
+    })
+}
+
+fn assert_only_deployment_config_for_profile_control(source: &str) {
+    let file = syn::parse_file(source).unwrap_or_else(|error| panic!("parse source: {error}"));
+    let mut visitor = ProfileControlVisitor::default();
+    visitor.visit_file(&file);
+
+    assert_eq!(
+        visitor.controls.len(),
+        1,
+        "deployment.rs must contain exactly one profile-dependent control expression; found {:?}",
+        visitor.controls
+    );
+    let control = &visitor.controls[0];
+    assert_eq!(
+        control.kind,
+        ProfileControlKind::Match,
+        "the sole profile-dependent control must be the DeploymentConfig::for_profile match; found {control:?}"
+    );
+    assert!(
+        control.in_deployment_config_for_profile,
+        "the sole profile-dependent control must be inside DeploymentConfig::for_profile; found {control:?}"
+    );
+}
 
 fn is_scanned_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -176,6 +402,18 @@ fn deployment_rs_is_the_target_state_entry() {
 }
 
 #[test]
+fn deployment_rs_allows_only_the_deployment_config_profile_control() {
+    let deployment = crate_path(
+        &workspace_root(),
+        "crates/ironclaw_composition/src/deployment.rs",
+    );
+    let source = std::fs::read_to_string(&deployment)
+        .unwrap_or_else(|error| panic!("read {}: {error}", deployment.display()));
+
+    assert_only_deployment_config_for_profile_control(&source);
+}
+
+#[test]
 fn allowlist_is_sorted_and_unique() {
     let paths: Vec<&str> = ALLOWLIST.iter().map(|(path, _)| *path).collect();
     let mut sorted = paths.clone();
@@ -225,4 +463,104 @@ fn scanner_strips_comments_and_strings() {
     // lifetime is preserved.
     assert!(!strip_comments_and_strings("let c = '\"';").contains('"'));
     assert!(strip_comments_and_strings("fn f<'a>(x: &'a str) {}").contains("'a"));
+}
+
+#[test]
+fn syntax_aware_profile_control_scanner_ignores_cfg_test_items_structurally() {
+    let source = r#"
+        struct DeploymentConfig;
+        impl DeploymentConfig {
+            fn for_profile(profile: RebornCompositionProfile) {
+                match profile { RebornCompositionProfile::Standalone => (), _ => () }
+            }
+        }
+        fn unrelated() {
+            // match selected_profile { RebornCompositionProfile::Production => (), _ => () }
+            let profile_label = "matches!(selected_profile, RebornCompositionProfile::Production)";
+            let _ = profile_label;
+        }
+        #[cfg(test)]
+        mod tests {
+            fn duplicate(selected_profile: RebornCompositionProfile) {
+                match selected_profile { RebornCompositionProfile::Production => (), _ => () }
+            }
+        }
+        #[cfg(test)]
+        fn direct_test_helper(selected_profile: RebornCompositionProfile) {
+            if selected_profile == RebornCompositionProfile::Production {}
+        }
+    "#;
+
+    assert_only_deployment_config_for_profile_control(source);
+}
+
+#[test]
+fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
+    let permitted = r#"
+        struct DeploymentConfig;
+        impl DeploymentConfig {
+            fn for_profile(profile: RebornCompositionProfile) {
+                match profile { RebornCompositionProfile::Standalone => (), _ => () }
+            }
+        }
+    "#;
+    let cases = [
+        (
+            "renamed match scrutinee",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    match selected_profile { RebornCompositionProfile::Production => (), _ => () }
+                }
+            "#,
+        ),
+        (
+            "borrowed match scrutinee",
+            r#"
+                fn bypass(profile: &RebornCompositionProfile) {
+                    match *profile { RebornCompositionProfile::Production => (), _ => () }
+                }
+            "#,
+        ),
+        (
+            "matches macro",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if matches!(selected_profile, RebornCompositionProfile::Production) {}
+                }
+            "#,
+        ),
+        (
+            "if let",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if let RebornCompositionProfile::Production = selected_profile {}
+                }
+            "#,
+        ),
+        (
+            "equality",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if selected_profile == RebornCompositionProfile::Production {}
+                }
+            "#,
+        ),
+    ];
+
+    for (name, duplicate) in cases {
+        let source = format!("{permitted}\n{duplicate}");
+        let failure = std::panic::catch_unwind(|| {
+            assert_only_deployment_config_for_profile_control(&source);
+        })
+        .expect_err("{name} must be rejected");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic payload");
+        assert!(
+            message.contains("profile-dependent control"),
+            "unexpected {name} failure: {message}"
+        );
+    }
 }

@@ -78,6 +78,27 @@ impl RebornCompositionProfile {
     }
 }
 
+impl From<ironclaw_config::RebornProfile> for RebornCompositionProfile {
+    fn from(profile: ironclaw_config::RebornProfile) -> Self {
+        match profile {
+            ironclaw_config::RebornProfile::Standalone => Self::Standalone,
+            ironclaw_config::RebornProfile::StandaloneUnrestricted => Self::StandaloneUnrestricted,
+            ironclaw_config::RebornProfile::HostedSingleTenant => Self::HostedSingleTenant,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume => {
+                Self::HostedSingleTenantVolume
+            }
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed => {
+                Self::HostedSingleTenantVolumeSandboxed
+            }
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+                Self::HostedSingleTenantVolumeSandboxedRailway
+            }
+            ironclaw_config::RebornProfile::Production => Self::Production,
+            ironclaw_config::RebornProfile::MigrationDryRun => Self::MigrationDryRun,
+        }
+    }
+}
+
 impl FromStr for RebornCompositionProfile {
     type Err = RebornCompositionProfileParseError;
 
