@@ -437,6 +437,101 @@ async fn record_result_for_superseded_job_is_a_noop() {
     assert!(doc.last_result.is_none());
 }
 
+#[tokio::test]
+async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
+    let store = store();
+    let ClaimOutcome::Claimed { job_id } = store
+        .claim_active_job(
+            &tenant(),
+            &user(),
+            ThreadId::new("t1").expect("thread id"),
+            TurnRunId::new(),
+        )
+        .await
+        .expect("claim")
+    else {
+        panic!("expected claim");
+    };
+    store
+        .record_result(&tenant(), &user(), job_id, vec![card("first result")])
+        .await
+        .expect("record result clears active_job");
+
+    // `active_job` is now `None`. A late, duplicate outcome for a job_id
+    // that was NEVER claimed (never `Some` in this doc's history) must not
+    // be applied — the guard must not treat "no active_job" as "anything
+    // goes", only "the still-claimed job matches".
+    let never_claimed_job = Uuid::new_v4();
+    store
+        .record_failure(
+            &tenant(),
+            &user(),
+            never_claimed_job,
+            "late duplicate".to_string(),
+        )
+        .await
+        .expect("stale outcome for an already-cleared slot is a no-op, not an error");
+
+    let doc = store
+        .read_doc(&tenant(), &user())
+        .await
+        .expect("read")
+        .expect("doc present");
+    assert!(doc.active_job.is_none());
+    assert_eq!(
+        doc.last_result.expect("first result preserved").cards[0].title,
+        "first result"
+    );
+    assert!(
+        doc.last_error.is_none(),
+        "late duplicate outcome must not clobber the already-recorded result"
+    );
+}
+
+#[tokio::test]
+async fn claim_succeeds_over_an_incompatible_schema_document() {
+    use ironclaw_filesystem::{CasExpectation, Entry, RootFilesystem};
+
+    let path = ironclaw_host_api::path::VirtualPath::new(format!(
+        "/tenants/{}/users/{}/suggestions/doc.json",
+        tenant().as_str(),
+        user().as_str()
+    ))
+    .expect("path");
+    let body = serde_json::json!({
+        "schema_version": SUGGESTIONS_SCHEMA_VERSION + 1,
+        "active_job": null,
+        "last_result": null,
+        "last_error": null,
+    });
+    let raw = Arc::new(InMemoryBackend::default());
+    raw.put(
+        &path,
+        Entry::bytes(serde_json::to_vec(&body).expect("serialize")),
+        CasExpectation::Any,
+    )
+    .await
+    .expect("write a future-schema doc directly, bypassing the store's own schema version");
+
+    let store_over_raw = SuggestionsStore::new(raw);
+
+    // Before the fix, this always hit `CasExpectation::Absent` against a
+    // path that already exists, so every attempt returned
+    // `FilesystemError::VersionMismatch` and the loop exhausted into
+    // `ClaimContention` — the incompatible document could never be
+    // superseded.
+    let outcome = store_over_raw
+        .claim_active_job(
+            &tenant(),
+            &user(),
+            ThreadId::new("t1").expect("thread id"),
+            TurnRunId::new(),
+        )
+        .await
+        .expect("claim must succeed by CAS-overwriting the incompatible document");
+    assert!(matches!(outcome, ClaimOutcome::Claimed { .. }));
+}
+
 // `record_failure_sets_last_error_and_clears_active_job` is likewise not
 // here — `dead_run_derives_failed_and_a_fresh_generate_claims_cleanly` in
 // the integration suite drives `record_failure` through the real product

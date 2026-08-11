@@ -62,10 +62,10 @@ impl SuggestionsStore {
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> Result<Option<SuggestionsDoc>, SuggestionsStoreError> {
-        Ok(self
-            .read_versioned(tenant_id, user_id)
-            .await?
-            .map(|(doc, _)| doc))
+        Ok(match self.read_versioned(tenant_id, user_id).await? {
+            ReadOutcome::Current(doc, _) => Some(doc),
+            ReadOutcome::Absent | ReadOutcome::Incompatible(_) => None,
+        })
     }
 
     /// Attempt to claim `active_job` for a new generation run. Fails closed
@@ -83,10 +83,7 @@ impl SuggestionsStore {
     ) -> Result<ClaimOutcome, SuggestionsStoreError> {
         let path = doc_path(tenant_id, user_id)?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (doc, cas) = match self.read_versioned(tenant_id, user_id).await? {
-                Some((doc, version)) => (doc, CasExpectation::Version(version)),
-                None => (SuggestionsDoc::empty(), CasExpectation::Absent),
-            };
+            let (doc, cas) = read_outcome_for_write(self.read_versioned(tenant_id, user_id).await?);
             if let Some(active_job) = &doc.active_job {
                 return Ok(ClaimOutcome::AlreadyClaimed {
                     job_id: active_job.job_id,
@@ -193,18 +190,18 @@ impl SuggestionsStore {
     ) -> Result<(), SuggestionsStoreError> {
         let path = doc_path(tenant_id, user_id)?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (doc, cas) = match self.read_versioned(tenant_id, user_id).await? {
-                Some((doc, version)) => (doc, CasExpectation::Version(version)),
-                None => (SuggestionsDoc::empty(), CasExpectation::Absent),
-            };
-            let superseded = doc
+            let (doc, cas) = read_outcome_for_write(self.read_versioned(tenant_id, user_id).await?);
+            let matches_active_job = doc
                 .active_job
                 .as_ref()
-                .is_some_and(|active| active.job_id != job_id);
-            if superseded {
-                // A newer claim already replaced this job's slot; recording
-                // this outcome would clobber it. Silently drop — the newer
-                // run's own outcome is authoritative.
+                .is_some_and(|active| active.job_id == job_id);
+            if !matches_active_job {
+                // Either a newer claim already replaced this job's slot, or
+                // the slot was already cleared (this outcome is a late
+                // duplicate of one already applied) — recording it now would
+                // clobber unrelated state. Silently drop; the authoritative
+                // writer for the current slot (if any) is responsible for
+                // its own outcome.
                 return Ok(());
             }
             let mut next = doc;
@@ -228,10 +225,10 @@ impl SuggestionsStore {
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
-    ) -> Result<Option<(SuggestionsDoc, RecordVersion)>, SuggestionsStoreError> {
+    ) -> Result<ReadOutcome, SuggestionsStoreError> {
         let path = doc_path(tenant_id, user_id)?;
         let Some(entry) = self.filesystem.get(&path).await? else {
-            return Ok(None);
+            return Ok(ReadOutcome::Absent);
         };
         let doc: SuggestionsDoc = serde_json::from_slice(&entry.entry.body).map_err(|error| {
             SuggestionsStoreError::Corrupt {
@@ -240,10 +237,13 @@ impl SuggestionsStore {
         })?;
         if doc.schema_version != super::types::SUGGESTIONS_SCHEMA_VERSION {
             // Wrong schema version reads as absent (spec §4) — the caller
-            // regenerates rather than migrating.
-            return Ok(None);
+            // regenerates rather than migrating — but the path DOES exist,
+            // so its `RecordVersion` must be preserved for the write side:
+            // a mutation CAS-ing against `Absent` here would conflict
+            // forever against the still-present incompatible document.
+            return Ok(ReadOutcome::Incompatible(entry.version));
         }
-        Ok(Some((doc, entry.version)))
+        Ok(ReadOutcome::Current(doc, entry.version))
     }
 
     async fn write_doc(
@@ -257,6 +257,30 @@ impl SuggestionsStore {
         })?;
         self.filesystem.put(path, Entry::bytes(body), cas).await?;
         Ok(())
+    }
+}
+
+/// Result of a version-tracked doc read, distinguishing "nothing at this
+/// path" from "something exists but this store can't interpret it as the
+/// current schema" — the two cases read alike to callers (both derive an
+/// empty doc) but must CAS differently on write: an `Incompatible` document
+/// still occupies the path, so overwriting it must expect its `RecordVersion`,
+/// not `Absent`.
+enum ReadOutcome {
+    Absent,
+    Incompatible(RecordVersion),
+    Current(SuggestionsDoc, RecordVersion),
+}
+
+/// Resolves a [`ReadOutcome`] into the `(doc, CasExpectation)` pair every
+/// read-modify-write loop in this store needs: a working (possibly empty)
+/// doc to mutate, and the CAS expectation that correctly targets whatever is
+/// actually at the path today.
+fn read_outcome_for_write(outcome: ReadOutcome) -> (SuggestionsDoc, CasExpectation) {
+    match outcome {
+        ReadOutcome::Current(doc, version) => (doc, CasExpectation::Version(version)),
+        ReadOutcome::Incompatible(version) => (SuggestionsDoc::empty(), CasExpectation::Version(version)),
+        ReadOutcome::Absent => (SuggestionsDoc::empty(), CasExpectation::Absent),
     }
 }
 
