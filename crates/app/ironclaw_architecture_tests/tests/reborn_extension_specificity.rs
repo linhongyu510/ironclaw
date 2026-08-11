@@ -1275,10 +1275,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
         "slack",
     ),
-    (
-        "crates/ironclaw_turn_runner/src/loop_driver_host.rs",
-        "slack",
-    ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
     (
         "crates/ironclaw_loop_host/src/tool_disclosure.rs",
@@ -1693,7 +1689,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// hook instead of naming one concrete extension. The stale `slack` exception
 /// was removed after the specificity scan proved the production file no
 /// longer contains that vendor term.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 118;
+// 118 -> 117 (2026-08-09, ephemeral-per-ping remodel): the
+// `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
+// forwarding it described was reworked, so its now-stale allowlist entry was
+// deleted — the ratchet only ever shrinks.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

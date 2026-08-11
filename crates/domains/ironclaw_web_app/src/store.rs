@@ -275,10 +275,12 @@ mod tests {
             |scope: &ResourceScope| {
                 use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
                 use ironclaw_host_api::path::{MountAlias, VirtualPath};
+                // Mirrors composition's persisted `/web-push` per-user
+                // alias (pre-rename spelling kept — see SUBSCRIPTIONS_DOCUMENT).
                 MountView::new(vec![MountGrant::new(
-                    MountAlias::new("/web-app")?,
+                    MountAlias::new("/web-push")?,
                     VirtualPath::new(format!(
-                        "/tenants/{}/users/{}/web-app",
+                        "/tenants/{}/users/{}/web-push",
                         scope.tenant_id, scope.user_id
                     ))?,
                     MountPermissions::read_write_list_delete(),

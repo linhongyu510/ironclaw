@@ -6611,6 +6611,9 @@ fn session_inbound_request(
         message,
         classification: None,
         requested_model,
+        // Session transports fetch no vendor-side history; the field exists
+        // for shared-channel webhook triggers.
+        channel_context: None,
     })
 }
 

@@ -33,7 +33,12 @@ const PAD_DELIMITER_BYTES: usize = 1;
 pub const MAX_PLAINTEXT_BYTES: usize =
     MAX_ENCRYPTED_BODY_BYTES - HEADER_BYTES - TAG_BYTES - PAD_DELIMITER_BYTES;
 
-const KEY_INFO_PREFIX: &[u8] = b"WebApp: info\0";
+// PROTOCOL-FIXED (RFC 8291 §3.3/§3.4): the CEK/nonce key-derivation info
+// string is the literal `WebPush: info` regardless of what the channel is
+// named — changing it breaks decryption at every push service. Pinned by the
+// Appendix A test-vector test below and allowlisted in the web-push
+// vocabulary-retirement gate.
+const KEY_INFO_PREFIX: &[u8] = b"WebPush: info\0";
 const CEK_INFO: &[u8] = b"Content-Encoding: aes128gcm\0";
 const NONCE_INFO: &[u8] = b"Content-Encoding: nonce\0";
 
@@ -141,7 +146,7 @@ fn derive_cek_and_nonce(
     as_public: &[u8],
     salt: &[u8; 16],
 ) -> Result<([u8; 16], [u8; 12]), WebAppError> {
-    // IKM = HKDF(salt=auth_secret, ikm=ecdh_secret, info="WebApp: info\0" || ua_public || as_public, 32)
+    // IKM = HKDF(salt=auth_secret, ikm=ecdh_secret, info="WebPush: info\0" || ua_public || as_public, 32)
     let mut ikm = [0u8; 32];
     hkdf_expand(
         auth_secret,

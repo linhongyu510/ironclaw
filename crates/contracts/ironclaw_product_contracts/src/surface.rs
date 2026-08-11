@@ -73,6 +73,11 @@ pub struct ChannelInboundSurfaceRequest {
     /// Caller-requested model hint for session/API transports. `None` for
     /// channels that don't select a model.
     pub requested_model: Option<String>,
+    /// Recent vendor-side conversation history fetched host-side at ingress
+    /// (through the channel's restricted egress) for shared-channel triggers.
+    /// UNTRUSTED third-party text, advisory only: `None` whenever the channel
+    /// has no such capability or the fetch degraded.
+    pub channel_context: Option<String>,
 }
 
 /// Durable channel admission evidence returned by product workflow.

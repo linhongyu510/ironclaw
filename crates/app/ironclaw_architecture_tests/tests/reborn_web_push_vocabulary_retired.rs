@@ -59,6 +59,12 @@ const SANCTIONED_PATHS: &[(&str, &[&str])] = &[
         "crates/domains/ironclaw_web_app/src/store.rs",
         &["web-push"],
     ),
+    // RFC 8291's key-derivation info string is the protocol-fixed literal
+    // `WebPush: info` — not a channel name; changing it breaks decryption.
+    (
+        "crates/domains/ironclaw_web_app/src/crypto.rs",
+        &["WebPush"],
+    ),
     // The per-user mount alias the enrollment documents physically live
     // under — it resolves to a physical subpath, so it keeps its spelling.
     ("crates/app/ironclaw_composition/src/lib.rs", &["web-push"]),

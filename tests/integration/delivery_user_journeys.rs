@@ -562,6 +562,10 @@ fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
             config: &[],
             body: body.as_bytes(),
             headers: &[],
+            // Slack's manifest `presentation.can_reply_in_threads` (#7377
+            // made the flag load-bearing); a DM body is unaffected either
+            // way, but the value must mirror the shipped manifest.
+            can_reply_in_threads: true,
         })
         .expect("the slack DM body must parse through the real adapter");
     let InboundOutcome::Messages(messages) = outcome else {
@@ -1346,6 +1350,8 @@ fn background_run_notifier(
             max_wait: Duration::from_secs(10),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("non-zero"),
             max_pending_deliveries: std::num::NonZeroUsize::new(8).expect("non-zero"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         services
             .triggered_run_delivery_store_for_test()
@@ -2021,6 +2027,8 @@ fn web_app_background_run_notifier(
             max_wait: Duration::from_secs(10),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("non-zero"),
             max_pending_deliveries: std::num::NonZeroUsize::new(8).expect("non-zero"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         services
             .triggered_run_delivery_store_for_test()
