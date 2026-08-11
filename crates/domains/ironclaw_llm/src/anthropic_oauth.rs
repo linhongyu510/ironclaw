@@ -134,7 +134,9 @@ pub(crate) struct AnthropicProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
-    cache_retention: CacheRetention,
+    /// Anthropic prompt-cache retention; drives the explicit `cache_control`
+    /// breakpoints (system prompt, last tool, last message block). See #6984.
+    cache_retention: crate::config::CacheRetention,
 }
 
 impl AnthropicProvider {
@@ -168,6 +170,9 @@ impl AnthropicProvider {
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
 
+        let cache_retention =
+            crate::rig_adapter::effective_cache_retention(config.cache_retention, &config.model);
+
         Ok(Self {
             client,
             streaming_client,
@@ -178,7 +183,7 @@ impl AnthropicProvider {
             base_url,
             active_model,
             unsupported_params,
-            cache_retention: config.cache_retention,
+            cache_retention,
         })
     }
 
@@ -199,6 +204,8 @@ impl AnthropicProvider {
             &config.base_url,
             crate::config::hardened_streaming_client_builder(),
         )?;
+        let cache_retention =
+            crate::rig_adapter::effective_cache_retention(config.cache_retention, &config.model);
         Ok(Self {
             client,
             streaming_client,
@@ -209,7 +216,7 @@ impl AnthropicProvider {
             base_url: (!config.base_url.is_empty()).then(|| config.base_url.clone()),
             active_model: std::sync::RwLock::new(config.model.clone()),
             unsupported_params: config.unsupported_params.iter().cloned().collect(),
-            cache_retention: config.cache_retention,
+            cache_retention,
         })
     }
 
@@ -303,14 +310,6 @@ impl AnthropicProvider {
 
     fn uses_oauth(&self) -> bool {
         matches!(self.auth, AnthropicAuth::OAuth(_))
-    }
-
-    fn cache_control(&self) -> Option<serde_json::Value> {
-        match self.cache_retention {
-            CacheRetention::None => None,
-            CacheRetention::Short => Some(serde_json::json!({ "type": "ephemeral" })),
-            CacheRetention::Long => Some(serde_json::json!({ "type": "ephemeral", "ttl": "1h" })),
-        }
     }
 
     async fn send_request<R: for<'de> Deserialize<'de>>(
@@ -607,18 +606,19 @@ impl LlmProvider for AnthropicProvider {
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             stream: false,
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
-            cache_control: self.cache_control(),
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -652,18 +652,20 @@ impl LlmProvider for AnthropicProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             stream: true,
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
-            cache_control: self.cache_control(),
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
+
         let response = self.send_streaming_request(&request, sink).await?;
         Ok(CompletionResponse {
             content: response.content,
@@ -698,7 +700,7 @@ impl LlmProvider for AnthropicProvider {
         let has_tools = !tools.is_empty();
         let opt_tools = if has_tools { Some(tools) } else { None };
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             stream: false,
             thinking: if has_tools {
                 None
@@ -707,13 +709,14 @@ impl LlmProvider for AnthropicProvider {
             },
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: opt_tools,
             tool_choice,
-            cache_control: self.cache_control(),
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -759,7 +762,7 @@ impl LlmProvider for AnthropicProvider {
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let has_tools = !tools.is_empty();
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             stream: true,
             thinking: if has_tools {
                 None
@@ -768,13 +771,15 @@ impl LlmProvider for AnthropicProvider {
             },
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: has_tools.then_some(tools),
             tool_choice,
-            cache_control: self.cache_control(),
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
+
         let response = self.send_streaming_request(&request, sink).await?;
         let has_tool_calls = !response.tool_calls.is_empty();
         Ok(ToolCompletionResponse {
@@ -892,7 +897,7 @@ struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<AnthropicSystem>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -902,14 +907,31 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
 struct AnthropicMessage {
     role: String,
     content: AnthropicContent,
+}
+
+/// Anthropic system prompt: a plain string (legacy wire shape, kept when
+/// caching is off) or content blocks so the last block can carry a
+/// `cache_control` breakpoint.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<AnthropicSystemBlock>),
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 /// Anthropic content can be a simple string or a list of content blocks.
@@ -924,20 +946,44 @@ enum AnthropicContent {
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "image")]
-    Image { source: AnthropicImageSource },
+    Image {
+        source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
         content: AnthropicToolResultContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
+}
+
+impl AnthropicContentBlock {
+    /// Stamp a `cache_control` breakpoint on this block.
+    fn set_cache_control(&mut self, marker: serde_json::Value) {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => *cache_control = Some(marker),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -970,6 +1016,8 @@ struct AnthropicTool {
     input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     defer_loading: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1262,6 +1310,7 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::ImageUrl { image_url } => {
                 let (media_type, data) = image_url.decode_data_url()?;
                 Some(AnthropicContentBlock::Image {
+                    cache_control: None,
                     source: AnthropicImageSource {
                         source_type: "base64",
                         media_type: media_type.to_string(),
@@ -1272,6 +1321,61 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::Text { .. } => None,
         })
         .collect()
+}
+
+/// Place the explicit Anthropic `cache_control` breakpoints (issue #6984):
+/// the system prompt, the last tool definition, and the last content block of
+/// the last message. Mirrors pi's placement so the tool/system prefix and the
+/// growing conversation each cache independently. All markers carry the same
+/// TTL, satisfying Anthropic's longer-TTL-first ordering rule. No-op when
+/// retention is `None`, preserving the legacy wire shape (plain-string
+/// system, no markers).
+fn apply_cache_breakpoints(
+    request: &mut AnthropicRequest,
+    retention: crate::config::CacheRetention,
+) {
+    let Some(marker) = retention.cache_control_json() else {
+        return;
+    };
+
+    // convert_messages only ever produces the string form, but restore any
+    // other value untouched rather than dropping it on the floor.
+    request.system = match request.system.take() {
+        Some(AnthropicSystem::Text(text)) => {
+            Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
+                block_type: "text",
+                text,
+                cache_control: Some(marker.clone()),
+            }]))
+        }
+        other => other,
+    };
+
+    if let Some(tools) = request.tools.as_mut()
+        && let Some(last) = tools.last_mut()
+    {
+        last.cache_control = Some(marker.clone());
+    }
+
+    if let Some(last_message) = request.messages.last_mut() {
+        match &mut last_message.content {
+            // Empty text blocks cannot carry cache_control (API rejects
+            // them), so an empty trailing message keeps the string form.
+            AnthropicContent::Text(text) if !text.is_empty() => {
+                last_message.content =
+                    AnthropicContent::Blocks(vec![AnthropicContentBlock::Text {
+                        text: std::mem::take(text),
+                        cache_control: Some(marker),
+                    }]);
+            }
+            AnthropicContent::Text(_) => {}
+            AnthropicContent::Blocks(blocks) => {
+                if let Some(last_block) = blocks.last_mut() {
+                    last_block.set_cache_control(marker);
+                }
+            }
+        }
+    }
 }
 
 fn convert_anthropic_tools(
@@ -1290,12 +1394,16 @@ fn convert_anthropic_tools(
             description: tool.description,
             input_schema: tool.parameters,
             defer_loading: false,
+            // Markers are applied per-request by `apply_cache_breakpoints`;
+            // the legacy shape carries none.
+            cache_control: None,
         })
         .chain(deferred_tools.into_iter().map(|tool| AnthropicTool {
             name: tool.name,
             description: tool.description,
             input_schema: tool.parameters,
             defer_loading: true,
+            cache_control: None,
         }))
         .collect()
 }
@@ -1360,7 +1468,10 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     image_blocks => {
                         let mut blocks = Vec::with_capacity(1 + image_blocks.len());
                         if !msg.content.is_empty() {
-                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: msg.content,
+                                cache_control: None,
+                            });
                         }
                         blocks.extend(image_blocks);
                         AnthropicContent::Blocks(blocks)
@@ -1376,13 +1487,17 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     // Assistant message with tool calls → content blocks
                     let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                     if !msg.content.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: msg.content,
+                            cache_control: None,
+                        });
                     }
                     for tc in tool_calls {
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id,
                             name: tc.name,
                             input: tc.arguments,
+                            cache_control: None,
                         });
                     }
                     anthropic_msgs.push(AnthropicMessage {
@@ -1411,6 +1526,7 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     vec![AnthropicContentBlock::ToolResult {
                         tool_use_id: tool_call_id,
                         content: AnthropicToolResultContent::Text(msg.content),
+                        cache_control: None,
                     }]
                 } else {
                     let blocks = msg
@@ -1421,10 +1537,14 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     let tool_result = AnthropicContentBlock::ToolResult {
                         tool_use_id: tool_call_id,
                         content: AnthropicToolResultContent::Blocks(blocks),
+                        cache_control: None,
                     };
                     let mut blocks = vec![tool_result];
                     if !msg.content.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: msg.content,
+                            cache_control: None,
+                        });
                     }
                     blocks
                 };
@@ -1539,766 +1659,7 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
     }
 }
 
+// The transport/cache-breakpoint test suite lives in its own file so this
+// one stays inside the file-size budget: `src/anthropic_oauth/tests.rs`.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_tool(name: &str) -> ToolDefinition {
-        ToolDefinition {
-            name: name.to_string(),
-            description: format!("{name} description"),
-            parameters: serde_json::json!({"type": "object"}),
-        }
-    }
-
-    #[test]
-    fn deferred_tool_wire_array_is_stable_after_promotion() {
-        let initial = convert_anthropic_tools(
-            vec![test_tool("tool_search")],
-            vec![test_tool("calendar_list")],
-        );
-        let promoted = convert_anthropic_tools(
-            vec![test_tool("tool_search"), test_tool("calendar_list")],
-            vec![test_tool("calendar_list")],
-        );
-
-        assert_eq!(
-            serde_json::to_value(initial).expect("initial tools"),
-            serde_json::to_value(promoted).expect("promoted tools"),
-            "promotion must not rewrite Anthropic's top-level tools array"
-        );
-        assert_eq!(
-            serde_json::to_value(convert_anthropic_tools(
-                vec![test_tool("tool_search")],
-                vec![test_tool("calendar_list")],
-            ))
-            .expect("tools")[1]["defer_loading"],
-            true
-        );
-        let encoded = serde_json::to_value(convert_anthropic_tools(
-            vec![test_tool("tool_search")],
-            vec![test_tool("calendar_list")],
-        ))
-        .expect("tools");
-        assert!(
-            encoded[0].get("defer_loading").is_none(),
-            "ordinary tools must omit defer_loading to keep the cached prefix byte-identical"
-        );
-    }
-
-    #[test]
-    fn parallel_tool_results_with_references_stay_in_one_user_message() {
-        // Anthropic requires the results of one assistant turn's parallel tool
-        // calls to sit in a single user message. A reference-carrying search
-        // result must merge with its sibling result instead of splitting the
-        // turn into consecutive user messages.
-        let messages = vec![
-            ChatMessage::tool_result("call-1", "tool_search", "matches")
-                .with_tool_references(vec!["calendar_list".to_string()]),
-            ChatMessage::tool_result("call-2", "calendar_list", "list"),
-        ];
-        let (_system, anthropic) = convert_messages(messages);
-        let value = serde_json::to_value(anthropic).expect("messages");
-
-        assert_eq!(
-            value.as_array().expect("user messages").len(),
-            1,
-            "both parallel results must land in a single user message: {value}"
-        );
-        assert_eq!(
-            value[0]["content"],
-            serde_json::json!([
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": [{
-                        "type": "tool_reference",
-                        "tool_name": "calendar_list"
-                    }]
-                },
-                {"type": "text", "text": "matches"},
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call-2",
-                    "content": "list"
-                }
-            ])
-        );
-    }
-
-    #[test]
-    fn deferred_tool_reference_to_unknown_tool_is_dropped() {
-        // A `tool_reference` naming a tool absent from `deferred_tools` is a
-        // request the API can reject, so the retain filter is load-bearing:
-        // the result must serialize with no tool_reference block.
-        let message = ChatMessage::tool_result("call-1", "tool_search", "matches")
-            .with_tool_references(vec!["revoked_tool".to_string()]);
-        let mut messages = vec![message];
-        retain_deferred_tool_references(&mut messages, &[test_tool("calendar_list")]);
-        let (_system, anthropic) = convert_messages(messages);
-        let value = serde_json::to_value(anthropic).expect("messages");
-
-        assert_eq!(
-            value[0]["content"],
-            serde_json::json!([{
-                "type": "tool_result",
-                "tool_use_id": "call-1",
-                "content": "matches"
-            }])
-        );
-    }
-
-    #[test]
-    fn beta_header_value_covers_auth_and_deferred_combinations() {
-        let oauth_config = || {
-            let mut config = RegistryProviderConfig::generic(
-                crate::registry::ProviderProtocol::Anthropic,
-                "anthropic_oauth",
-                None,
-                String::new(),
-                "claude-test",
-            );
-            config.oauth_token = Some(SecretString::from("test-token".to_string()));
-            config
-        };
-        let key_config = || {
-            RegistryProviderConfig::generic(
-                crate::registry::ProviderProtocol::Anthropic,
-                "anthropic_oauth",
-                Some(SecretString::from("test-key".to_string())),
-                String::new(),
-                "claude-test",
-            )
-        };
-        let request = |deferred: bool| AnthropicRequest {
-            stream: false,
-            model: "claude-test".to_string(),
-            messages: Vec::new(),
-            system: None,
-            max_tokens: 64,
-            temperature: None,
-            thinking: None,
-            tools: Some(vec![AnthropicTool {
-                name: "tool_search".to_string(),
-                description: "search".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-                defer_loading: deferred,
-            }]),
-            tool_choice: None,
-            cache_control: None,
-        };
-
-        let oauth = AnthropicProvider::new(&oauth_config()).expect("oauth provider");
-        let api_key =
-            AnthropicProvider::new_with_api_key(&key_config(), 60).expect("api-key provider");
-
-        assert_eq!(
-            oauth.beta_header_value(&request(true)).as_deref(),
-            Some("advanced-tool-use-2025-11-20,oauth-2025-04-20")
-        );
-        assert_eq!(
-            api_key.beta_header_value(&request(true)).as_deref(),
-            Some("advanced-tool-use-2025-11-20")
-        );
-        assert_eq!(
-            oauth.beta_header_value(&request(false)).as_deref(),
-            Some("oauth-2025-04-20")
-        );
-        assert_eq!(api_key.beta_header_value(&request(false)), None);
-    }
-
-    #[test]
-    fn deferred_tool_reference_is_isolated_from_result_text() {
-        let message = ChatMessage::tool_result("call-1", "tool_search", "matches")
-            .with_tool_references(vec!["calendar_list".to_string()]);
-        let (_system, messages) = convert_messages(vec![message]);
-        let value = serde_json::to_value(messages).expect("messages");
-
-        assert_eq!(
-            value[0]["content"],
-            serde_json::json!([
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": [{
-                        "type": "tool_reference",
-                        "tool_name": "calendar_list"
-                    }]
-                },
-                {"type": "text", "text": "matches"}
-            ])
-        );
-    }
-
-    #[test]
-    fn deferred_loading_is_limited_to_supported_anthropic_models() {
-        for model in [
-            "claude-sonnet-4-5-20250929",
-            "claude-opus-4-5-20251101",
-            "claude-opus-4-6",
-        ] {
-            assert!(supports_tool_references(model), "{model}");
-        }
-        for model in [
-            "claude-sonnet-4-20250514",
-            "claude-haiku-4-5-20251001",
-            "claude-3-7-sonnet-latest",
-        ] {
-            assert!(!supports_tool_references(model), "{model}");
-        }
-    }
-
-    #[test]
-    fn custom_base_url_accepts_host_root_or_v1_root() {
-        assert_eq!(
-            anthropic_v1_base_url("https://proxy.example"),
-            "https://proxy.example/v1"
-        );
-        assert_eq!(
-            anthropic_v1_base_url("https://proxy.example/v1/"),
-            "https://proxy.example/v1"
-        );
-    }
-
-    #[derive(Default)]
-    struct RecordingSink(std::sync::Mutex<Vec<String>>);
-
-    #[async_trait]
-    impl CompletionStreamSink for RecordingSink {
-        async fn text_delta(&self, delta: String) {
-            self.0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .push(delta);
-        }
-    }
-
-    #[tokio::test]
-    async fn anthropic_stream_emits_text_and_preserves_terminal_tools_and_usage() {
-        let sink = RecordingSink::default();
-        let mut response = AnthropicStreamingResponse::default();
-        ingest_anthropic_event(
-            &mut response,
-            "message_start",
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":3}}}"#,
-            &sink,
-        )
-        .await
-        .expect("message start");
-        ingest_anthropic_event(
-            &mut response,
-            "content_block_delta",
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}"#,
-            &sink,
-        )
-        .await
-        .expect("text delta");
-        assert_eq!(
-            sink.0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .as_slice(),
-            ["hello "]
-        );
-        assert!(!response.terminal, "text must arrive before completion");
-        ingest_anthropic_event(
-            &mut response,
-            "content_block_start",
-            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}"#,
-            &sink,
-        )
-        .await
-        .expect("tool start");
-        for partial_json in ["{\"city\":\"", "Istanbul\"}"] {
-            ingest_anthropic_event(
-                &mut response,
-                "content_block_delta",
-                &format!(
-                    r#"{{"type":"content_block_delta","index":1,"delta":{{"type":"input_json_delta","partial_json":{}}}}}"#,
-                    serde_json::to_string(partial_json).expect("partial JSON string")
-                ),
-                &sink,
-            )
-            .await
-            .expect("tool delta");
-        }
-        ingest_anthropic_event(
-            &mut response,
-            "message_delta",
-            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
-            &sink,
-        )
-        .await
-        .expect("terminal delta");
-        let response = response.finish().expect("complete stream");
-        assert_eq!(response.content, "hello ");
-        assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
-        assert_eq!(response.usage.input_tokens, 11);
-        assert_eq!(response.usage.output_tokens, 7);
-        assert_eq!(response.usage.cache_read_input_tokens, 3);
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "weather");
-        assert_eq!(
-            response.tool_calls[0].arguments,
-            serde_json::json!({"city":"Istanbul"})
-        );
-    }
-
-    #[test]
-    fn anthropic_stream_rejects_tool_state_missing_id_or_name() {
-        for (id, name) in [("", "weather"), ("call-1", "")] {
-            let mut response = AnthropicStreamingResponse::default();
-            response.tool_call_parts.insert(
-                0,
-                AnthropicStreamingToolCall {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    input_json: "{}".to_string(),
-                },
-            );
-
-            assert!(matches!(
-                response.finish(),
-                Err(LlmError::InvalidResponse { provider, reason })
-                    if provider == "anthropic_oauth"
-                        && reason == "streamed tool_use block is missing its id or name"
-            ));
-        }
-    }
-
-    #[test]
-    fn anthropic_stream_rejects_malformed_accumulated_tool_arguments() {
-        let mut response = AnthropicStreamingResponse::default();
-        response.tool_call_parts.insert(
-            0,
-            AnthropicStreamingToolCall {
-                id: "call-1".to_string(),
-                name: "weather".to_string(),
-                input_json: r#"{"city":"Istanbul""#.to_string(),
-            },
-        );
-
-        match response.finish() {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
-                assert_eq!(provider, "anthropic_oauth");
-                assert!(reason.starts_with("streamed tool arguments are invalid JSON: "));
-            }
-            other => panic!("expected invalid streamed tool arguments, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn complete_preserves_missing_retry_after_on_headerless_502() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("loopback address")
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 4096];
-            let _ = socket.read(&mut request).await.expect("read request");
-            let body = r#"{"error":{"message":"upstream unavailable"}}"#;
-            let response = format!(
-                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write error response");
-        });
-
-        let mut config = RegistryProviderConfig::generic(
-            crate::registry::ProviderProtocol::Anthropic,
-            "anthropic_oauth",
-            None,
-            base_url,
-            "claude-test",
-        );
-        config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicProvider::new(&config).expect("provider");
-        let error = provider
-            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
-            .await
-            .expect_err("scripted provider error");
-        server.await.expect("loopback server");
-
-        assert!(matches!(
-            error,
-            LlmError::BadGateway {
-                provider,
-                status: 502,
-                retry_after: None,
-            } if provider == "anthropic_oauth"
-        ));
-    }
-
-    #[tokio::test]
-    async fn list_models_loopback_projects_data_ids() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("loopback address")
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 4096];
-            let _ = socket.read(&mut request).await.expect("read request");
-            let request_line = String::from_utf8_lossy(&request);
-            assert!(
-                request_line.starts_with("GET /v1/models"),
-                "models discovery must target {{base}}/v1/models, got: {request_line}"
-            );
-            let body = r#"{"data":[{"id":"claude-sonnet-4-5"},{"id":"claude-opus-4-5"}]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write models response");
-        });
-
-        let mut config = RegistryProviderConfig::generic(
-            crate::registry::ProviderProtocol::Anthropic,
-            "anthropic_oauth",
-            None,
-            base_url,
-            "claude-test",
-        );
-        config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicProvider::new(&config).expect("provider");
-        let models = provider.list_models().await.expect("list models");
-        server.await.expect("loopback server");
-
-        assert_eq!(
-            models,
-            vec![
-                "claude-sonnet-4-5".to_string(),
-                "claude-opus-4-5".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_streaming_rejects_eof_without_terminal_event() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("loopback address")
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 4096];
-            let _ = socket.read(&mut request).await.expect("read request");
-            let body = concat!(
-                "event: message_start\n",
-                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
-                "event: content_block_delta\n",
-                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                 content-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write streaming response");
-        });
-
-        let mut config = RegistryProviderConfig::generic(
-            crate::registry::ProviderProtocol::Anthropic,
-            "anthropic_oauth",
-            None,
-            base_url,
-            "claude-test",
-        );
-        config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicProvider::new(&config).expect("provider");
-        let sink = Arc::new(RecordingSink::default());
-        let error = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("hello")]),
-                sink.clone(),
-            )
-            .await
-            .expect_err("unterminated stream must fail");
-        server.await.expect("loopback server");
-
-        assert!(matches!(
-            error,
-            LlmError::StreamInterrupted { provider, reason }
-                if provider == "anthropic_oauth"
-                    && reason == "stream ended before message_stop or a stop reason"
-        ));
-        assert_eq!(
-            sink.0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .as_slice(),
-            ["partial"]
-        );
-    }
-
-    #[test]
-    fn context_overflow_413_maps_to_context_length_exceeded() {
-        // A raw HTTP 413 (payload too large) must become ContextLengthExceeded
-        // so the loop's context-shrink recovery fires.
-        match context_length_error_for_status(413, "Request Entity Too Large") {
-            Some(LlmError::ContextLengthExceeded { .. }) => {}
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn context_overflow_400_body_maps_to_context_length_exceeded() {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 234872 tokens > 200000 maximum"}}"#;
-        match context_length_error_for_status(400, body) {
-            Some(LlmError::ContextLengthExceeded { used, limit }) => {
-                assert_eq!(used, 234872);
-                assert_eq!(limit, 200000);
-            }
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unrelated_400_is_not_context_overflow() {
-        // A plain bad-request (e.g. invalid request shape) must NOT be
-        // classified as context overflow — the caller falls through to
-        // RequestFailed.
-        assert!(
-            context_length_error_for_status(400, r#"{"error":{"message":"invalid request body"}}"#)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn unrelated_5xx_is_not_context_overflow() {
-        assert!(context_length_error_for_status(503, "service unavailable").is_none());
-    }
-
-    #[test]
-    fn test_convert_messages_extracts_system() {
-        let messages = vec![
-            ChatMessage::system("You are helpful."),
-            ChatMessage::user("Hello"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert_eq!(system, Some("You are helpful.".to_string()));
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "user");
-    }
-
-    #[test]
-    fn test_convert_messages_multiple_systems() {
-        let messages = vec![
-            ChatMessage::system("System 1"),
-            ChatMessage::system("System 2"),
-            ChatMessage::user("Hello"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert_eq!(system, Some("System 1\n\nSystem 2".to_string()));
-        assert_eq!(msgs.len(), 1);
-    }
-
-    #[test]
-    fn test_convert_messages_user_image_becomes_base64_image_block() {
-        let messages = vec![ChatMessage::user_with_parts(
-            "what is this?",
-            vec![ContentPart::ImageUrl {
-                image_url: crate::provider::ImageUrl {
-                    url: "data:image/png;base64,AQIDBA==".to_string(),
-                    detail: None,
-                },
-            }],
-        )];
-        let (_system, msgs) = convert_messages(messages);
-        assert_eq!(msgs.len(), 1);
-        // Text rides as the first block, the image as a base64 `image` block.
-        let value = serde_json::to_value(&msgs[0]).expect("serialize");
-        let blocks = value["content"].as_array().expect("content blocks");
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[0]["text"], "what is this?");
-        assert_eq!(blocks[1]["type"], "image");
-        assert_eq!(blocks[1]["source"]["type"], "base64");
-        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
-        assert_eq!(blocks[1]["source"]["data"], "AQIDBA==");
-    }
-
-    #[test]
-    fn test_convert_messages_text_only_user_stays_a_string() {
-        let messages = vec![ChatMessage::user("just text")];
-        let (_system, msgs) = convert_messages(messages);
-        let value = serde_json::to_value(&msgs[0]).expect("serialize");
-        // No inline images → compact string content, not a blocks array.
-        assert_eq!(value["content"], "just text");
-    }
-
-    #[test]
-    fn test_convert_messages_tool_calls() {
-        let tool_calls = vec![ToolCall {
-            id: "call_1".to_string(),
-            name: "search".to_string(),
-            arguments: serde_json::json!({"q": "test"}),
-            reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
-        }];
-        let messages = vec![
-            ChatMessage::user("Search for test"),
-            ChatMessage::assistant_with_tool_calls(Some("Let me search.".to_string()), tool_calls),
-            ChatMessage::tool_result("call_1", "search", "found it"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert!(system.is_none());
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[1].role, "assistant");
-        // Tool result should be a user message
-        assert_eq!(msgs[2].role, "user");
-    }
-
-    #[test]
-    fn test_extract_response_text_only() {
-        let response = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text {
-                text: "Hello!".to_string(),
-            }],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Hello!".to_string()));
-        assert!(extracted.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn test_extract_response_with_tool_use() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Text {
-                    text: "Let me search.".to_string(),
-                },
-                AnthropicResponseBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "search".to_string(),
-                    input: serde_json::json!({"q": "test"}),
-                },
-            ],
-            stop_reason: Some("tool_use".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Let me search.".to_string()));
-        assert_eq!(extracted.tool_calls.len(), 1);
-        assert_eq!(extracted.tool_calls[0].name, "search");
-    }
-
-    #[test]
-    fn test_extract_response_preserves_thinking_as_reasoning() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Thinking {
-                    thinking: Some("Raw thinking".to_string()),
-                    summary: Some("Summarized thinking".to_string()),
-                    _signature: Some("sig".to_string()),
-                },
-                AnthropicResponseBlock::Text {
-                    text: "Done.".to_string(),
-                },
-            ],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Done.".to_string()));
-        assert_eq!(extracted.reasoning, Some("Summarized thinking".to_string()));
-    }
-
-    #[test]
-    fn test_extract_response_uses_thinking_when_summary_absent() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Thinking {
-                    thinking: Some("Raw thinking fallback".to_string()),
-                    summary: None,
-                    _signature: Some("sig".to_string()),
-                },
-                AnthropicResponseBlock::Text {
-                    text: "Done.".to_string(),
-                },
-            ],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-
-        let extracted = extract_response_content(&response);
-
-        assert_eq!(extracted.content, Some("Done.".to_string()));
-        assert_eq!(
-            extracted.reasoning,
-            Some("Raw thinking fallback".to_string())
-        );
-    }
-
-    /// Regression test for #1136: token field must be mutable via RwLock
-    /// so that a refreshed token persists across subsequent requests.
-    #[test]
-    fn test_token_update_persists() {
-        let original = SecretString::from("old_token".to_string());
-        let token = std::sync::RwLock::new(original);
-
-        // Read the original
-        assert_eq!(token.read().unwrap().expose_secret(), "old_token");
-
-        // Simulate a successful refresh
-        let refreshed = SecretString::from("new_token".to_string());
-        *token.write().unwrap() = refreshed;
-
-        // Subsequent reads see the updated token
-        assert_eq!(token.read().unwrap().expose_secret(), "new_token");
-    }
-}
+mod tests;

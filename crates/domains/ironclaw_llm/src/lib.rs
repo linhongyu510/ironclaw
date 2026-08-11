@@ -2167,4 +2167,31 @@ mod tests {
              forwarding `request_timeout_secs` to `provider_http_client`.",
         );
     }
+
+    /// Construction-path coverage for the Anthropic cache wiring (#6984):
+    /// every retention mode builds the rig provider, including the
+    /// unsupported-model downgrade that disables rig's typed breakpoints.
+    #[test]
+    fn anthropic_registry_provider_builds_for_every_cache_retention() {
+        use crate::config::CacheRetention;
+
+        for (model, retention) in [
+            ("claude-opus-4-6", CacheRetention::Short),
+            ("claude-opus-4-6", CacheRetention::Long),
+            ("claude-opus-4-6", CacheRetention::None),
+            ("claude-2.1", CacheRetention::Short),
+        ] {
+            let mut config = RegistryProviderConfig::generic(
+                crate::registry::ProviderProtocol::Anthropic,
+                "anthropic",
+                Some(secrecy::SecretString::from("sk-test".to_string())),
+                "http://127.0.0.1:9",
+                model,
+            );
+            config.cache_retention = retention;
+            let provider = create_anthropic_from_registry(&config, 5)
+                .expect("anthropic provider construction");
+            assert_eq!(provider.model_name(), model);
+        }
+    }
 }
