@@ -145,11 +145,11 @@ struct StoredSession {
 /// Verify that the configured master key authenticates existing encrypted
 /// durable state without returning any plaintext to the caller.
 ///
-/// One authenticated ciphertext is sufficient because every secret and
-/// credential record derives from the same installation master key. An empty
+/// Every reconstructable ciphertext is authenticated before cutover. An empty
 /// store has no prior ciphertext against which a key can be checked. The scan
-/// is bounded and fails closed if the first encrypted record cannot be found
-/// within the supported installation-size envelope.
+/// is bounded, and fails closed when it encounters credential-session
+/// ciphertext because the session AAD identity is intentionally encrypted and
+/// cannot be reconstructed from the durable record locator.
 pub async fn verify_existing_encrypted_records<F>(
     filesystem: &F,
     crypto: &SecretsCrypto,
@@ -160,6 +160,7 @@ where
     let tenants_root = VirtualPath::new("/tenants").map_err(host_api_to_secret_store_error)?;
     let mut offset = 0_u64;
     let mut saw_unverifiable_session = false;
+    let mut record_verification_error = None;
     loop {
         if offset >= MASTER_KEY_VERIFICATION_RECORD_LIMIT {
             return Err(SecretStoreError::StoreUnavailable {
@@ -177,33 +178,49 @@ where
         for versioned in entries {
             match versioned.entry.kind.as_ref().map(RecordKind::as_str) {
                 Some(SECRET_RECORD_KIND) => {
-                    let stored: StoredSecret = deserialize_secret(&versioned.entry.body)?;
+                    let stored: StoredSecret = match deserialize_secret(&versioned.entry.body) {
+                        Ok(stored) => stored,
+                        Err(error) => {
+                            record_verification_error.get_or_insert(error);
+                            continue;
+                        }
+                    };
                     let aad = filesystem_secret_aad(&stored.scope, &stored.handle);
-                    let _ = crypto
+                    if let Err(error) = crypto
                         .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
-                        .map_err(secret_error_to_store_error)?;
-                    return Ok(());
+                        .map_err(secret_error_to_store_error)
+                    {
+                        record_verification_error.get_or_insert(error);
+                    }
                 }
                 Some(CREDENTIAL_ACCOUNT_KIND) => {
-                    let stored: StoredAccount = deserialize_credential(&versioned.entry.body)
+                    let stored: StoredAccount = match deserialize_credential(&versioned.entry.body)
                         .map_err(|error| SecretStoreError::StoreUnavailable {
                             reason: format!(
                                 "failed to inspect encrypted credential record: {error}"
                             ),
-                        })?;
+                        }) {
+                        Ok(stored) => stored,
+                        Err(error) => {
+                            record_verification_error.get_or_insert(error);
+                            continue;
+                        }
+                    };
                     let aad = credential_account_aad(&stored.scope, &stored.id);
-                    let _ = crypto
+                    if let Err(error) = crypto
                         .decrypt(&stored.encrypted_payload, &stored.key_salt, &aad)
-                        .map_err(secret_error_to_store_error)?;
-                    return Ok(());
+                        .map_err(secret_error_to_store_error)
+                    {
+                        record_verification_error.get_or_insert(error);
+                    }
                 }
                 Some(CREDENTIAL_SESSION_KIND) => {
                     // Session AAD includes invocation/mission/thread identity
                     // that is intentionally encrypted inside the payload and
                     // cannot be reconstructed from the storage path. Keep
-                    // scanning for a durable secret/account verifier; if none
-                    // exists, fail closed rather than accepting an unchecked
-                    // master key or exposing those identifiers in plaintext.
+                    // scanning so every reconstructable record is checked,
+                    // then fail closed with a generic error that exposes none
+                    // of those identifiers.
                     saw_unverifiable_session = true;
                 }
                 _ => {}
@@ -212,9 +229,12 @@ where
         if entry_count < limit as usize {
             if saw_unverifiable_session {
                 return Err(SecretStoreError::StoreUnavailable {
-                    reason: "credential-session ciphertext exists without a durable secret or credential-account record that can authenticate the configured master key; refusing storage cutover"
+                    reason: "credential-session ciphertext cannot be fully authenticated from its durable record locator; refusing storage cutover"
                         .to_string(),
                 });
+            }
+            if let Some(error) = record_verification_error {
+                return Err(error);
             }
             return Ok(());
         }
@@ -1646,6 +1666,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypted_record_verification_checks_every_secret_record() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        let store = SecretStore::new(Arc::clone(&scoped), test_crypto());
+        let scope = sample_scope("test", "test");
+        store
+            .put(
+                scope.clone(),
+                SecretHandle::new("a-valid").expect("secret handle"),
+                SecretMaterial::from("valid".to_string()),
+                None,
+            )
+            .await
+            .expect("seed valid encrypted record");
+        let wrong_crypto = Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "fedcba9876543210fedcba9876543210".to_string(),
+            ))
+            .expect("different valid master key"),
+        );
+        let wrong_key_store = SecretStore::new(scoped, wrong_crypto);
+        wrong_key_store
+            .put(
+                scope,
+                SecretHandle::new("z-invalid").expect("secret handle"),
+                SecretMaterial::from("invalid".to_string()),
+                None,
+            )
+            .await
+            .expect("seed differently encrypted record");
+
+        verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect_err("every encrypted record must authenticate before cutover");
+    }
+
+    #[tokio::test]
+    async fn encrypted_record_verification_checks_every_credential_account_record() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        let scope = sample_scope("test", "test");
+        CredentialBroker::new(Arc::clone(&scoped), test_crypto())
+            .put_account(sample_account(
+                scope.clone(),
+                CredentialAccountId::new("a-valid").expect("account id"),
+                SecretHandle::new("provider-key").expect("secret handle"),
+            ))
+            .await
+            .expect("seed valid encrypted credential account");
+        let wrong_crypto = Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "fedcba9876543210fedcba9876543210".to_string(),
+            ))
+            .expect("different valid master key"),
+        );
+        CredentialBroker::new(scoped, wrong_crypto)
+            .put_account(sample_account(
+                scope,
+                CredentialAccountId::new("z-invalid").expect("account id"),
+                SecretHandle::new("provider-key").expect("secret handle"),
+            ))
+            .await
+            .expect("seed differently encrypted credential account");
+
+        verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
+            .await
+            .expect_err("every encrypted credential account must authenticate before cutover");
+    }
+
+    #[tokio::test]
     async fn empty_encrypted_store_accepts_a_valid_master_key() {
         let backend = Arc::new(InMemoryBackend::new());
 
@@ -1689,7 +1779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_only_encrypted_store_fails_closed_without_exposing_aad_metadata() {
+    async fn encrypted_session_fails_closed_without_exposing_aad_metadata() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = build_scoped_fs(
             Arc::clone(&backend),
@@ -1724,10 +1814,26 @@ mod tests {
             .await
             .expect("persist session");
 
+        SecretStore::new(
+            build_scoped_fs(
+                Arc::clone(&backend),
+                "/tenants/tenant-a/users/user-a/secrets",
+            ),
+            test_crypto(),
+        )
+        .put(
+            scope.clone(),
+            SecretHandle::new("verification-sentinel").expect("secret handle"),
+            SecretMaterial::from("encrypted-value".to_string()),
+            None,
+        )
+        .await
+        .expect("seed independently verifiable secret");
+
         let original_key_error =
             verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
                 .await
-                .expect_err("session-only state has no safely reconstructable AAD verifier");
+                .expect_err("session ciphertext has no safely reconstructable AAD verifier");
         assert!(
             original_key_error
                 .to_string()
@@ -1746,6 +1852,9 @@ mod tests {
         let wrong_key_rendered = error.to_string();
         for identifier in [
             session_correlation_id,
+            scope.tenant_id.to_string(),
+            scope.user_id.to_string(),
+            scope.project_id.as_ref().expect("project id").to_string(),
             scope.invocation_id.to_string(),
             scope.mission_id.as_ref().expect("mission id").to_string(),
             scope.thread_id.as_ref().expect("thread id").to_string(),
