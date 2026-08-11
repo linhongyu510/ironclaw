@@ -49,7 +49,15 @@ impl RenderSuggestionsHook for StoreBackedRenderSuggestionsHook {
         // the dispatch-stamped identity of the acting loop run (forwarded
         // from `FirstPartyCapabilityRequest::run_id`, not model-supplied),
         // so it is safe to trust as the caller's own run.
-        if let Some(run_id) = run_id {
+        {
+            // Fail closed: a call that cannot name its run cannot prove it owns
+            // the claim, so it must not record against it. The production
+            // dispatch always stamps `run_id` (verified by making this arm
+            // reject and watching the full suggestion-cards integration suite
+            // stay green), so this is a guard, not a live branch.
+            let Some(run_id) = run_id else {
+                return Err(RenderSuggestionsHookError::NoActiveJob);
+            };
             let calling_run_id = TurnRunId::from_uuid(run_id.as_uuid());
             if active_job.run_id != calling_run_id {
                 return Err(RenderSuggestionsHookError::NoActiveJob);
