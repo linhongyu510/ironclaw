@@ -52,7 +52,7 @@ const WS0_MEASURED_FROM: &str = "origin/main @ ae0989c37 (2026-07-30)";
 /// Composition mass, from `bash scripts/ci/check-composition-budget.sh --print`:
 /// "composition share: 6.58% (658 bp) — 43936 / 667978 LOC".
 ///
-/// The metric is production `.rs` LOC of `crates/ironclaw_composition/src`
+/// The metric is production `.rs` LOC of `crates/app/ironclaw_composition/src`
 /// over the same measure of every `crates/*/src` tree (test-only files excluded
 /// from both sides — see `scripts/ci/composition-budget.toml` for the full
 /// definition). CHECKLIST WS6 re-baselines the gate's ceiling once the eviction
@@ -115,7 +115,26 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// force.
 /// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
 /// repoint added one line in composition; recorded at the measured figure.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_419;
+/// ✎ Re-equalized 2026-08-05 (program closure): + 4 from #6831's standardized
+/// messaging framework, which landed through the queue's tolerance window;
+/// recorded at the measured figure with `[gate].loc_ceiling`/`loc_observed`.
+/// ✎ Re-recorded 40_423 → 40_692 on 2026-08-07 for #7157: the one-time
+/// stored-trigger delivery migration runs in boot sequencing, while the
+/// notification-channel capability split and delivery wiring preserve their
+/// mediated owners. Measured on the merged tree; the manifest ceiling and
+/// observed value move with this record so the increase is explicit.
+/// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
+/// delivery refactor with #7214's sandbox profile and binding assembly.
+/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
+/// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
+/// this ratchet fails when the two disagree.
+/// ✎ Union re-measured 41_509 → 41_582 on 2026-08-10 after merging main into
+/// implement-issue-6896-fix: #7131's run-failure settlement observer adds its
+/// production wiring and inline regression coverage to the current main tree.
+/// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
+/// manifest ceiling and observed value move with this record.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_582;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
