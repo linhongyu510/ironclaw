@@ -167,22 +167,20 @@ observed_date = "2026-08-07"
 # implement-issue-6896-fix: #7131's run-failure settlement observer adds its
 # production wiring and inline regression coverage to the current main tree.
 # Measured with --print; set to current rather than hidden in tolerance.
-#
-# Re-ratcheted 41582 -> 41811 on 2026-08-11 for #7038 (suggestion cards,
-# feat/suggestion-cards / PR #7498). The composition-owned pieces that
-# remain after moving the real behavior out (see arc_dyn note below) are
-# genuine assembly: `StoreBackedRenderSuggestionsHook` — the same
-# hook-injection shape `TriggerCreatorPairingHook`
-# (`factory/trigger_creation_assembly.rs`) already uses to let a kernel
-# tool reach a store above it — plus its construction/registration call
-# sites in `factory/production_backend_assembly.rs`, `product_surface.rs`,
-# and `runtime.rs`. The turn-finalizer behavior itself
-# (`SuggestionGenerationFinalizerSink`) was moved to `ironclaw_assistant`
-# (product layer, which already depends on both `ironclaw_turns` and
-# `ironclaw_suggestions` — no new dependency edge). Measured on this branch
-# with `bash scripts/ci/check-composition-budget.sh --print`. Set to
-# current, not padded.
-loc_ceiling = 41811
+# Re-seeded 41582 -> 41810 on 2026-08-11 for #7471's merged tree. The dedicated
+# process-journal PostgreSQL pool adds service-graph assembly needed to keep
+# lease heartbeats independent of data-plane saturation; concurrent mainline
+# composition growth consumed the prior tolerance before this branch merged.
+# Measured by the Fast deterministic checks gate on the GitHub merge commit and
+# recorded explicitly rather than weakening or bypassing the absolute bound.
+# Re-ratcheted 41810 -> 42098 on 2026-08-11 merging #7038 (suggestion cards,
+# PR #7498) with #7471's lease-expiry work: both branches re-ratcheted this
+# gate independently, so neither side's number describes the merged tree.
+# Re-measured on the merge with `bash scripts/ci/check-composition-budget.sh
+# --print`. #7038's composition-resident share is assembly only — the
+# `StoreBackedRenderSuggestionsHook` bridge plus its construction sites; the
+# turn-finalizer behavior lives in `ironclaw_assistant`.
+loc_ceiling = 42098
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -193,7 +191,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41811
+loc_observed = 42098
 loc_observed_date = "2026-08-11"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -230,25 +228,11 @@ loc_observed_date = "2026-08-11"
 # only wires). Observed on the batch branch: 831 (829 on main pre-batch + these
 # two); effective ceiling 816 + 15 tolerance = 831 — equal to the observed
 # count exactly, no slack.
-# 2026-08-11 #7038 (suggestion cards, feat/suggestion-cards / PR #7498):
-# 816 -> 820 for 4 new sites, all genuine dyn seams, none eliminated by
-# moving `SuggestionGenerationFinalizerSink`'s behavior to
-# `ironclaw_assistant` (the construction/cast sites live in composition
-# regardless of which crate defines the type being wrapped):
-#  - 2x `Arc::clone(&filesystem) as Arc<dyn RootFilesystem>` —
-#    the established backend-abstraction cast every `SuggestionsStore::new`
-#    call site uses (same pattern already at `runtime.rs:1018` and
-#    elsewhere); `RootFilesystem` has multiple production backends, so this
-#    is not new dispatch, just a new call site of an existing one.
-#  - 2x `Arc<dyn ironclaw_turns::TurnEventSink>` (a type annotation + the
-#    `RootFilesystem` cast inside the same construction) for
-#    `suggestion_generation_finalizer_sink` — a genuine multi-impl fan-out
-#    boundary, sibling to `TraceCaptureTurnEventSink` and
-#    `SkillLearningTurnEventSink` in the same `Vec<Arc<dyn TurnEventSink>>`
-#    (`runtime.rs`).
-# Observed on this branch: 835 (831 on main pre-branch + these 4); effective
-# ceiling 820 + 15 tolerance = 835 — equal to the observed count exactly, no
-# slack.
+# 2026-08-11 #7038 (PR #7498): 816 -> 820 for 4 construction-site casts, none
+# of them new dispatch — 2x `Arc<dyn RootFilesystem>` (multi-backend by design,
+# the same cast every `SuggestionsStore::new` site uses) and 2x for the
+# `TurnEventSink` fan-out the suggestion finalizer joins beside
+# `TraceCaptureTurnEventSink`. Observed on the merged tree: 835.
 arc_dyn_ceiling = 820
 arc_dyn_tolerance = 15
 arc_dyn_observed = 835
