@@ -66,6 +66,7 @@ mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
 mod steering;
+mod suggestion_generation_finalizer;
 mod suggestions_product_service;
 mod workflow;
 
@@ -182,6 +183,7 @@ pub use scoped_fs::{
     map_kind,
     mime_for_path,
 };
+pub use suggestion_generation_finalizer::SuggestionGenerationFinalizerSink;
 pub use suggestions_product_service::{
     RebornSuggestionsGenerateRequest, RebornSuggestionsProductService, RebornSuggestionsResponse,
 };

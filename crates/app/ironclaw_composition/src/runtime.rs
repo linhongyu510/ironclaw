@@ -3537,9 +3537,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // seam: it clears a suggestion-generation `active_job` the moment ITS
     // run goes terminal, so `RunLiveness::Terminal`/`Missing` in the product
     // service's crash-recovery pre-check is unambiguous — see
-    // `SuggestionGenerationFinalizerSink`'s doc comment in `suggestions.rs`.
+    // `SuggestionGenerationFinalizerSink`'s doc comment in
+    // `ironclaw_assistant` (product layer; real behavior, not assembly —
+    // this composition file only constructs and registers it).
     let suggestion_generation_finalizer_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
-        Arc::new(crate::suggestions::SuggestionGenerationFinalizerSink::new(
+        Arc::new(ironclaw_assistant::SuggestionGenerationFinalizerSink::new(
             ironclaw_suggestions::SuggestionsStore::new(Arc::clone(&services.extension_filesystem)
                 as Arc<dyn ironclaw_filesystem::RootFilesystem>),
         ));
