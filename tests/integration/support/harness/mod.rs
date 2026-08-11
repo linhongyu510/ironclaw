@@ -1891,10 +1891,13 @@ impl HostRuntimeCapabilityHarness {
         let activation_backed_providers: std::collections::HashSet<ExtensionId> =
             if let Some(services) = self.reborn_services.as_ref() {
                 // #6520 folded caller-scoping into the lifecycle facade the
-                // method reads through; provider trust decisions are
-                // tenant-level activation facts, so no per-run caller arg.
+                // Read through the same caller-filtered production surface used
+                // to derive grants and provider trust for this dispatch.
                 match services
-                    .standalone_active_extension_authority_for_test(&execution_extension)
+                    .standalone_active_extension_authority_for_test(
+                        &execution_extension,
+                        &dispatch_user,
+                    )
                     .await
                 {
                     Some(active_authority) => active_authority

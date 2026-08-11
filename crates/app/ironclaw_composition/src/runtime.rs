@@ -1413,6 +1413,7 @@ impl RebornRuntime {
     pub async fn standalone_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
+        caller: &UserId,
     ) -> Option<
         Result<
             crate::factory::ActiveExtensionAuthorityForTest,
@@ -1423,6 +1424,7 @@ impl RebornRuntime {
             crate::factory::active_extension_authority_for_test(
                 &self.extension_management,
                 grantee,
+                caller,
             )
             .await,
         )

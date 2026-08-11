@@ -2,14 +2,12 @@ use super::*;
 
 #[cfg(feature = "test-support")]
 use ironclaw_host_api::{
-    action::NetworkPolicy,
-    capability::{CapabilityGrant, EffectKind, GrantConstraints},
-    ids::{CapabilityGrantId, ExtensionId},
-    scope::Principal,
+    capability::CapabilityGrant,
+    ids::{ExtensionId, UserId},
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 #[cfg(feature = "test-support")]
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
 
 /// Harness-facing wiring for
 /// [`RebornRuntimeStores::start_channel_host_assembly_for_test`]: the test group
@@ -667,10 +665,11 @@ impl RebornRuntimeStores {
     pub(crate) async fn standalone_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
+        caller: &UserId,
     ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_assistant::ProductSurfaceFailure>>
     {
         let extension_management = &self.extension_management;
-        Some(active_extension_authority_for_test(extension_management, grantee).await)
+        Some(active_extension_authority_for_test(extension_management, grantee, caller).await)
     }
 }
 
@@ -684,86 +683,18 @@ pub struct ActiveExtensionAuthorityForTest {
 pub(crate) async fn active_extension_authority_for_test(
     extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
+    caller: &UserId,
 ) -> Result<ActiveExtensionAuthorityForTest, ironclaw_assistant::ProductSurfaceFailure> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;
-    let grants = active_capabilities
-        .iter()
-        .map(|capability| CapabilityGrant {
-            id: CapabilityGrantId::new(),
-            capability: capability.id.clone(),
-            grantee: Principal::Extension(grantee.clone()),
-            issued_by: Principal::HostRuntime,
-            constraints: active_extension_grant_constraints_for_test(capability),
-        })
-        .collect();
-    let mut effects_by_provider: std::collections::BTreeMap<ExtensionId, Vec<EffectKind>> =
-        std::collections::BTreeMap::new();
-    for capability in &active_capabilities {
-        let effects = effects_by_provider
-            .entry(capability.provider.clone())
-            .or_default();
-        for effect in &capability.effects {
-            if !effects.contains(effect) {
-                effects.push(*effect);
-            }
-        }
-    }
-    let provider_trust = effects_by_provider
-        .into_iter()
-        .map(|(provider, allowed_effects)| {
-            (
-                provider,
-                TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: AuthorityCeiling {
-                        allowed_effects,
-                        max_resource_ceiling: None,
-                    },
-                    provenance: TrustProvenance::AdminConfig,
-                    evaluated_at: chrono::Utc::now(),
-                },
-            )
-        })
-        .collect();
+    let surface = ironclaw_extension_host::capability_surface::ExtensionCapabilitySurface::from_active_capabilities(active_capabilities);
+    let grants = surface.grants(grantee, caller);
+    let provider_trust = surface.provider_trust(caller).into_iter().collect();
     Ok(ActiveExtensionAuthorityForTest {
         grants,
         provider_trust,
     })
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_grant_constraints_for_test(
-    capability: &ironclaw_extension_host::ActiveExtensionCapability,
-) -> GrantConstraints {
-    GrantConstraints {
-        allowed_effects: capability.effects.clone(),
-        mounts: MountView::default(),
-        network: active_extension_network_policy_for_test(capability),
-        secrets: {
-            let mut handles = Vec::new();
-            for credential in &capability.runtime_credentials {
-                if !handles.contains(&credential.handle) {
-                    handles.push(credential.handle.clone());
-                }
-            }
-            handles
-        },
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: None,
-    }
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_network_policy_for_test(
-    capability: &ironclaw_extension_host::ActiveExtensionCapability,
-) -> NetworkPolicy {
-    // Delegate to the production manifest-egress policy builder (gsuite +
-    // web-access declare their egress in their manifests now — no per-provider
-    // special-case, and no first-party dependency in this test-support seam).
-    ironclaw_extension_host::capability_surface::extension_network_policy(capability)
 }
 
 /// Bundle returned by [`RebornRuntimeStores::standalone_attachment_test_support_for_test`]
