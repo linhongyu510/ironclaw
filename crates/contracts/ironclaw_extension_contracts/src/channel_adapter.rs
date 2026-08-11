@@ -13,9 +13,11 @@
 //! protocol crates; the old metadata-carrying `ProductAdapter` is retired as
 //! its callers cut over (implementation.md §5).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
-use ironclaw_host_api::attachment::{InboundAttachment, WorkspaceFile};
+use ironclaw_host_api::attachment::WorkspaceFile;
 use serde::{Deserialize, Serialize};
 
 use crate::external::{
@@ -41,127 +43,61 @@ pub enum ProductTriggerReason {
     LinkedThreadAction,
 }
 
-/// A channel adapter: protocol behavior for one extension's channel surface.
+/// **Ingress** — how input arrives. Pairs with `[channel.ingress]`.
+///
+/// Absence of an implementation means the channel accepts no input, exactly
+/// as absence of the manifest section does; declaration and code cannot
+/// disagree because the host resolves both from the same descriptor.
 #[async_trait]
-pub trait ChannelAdapter: Send + Sync {
-    /// Idempotent vendor-side wiring + config validation, run during
-    /// activation (e.g. a webhook registration, an auth probe). Failure
-    /// fails activation.
-    async fn activate(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    /// Idempotent, best-effort vendor-side unwiring, run during
-    /// deactivation/removal. Failure is recorded and retryable; it does not
-    /// block removal forever.
-    async fn cleanup(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
+pub trait ChannelIngress: Send + Sync {
     /// Parse one host-verified inbound request into a normalized outcome.
-    /// Pure protocol work: no I/O, no secrets, bounded input.
-    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+    ///
+    /// Async so a channel is not artificially barred from awaiting — but it
+    /// must NOT fetch attachment bytes or conversation history here. Both are
+    /// declarative recipes the host runs **after** the webhook ack
+    /// (`[channel.attachments]`), because the ack is ack-after-commit and
+    /// anything awaited here lands inside the pre-ack window. Committing refs
+    /// instead of bytes is what moves the round trip later; inlining a fetch
+    /// here moves it *earlier*.
+    async fn receive(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+}
 
-    /// Fetch one inbound attachment's bytes through the channel's restricted
-    /// egress. The generic workflow calls this only after duplicate replay has
-    /// missed and before-inbound policy has returned Allow or Rewrite, then
-    /// lands the returned bytes through the canonical project filesystem path.
-    async fn fetch_attachment(
+/// **Reply** — answering the run's input, source-routed. Pairs with
+/// `[channel.reply]`.
+///
+/// A channel declaring `transport = "stream"` implements **nothing here**:
+/// the host publishes to the durable projection pipeline and the adapter is
+/// never called. That absence is meaningful rather than a mystery — it is
+/// what `stream` means.
+#[async_trait]
+pub trait ChannelReply: Send + Sync {
+    /// Render and send one run answer back to where its input came from.
+    /// Owns vendor formatting, splitting to the declared
+    /// `max_message_chars`, target syntax, and safe error mapping. Never
+    /// touches the delivery store.
+    async fn send_reply(
         &self,
-        _attachment: &ChannelAttachmentRef,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<InboundAttachment, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError>;
+}
 
-    /// Fetch recent vendor-side conversation context for one inbound shared
-    /// message, through the channel's restricted egress. `topic`-bearing
-    /// conversations fetch that thread's messages; top-level conversations
-    /// fetch recent channel history. Returns `Ok(None)` when the channel has
-    /// no such capability (the default), when scopes are missing, or when the
-    /// vendor call fails — context is advisory and must never fail admission.
-    async fn fetch_conversation_context(
-        &self,
-        _conversation: &ExternalConversationRef,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<Option<ChannelConversationContext>, ChannelError> {
-        Ok(None)
-    }
-
-    /// Render and send one normalized outbound envelope through restricted
-    /// egress. Owns vendor formatting, splitting, target syntax, DM
-    /// provisioning, and safe error mapping. Never touches the delivery
-    /// store.
+/// **Delivery** — reaching someone out of band, target-resolved. Pairs with
+/// `[channel.delivery]`.
+///
+/// Orthogonal to [`ChannelReply`], not an alternative: a channel may
+/// implement both (one run streams an answer into an open tab *and* fires a
+/// push), either, or neither.
+#[async_trait]
+pub trait ChannelDelivery: Send + Sync {
+    /// Render and send one out-of-band delivery to an already-resolved,
+    /// already-authorized target. The coordinator decided the axis and the
+    /// target; this renders and sends.
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
-
-    /// Per-user notification-setup status (§7b of the unified channel
-    /// model): whether notification delivery is enabled for this user on this
-    /// channel, plus channel-opaque detail the channel's own client renders.
-    /// Generic code never interprets `detail`. Channels whose manifest
-    /// declaring no `[channel.delivery] requires_enrollment` keep the default.
-    async fn notification_setup_status(
-        &self,
-        _context: &ChannelContext<'_>,
-        _scope: &NotificationSetupScope,
-    ) -> Result<NotificationSetupStatus, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-
-    /// Perform this channel's per-user notification enrollment with a
-    /// channel-defined, host-opaque payload (§7b). The payload is untrusted
-    /// input: the adapter validates and bounds it before any storage.
-    /// Returns the fresh post-enrollment status (read-back evidence).
-    async fn enable_notifications(
-        &self,
-        _context: &ChannelContext<'_>,
-        _scope: &NotificationSetupScope,
-        _payload: &str,
-    ) -> Result<NotificationSetupStatus, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-
-    /// Tear down this channel's per-user notification enrollment (§7b), with
-    /// a channel-defined payload selecting what to tear down. Returns the
-    /// fresh post-teardown status (read-back evidence).
-    async fn disable_notifications(
-        &self,
-        _context: &ChannelContext<'_>,
-        _scope: &NotificationSetupScope,
-        _payload: &str,
-    ) -> Result<NotificationSetupStatus, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-
-    /// The channel-specific *notification* send (§7a of the unified channel
-    /// model): a blocked-automation notice, gate/auth prompt fanned out to a
-    /// notification channel, or any other out-of-band notice — gated on the
-    /// channel's `notifications` capability and dispatched by the generic
-    /// `DeliveryCoordinator` facade, never called directly by feature code.
-    ///
-    /// Defaults to the channel's ordinary delivery: on a conversational
-    /// channel a notification is a message in the conversation, and a
-    /// notification-only channel (browser push) implements its whole
-    /// delivery as this send. Override only when notifications render
-    /// differently from conversation replies.
-    async fn deliver_notification(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        self.deliver(envelope, egress).await
-    }
 
     /// Optional: list/search delivery targets for pickers.
     async fn list_targets(
@@ -170,6 +106,62 @@ pub trait ChannelAdapter: Send + Sync {
         _egress: &dyn RestrictedEgress,
     ) -> Result<Vec<TargetCandidate>, ChannelError> {
         Err(ChannelError::Unsupported)
+    }
+}
+
+/// The halves one extension's channel surface actually implements.
+///
+/// Eleven methods on one trait became three across three traits, and this is
+/// what the host holds instead of a single `Arc<dyn ChannelAdapter>` whose
+/// unsupported methods were discovered at call time. A `None` here is the
+/// same fact as a missing manifest section, resolved once at binding.
+///
+/// What left the trait entirely, and where it went:
+/// - `activate`/`cleanup` → `[channel.ingress.registration]` /
+///   `[channel.ingress.deregistration]` recipes the host runs through
+///   existing restricted egress with existing credential injection.
+/// - `fetch_attachment`/`fetch_conversation_context` →
+///   `[channel.attachments]`, run post-ack.
+/// - the three notification-setup methods → host-owned per-user delivery
+///   registrations, so the host can answer "is this user set up?" before a
+///   send instead of discovering it inside the vendor path.
+#[derive(Clone, Default)]
+pub struct ChannelSurfaces {
+    pub ingress: Option<Arc<dyn ChannelIngress>>,
+    pub reply: Option<Arc<dyn ChannelReply>>,
+    pub delivery: Option<Arc<dyn ChannelDelivery>>,
+}
+
+impl ChannelSurfaces {
+    pub fn with_ingress(mut self, ingress: Arc<dyn ChannelIngress>) -> Self {
+        self.ingress = Some(ingress);
+        self
+    }
+
+    pub fn with_reply(mut self, reply: Arc<dyn ChannelReply>) -> Self {
+        self.reply = Some(reply);
+        self
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<dyn ChannelDelivery>) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
+    /// Whether this surface set emits anything at all.
+    pub fn has_outbound(&self) -> bool {
+        self.reply.is_some() || self.delivery.is_some()
+    }
+}
+
+impl std::fmt::Debug for ChannelSurfaces {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelSurfaces")
+            .field("ingress", &self.ingress.is_some())
+            .field("reply", &self.reply.is_some())
+            .field("delivery", &self.delivery.is_some())
+            .finish()
     }
 }
 

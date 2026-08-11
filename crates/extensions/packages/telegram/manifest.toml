@@ -79,6 +79,31 @@ kind = "shared_secret_header"
 secret_handle = "telegram_webhook_secret"
 header = "X-Telegram-Bot-Api-Secret-Token"
 
+# Vendor-side webhook wiring, formerly ChannelAdapter::activate/cleanup. Both
+# method bodies became zero lines: every input was already host-known (the
+# host owns the webhook route, so it owns the URL), and both calls already ran
+# through restricted egress with host-side credential injection. The bot token
+# rides the path placeholder the [[channel.egress]] injection declares; the
+# shared secret rides body_credentials, so neither ever enters adapter scope.
+# `setWebhook` is idempotent — Telegram overwrites the previous registration.
+[channel.ingress.registration]
+method = "post"
+path = "/bot{telegram_bot_token}/setWebhook"
+body = { url = "{telegram_webhook_url}" }
+body_credentials = ["telegram_webhook_secret"]
+
+[channel.ingress.deregistration]
+method = "post"
+path = "/bot{telegram_bot_token}/deleteWebhook"
+body = {}
+
+# Inbound attachment bytes, fetched AFTER the webhook ack. The commit that
+# precedes the ack carries the vendor ref only — already in the parsed payload,
+# needing no network — so the message is durable immediately and the round trip
+# moves out of the pre-ack window without ever acking before the commit.
+[channel.attachments]
+fetch = { method = "get", path = "/bot{telegram_bot_token}/getFile" }
+
 [[channel.egress]]
 scheme = "https"
 host = "api.telegram.org"

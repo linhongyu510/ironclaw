@@ -193,6 +193,11 @@ pub struct ChannelDescriptor {
     /// not looking (delivery).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<ChannelDeliveryDescriptor>,
+    /// The `[channel.attachments]` section: how the host fetches inbound
+    /// attachment bytes, run post-ack. Absent means this channel's inbound
+    /// messages carry nothing fetchable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<ChannelAttachmentsDescriptor>,
     /// User-account connection behavior for this channel. This declaration is
     /// the only authority for pairing presentation and connection notices;
     /// hosts must not infer a recipe from an extension id or display name.
@@ -512,10 +517,76 @@ pub struct ChannelConnectionNotices {
     pub expired_or_unknown: String,
 }
 
+/// One declarative vendor call the host runs on the channel's behalf.
+///
+/// This is the shape that replaced `ChannelAdapter::activate`/`cleanup` and
+/// the attachment fetch: **per-channel data, generic execution**. The host
+/// substitutes `{handle}` placeholders from the installation's non-secret
+/// config, then runs the call through the same restricted egress and the same
+/// host-side credential injection an adapter send uses — so a manifest field
+/// cannot drift from an implementation, because there is no implementation.
+///
+/// Placeholders the host does **not** find in config are left in place for
+/// the egress layer, which is how a credential-in-path vendor works: the
+/// manifest's `injection = { type = "path_placeholder" }` substitutes the
+/// secret host-side and the bytes never enter adapter scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelVendorCallRecipe {
+    #[serde(default)]
+    pub method: ChannelVendorCallMethod,
+    /// URL path on the channel's declared egress host, `{handle}`-templated.
+    pub path: String,
+    /// JSON body template. String values are `{handle}`-substituted from
+    /// non-secret config; secrets are never templated here — they ride
+    /// `body_credentials` on the egress target, which inserts the resolved
+    /// value host-side at a declared JSON pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+    /// Secret handles the host may inject into this call's body, each at the
+    /// pointer its `[[channel.egress]] body_credentials` entry declares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_credentials: Vec<SecretHandle>,
+}
+
+/// HTTP methods a declarative vendor call may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelVendorCallMethod {
+    #[default]
+    Post,
+    Get,
+}
+
+/// The `[channel.attachments]` section: how the host fetches one inbound
+/// attachment's bytes, run **after** the webhook ack.
+///
+/// Declarative for the same reason registration is: the fetch is per-channel
+/// data over a generic execution path. Absence means the channel's inbound
+/// messages carry no fetchable attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAttachmentsDescriptor {
+    /// Resolves `{external_file_id}` from the attachment's vendor ref, plus
+    /// any config handle.
+    pub fetch: ChannelVendorCallRecipe,
+}
+
 /// Ingress declaration for an inbound channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelIngressDescriptor {
+    /// Idempotent vendor-side wiring run at activation — telling the vendor
+    /// where to POST. Every input is already known to the host (it owns the
+    /// webhook route and therefore the URL), which is why this is a recipe
+    /// and not a method. Absent means no registration is needed: a vendor
+    /// whose events URL is configured in its own app console, or a channel
+    /// with no webhook at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration: Option<ChannelVendorCallRecipe>,
+    /// Idempotent, best-effort vendor-side unwiring run at deactivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deregistration: Option<ChannelVendorCallRecipe>,
     /// Present for webhook ingress (the mounted route's last path segment);
     /// absent for `authenticated_session` ingress, which mounts no webhook
     /// route. The pairing is enforced by [`ChannelDescriptor::validate`].
