@@ -58,10 +58,11 @@ use ironclaw_assistant::{
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND,
     RebornCreateThreadResponse, RebornExtensionListResponse, RebornListThreadsResponse,
-    RebornTimelineResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
+    RebornSuggestionsGenerateRequest, RebornSuggestionsResponse, RebornTimelineResponse,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SUBMIT_TURN_COMMAND, SUGGESTIONS_GENERATE_COMMAND,
+    SUGGESTIONS_VIEW, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
     TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     TRACE_HOLD_AUTHORIZE_COMMAND,
 };
@@ -1893,6 +1894,41 @@ pub async fn list_automations(
     };
     let surface = state.bind_services(caller);
     let response = AUTOMATIONS_VIEW.query_on(&surface, request, None).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/suggestions`
+///
+/// Returns the derived suggestion-cards doc (#7038): `generation.state` is
+/// computed at read time, never persisted — see `derive_suggestions_view`.
+pub async fn get_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = SUGGESTIONS_VIEW
+        .query_on(&surface, serde_json::Value::Null, None)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/suggestions/generate`
+///
+/// Idempotent while a generation is already running: CAS-claims the doc's
+/// `active_job` and returns the derived doc either way (spec §4) — a second
+/// POST while running dedupes onto the same job, it never starts a second
+/// loop.
+pub async fn generate_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTIONS_GENERATE_COMMAND,
+        RebornSuggestionsGenerateRequest::default(),
+    )
+    .await?;
     Ok(Json(response))
 }
 

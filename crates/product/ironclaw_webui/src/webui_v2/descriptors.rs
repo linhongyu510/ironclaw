@@ -46,6 +46,8 @@ pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
+pub const WEBUI_V2_ROUTE_SUGGESTIONS: &str = "webui.v2.suggestions";
+pub const WEBUI_V2_ROUTE_GENERATE_SUGGESTIONS: &str = "webui.v2.generate_suggestions";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
@@ -167,6 +169,8 @@ pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
 // Intentional dual-method resource path: POST renames an automation and DELETE
 // removes it. Keep the route ids separate so host policy/audit stays action-specific.
 pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
+pub const WEBUI_V2_PATTERN_SUGGESTIONS: &str = "/api/webchat/v2/suggestions";
+pub const WEBUI_V2_PATTERN_GENERATE_SUGGESTIONS: &str = "/api/webchat/v2/suggestions/generate";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
@@ -318,6 +322,8 @@ pub fn webui_v2_routes_with_artifact_flags(
         resume_automation_descriptor(),
         rename_automation_descriptor(),
         delete_automation_descriptor(),
+        suggestions_descriptor(),
+        generate_suggestions_descriptor(),
         trace_credits_descriptor(),
         trace_account_traces_descriptor(),
         trace_account_login_link_descriptor(),
@@ -1056,6 +1062,34 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn suggestions_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SUGGESTIONS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SUGGESTIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn generate_suggestions_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GENERATE_SUGGESTIONS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_GENERATE_SUGGESTIONS,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
