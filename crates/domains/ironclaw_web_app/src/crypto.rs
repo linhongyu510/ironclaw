@@ -36,7 +36,7 @@ pub const MAX_PLAINTEXT_BYTES: usize =
 // PROTOCOL-FIXED (RFC 8291 §3.3/§3.4): the CEK/nonce key-derivation info
 // string is the literal `WebPush: info` regardless of what the channel is
 // named — changing it breaks decryption at every push service. Pinned by the
-// Appendix A test-vector test below and allowlisted in the web-push
+// Appendix A test-vector test below and allowlisted in the
 // vocabulary-retirement gate.
 const KEY_INFO_PREFIX: &[u8] = b"WebPush: info\0";
 const CEK_INFO: &[u8] = b"Content-Encoding: aes128gcm\0";

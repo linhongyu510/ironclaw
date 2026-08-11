@@ -778,7 +778,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // (session_ingress), the reply-mode + notifications-require-setup
         // delivery-port defaults, and the generic notification-setup
         // descriptors + `RebornNotificationSetup*` wire family that replaced
-        // the web_push module. Declarations only — admission, dispatch, and
+        // the retired per-channel enrollment module. Declarations only — admission, dispatch, and
         // storage stay in their owning crates. Count read from this test's
         // failure on the merged branch.
         ("ironclaw_product_contracts", 16_119),

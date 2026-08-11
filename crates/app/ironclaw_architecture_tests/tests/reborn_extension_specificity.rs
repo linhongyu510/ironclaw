@@ -1506,26 +1506,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // localized pairing copy). Consumed by the generic descriptor-driven
     // pairing seam (extension-runtime P2), which moves product copy and
     // routing onto manifest-declared account-setup descriptors.
-    (
-        "crates/ironclaw_webui/frontend/src/components/telegram-setup-panel.tsx",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "telegram"),
     ("crates/ironclaw_webui/frontend/src/i18n/de.ts", "slack"),
@@ -1693,7 +1673,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

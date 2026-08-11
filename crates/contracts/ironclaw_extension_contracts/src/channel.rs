@@ -126,8 +126,8 @@ pub struct ChannelDescriptor {
     pub notifications: bool,
     /// Whether notification delivery needs per-user enrollment before it can
     /// deliver (§7b): the generic setup surface consults the adapter's
-    /// status/enable/disable operations for such channels. A connected
-    /// conversation channel (Slack/Telegram DM) is deliverable as-is and
+    /// status/enable/disable operations for such channels. A channel whose
+    /// conversation surface is already connected is deliverable as-is and
     /// keeps the default.
     #[serde(default)]
     pub notifications_require_setup: bool,

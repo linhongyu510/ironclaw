@@ -4023,7 +4023,19 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .collect();
         match session_ids.as_slice() {
             [only] => Some(only.clone()),
-            [] => None,
+            // No installed channel claims the session surface — advertise the
+            // product's built-in one. A deployment may legitimately ship
+            // without any channel extension (`assemble_web_app` treats its
+            // slot as optional), and browser chat must not depend on one:
+            // without this the SPA has no id to build its send URL with and
+            // the deployment loses chat entirely.
+            [] => Some(
+                ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID.to_string(),
+            ),
+            // Ambiguous: fail closed rather than pick one. The built-in
+            // surface is not a safe answer here either, because a channel
+            // that believes it owns the session would silently stop
+            // receiving browser turns.
             several => {
                 tracing::debug!(
                     count = several.len(),

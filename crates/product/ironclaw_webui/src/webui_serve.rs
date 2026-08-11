@@ -301,7 +301,13 @@ impl WebuiServeConfig {
             max_body_bytes: DEFAULT_WEBUI_MAX_BODY_BYTES,
             allowed_origins,
             csp_header: None,
-            session_channel_extension_id: None,
+            // Never `None`: the built-in session surface always exists, so a
+            // config that names no channel still yields a working send path.
+            // Composition overrides this when an installed channel claims the
+            // surface.
+            session_channel_extension_id: Some(
+                ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID.to_string(),
+            ),
             canonical_host: None,
             workspace_requires_scoped_projection: false,
             default_agent_id: None,

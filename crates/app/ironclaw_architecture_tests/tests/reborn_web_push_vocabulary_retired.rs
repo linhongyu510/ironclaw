@@ -68,14 +68,26 @@ const SANCTIONED_PATHS: &[(&str, &[&str])] = &[
     // The per-user mount alias the enrollment documents physically live
     // under — it resolves to a physical subpath, so it keeps its spelling.
     ("crates/app/ironclaw_composition/src/lib.rs", &["web-push"]),
-    // The persisted credential handle in the channel's own manifest.
+    // The persisted credential handle in the channel's own manifest, and the
+    // package README that documents that value for a reader who greps for it.
     (
         "crates/extensions/packages/web-app/manifest.toml",
+        &["web_push"],
+    ),
+    (
+        "crates/extensions/packages/web-app/README.md",
         &["web_push"],
     ),
     // The specificity gate's carve-out doc records the rename and names this
     // gate's file (which contains `web_push`).
     ("reborn_extension_specificity.rs", &["web-push", "web_push"]),
+    // The integration suites assert the PERSISTED catalog target id, whose
+    // value deliberately keeps the pre-rename spelling (see
+    // `ironclaw_web_app::WEB_APP_TARGET_ID`). Pinning it is the point: it is
+    // what proves a stored notification-channel selection survives the
+    // rename, so these must spell it.
+    ("tests/integration/webui_v2_product_api.rs", &["web-push"]),
+    ("tests/integration/delivery_user_journeys.rs", &["web-push"]),
     // This gate names every term on purpose.
     ("reborn_web_push_vocabulary_retired.rs", &[]),
 ];
@@ -237,4 +249,83 @@ fn notification_setup_and_session_routes_stay_extension_id_parameterized() {
              per-channel routes were retired by the unified channel model",
         );
     }
+}
+
+/// §0/§8's structural half: **no route may name a channel.** Every
+/// channel-scoped route is `{extension_id}`-parameterized, so a literal like
+/// `/api/webchat/v2/channels/telegram/pairing` is a per-channel surface no
+/// matter which channel it names — the exact shape the unified channel model
+/// deletes.
+///
+/// This scans SOURCE (Rust + the WebUI frontend) rather than the descriptor
+/// table, because the defect this exists to catch lived entirely in frontend
+/// modules calling routes the backend had already stopped serving: the route
+/// table was clean while 871 lines of channel-named client code sat beside
+/// it. A dead caller is still a channel-specific surface, and it is how the
+/// next one comes back.
+#[test]
+fn no_source_file_names_a_channel_in_a_webchat_channel_route() {
+    const MARKER: &str = "/api/webchat/v2/channels/";
+
+    let root = workspace_root();
+    let (_, scanned) = scan_workspace(&root).expect("workspace scan must complete");
+    let mut offenders = Vec::new();
+    for relative in &scanned {
+        // This gate and its siblings name routes on purpose.
+        if relative.contains("ironclaw_architecture_tests/") {
+            continue;
+        }
+        // Tests may name concrete channels (extension-runtime overview §8):
+        // a fixture id in a URL is exercising the generic route, not adding a
+        // per-channel surface. The sibling specificity gate strips
+        // `#[cfg(test)]` for the same reason.
+        if relative.contains("/tests/")
+            || relative.starts_with("tests/")
+            || relative.contains(".test.")
+        {
+            continue;
+        }
+        // Code only. Guidance and contract docs carry dated gravestones that
+        // describe per-channel routes precisely to record their REMOVAL —
+        // banning the words there would delete the history that explains why
+        // the generic route exists.
+        if !(relative.ends_with(".rs")
+            || relative.ends_with(".ts")
+            || relative.ends_with(".tsx")
+            || relative.ends_with(".mts")
+            || relative.ends_with(".mjs")
+            || relative.ends_with(".js"))
+        {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(root.join(relative)) else {
+            continue;
+        };
+        for (index, line) in contents.lines().enumerate() {
+            let mut rest = line;
+            while let Some(at) = rest.find(MARKER) {
+                let tail = &rest[at + MARKER.len()..];
+                let segment: String = tail
+                    .chars()
+                    .take_while(|c| !matches!(c, '/' | '"' | '\'' | '`' | ' ' | ')'))
+                    .collect();
+                // A `{…}` segment is a parameter — either the route
+                // pattern's own `{extension_id}` or a caller interpolating a
+                // variable it resolved from `GET /session`. Either way no
+                // channel is named in the source.
+                if !segment.is_empty() && !segment.starts_with('{') {
+                    offenders.push(format!("{relative}:{}: /channels/{segment}/", index + 1));
+                }
+                rest = &tail[segment.len().min(tail.len())..];
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a channel-scoped route names a channel instead of taking {{extension_id}} — the \
+         unified channel model routes every channel through one parameterized surface, and a \
+         caller pointed at a per-channel route is a per-channel surface even when the backend \
+         no longer serves it:\n  {}",
+        offenders.join("\n  "),
+    );
 }

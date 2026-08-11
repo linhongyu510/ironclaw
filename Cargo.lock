@@ -3596,7 +3596,6 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
- "ironclaw_web_app",
  "libsql",
  "secrecy",
  "serde",

@@ -3747,6 +3747,14 @@ where
         // whose declared entrypoint is the authenticated session — fail
         // closed (404, indistinguishable from an absent route) otherwise.
         let session_surface = match &extension_id {
+            // The built-in session surface: always available, because a
+            // deployment that installs no channel extension still has a
+            // browser chat. Named explicitly so the route stays generic
+            // (`/channels/{extension_id}/messages`) without making the
+            // browser's send path depend on an installed extension.
+            Some(extension_id) if extension_id.as_str() == SESSION_SURFACE_ADAPTER_ID => {
+                SESSION_SURFACE_ADAPTER_ID
+            }
             Some(extension_id) => {
                 let Some(directory) = &self.session_channels else {
                     return Err(ProductSurfaceError::service_unavailable(false));
@@ -6575,7 +6583,8 @@ fn webui_reply_target_binding_ref_from_raw(
 /// a channel extension (the legacy browser route and API transports). Not a
 /// channel name: `webui` is the product transport itself, the same constant
 /// the turn kernel uses for the WebUi source channel.
-const SESSION_SURFACE_ADAPTER_ID: &str = "webui";
+const SESSION_SURFACE_ADAPTER_ID: &str =
+    ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID;
 /// External-actor ref kind for session callers in admission fingerprints.
 const SESSION_ACTOR_KIND: &str = "session_user";
 
