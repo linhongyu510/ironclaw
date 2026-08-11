@@ -573,6 +573,7 @@ struct StubServices {
     submit_turn_calls: Mutex<Vec<ProductSubmitTurnRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
+    next_browse_fs_error: Mutex<Option<ProductSurfaceError>>,
     stat_fs_calls: Mutex<Vec<RebornFsStatRequest>>,
     global_auto_approve_enabled: Mutex<bool>,
     global_auto_approve_calls: Mutex<usize>,
@@ -639,6 +640,10 @@ struct StubServices {
 }
 
 impl StubServices {
+    fn fail_browse_fs_dir(&self, error: ProductSurfaceError) {
+        *self.next_browse_fs_error.lock().expect("lock") = Some(error);
+    }
+
     fn fail_create_thread(&self, error: ProductSurfaceError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
     }
@@ -1342,6 +1347,9 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(request.clone());
+                if let Some(error) = self.next_browse_fs_error.lock().expect("lock").take() {
+                    return Err(error);
+                }
                 let entry_path = if request.path.is_empty() {
                     "today.md".to_string()
                 } else {
@@ -8225,6 +8233,51 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
     assert_eq!(body["entries"][0]["path"], "daily/today.md");
     let queries = services.view_queries.lock().expect("lock");
     assert_eq!(queries[0].view_id.as_str(), FS_LIST_VIEW.id);
+}
+
+#[tokio::test]
+async fn browse_fs_dir_only_converts_workspace_root_not_found_to_empty_listing() {
+    for (mount, expected_status) in [
+        ("workspace", StatusCode::OK),
+        ("memory", StatusCode::NOT_FOUND),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_browse_fs_dir(ProductSurfaceError {
+            code: ProductSurfaceErrorCode::NotFound,
+            kind: ProductSurfaceErrorKind::NotFound,
+            status_code: StatusCode::NOT_FOUND.as_u16(),
+            retryable: false,
+            field: None,
+            validation_code: None,
+        });
+        let router = router_with(services);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/webchat/v2/fs/list?mount={mount}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "only a fresh Workspace root is lazily created"
+        );
+        if mount == "workspace" {
+            assert!(
+                read_json(response).await["entries"]
+                    .as_array()
+                    .expect("workspace entries array")
+                    .is_empty(),
+                "a fresh Workspace root remains an empty listing"
+            );
+        }
+    }
 }
 
 #[tokio::test]

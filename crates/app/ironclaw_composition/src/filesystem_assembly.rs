@@ -108,7 +108,7 @@ pub(crate) async fn build_filesystem(
             build_default_database_roots(state_root, &mut composite).await?
         }
     };
-    mount_host_disk_roots(&mut composite, disk)?;
+    mount_host_disk_roots(&mut composite, disk, host_home_root.is_some())?;
     Ok(FilesystemAssembly {
         filesystem: Arc::new(composite),
         durable_backend,
@@ -296,6 +296,7 @@ where
 fn mount_host_disk_roots(
     root: &mut CompositeRootFilesystem,
     disk: Arc<DiskFilesystem>,
+    include_host_home: bool,
 ) -> Result<(), RebornBuildError> {
     for (virtual_root, backend_id, content_kind) in [
         (
@@ -332,6 +333,20 @@ fn mount_host_disk_roots(
             Arc::clone(&disk),
         )?;
     }
+    if include_host_home {
+        root.mount(
+            mount_descriptor(
+                "/projects/host",
+                "standalone-host-home",
+                BackendKind::DiskFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ProjectFile,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            disk,
+        )?;
+    }
     Ok(())
 }
 
@@ -357,9 +372,13 @@ pub(crate) fn mount_descriptor(
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableStorageInput, STANDALONE_DB_FILENAME, build_filesystem};
-    use ironclaw_filesystem::RootFilesystem;
-    use ironclaw_host_api::path::VirtualPath;
+    use std::sync::Arc;
+
+    use super::{
+        DurableStorageInput, STANDALONE_DB_FILENAME, build_filesystem, mount_host_disk_roots,
+    };
+    use ironclaw_filesystem::{CompositeRootFilesystem, DiskFilesystem, RootFilesystem};
+    use ironclaw_host_api::path::{HostPath, VirtualPath};
 
     #[tokio::test]
     async fn filesystem_assembly_keeps_state_system_and_workspace_content_in_separate_roots() {
@@ -396,6 +415,10 @@ mod tests {
         assert!(
             !mounted_roots.contains(&"/projects".to_string()),
             "the trusted disk catalog must not expose a broad projects root"
+        );
+        assert!(
+            !mounted_roots.contains(&"/projects/host".to_string()),
+            "a catalog without a confirmed host home must not advertise one"
         );
 
         let project_file = VirtualPath::new("/projects/workspace/only-workspace.txt")
@@ -450,6 +473,35 @@ mod tests {
         assert!(
             system.is_dir(),
             "the reviewed system root is part of the explicit layout"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_disk_catalog_routes_confirmed_host_home_files() {
+        let temp = tempfile::tempdir().expect("temporary Reborn home");
+        let host_home = temp.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("create confirmed host home");
+
+        let mut disk = DiskFilesystem::new();
+        disk.mount_local(
+            VirtualPath::new("/projects/host").expect("host home virtual path"),
+            HostPath::from_path_buf(host_home.clone()),
+        )
+        .expect("mount confirmed host home on disk filesystem");
+        let disk = Arc::new(disk);
+        let mut catalog = CompositeRootFilesystem::new();
+        mount_host_disk_roots(&mut catalog, Arc::clone(&disk), true)
+            .expect("mount host disk roots in composite catalog");
+
+        let host_file =
+            VirtualPath::new("/projects/host/safe.txt").expect("host file virtual path");
+        RootFilesystem::write_file(&catalog, &host_file, b"host file")
+            .await
+            .expect("composite catalog routes confirmed host home writes");
+
+        assert_eq!(
+            std::fs::read(host_home.join("safe.txt")).expect("host file written to disk"),
+            b"host file",
         );
     }
 }

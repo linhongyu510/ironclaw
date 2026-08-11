@@ -817,6 +817,7 @@ pub async fn browse_fs_dir(
         // paths under it keep reporting NotFound.
         Err(error)
             if error.code == ProductSurfaceErrorCode::NotFound
+                && mount == FsMount::Workspace
                 && workspace_scoped_projection_required(&state, &capabilities)
                 && requested_path.trim_matches('/').is_empty() =>
         {
