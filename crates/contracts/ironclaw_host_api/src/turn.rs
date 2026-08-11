@@ -877,6 +877,25 @@ impl TurnStatus {
     pub fn keeps_active_lock(self) -> bool {
         !self.is_terminal()
     }
+
+    /// Stable snake_case label for UI/diagnostic rendering. Never derive this
+    /// from `{:?}` — see `.claude/rules/types.md` "Wire-stable enums".
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::BlockedApproval => "blocked_approval",
+            Self::BlockedAuth => "blocked_auth",
+            Self::BlockedResource => "blocked_resource",
+            Self::BlockedDependentRun => "blocked_dependent_run",
+            Self::BlockedExternalTool => "blocked_external_tool",
+            Self::CancelRequested => "cancel_requested",
+            Self::Cancelled => "cancelled",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
 }
 
 /// The canonical kind of gate a run can park on. One value per blocked

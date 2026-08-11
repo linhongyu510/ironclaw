@@ -161,7 +161,10 @@ async fn finalize_claim_if_owned(
             tenant_id,
             user_id,
             active_job.job_id,
-            format!("generation run ended ({status:?}) without calling render_suggestions"),
+            format!(
+                "generation run ended ({}) without calling render_suggestions",
+                status.as_str()
+            ),
         )
         .await
     {
@@ -338,7 +341,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(doc.active_job.is_none());
-        assert!(doc.last_error.unwrap().message.contains("Failed"));
+        assert!(doc.last_error.unwrap().message.contains("failed"));
         let _ = job_id;
     }
 
@@ -491,6 +494,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let doc = doc.expect("spawned finalize work clears active_job within the poll window");
-        assert!(doc.last_error.unwrap().message.contains("Failed"));
+        assert!(doc.last_error.unwrap().message.contains("failed"));
     }
 }

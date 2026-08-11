@@ -682,7 +682,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // generation run profile, replacing a hand-mirrored string literal
         // at the call sites. Declaration only; the run itself is composed
         // and scheduled in ironclaw_composition/ironclaw_assistant.
-        ("ironclaw_host_api", 18_998),
+        // 18_998 -> 19_017 (#7498 suggestion cards review): `TurnStatus::
+        // as_str()` — a stable snake_case label for wire/UI rendering,
+        // replacing a `format!("{:?}", status)` Debug-format persisted
+        // into `SuggestionsStore`'s `last_error.message`. Declaration
+        // only; the caller lives in ironclaw_composition.
+        ("ironclaw_host_api", 19_017),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
