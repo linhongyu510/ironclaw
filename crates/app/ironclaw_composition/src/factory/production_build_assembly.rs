@@ -91,7 +91,6 @@ pub(super) async fn build_production_shaped(
         credential_account_visibility_policy,
         ironhub_manifest_url,
         workspace_filesystems: None,
-        standalone_storage_root: None,
         system_content_root: None,
         default_system_prompt_path: None,
         #[cfg(any(test, feature = "test-support"))]
@@ -341,7 +340,6 @@ async fn build_local_storage_production_shaped(
         context.workspace_scoped_per_caller,
     )?);
     context.local_process_port = host_access.process_port;
-    context.standalone_storage_root = Some(state_root.clone());
     context.system_content_root = Some(system_root.clone());
     context.default_system_prompt_path = Some(default_system_prompt_path);
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
@@ -415,7 +413,6 @@ pub(super) struct RebornProductionBuildContext {
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     pub(super) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
-    pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) system_content_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]

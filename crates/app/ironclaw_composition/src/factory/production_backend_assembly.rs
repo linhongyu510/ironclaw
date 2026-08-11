@@ -348,7 +348,6 @@ pub(super) async fn build_backend_production(
         credential_account_visibility_policy,
         ironhub_manifest_url,
         workspace_filesystems,
-        standalone_storage_root,
         system_content_root,
         default_system_prompt_path,
         #[cfg(any(test, feature = "test-support"))]
@@ -1356,7 +1355,6 @@ pub(super) async fn build_backend_production(
         memory_service_resolver: resolved_memory.resolver.clone(),
         memory_lifecycle: resolved_memory.lifecycle.clone(),
         workspace_mounts: runtime_workspace_mounts,
-        standalone_storage_root,
         system_content_root,
         default_system_prompt_path,
         #[cfg(any(test, feature = "test-support"))]

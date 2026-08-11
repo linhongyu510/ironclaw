@@ -167,13 +167,6 @@ impl RebornRuntimeStores {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn standalone_storage_root_for_direct_test(&self) -> &PathBuf {
-        self.standalone_storage_root
-            .as_ref()
-            .expect("local runtime storage root")
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn default_system_prompt_path_for_test(&self) -> &PathBuf {
         self.default_system_prompt_path
             .as_ref()
@@ -489,17 +482,6 @@ impl RebornRuntimeStores {
         &self,
     ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
         Some(Arc::clone(&self.outbound_preferences))
-    }
-
-    /// Test-support access to the on-disk standalone storage root (W6-COLD-SPOTS
-    /// seam), for tests only — mirrors the same `standalone_storage_root`
-    /// that `build_local_runtime_runtime_stores` establishes in production. Used to reopen
-    /// a fresh outbound-preferences store at the same root (see
-    /// `open_standalone_outbound_preferences_store_for_test`). Returns `None` for
-    /// production-profile compositions without a standalone runtime.
-    #[cfg(feature = "test-support")]
-    pub(crate) fn standalone_storage_root_for_test(&self) -> Option<PathBuf> {
-        self.standalone_storage_root.clone()
     }
 
     /// Single owner of the `ProjectScopedAttachmentReader` construction recipe
