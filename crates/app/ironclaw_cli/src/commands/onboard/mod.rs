@@ -82,13 +82,11 @@ impl OnboardCommand {
                     }
                     Err(LlmCredentialPromptError::Other(error)) => return Err(error),
                 };
-                (Some(master_key_outcome), llm_outcome)
+                (master_key_outcome, llm_outcome)
             }
             crate::runtime::OnboardingSecretStoreMode::HostedExternal => (
-                None,
-                LlmCredentialProvisionOutcome::SkippedNonInteractivePartialEnv {
-                    reason: "hosted profile uses an external secret store; configure credentials through deployment secrets or the hosted operator surface".to_string(),
-                },
+                MasterKeyProvisionOutcome::SkippedHostedExternal,
+                LlmCredentialProvisionOutcome::SkippedHostedExternal,
             ),
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
@@ -122,15 +120,8 @@ impl OnboardCommand {
             marker_path.display(),
             marker_action
         );
-        if let Some(master_key_outcome) = master_key_outcome {
-            println!("master_key: {}", master_key_outcome.display_line());
-        } else {
-            println!("master_key: skipped (hosted profile uses an external secret store)");
-        }
-        if matches!(
-            master_key_outcome,
-            Some(MasterKeyProvisionOutcome::Suppressed)
-        ) {
+        println!("master_key: {}", master_key_outcome.display_line());
+        if matches!(master_key_outcome, MasterKeyProvisionOutcome::Suppressed) {
             println!(
                 "master_key_note: OS keychain unavailable; set SECRETS_MASTER_KEY yourself or \
                  let the first `serve`/`onboard` run auto-generate and cache \

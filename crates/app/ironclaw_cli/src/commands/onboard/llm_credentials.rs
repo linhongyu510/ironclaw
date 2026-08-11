@@ -51,6 +51,9 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     SkippedNonInteractivePartialEnv {
         reason: String,
     },
+    /// Hosted profiles use an externally managed secret store, so onboarding
+    /// must not prompt for or persist LLM credentials locally.
+    SkippedHostedExternal,
 }
 
 impl LlmCredentialProvisionOutcome {
@@ -74,6 +77,7 @@ impl LlmCredentialProvisionOutcome {
                     "skipped (non-interactive session; partial environment LLM config: {reason})"
                 )
             }
+            Self::SkippedHostedExternal => "skipped (hosted profile uses an external secret store; configure credentials through deployment secrets or the hosted operator surface)".to_string(),
         }
     }
 }
@@ -579,6 +583,20 @@ mod tests {
 
     use super::*;
     use crate::context::RebornCliContext;
+
+    #[test]
+    fn hosted_external_skip_is_rendered_as_profile_policy_not_tty_or_env_state() {
+        let line = LlmCredentialProvisionOutcome::SkippedHostedExternal.display_line();
+
+        assert_eq!(
+            line,
+            "skipped (hosted profile uses an external secret store; configure credentials through deployment secrets or the hosted operator surface)"
+        );
+        assert!(
+            !line.contains("non-interactive") && !line.contains("partial environment"),
+            "hosted-external policy must not be described as a TTY or environment outcome: {line}"
+        );
+    }
 
     /// Selects `provider` on the menu (matched by id), answers `key` for the
     /// API-key prompt (only reached when the selected entry requires one),

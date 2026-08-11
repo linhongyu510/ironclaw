@@ -22,6 +22,9 @@ pub(crate) enum MasterKeyProvisionOutcome {
     /// falls through to `SECRETS_MASTER_KEY` env var, then dotfile
     /// auto-generation on first boot.
     Suppressed,
+    /// Hosted profiles use an externally managed secret store, so onboarding
+    /// must not provision a standalone OS-keychain master key.
+    SkippedHostedExternal,
 }
 
 impl MasterKeyProvisionOutcome {
@@ -31,6 +34,7 @@ impl MasterKeyProvisionOutcome {
             Self::KeychainAlreadyPresent => "already provisioned in OS keychain",
             Self::Provisioned => "provisioned in OS keychain",
             Self::Suppressed => "OS keychain unavailable; falling back to env/dotfile",
+            Self::SkippedHostedExternal => "skipped (hosted profile uses an external secret store)",
         }
     }
 }
@@ -79,4 +83,17 @@ pub(crate) fn provision_master_key(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MasterKeyProvisionOutcome;
+
+    #[test]
+    fn hosted_external_skip_has_a_typed_status_line() {
+        assert_eq!(
+            MasterKeyProvisionOutcome::SkippedHostedExternal.display_line(),
+            "skipped (hosted profile uses an external secret store)"
+        );
+    }
 }
