@@ -1732,17 +1732,16 @@ mod tests {
     }
 
     async fn suggestion_generation_run_context() -> LoopRunContext {
-        use crate::planned_driver_factory::{
-            SUGGESTION_GENERATION_RUN_PROFILE_ID, default_planned_run_profile_resolver,
-        };
-        use ironclaw_turns::RunProfileRequest;
+        use crate::planned_driver_factory::default_planned_run_profile_resolver;
+        use ironclaw_turns::{RunProfileId, RunProfileRequest};
 
         let resolver =
             default_planned_run_profile_resolver().expect("planned resolver should build");
         let resolved = resolver
             .resolve_run_profile(
                 RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
-                    RunProfileRequest::new(SUGGESTION_GENERATION_RUN_PROFILE_ID).unwrap(),
+                    RunProfileRequest::new(RunProfileId::suggestion_generation().as_str())
+                        .unwrap(),
                 ),
             )
             .await

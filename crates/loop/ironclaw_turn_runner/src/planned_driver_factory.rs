@@ -39,8 +39,6 @@ pub const SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID: &str = "scheduled_tri
 /// Capability-surface profile id for the suggestion-generation loop (#7038).
 /// Its policy shape is declared in [`BESPOKE_SURFACE_POLICY_SHAPES`] below.
 pub const SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID: &str = "suggestion_generation";
-/// `RunProfileId` string for the suggestion-generation loop (#7038).
-pub const SUGGESTION_GENERATION_RUN_PROFILE_ID: &str = "suggestion_generation";
 
 /// How a capability-surface profile reshapes the run's one resolved policy.
 ///
@@ -361,10 +359,8 @@ pub fn suggestion_generation_planned_profile_definition()
 -> Result<RunProfileDefinition, RunProfileRegistryError> {
     let descriptor = planned_driver_descriptor()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    let profile_id = RunProfileId::new(SUGGESTION_GENERATION_RUN_PROFILE_ID)
-        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     planned_like_profile_definition(
-        profile_id,
+        RunProfileId::suggestion_generation(),
         descriptor,
         SUGGESTION_GENERATION_CAPABILITY_SURFACE_PROFILE_ID,
     )

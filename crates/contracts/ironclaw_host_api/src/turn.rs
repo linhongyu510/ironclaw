@@ -316,6 +316,10 @@ impl RunProfileId {
         Self::from_trusted_static("scheduled_trigger")
     }
 
+    pub fn suggestion_generation() -> Self {
+        Self::from_trusted_static("suggestion_generation")
+    }
+
     pub fn is_interactive_default(&self) -> bool {
         self == &Self::interactive_default()
     }
