@@ -171,7 +171,12 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
     }
 
     fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
-        if node.mac.path.is_ident("matches")
+        if node
+            .mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "matches")
             && token_stream_contains_reborn_profile_variant(node.mac.tokens.clone())
         {
             self.record(ProfileControlKind::MatchesMacro);
@@ -223,11 +228,9 @@ struct PatternProfileVariantFinder {
 }
 
 impl<'ast> Visit<'ast> for PatternProfileVariantFinder {
-    fn visit_pat(&mut self, node: &'ast syn::Pat) {
-        if let syn::Pat::Path(path) = node {
-            self.found |= path_is_reborn_profile_variant(&path.path);
-        }
-        visit::visit_pat(self, node);
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        self.found |= path_is_reborn_profile_variant(node);
+        visit::visit_path(self, node);
     }
 }
 
@@ -530,10 +533,42 @@ fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
             "#,
         ),
         (
+            "std-qualified matches macro",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if std::matches!(selected_profile, RebornCompositionProfile::Production) {}
+                }
+            "#,
+        ),
+        (
+            "core-qualified matches macro",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if core::matches!(selected_profile, RebornCompositionProfile::Production) {}
+                }
+            "#,
+        ),
+        (
             "if let",
             r#"
                 fn bypass(selected_profile: RebornCompositionProfile) {
                     if let RebornCompositionProfile::Production = selected_profile {}
+                }
+            "#,
+        ),
+        (
+            "struct pattern",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if let RebornCompositionProfile::Production {} = selected_profile {}
+                }
+            "#,
+        ),
+        (
+            "tuple struct pattern",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    match selected_profile { RebornCompositionProfile::Production(..) => (), _ => () }
                 }
             "#,
         ),
@@ -552,7 +587,8 @@ fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
         let failure = std::panic::catch_unwind(|| {
             assert_only_deployment_config_for_profile_control(&source);
         })
-        .expect_err("{name} must be rejected");
+        .err()
+        .unwrap_or_else(|| panic!("{name} must be rejected"));
         let message = failure
             .downcast_ref::<String>()
             .map(String::as_str)
