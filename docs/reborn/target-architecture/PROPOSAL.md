@@ -252,7 +252,9 @@ crates/
 │   ├── ironclaw_trace_commons        ▣ [substrates] (renamed)   Trace Commons client: envelope/redaction/queue/credits
 │   ├── ironclaw_web_push             ▣ [substrates]             Web Push (RFC 8030/8291/8292) records, encryption,
 │   │                                                            request planning (added 2026-08-08, browser channel)
-│   └── ironclaw_outbound             ▣ [substrates]             metadata-only outbound policy/state (sealed grants)
+│   ├── ironclaw_outbound             ▣ [substrates]             metadata-only outbound policy/state (sealed grants)
+│   └── ironclaw_suggestions          ▣ [substrates] (NEW)       suggestion-cards doc: derived generation state, CAS-
+│                                                                claimed generation job (added 2026-08-11, #7038)
 ├── kernel/                           ▢ the authority perimeter — nine crates, steady-state reached
 │                                       (the transitional tenth, ironclaw_run_state, was deleted by #6696 on 2026-07-29)
 │   ├── ironclaw_trust                ▣ [kernel]                 trust-class policy engine (sealed ceilings)
