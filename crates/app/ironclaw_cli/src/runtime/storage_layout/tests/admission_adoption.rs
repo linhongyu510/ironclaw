@@ -15,6 +15,11 @@ fn fresh_home_initializes_canonical_namespaces_and_commits_manifest_last() {
     assert!(temp.path().join("logs").is_dir());
     assert!(temp.path().join("cache").is_dir());
     assert!(temp.path().join("tmp").is_dir());
+    let manifest = read_manifest(&temp.path().join(LAYOUT_MANIFEST_FILE)).expect("manifest");
+    assert_eq!(
+        manifest.memory_provider_app_id(),
+        Some(ironclaw_config::canonical_memory_provider_app_id(temp.path()).as_str())
+    );
 }
 
 #[test]
@@ -29,6 +34,7 @@ fn concurrent_fresh_initializers_admit_the_identical_manifest() {
     for _ in 0..16 {
         let home = Arc::clone(&home);
         let barrier = Arc::clone(&barrier);
+        let manifest = manifest.clone();
         workers.push(thread::spawn(move || {
             barrier.wait();
             write_manifest_last(&home, &manifest)
@@ -160,6 +166,7 @@ fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
     let home = reborn_home(temp.path());
     let legacy = temp.path().join("local-dev");
     seed_legacy_embedded_store(&legacy);
+    let legacy_memory_provider_app_id = ironclaw_config::legacy_memory_provider_app_id(&legacy);
     fs::create_dir_all(legacy.join("system/extensions")).expect("legacy system root");
     fs::write(legacy.join("system/extensions/example.toml"), b"extension").expect("extension");
 
@@ -171,6 +178,12 @@ fn adoption_moves_one_legacy_root_to_snapshot_and_commits_manifest() {
     .expect("offline adoption succeeds");
 
     assert!(temp.path().join("layout.toml").is_file());
+    let manifest = read_manifest(&temp.path().join(LAYOUT_MANIFEST_FILE)).expect("manifest");
+    assert_eq!(
+        manifest.memory_provider_app_id(),
+        Some(legacy_memory_provider_app_id.as_str()),
+        "legacy remote-memory namespace survives physical storage adoption"
+    );
     assert!(!legacy.exists());
     assert!(
         temp.path()
@@ -496,14 +509,31 @@ fn hosted_postgres_adoption_requires_verified_store_before_manifest_commit() {
     assert!(error.to_string().contains("were not verified"), "{error:#}");
     assert!(!temp.path().join("layout.toml").exists());
 
+    let mut verifier_invoked = false;
     adopt_layout_with_store_verification(
         &home,
         external_single_user_requirement(),
         confirmed_options(),
-        CanonicalStoreVerification::ExternalPostgresVerified,
+        || {
+            verifier_invoked = true;
+            let journal = read_journal(
+                &temp
+                    .path()
+                    .join("runtime/layout-adoption/journal.toml"),
+            )?;
+            assert_eq!(journal.phase, AdoptionPhase::MigrationPending);
+            assert!(
+                temp.path()
+                    .join("runtime/layout-adoption/snapshot/hosted-single-tenant/system/prompts/operator.md")
+                    .is_file(),
+                "external-store migrations begin only after the local snapshot is durable"
+            );
+            Ok(CanonicalStoreVerification::ExternalPostgresVerified)
+        },
     )
     .expect("verified PostgreSQL system-content adoption resumes and succeeds");
 
+    assert!(verifier_invoked);
     assert!(temp.path().join("system/prompts/operator.md").is_file());
     assert!(!temp.path().join("state/reborn-local-dev.db").exists());
 }
@@ -775,9 +805,13 @@ fn completed_adoption_is_idempotent_and_retains_snapshot_and_journal() {
         .path()
         .join("runtime/layout-adoption/snapshot/local-dev");
     let journal = temp.path().join("runtime/layout-adoption/journal.toml");
+    let manifest = temp.path().join(LAYOUT_MANIFEST_FILE);
     assert!(snapshot.is_dir());
     assert!(journal.is_file());
+    let manifest_before = fs::read(&manifest).expect("read committed manifest");
+    let journal_before = fs::read(&journal).expect("read committed journal");
 
+    reset_canonical_store_verification_count();
     adopt_layout(
         &home,
         embedded_single_user_requirement(),
@@ -786,4 +820,19 @@ fn completed_adoption_is_idempotent_and_retains_snapshot_and_journal() {
     .expect("completed adoption is a no-op");
     assert!(snapshot.is_dir());
     assert!(journal.is_file());
+    assert_eq!(
+        fs::read(&manifest).expect("reread committed manifest"),
+        manifest_before,
+        "an equivalent restart must not rewrite the layout receipt"
+    );
+    assert_eq!(
+        fs::read(&journal).expect("reread committed journal"),
+        journal_before,
+        "an equivalent restart must not restart or advance adoption"
+    );
+    assert_eq!(
+        canonical_store_verification_count(),
+        0,
+        "a ready canonical layout must bypass adoption store verification"
+    );
 }

@@ -9,8 +9,6 @@ use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
-#[cfg(unix)]
-use fs2::FileExt as _;
 use ironclaw_composition::LegacySkillSnapshotSource;
 use ironclaw_config::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
@@ -29,7 +27,7 @@ mod model;
 
 pub(crate) use admission::{
     admit_startup_layout, ensure_ready_layout, inspect_ready_layout,
-    ready_legacy_skill_snapshot_source,
+    ready_legacy_skill_snapshot_source, ready_memory_provider_app_id,
 };
 pub(crate) use adoption::{
     adopt_layout_with_store_verification, automatically_adopt_layout_with_store_verification,

@@ -143,3 +143,10 @@ pub(crate) fn ready_legacy_skill_snapshot_source(
         .has_legacy_skills
         .then(|| journal.source.skill_snapshot_source()))
 }
+
+/// Read the durable external-memory namespace committed by fresh
+/// initialization or legacy adoption.
+pub(crate) fn ready_memory_provider_app_id(home: &RebornHome) -> anyhow::Result<Option<String>> {
+    let manifest = read_manifest(&home.path().join(LAYOUT_MANIFEST_FILE))?;
+    Ok(manifest.memory_provider_app_id().map(str::to_owned))
+}

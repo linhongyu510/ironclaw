@@ -65,17 +65,19 @@ pub(super) fn ensure_startup_layout(
             let authority = startup_adoption_authority_from_environment()?;
             let permit =
                 storage_layout::prepare_automatic_adoption(config.home(), requirement, authority)?;
-            let store_verification = canonical_store_verification_for_adoption(
-                config,
-                &DeploymentConfig::for_profile(profile.into(), false),
-                config_file,
-                requirement,
-            )?;
+            let deployment = DeploymentConfig::for_profile(profile.into(), false);
             storage_layout::automatically_adopt_layout_with_store_verification(
                 config.home(),
                 requirement,
                 permit,
-                store_verification,
+                || {
+                    canonical_store_verification_for_adoption(
+                        config,
+                        &deployment,
+                        config_file,
+                        requirement,
+                    )
+                },
             )?;
             storage_layout::ensure_ready_layout(config.home(), requirement)
         }
@@ -159,17 +161,19 @@ pub(crate) fn adopt_storage_layout(
         workspace_import,
     };
     storage_layout::validate_adopt_options(&options)?;
-    let store_verification = canonical_store_verification_for_adoption(
-        config,
-        &DeploymentConfig::for_profile(profile.into(), false),
-        config_file.as_ref(),
-        requirement,
-    )?;
+    let deployment = DeploymentConfig::for_profile(profile.into(), false);
     storage_layout::adopt_layout_with_store_verification(
         config.home(),
         requirement,
         options,
-        store_verification,
+        || {
+            canonical_store_verification_for_adoption(
+                config,
+                &deployment,
+                config_file.as_ref(),
+                requirement,
+            )
+        },
     )?;
     // The adoption command does not start a runtime. Validate the manifest
     // through the same normal-boot prerequisite before reporting completion.

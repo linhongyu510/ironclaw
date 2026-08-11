@@ -11,55 +11,61 @@ pub(crate) fn adopt_layout(
     requirement: LayoutRequirement,
     options: AdoptOptions,
 ) -> anyhow::Result<()> {
-    adopt_layout_with_store_verification(
-        home,
-        requirement,
-        options,
-        CanonicalStoreVerification::EmbeddedLibSql,
-    )
+    adopt_layout_with_store_verification(home, requirement, options, || {
+        Ok(CanonicalStoreVerification::EmbeddedLibSql)
+    })
 }
 
 /// Run or resume the one bounded offline adoption state machine and verify the
 /// canonical store before the manifest is published.
-pub(crate) fn adopt_layout_with_store_verification(
+pub(crate) fn adopt_layout_with_store_verification<VerifyStore>(
     home: &RebornHome,
     requirement: LayoutRequirement,
     options: AdoptOptions,
-    store_verification: CanonicalStoreVerification,
-) -> anyhow::Result<()> {
+    mut verify_store: VerifyStore,
+) -> anyhow::Result<()>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
     validate_adopt_options(&options)?;
     run_adoption_with_store_verification(
         home,
         requirement,
         options.workspace_import.as_ref(),
-        store_verification,
+        &mut verify_store,
     )
 }
 
 /// Run or resume automatic startup adoption without inferring an external
 /// workspace owner. Ambiguous and unsupported sources still fail closed in
 /// the shared state machine.
-pub(crate) fn automatically_adopt_layout_with_store_verification(
+pub(crate) fn automatically_adopt_layout_with_store_verification<VerifyStore>(
     home: &RebornHome,
     requirement: LayoutRequirement,
     permit: AutomaticAdoptionPermit,
-    store_verification: CanonicalStoreVerification,
-) -> anyhow::Result<()> {
+    mut verify_store: VerifyStore,
+) -> anyhow::Result<()>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
     if permit.home != home.path() || permit.requirement != requirement {
         bail!("automatic adoption permit does not match this home and layout requirement");
     }
     // The permit keeps the cutover lock alive through this call. Revalidate
-    // after external-store verification and immediately before mutation.
+    // immediately before the journaled filesystem transition begins.
     preflight_automatic_adoption(home, requirement)?;
-    run_adoption_with_store_verification(home, requirement, None, store_verification)
+    run_adoption_with_store_verification(home, requirement, None, &mut verify_store)
 }
 
-pub(super) fn run_adoption_with_store_verification(
+pub(super) fn run_adoption_with_store_verification<VerifyStore>(
     home: &RebornHome,
     requirement: LayoutRequirement,
     workspace_import: Option<&WorkspaceImportOptions>,
-    store_verification: CanonicalStoreVerification,
-) -> anyhow::Result<()> {
+    verify_store: &mut VerifyStore,
+) -> anyhow::Result<()>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
     let home_path = home.path();
     let paths = RebornStoragePaths::from_home(home);
     let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
@@ -132,7 +138,7 @@ pub(super) fn run_adoption_with_store_verification(
         &adoption_root,
         &journal_path,
         &mut journal,
-        store_verification,
+        verify_store,
     )?;
     Ok(())
 }
@@ -153,15 +159,27 @@ pub(super) fn require_operator_confirmations(options: &AdoptOptions) -> anyhow::
     Ok(())
 }
 
-pub(super) fn resume_adoption(
+pub(super) fn resume_adoption<VerifyStore>(
     home: &Path,
     paths: &RebornStoragePaths,
     adoption_root: &Path,
     journal_path: &Path,
     journal: &mut AdoptionJournal,
-    store_verification: CanonicalStoreVerification,
-) -> anyhow::Result<()> {
+    verify_store: &mut VerifyStore,
+) -> anyhow::Result<()>
+where
+    VerifyStore: FnMut() -> anyhow::Result<CanonicalStoreVerification>,
+{
     let candidate = journal.candidate(home);
+    let expected_memory_provider_app_id =
+        ironclaw_config::legacy_memory_provider_app_id(&candidate.source_root);
+    let memory_provider_app_id = match &journal.memory_provider_app_id {
+        Some(app_id) if app_id == &expected_memory_provider_app_id => app_id.clone(),
+        Some(_) => bail!(
+            "adoption journal memory-provider namespace does not match its legacy source; refusing to resume"
+        ),
+        None => expected_memory_provider_app_id,
+    };
     let snapshot = candidate.snapshot_root(adoption_root);
     let workspace = journal.validated_workspace()?;
 
@@ -209,6 +227,7 @@ pub(super) fn resume_adoption(
 
     let store_verified_on_this_run = if journal.phase == AdoptionPhase::MigrationPending {
         verify_post_migration_canonical_shape(paths, &candidate, &snapshot, false)?;
+        let store_verification = verify_store()?;
         verify_canonical_store(
             paths,
             candidate.kind.requirement().durable_state,
@@ -228,6 +247,7 @@ pub(super) fn resume_adoption(
     // snapshot; validate the post-migration shape and reopen the real store.
     verify_post_migration_canonical_shape(paths, &candidate, &snapshot, true)?;
     if !store_verified_on_this_run {
+        let store_verification = verify_store()?;
         verify_canonical_store(
             paths,
             candidate.kind.requirement().durable_state,
@@ -238,7 +258,8 @@ pub(super) fn resume_adoption(
     verify_canonical_workspace(paths, workspace.as_ref())?;
     initialize_disposable_namespaces(home, paths)?;
 
-    let manifest = LayoutManifest::new(journal.target_requirement);
+    let manifest = LayoutManifest::new(journal.target_requirement)
+        .with_memory_provider_app_id(memory_provider_app_id);
     write_manifest_last(home, &manifest)?;
     Ok(())
 }
@@ -803,7 +824,8 @@ pub(super) fn verify_post_migration_canonical_shape(
             entry.with_context(|| format!("read entry under {}", paths.state_root().display()))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name != MASTER_KEY_FILE && !LIBSQL_DB_UNIT.contains(&name.as_ref()) {
+        let expected_master_key = name == MASTER_KEY_FILE && candidate.has_master_key;
+        if !expected_master_key && !LIBSQL_DB_UNIT.contains(&name.as_ref()) {
             bail!(
                 "canonical state contains unexpected post-migration entry `{name}` at {}",
                 paths.state_root().display()
@@ -1007,5 +1029,8 @@ pub(super) fn initialize_fresh_layout(
         create_or_validate_direct_child(home, path)?;
         sync_directory(path)?;
     }
-    write_manifest_last(home, &LayoutManifest::new(requirement))
+    let manifest = LayoutManifest::new(requirement).with_memory_provider_app_id(
+        ironclaw_config::canonical_memory_provider_app_id(paths.installation_root()),
+    );
+    write_manifest_last(home, &manifest)
 }

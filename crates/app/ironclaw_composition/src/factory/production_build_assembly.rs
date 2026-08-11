@@ -1,11 +1,5 @@
 use super::*;
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
-use sha2::{Digest as _, Sha256};
-
-fn implicit_memory_provider_app_id(installation_root: &std::path::Path) -> String {
-    let digest = Sha256::digest(installation_root.as_os_str().as_encoded_bytes());
-    format!("ws-{}", hex::encode(digest))
-}
 
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
@@ -49,8 +43,9 @@ pub(super) async fn build_production_shaped(
         if memory_provider_connection.app_id.is_none()
             && let crate::input::RebornStorageInput::LocalFilesystem { paths, .. } = &storage
         {
-            memory_provider_connection.app_id =
-                Some(implicit_memory_provider_app_id(paths.installation_root()));
+            memory_provider_connection.app_id = Some(
+                ironclaw_config::canonical_memory_provider_app_id(paths.installation_root()),
+            );
         }
         crate::resolve_memory_provider(
             memory_binding_policy,
@@ -533,13 +528,12 @@ pub(super) type FilesystemProductionHostRuntimeServices<F> =
 
 #[cfg(test)]
 mod tests {
-    use super::implicit_memory_provider_app_id;
     use std::path::Path;
 
     #[test]
-    fn implicit_memory_provider_app_id_is_a_stable_sha256_derivation() {
+    fn canonical_memory_provider_app_id_is_a_stable_sha256_derivation() {
         assert_eq!(
-            implicit_memory_provider_app_id(Path::new("/var/lib/ironclaw")),
+            ironclaw_config::canonical_memory_provider_app_id(Path::new("/var/lib/ironclaw")),
             "ws-f0d6f77ada36695664007e305f03546485e25e5f295cb273657c4370f4aaab01"
         );
     }

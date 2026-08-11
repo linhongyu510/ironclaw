@@ -1,6 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use sha2::{Digest as _, Sha256};
 
 use crate::RebornHome;
 
@@ -179,13 +183,15 @@ impl RebornStoragePaths {
 }
 
 /// Versioned, persisted record of durable storage assumptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutManifest {
     #[serde(deserialize_with = "deserialize_schema_version")]
     schema_version: u32,
     state_layout_version: StateLayoutVersion,
     durable_state: DurableStateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_provider_app_id: Option<String>,
     security: DeploymentSecurityEnvelope,
 }
 
@@ -197,8 +203,19 @@ impl LayoutManifest {
             schema_version: Self::SCHEMA_VERSION,
             state_layout_version: StateLayoutVersion::V1,
             durable_state: requirement.durable_state,
+            memory_provider_app_id: None,
             security: requirement.security,
         }
+    }
+
+    /// Persist the external-memory namespace selected before storage cutover.
+    pub fn with_memory_provider_app_id(mut self, app_id: String) -> Self {
+        self.memory_provider_app_id = Some(app_id);
+        self
+    }
+
+    pub fn memory_provider_app_id(&self) -> Option<&str> {
+        self.memory_provider_app_id.as_deref()
     }
 
     pub const fn schema_version(&self) -> u32 {
@@ -263,6 +280,23 @@ impl LayoutManifest {
 
         ProfileTransitionAdmission::Allowed
     }
+}
+
+/// Reproduce the historical implicit mem0 namespace for a storage root.
+///
+/// Legacy adoption records this value in `layout.toml` before the physical
+/// root changes, so later profile or deployment-config changes cannot silently
+/// strand remote memory under a different `app_id`.
+pub fn legacy_memory_provider_app_id(storage_root: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    storage_root.hash(&mut hasher);
+    format!("ws-{:016x}", hasher.finish())
+}
+
+/// Stable implicit namespace for a canonical profile-agnostic installation.
+pub fn canonical_memory_provider_app_id(installation_root: &Path) -> String {
+    let digest = Sha256::digest(installation_root.as_os_str().as_encoded_bytes());
+    format!("ws-{}", hex::encode(digest))
 }
 
 /// Exhaustive durable-state transition matrix.

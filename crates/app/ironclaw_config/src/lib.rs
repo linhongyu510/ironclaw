@@ -64,5 +64,5 @@ pub use secrets_guard::{InlineSecretError, reject_inline_secret};
 pub use storage_layout::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
     ProfileTransitionAdmission, RebornStoragePaths, StateLayoutVersion, TenancyModel,
-    WorkspaceAccessFloor,
+    WorkspaceAccessFloor, canonical_memory_provider_app_id, legacy_memory_provider_app_id,
 };

@@ -374,6 +374,39 @@ fn layout_manifest_rejects_unsupported_or_unowned_wire_fields() {
 }
 
 #[test]
+fn layout_manifest_round_trips_the_persisted_memory_provider_namespace() {
+    let requirement = LayoutRequirement {
+        durable_state: DurableStateKind::EmbeddedLibSql,
+        security: DeploymentSecurityEnvelope {
+            tenancy: TenancyModel::SingleUser,
+            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+        },
+    };
+    let app_id = ironclaw_config::legacy_memory_provider_app_id(std::path::Path::new(
+        "/var/lib/ironclaw/local-dev",
+    ));
+    let manifest = LayoutManifest::new(requirement).with_memory_provider_app_id(app_id.clone());
+    let serialized = toml::to_string(&manifest).expect("manifest serializes");
+    let decoded: LayoutManifest = toml::from_str(&serialized).expect("manifest deserializes");
+
+    assert_eq!(decoded, manifest);
+    assert_eq!(decoded.memory_provider_app_id(), Some(app_id.as_str()));
+}
+
+#[test]
+fn released_and_canonical_memory_provider_derivations_remain_distinct_and_stable() {
+    let root = std::path::Path::new("/var/lib/ironclaw");
+    assert_eq!(
+        ironclaw_config::legacy_memory_provider_app_id(root),
+        "ws-f4f432cf4db72cc2"
+    );
+    assert_eq!(
+        ironclaw_config::canonical_memory_provider_app_id(root),
+        "ws-f0d6f77ada36695664007e305f03546485e25e5f295cb273657c4370f4aaab01"
+    );
+}
+
+#[test]
 fn layout_manifest_transition_admission_has_an_explicit_durable_state_matrix() {
     struct Case {
         name: &'static str,

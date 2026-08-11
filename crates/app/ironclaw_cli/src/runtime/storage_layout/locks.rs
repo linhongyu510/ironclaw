@@ -2,8 +2,6 @@
 
 use super::*;
 use super::{filesystem::*, model::*};
-#[cfg(any(unix, windows))]
-use fs2::FileExt as _;
 
 pub(super) struct AdoptionLock {
     #[cfg(any(unix, windows))]
@@ -40,7 +38,7 @@ pub(super) fn acquire_named_lock(
             .create(true)
             .open(&path)
             .with_context(|| format!("open advisory lock {} for {operation}", path.display()))?;
-        file.try_lock_exclusive().with_context(|| {
+        fs2::FileExt::try_lock_exclusive(&file).with_context(|| {
         format!(
             "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
             path.display()

@@ -162,6 +162,8 @@ pub(super) struct AdoptionJournal {
     pub(super) phase: AdoptionPhase,
     pub(super) source_requirement: LayoutRequirement,
     pub(super) target_requirement: LayoutRequirement,
+    #[serde(default)]
+    pub(super) memory_provider_app_id: Option<String>,
     pub(super) inventory: AdoptionInventory,
     pub(super) workspace: Option<WorkspaceImportDecision>,
 }
@@ -235,6 +237,9 @@ impl AdoptionJournal {
             phase: AdoptionPhase::Prepare,
             source_requirement: candidate.kind.requirement(),
             target_requirement,
+            memory_provider_app_id: Some(ironclaw_config::legacy_memory_provider_app_id(
+                &candidate.source_root,
+            )),
             inventory: AdoptionInventory {
                 db_files: candidate.db_files.clone(),
                 has_master_key: candidate.has_master_key,

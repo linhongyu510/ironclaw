@@ -164,6 +164,86 @@ fn migration_pending_recovery_allows_a_pre_copy_sidecar_to_disappear() {
 }
 
 #[test]
+fn migration_pending_recovery_rejects_an_unjournaled_master_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = external_single_user_requirement();
+    let legacy = temp.path().join("hosted-single-tenant");
+    fs::create_dir_all(legacy.join("system/prompts")).expect("legacy system content");
+    fs::write(legacy.join("system/prompts/operator.md"), b"prompt").expect("legacy prompt");
+    let paths = RebornStoragePaths::from_home(&home);
+    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+    fs::create_dir_all(&adoption_root).expect("adoption root");
+    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+    let candidate = candidates.first().expect("one candidate");
+    assert!(
+        !candidate.has_master_key,
+        "fixture has no legacy master key"
+    );
+    let snapshot = candidate.snapshot_root(&adoption_root);
+    let mut journal = AdoptionJournal::new(candidate, requirement, None);
+    snapshot_source(candidate, &snapshot).expect("snapshot source");
+    stage_snapshot(
+        candidate,
+        &snapshot,
+        &adoption_root,
+        None,
+        &journal.operation_id,
+    )
+    .expect("stage snapshot");
+    install_staged(&paths, &adoption_root, None).expect("install staged content");
+    fs::write(paths.state_root().join(MASTER_KEY_FILE), b"unexpected-key")
+        .expect("inject unjournaled master key");
+    journal.phase = AdoptionPhase::MigrationPending;
+    write_journal(&adoption_root.join(JOURNAL_FILE), &journal).expect("migration journal");
+
+    let error =
+        adopt_layout_with_store_verification(&home, requirement, confirmed_options(), || {
+            Ok(CanonicalStoreVerification::ExternalPostgresVerified)
+        })
+        .expect_err("an unjournaled canonical master key must fail closed");
+
+    assert!(
+        format!("{error:#}").contains("unexpected post-migration entry"),
+        "unexpected diagnostic: {error:#}"
+    );
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+}
+
+#[test]
+fn schema_four_journal_without_memory_namespace_resumes_without_a_second_migration() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+    let expected_app_id = ironclaw_config::legacy_memory_provider_app_id(&legacy);
+    let paths = RebornStoragePaths::from_home(&home);
+    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
+    create_adoption_root(temp.path(), &paths, &adoption_root).expect("adoption root");
+    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
+    let candidate = candidates.first().expect("one candidate");
+    let mut journal = AdoptionJournal::new(candidate, requirement, None);
+    journal.memory_provider_app_id = None;
+    let journal_path = adoption_root.join(JOURNAL_FILE);
+    write_journal(&journal_path, &journal).expect("legacy schema-four journal");
+    assert!(
+        !fs::read_to_string(&journal_path)
+            .expect("journal text")
+            .contains("memory_provider_app_id"),
+        "the fixture matches a schema-four journal written before the optional field"
+    );
+
+    adopt_layout(&home, requirement, confirmed_options()).expect("legacy journal resumes");
+
+    let manifest = read_manifest(&temp.path().join(LAYOUT_MANIFEST_FILE)).expect("manifest");
+    assert_eq!(
+        manifest.memory_provider_app_id(),
+        Some(expected_app_id.as_str())
+    );
+}
+
+#[test]
 fn recovery_never_deletes_unproven_canonical_content() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
@@ -443,12 +523,9 @@ fn fault_after_state_rename_resumes_the_remaining_install_boundary() {
     .expect("cutover authority");
     let permit = prepare_automatic_adoption(&home, requirement, authority)
         .expect("automatic recovery preflight");
-    automatically_adopt_layout_with_store_verification(
-        &home,
-        requirement,
-        permit,
-        CanonicalStoreVerification::EmbeddedLibSql,
-    )
+    automatically_adopt_layout_with_store_verification(&home, requirement, permit, || {
+        Ok(CanonicalStoreVerification::EmbeddedLibSql)
+    })
     .expect("automatic recovery completes the remaining system rename");
     assert!(temp.path().join("layout.toml").is_file());
 }
@@ -527,12 +604,9 @@ fn automatic_startup_resumes_every_persisted_phase_and_commits_manifest_last() {
         .expect("cutover authority");
         let permit = prepare_automatic_adoption(&home, requirement, authority)
             .expect("automatic recovery preflight");
-        automatically_adopt_layout_with_store_verification(
-            &home,
-            requirement,
-            permit,
-            CanonicalStoreVerification::EmbeddedLibSql,
-        )
+        automatically_adopt_layout_with_store_verification(&home, requirement, permit, || {
+            Ok(CanonicalStoreVerification::EmbeddedLibSql)
+        })
         .expect("resume exact persisted phase automatically");
         assert!(temp.path().join("layout.toml").is_file());
         assert!(temp.path().join("state/reborn-local-dev.db").is_file());
