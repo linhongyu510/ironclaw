@@ -1644,6 +1644,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])
 
+    def test_omp_contract_fixture_selects_its_owning_root_partition(self) -> None:
+        prefix = "tests/fixtures/omp_coding_contract/"
+        owner = planner.ROOT_FIXTURE_PREFIX_OWNERS[prefix]
+        expected_partition = planner._root_test_partitions()[owner]
+
+        plan = self.plan("pull_request", [f"{prefix}golden/errors/read.json"])
+
+        self.assertEqual(plan["root_partitions"], [expected_partition])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        support_plan = self.plan(
+            "pull_request", ["tests/support/omp_coding_contract/mod.rs"]
+        )
+        self.assertEqual(support_plan["root_partitions"], [expected_partition])
+
+    def test_shared_root_support_selects_representative_partition(self) -> None:
+        plan = self.plan("pull_request", ["tests/support/mod.rs"])
+        self.assertEqual(plan["root_partitions"], [0])
+
     def test_unowned_snapshot_still_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
