@@ -87,6 +87,11 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/ironclaw-release.yml": (
         "Smoke exact binaries before packaging upload",
         "scripts/ci/smoke-release-binary.py",
+        "release-upgrade-canary:",
+        "previous_tag: ironclaw-v1.0.0",
+        "previous_tag: ironclaw-v1.1.1-rc.1",
+        "scripts/ci/release-upgrade-canary.py",
+        "needs.release-upgrade-canary.result == 'success'",
     ),
 }
 
