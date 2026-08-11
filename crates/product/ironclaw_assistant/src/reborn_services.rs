@@ -2247,6 +2247,10 @@ pub struct RebornServices<
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
+    /// The session lane's product surface, built once. Every input is an
+    /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
+    /// only allocated — on the browser's primary send path.
+    session_inbound_surface: Arc<std::sync::OnceLock<Arc<DefaultProductSurface>>>,
     session_channels:
         Option<Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>>,
     operator_status: Arc<dyn OperatorStatusService>,
@@ -2336,6 +2340,7 @@ where
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
+            session_inbound_surface: Arc::new(std::sync::OnceLock::new()),
             session_channels: None,
             operator_status: Arc::new(UnsupportedOperatorStatusService),
             operator_logs: Arc::new(UnsupportedOperatorLogsService),
@@ -3787,7 +3792,16 @@ where
     /// implementation webhook channels run, constructed over this service's
     /// own ports plus the durable session idempotency ledger. Built per call
     /// from `Arc` handles (cheap), so builder-wired ports are always current.
-    fn session_inbound_core(&self) -> DefaultProductSurface {
+    fn session_inbound_core(&self) -> Arc<DefaultProductSurface> {
+        Arc::clone(
+            self.session_inbound_surface
+                .get_or_init(|| Arc::new(self.build_session_inbound_core())),
+        )
+    }
+
+    /// Compose the session lane's surface. Called once per service instance
+    /// through [`Self::session_inbound_core`]'s memoization.
+    fn build_session_inbound_core(&self) -> DefaultProductSurface {
         let mut inbound = DefaultInboundTurnService::new(
             SessionLaneRejectingBindingResolver,
             Arc::clone(&self.thread_service),

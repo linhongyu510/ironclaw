@@ -70,6 +70,7 @@ async def _open_stubbed_approval_thread(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

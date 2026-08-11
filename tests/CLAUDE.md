@@ -240,7 +240,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Scheduled-origin runs carry their origin into persisted state | `triggered_submit.rs` |
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
-| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::web_app_enrollment_and_notification_channel_round_trip_through_production_facade` |
+| Enroll/refresh/remove a browser for web push over the real routes — advertised VAPID key, endpoint redacted to its push-service host, undeclared push hosts rejected, and the `web-app` catalog row selectable through the same notification-channels wire as every vendor channel | `webui_v2_product_api.rs::browser_channel_notification_setup_round_trip_through_production_facade` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
 
 One of the 55 registered bins, `delivery_user_journeys.rs`, holds the explicit

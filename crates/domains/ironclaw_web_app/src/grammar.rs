@@ -23,7 +23,15 @@ pub const WEB_APP_CHANNEL_NAME: &str = "web-app";
 /// The constant, owner-scoped catalog target id. Target resolution is always
 /// scoped to the requesting owner, so one stable id per user is unambiguous
 /// ("this user's enrolled browsers").
-pub const WEB_APP_TARGET_ID: &str = "web-app";
+///
+/// The VALUE keeps the pre-rename `web-push` spelling for the same reason
+/// [`WEB_APP_VAPID_CREDENTIAL_HANDLE`] does: the notification-channel picker
+/// persists its selection as catalog target ids in each user's communication
+/// preferences, so this is a persisted per-user identity, not a display
+/// label. Renaming it would resolve every stored selection to `Missing` and
+/// silently drop those users from notification fan-out until they re-ticked
+/// the box. The user-visible channel name is [`WEB_APP_CHANNEL_NAME`].
+pub const WEB_APP_TARGET_ID: &str = "web-push";
 
 /// Credential handle for the deployment's VAPID key material, referenced by
 /// the manifest's `[[channel.egress]]` declarations and seeded at boot.

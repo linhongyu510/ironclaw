@@ -9,7 +9,7 @@ The web app's browser-notification channel: outbound-only Web Push
 - **Deployment-bound** like Telegram: the binary's binding table links the
   adapter and codec; there is no pairing flow (browser enrollment happens in
   the authenticated WebUI session via the web-app product commands).
-- **Credentials:** the `web_app_vapid` handle holds auto-generated VAPID key
+- **Credentials:** the `web_push_vapid` handle (constant `WEB_APP_VAPID_CREDENTIAL_HANDLE`, whose value deliberately keeps the pre-rename spelling — renaming it would rotate the VAPID identity and break every existing subscription) holds auto-generated VAPID key
   material (`VapidCredentialMaterialV1`), seeded by composition at boot —
   never operator-typed. The RFC 8292 `Authorization: vapid` header is
   computed host-side by the `vapid_authorization` egress injection; the

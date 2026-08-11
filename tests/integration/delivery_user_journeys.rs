@@ -1934,7 +1934,10 @@ async fn empty_notification_set_keeps_blocked_fire_in_app_only() {
 /// `201 Created`).
 const WEB_APP_LIVE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/live-subscription-token";
 const WEB_APP_GONE_ENDPOINT: &str = "https://fcm.googleapis.com/fcm/send/gone-subscription-token";
-const WEB_APP_TARGET_ID: &str = "web-app";
+/// The browser channel's catalog target id. Deliberately the pre-rename
+/// `web-push` bytes: it is a persisted per-user preference identity (see
+/// `ironclaw_web_app::WEB_APP_TARGET_ID`), unlike the `web-app` channel name.
+const WEB_APP_TARGET_ID: &str = "web-push";
 
 /// Exact-destination + unthreaded delivery evidence for the journey coverage
 /// gate (`tests/e2e/scenarios/test_journey_coverage.py`

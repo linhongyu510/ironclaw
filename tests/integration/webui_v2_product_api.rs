@@ -2505,9 +2505,13 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     let (status, body) = get_json(router(), "/api/webchat/v2/outbound/targets").await;
     assert_eq!(status, StatusCode::OK, "targets response: {body}");
     let targets = body["targets"].as_array().expect("targets array");
+    // The catalog target id deliberately keeps its pre-rename `web-push`
+    // bytes (a persisted per-user preference identity) while the CHANNEL is
+    // `web-app` — pinning both here is what proves stored selections survive
+    // the rename.
     let web_app_target = targets
         .iter()
-        .find(|entry| entry["target"]["target_id"] == "web-app")
+        .find(|entry| entry["target"]["target_id"] == "web-push")
         .unwrap_or_else(|| panic!("web-app target missing from the catalog: {body}"));
     assert_eq!(web_app_target["target"]["channel"], "web-app", "{body}");
     assert_eq!(
@@ -2605,13 +2609,13 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     let (status, body) = post_json(
         router(),
         "/api/webchat/v2/outbound/notification-channels",
-        serde_json::json!({"target_ids": ["web-app"]}),
+        serde_json::json!({"target_ids": ["web-push"]}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "set channels response: {body}");
     let (status, body) = get_json(router(), "/api/webchat/v2/outbound/notification-channels").await;
     assert_eq!(status, StatusCode::OK, "get channels response: {body}");
-    assert_eq!(body["channels"][0]["target_id"], "web-app", "{body}");
+    assert_eq!(body["channels"][0]["target_id"], "web-push", "{body}");
     assert_eq!(body["channels"][0]["status"], "available", "{body}");
 
     // Unenroll; the browser disappears from the caller's status.

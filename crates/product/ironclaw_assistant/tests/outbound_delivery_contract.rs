@@ -1859,6 +1859,98 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
     }
 }
 
+/// Regression pin (unified-channel-model §5, review finding): `deliver_notice`
+/// skips EVERY notice-class intent for a streaming channel — unlike `deliver`,
+/// which carves out notification-routed sends. The asymmetry is intentional:
+/// notice-class intents are source-routed to the originating conversation,
+/// which for a streaming channel is the durable projection stream the client
+/// already renders from, and the vendor-message operations in this class have
+/// no counterpart there. The sends that must reach a closed tab are
+/// policy-class and travel through `deliver`'s notification path, which this
+/// test also pins in the same breath so the two can never drift apart.
+#[tokio::test]
+async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-notice")],
+        })],
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_mode: ironclaw_extension_contracts::channel::ChannelReplyMode::Streaming,
+        }),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec()))
+            as Arc<dyn DeliveryReplyContextSource>,
+        DeliveryRetryPolicy {
+            max_attempts: 3,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+
+    // Every notice-class intent is source-routed and therefore skipped.
+    for intent in [
+        DeliveryIntent::Working,
+        DeliveryIntent::Cleanup,
+        DeliveryIntent::Reaction,
+        DeliveryIntent::FailureNotice,
+        DeliveryIntent::ConnectionStatus,
+        DeliveryIntent::CommandFeedback,
+        DeliveryIntent::ConnectRequired,
+    ] {
+        let mut request = working_notice(scope.clone(), "vendorx");
+        request.intent = intent;
+        let outcome = coordinator
+            .deliver_notice(request)
+            .await
+            .expect("a streaming skip is a clean outcome, not an error");
+        assert!(
+            matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery),
+            "{intent:?} is source-routed: a streaming channel renders it from the \
+             projection stream, got {outcome:?}"
+        );
+    }
+    assert_eq!(
+        adapter.deliver_calls(),
+        0,
+        "no source-routed notice may reach the adapter on a streaming channel"
+    );
+
+    // ...while the policy-class notification path still delivers, so a user
+    // with the tab closed keeps receiving background-run notices.
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let thread_scope = project_thread_scope();
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_notification(scope.clone(), "vendorx", &thread_scope),
+        )
+        .await
+        .expect("notification-routed send drives");
+    assert!(
+        matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }),
+        "a notification-routed send must still reach a streaming channel, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.notification_sends(),
+        1,
+        "and it must ride the adapter's notification send"
+    );
+}
+
 #[tokio::test]
 async fn coordinator_notice_is_source_routed_and_persists_before_egress() {
     let scope = scope();

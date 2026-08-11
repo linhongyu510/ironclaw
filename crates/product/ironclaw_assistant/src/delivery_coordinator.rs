@@ -519,6 +519,20 @@ impl DeliveryCoordinator {
         }
         reject_caller_supplied_files(&request.parts)?;
         self.ensure_scope_recovered(&request.scope).await;
+        // Unlike `deliver`, this guard is unconditional — and deliberately so.
+        // Notice-class intents are SOURCE-routed: they target the originating
+        // conversation, never a policy-resolved notification target, so none
+        // of them is ever notification-routed and the `as_notification`
+        // carve-out `deliver` needs cannot apply here. For a streaming
+        // channel the originating conversation IS the durable projection
+        // stream the client already renders from, which carries run status
+        // and failure transitions; and the vendor-message operations in this
+        // class (`Retract`, `React`) have no counterpart there — the web-app
+        // adapter reports both as unsupported parts, so delivering them would
+        // only persist a failed attempt. Background-run notices, the sends
+        // that must reach a closed tab, are policy-class and flow through
+        // `deliver`'s notification path instead. Pinned by
+        // `streaming_channel_skips_source_routed_notices_but_not_notifications`.
         if self.streaming_channel_skips_conversation_reply(request.intent, request.extension_id) {
             tracing::debug!(
                 target: "ironclaw::reborn::delivery",

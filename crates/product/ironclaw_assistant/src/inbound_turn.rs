@@ -871,9 +871,6 @@ where
         // A session client action id is caller-scoped, not thread-scoped: the
         // same id replayed against a different thread is a duplicate action,
         // not a fresh submission for the new thread.
-        // A session client action id is caller-scoped, not thread-scoped: the
-        // same id replayed against a different thread is a duplicate action,
-        // not a fresh submission for the new thread.
         if prepared.lane == SubmissionLane::Session
             && replay.thread_id != prepared.binding.thread_id
         {
