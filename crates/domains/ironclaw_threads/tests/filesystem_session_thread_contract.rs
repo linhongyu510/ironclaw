@@ -2790,7 +2790,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -2849,7 +2849,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -2873,7 +2873,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -2912,7 +2912,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -4126,7 +4126,7 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
