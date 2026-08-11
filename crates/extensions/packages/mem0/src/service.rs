@@ -336,9 +336,10 @@ impl Mem0MemoryService {
         // document reads back scrambled. `sort_by` is stable, so fragments that
         // share (or lack) a `created_at` keep their relative list order.
         //
-        // Tag matching is alias-aware (#7505): new writes are tagged with the
-        // canonical path (`MEMORY.md`), and pre-fix rows tagged with the legacy
-        // alias (`memory`) must stay reachable by that same canonical path.
+        // Tag matching is alias-aware and symmetric (#7505): new writes are
+        // tagged with the canonical path (`MEMORY.md`), pre-fix rows tagged
+        // with the legacy alias (`memory`) stay reachable by that canonical
+        // path, and alias-path reads still find canonical-tagged rows.
         let mut fragments: Vec<&Value> = response_items(&response.body)
             .map_err(MemoryServiceError::operation_from)?
             .into_iter()
@@ -910,13 +911,15 @@ mod tests {
     async fn read_matches_legacy_alias_tags_alongside_canonical_paths() {
         // #7505: pre-fix rows tagged with the legacy alias (`memory`) must stay
         // reachable by the canonical path (`MEMORY.md` — what the host's
-        // always-on lane reads), alongside post-fix canonical tags.
+        // always-on lane reads), alongside post-fix canonical tags. The match
+        // is symmetric: an alias-path read finds the canonical-tagged rows
+        // too, preserving the pre-fix write-then-read-by-alias round-trip.
         let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
             { "memory": "legacy alias row", "metadata": { "target": "memory" } },
             { "memory": "canonical row", "metadata": { "target": "MEMORY.md" } },
             { "memory": "other doc", "metadata": { "target": "HEARTBEAT.md" } }
         ])));
-        let read = service
+        let canonical = service
             .read(
                 invocation(),
                 MemoryServiceReadRequest {
@@ -926,8 +929,23 @@ mod tests {
             .await
             .expect("read should succeed");
         assert_eq!(
-            read.content, "legacy alias row\ncanonical row",
+            canonical.content, "legacy alias row\ncanonical row",
             "both the legacy-alias and canonical tags must reconstruct the document"
+        );
+
+        let by_alias = service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "memory".to_string(),
+                },
+            )
+            .await
+            .expect("alias-path read should succeed");
+        assert_eq!(
+            by_alias.content, "legacy alias row\ncanonical row",
+            "an alias-path read must also find canonical-tagged rows (same_document_target is \
+             symmetric)"
         );
     }
 

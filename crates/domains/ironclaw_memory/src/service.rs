@@ -910,9 +910,14 @@ fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
 /// `*_DOCUMENT_TARGET` vocabulary in `crate::target`) and ordinary relative
 /// document paths (`notes/x.md`) pass unchanged; resolution to the canonical
 /// document is the domain-owned [`resolve_document_target`] table.
-fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
+///
+/// `pub(crate)`: also the input gate of [`resolve_document_target`], so the
+/// exported resolver is fail-closed regardless of which caller routes through
+/// it — never only at `from_tool_input`.
+pub(crate) fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
     if target.trim().is_empty()
         || target.starts_with('/')
+        || target.starts_with("~/")
         || target.contains("..")
         || target.contains('\\')
     {

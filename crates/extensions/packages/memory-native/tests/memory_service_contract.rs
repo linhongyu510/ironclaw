@@ -102,6 +102,67 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
 }
 
 #[tokio::test]
+async fn native_write_resolves_daily_log_through_the_shared_timezone_rule() {
+    // Caller-level pin of the domain resolver's timezone contract through
+    // native's own write seam (#7505 review): an invalid timezone fails the
+    // write, a valid one lands at today's dated document and round-trips.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let invalid = service
+        .write(
+            invocation(),
+            MemoryServiceWriteRequest {
+                target: "daily_log".to_string(),
+                content: "timezone should reject".to_string(),
+                append: true,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: Some("not/a-zone".to_string()),
+            },
+        )
+        .await
+        .expect_err("an invalid timezone must fail native write");
+    assert_eq!(invalid.kind(), MemoryServiceErrorKind::Input);
+
+    let written = service
+        .write(
+            invocation(),
+            MemoryServiceWriteRequest {
+                target: "daily_log".to_string(),
+                content: "berlin log entry".to_string(),
+                append: true,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: Some("Europe/Berlin".to_string()),
+            },
+        )
+        .await
+        .expect("a valid timezone write must succeed");
+    assert!(
+        written.path.starts_with("daily/") && written.path.ends_with(".md"),
+        "daily_log must resolve to today's dated canonical path, got {:?}",
+        written.path
+    );
+
+    let read = service
+        .read(
+            invocation(),
+            MemoryServiceReadRequest { path: written.path },
+        )
+        .await
+        .expect("the daily log must round-trip at the resolved path");
+    assert!(
+        read.content.contains("berlin log entry"),
+        "the daily log write must be readable back, got {:?}",
+        read.content
+    );
+}
+
+#[tokio::test]
 async fn native_search_preserves_oversized_provider_result() {
     const QUERY: &str = "needle";
     const RESULT_BOUND: usize = 8 * 1024;
