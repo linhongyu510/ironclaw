@@ -359,9 +359,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             &self.policy,
             self.mode,
         );
-        Ok(state
-            .catalog
-            .deferred_definitions(&initial, &self.policy))
+        Ok(state.catalog.deferred_definitions(&initial, &self.policy))
     }
 
     fn provider_tool_call_capability_ids(
