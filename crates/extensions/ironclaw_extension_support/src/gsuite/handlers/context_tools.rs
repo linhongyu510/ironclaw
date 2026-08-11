@@ -1020,12 +1020,17 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return String::new();
     }
     let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_none() {
+        return prefix;
     }
+
+    if max_chars <= 3 {
+        return prefix;
+    }
+
+    let truncated: String = prefix.chars().take(max_chars - 3).collect();
+    format!("{truncated}...")
 }
 
 fn partial_failure(scope: &str, status: u16, body: &Value) -> Value {
@@ -1194,7 +1199,13 @@ mod tests {
 
         let summary = compact_gmail_message(&message, 4);
 
-        assert_eq!(summary["bodyPreview"], "0123");
+        assert_eq!(summary["bodyPreview"], "0...");
+        assert_eq!(
+            summary["bodyPreview"]
+                .as_str()
+                .map(|preview| preview.chars().count()),
+            Some(4)
+        );
         assert!(summary.get("snippet").is_none());
     }
 
