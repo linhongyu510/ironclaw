@@ -1,22 +1,20 @@
-//! Unregistered omp-parity coding engines (issue #7392 slice 2).
+//! Pinned omp-parity coding engines (issue #7392).
 //!
-//! #doc(hidden): these engines are deliberately OUTSIDE the production
-//! registry. They port the model-visible contract of the five omp core
+//! These engines implement the model-visible contract of the five omp core
 //! coding tools (`read`, `write`, `edit`, `glob`, `grep`) at upstream commit
 //! `08819b279cf02ae2545e69dad7111ab48d91d35e` of `can1357/oh-my-pi`, backed by
-//! [`RootFilesystem`] instead of the local process filesystem. Wired to
-//! production dispatch only at atomic cutover (issue #7392); until then they
-//! are exercised by crate unit tests and the root harness test bin
-//! `tests/reborn_omp_coding_engines.rs` against the pinned fixture snapshot at
+//! [`RootFilesystem`] and the host's scoped artifact reader. The always-on
+//! first-party package wires them through normal production dispatch. Contract
+//! tests compare them with the pinned snapshot under
 //! `tests/fixtures/omp_coding_contract/`.
 //!
 //! Exact strings (selector errors, stale-anchor messages, output formats,
 //! success shapes) are copied verbatim from the pinned upstream sources;
 //! never approximate them.
 //!
-//! Scope notes (later slices, NOT implemented here): archives, SQLite,
-//! documents, URLs, SSH, ast_grep/ast_edit, networked tools, the multi-backend
-//! conformance suite.
+//! Scope notes: `artifact://` reads are implemented. Archives, SQLite,
+//! documents, URLs, SSH, ast_grep/ast_edit, networked tools, and the
+//! multi-backend conformance suite remain later issue #7392 slices.
 
 use std::sync::Arc;
 
@@ -144,14 +142,15 @@ impl std::error::Error for OmpEngineError {}
 #[derive(Clone)]
 pub struct OmpEngineContext {
     pub filesystem: Arc<dyn RootFilesystem>,
+    pub artifact_reader: Option<Arc<dyn ironclaw_host_api::artifact::ScopedArtifactReader>>,
     pub mounts: MountView,
     pub scope: ResourceScope,
     pub run_id: Option<RunId>,
     pub snapshots: Arc<OmpSnapshotRegistry>,
 }
 
-/// A fully resolved engine target: the scoped path the caller named, the
-/// canonical virtual path on the backend, and the granting mount.
+/// A resolved engine target: the canonical virtual path on the backend and
+/// the granting mount.
 pub(crate) struct OmpResolvedPath {
     pub(crate) virtual_path: ironclaw_host_api::path::VirtualPath,
     pub(crate) grant: ironclaw_host_api::mount::MountGrant,

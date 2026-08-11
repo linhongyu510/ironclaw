@@ -527,10 +527,9 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
-    /// the REAL `StagedCapabilityIo` (durable tool-result projection seam,
-    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
-    /// double, so a large `read_file` output is persisted durably and
-    /// `result_read` can page through it.
+    /// the real `StagedCapabilityIo` instead of the ephemeral
+    /// `ProductLiveCapabilityIo` test double, so artifact-backed result
+    /// projection follows the production path.
     pub fn with_durable_capability_io_file_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::FileToolsDurableIo;
         self

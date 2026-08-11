@@ -22,14 +22,15 @@ use ironclaw_host_api::{
     invocation::InvocationOrigin,
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
-    resource::{ResourceEstimate, ResourceScope},
+    resource::{ResourceEstimate, ResourceReceipt, ResourceScope},
     result_meta::{FailureKind, ModelDiagnostic},
     runtime::RuntimeKind,
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -233,6 +234,12 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityResultUpdate {
+    pub byte_len: u64,
+    pub completed_artifact: Option<ironclaw_host_api::artifact::CompletedArtifact>,
+}
+
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
     /// Write the result of a completed capability invocation.
@@ -250,7 +257,7 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _run_context: &LoopRunContext,
         _result_ref: &LoopResultRef,
         _output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "capability result updates are not supported by this writer",
@@ -485,13 +492,10 @@ pub enum DurablePersistence {
     /// for any capability result the model has not already seen in full.
     #[default]
     Persist,
-    /// Skip durable persistence. Reserved for outputs that are already
-    /// fully model-visible inline (e.g. a `result_read` continuation chunk,
-    /// whose bytes are returned directly in the tool observation) — writing
-    /// them durably again would mint a redundant record per chunk with no
-    /// reader that needs it. Best-effort in-memory staging still happens,
-    /// so an immediate re-read from cache can still succeed; a later durable
-    /// read against this ref must fail gracefully as unavailable.
+    /// Skip durable persistence. Reserved for outputs that are already fully
+    /// model-visible inline. Best-effort in-memory staging still happens, so an
+    /// immediate cache read can succeed; a later durable read against this ref
+    /// must fail gracefully as unavailable.
     InlineOnly,
 }
 
@@ -502,6 +506,11 @@ pub struct CapabilityResultWrite<'a> {
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
+    pub receipt: Option<&'a ResourceReceipt>,
+    pub completed_artifact: Option<&'a ironclaw_host_api::artifact::CompletedArtifact>,
+    /// Stable digest of the full canonical output when `output` is only a
+    /// bounded transport preview.
+    pub canonical_output_digest: Option<ContentDigest>,
     pub durable_persistence: DurablePersistence,
 }
 
@@ -1671,6 +1680,9 @@ impl HostRuntimeLoopCapabilityPort {
         let write_result = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &self.run_context,
                 input_ref: &request.input_ref,
                 invocation_id: InvocationId::from_uuid(request.activity_id.as_uuid()),
@@ -3291,6 +3303,7 @@ fn auth_decline_context_from_visible(
     // across tool calls of one run but never leaks into a later run.
     let run_id = ironclaw_host_api::ids::RunId::from_uuid(run_context.run_id.as_uuid());
     context.run_id = Some(run_id);
+    context.artifact_namespace = Some(run_context.effective_artifact_namespace());
     // Authoritative origin (§5.2.1): a tool call inside an agent loop turn-run is
     // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
     // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
@@ -3594,14 +3607,27 @@ async fn runtime_outcome_to_loop(
     ensure_runtime_outcome_matches(conversion.requested_capability_id, &conversion.outcome)?;
     Ok(match conversion.outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
+            let RuntimeCapabilityCompleted {
+                capability_id,
+                output,
+                display_preview,
+                usage: _,
+                receipt,
+                completed_artifact,
+                canonical_output_digest,
+            } = *completed;
             let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
+                    receipt: receipt.as_ref(),
+                    completed_artifact: completed_artifact.as_ref(),
+                    canonical_output_digest: canonical_output_digest
+                        .map(|digest| ContentDigest(digest.value())),
                     run_context,
                     input_ref: conversion.input_ref,
                     invocation_id: conversion.invocation_id,
-                    capability_id: &completed.capability_id,
-                    output: completed.output.clone(),
-                    display_preview: completed.display_preview.clone(),
+                    capability_id: &capability_id,
+                    output,
+                    display_preview,
                     durable_persistence: DurablePersistence::Persist,
                 })
                 .await?;
@@ -9014,6 +9040,11 @@ mod tests {
             )),
             "invocation context must be stamped with the loop turn-run identity"
         );
+        assert_eq!(
+            invocation_context.artifact_namespace,
+            Some(run_context.effective_artifact_namespace()),
+            "loop invocation context must carry the spawn-tree artifact namespace"
+        );
         // The loop ingress is the authoritative origin source: it seals
         // `LoopRun` explicitly so the kernel does not have to fall back to
         // reconstructing origin from `run_id`.
@@ -10723,6 +10754,9 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: request.1,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
@@ -10875,6 +10909,9 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
+                    completed_artifact: None,
+                    canonical_output_digest: None,
+                    receipt: None,
                     capability_id: request.2,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,

@@ -22,6 +22,7 @@
 
 mod support;
 
+use ironclaw_host_api::artifact::ArtifactRef;
 use serde_json::json;
 use support::omp_coding_contract::{
     EXPECTED_TOOL_NAMES, PINNED_COMMIT, RunOutcome, compare_cases, error_entries, fixture_root,
@@ -801,4 +802,42 @@ fn rendered_read_prompt_pins_the_issue_target_description() {
         rendered_tool_prompt("write").is_none(),
         "tools without a pinned render context expose no rendered prompt"
     );
+}
+
+#[test]
+fn artifact_uri_fixture_matches_the_pinned_parser_contract() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(&read_snapshot_text("golden/artifacts.json"))
+            .expect("artifact fixture parses");
+    assert_eq!(fixture["source_commit"], PINNED_COMMIT);
+    assert_eq!(fixture["allocation"]["first_id"], 0);
+    assert_eq!(
+        fixture["allocation"]["scope"],
+        "parent_and_subagent_tree_share_one_namespace"
+    );
+
+    let cases = fixture["cases"].as_array().expect("artifact cases");
+    let zero = cases
+        .iter()
+        .find(|case| case["id"] == "zero_is_valid")
+        .expect("zero case");
+    let parsed: ArtifactRef = zero["input"]
+        .as_str()
+        .expect("zero input")
+        .parse()
+        .expect("zero parses");
+    assert_eq!(parsed.id().get(), 0);
+
+    for case_id in ["missing_id", "non_numeric_id"] {
+        let case = cases
+            .iter()
+            .find(|case| case["id"] == case_id)
+            .unwrap_or_else(|| panic!("missing {case_id}"));
+        let error = case["input"]
+            .as_str()
+            .expect("error input")
+            .parse::<ArtifactRef>()
+            .expect_err("fixture input must fail");
+        assert_eq!(error.to_string(), case["error"]);
+    }
 }

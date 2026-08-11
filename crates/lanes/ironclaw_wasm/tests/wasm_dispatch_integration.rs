@@ -879,6 +879,8 @@ fn execute_prepared_wasm(
         }
     };
     Ok(RuntimeAdapterResult {
+        canonical_output_digest: None,
+        completed_artifact: None,
         output,
         display_preview: None,
         output_bytes: execution.usage.output_bytes,
@@ -983,6 +985,7 @@ fn dispatch_request(capability: &str, input: Value) -> Authorized {
         .set_output_bytes(10_000);
     Authorized::seal_for_test(
         Invocation {
+            artifact_namespace: None,
             activity_id: ActivityId::new(),
             capability: CapabilityId::new(capability).unwrap(),
             input,

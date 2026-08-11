@@ -400,6 +400,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id,

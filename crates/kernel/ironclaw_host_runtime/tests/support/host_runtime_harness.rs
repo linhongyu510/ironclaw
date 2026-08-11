@@ -1198,16 +1198,24 @@ where
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct FailingCleanupResourceGovernor;
+#[derive(Debug, Default)]
+pub(crate) struct FailingCleanupResourceGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl FailingCleanupResourceGovernor {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl ResourceGovernor for FailingCleanupResourceGovernor {
     fn set_limit(
         &self,
-        _account: ResourceAccount,
-        _limits: ResourceLimits,
+        account: ResourceAccount,
+        limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
-        Ok(())
+        self.inner.set_limit(account, limits)
     }
 
     fn reserve_with_outcome(
@@ -1215,14 +1223,7 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         scope: ResourceScope,
         estimate: ResourceEstimate,
     ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
-        Ok(ironclaw_resources::ReservationOutcome {
-            reservation: ResourceReservation {
-                id: ResourceReservationId::new(),
-                scope,
-                estimate,
-            },
-            warnings: Vec::new(),
-        })
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
     fn reserve_with_id_and_outcome(
@@ -1231,14 +1232,17 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
     ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
-        Ok(ironclaw_resources::ReservationOutcome {
-            reservation: ResourceReservation {
-                id: reservation_id,
-                scope,
-                estimate,
-            },
-            warnings: Vec::new(),
-        })
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+    }
+
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ResourceReservationId,
+        additional: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
     }
 
     fn reconcile(
@@ -1693,6 +1697,7 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
 
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
@@ -1749,6 +1754,7 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
     allowed_effects: Vec<EffectKind>,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,

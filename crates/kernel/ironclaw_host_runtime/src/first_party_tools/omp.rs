@@ -1,40 +1,23 @@
-//! Registration seam for the omp-parity coding engines (issue #7392 slice 3).
+//! Exact omp coding surface for the always-on first-party package (issue #7392).
 //!
-//! Produces the built-in first-party package PLUS the five omp capabilities
-//! (`builtin.read`, `builtin.write`, `builtin.edit`, `builtin.glob`,
-//! `builtin.grep`) with exact provider-name overrides (`read`, `write`,
-//! `edit`, `glob`, `grep`), the pinned fixture schemas and descriptions as
-//! model-visible contract bytes, and a [`FirstPartyCapabilityHandler`]
-//! adapter dispatching to `ironclaw_extension_support::coding::omp::*`
-//! through the ordinary first-party capability path (CapabilityHost,
-//! authorization, approvals, resource accounting, RootFilesystem/MountView,
-//! durable tool results).
-//!
-//! Two canonical ids overlap with the stock builtins: `builtin.glob` and
-//! `builtin.grep`. The temporary benchmark package replaces those entries
-//! and removes the remaining legacy coding tools so the model sees only the
-//! five exact omp names.
-//!
-//! ⚠️ TEMPORARY benchmark override (revert at cutover): the omp surface is
-//! enabled in PRODUCTION builds for the /benchmark panel (issue #7392) — the
-//! stock production package/handler builders now include the five omp
-//! capabilities unconditionally. The atomic cutover removes the old tools;
-//! the omp surface then becomes the only surface and this override (plus the
-//! `// ⚠️ TEMPORARY benchmark override` markers at the wiring points in
-//! `mod.rs`) goes away.
-//!
-//! Documented divergence from the stock coding path: the stock arm runs
-//! `normalize_optional_null_sentinels` (keyed on its derived schema names)
-//! before dispatch; the omp schemas are pinned fixture bytes under their own
-//! refs, so that normalization does not apply here — optional fields
-//! populated with the string `"null"` reach the omp engines verbatim and get
-//! the pinned engine error rather than graceful absent-field handling. This
-//! is the exact pinned contract; revisit only if the benchmark arm shows a
-//! real model-behavior delta.
+//! Registers `read`, `write`, `edit`, `glob`, and `grep` with the pinned omp
+//! schemas, prompts, provider names, and engine behavior. These capabilities
+//! use the ordinary first-party dispatch path, so authorization, approvals,
+//! resource accounting, mount scoping, and durable artifact handling remain
+//! host-owned.
 
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::{
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, MAX_FIRST_PARTY_INPUT_BYTES,
+    MAX_WRITE_FILE_INPUT_BYTES, builtin_first_party_package,
+};
+use crate::first_party::PendingFirstPartyArtifact;
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
 use async_trait::async_trait;
 use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
@@ -43,6 +26,10 @@ use ironclaw_extension_support::coding::omp::{
     OmpEngineContext, OmpEngineError, OmpEngineErrorKind, OmpSnapshotRegistry,
 };
 use ironclaw_host_api::{
+    artifact::{
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, ArtifactOwnerScope, ArtifactRef, ArtifactWriteError,
+        ArtifactWriteMetadata,
+    },
     capability::{EffectKind, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
     dispatch::RuntimeDispatchErrorKind,
@@ -50,37 +37,23 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     path::VirtualPath,
     resource::ResourceUsage,
+    result_meta::OutputDigest,
     runtime_policy::ProcessBackendKind,
 };
+use ironclaw_loop_contracts::ContentDigest;
 
-use super::{
-    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    MAX_FIRST_PARTY_INPUT_BYTES, MAX_WRITE_FILE_INPUT_BYTES, READ_FILE_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
-};
-use crate::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-};
-
-/// Canonical capability id of the omp `read` engine (slice 2). New id —
-/// no stock builtin shares it.
+/// Canonical capability id of the omp `read` engine.
 pub const OMP_READ_CAPABILITY_ID: &str = "builtin.read";
-/// Canonical capability id of the omp `write` engine (slice 2). New id.
+/// Canonical capability id of the omp `write` engine.
 pub const OMP_WRITE_CAPABILITY_ID: &str = "builtin.write";
-/// Canonical capability id of the omp hashline `edit` engine (slice 2).
-/// New id.
+/// Canonical capability id of the omp hashline `edit` engine.
 pub const OMP_EDIT_CAPABILITY_ID: &str = "builtin.edit";
-/// The omp `glob` engine rides the existing `builtin.glob` canonical id
-/// (replacing the stock v1 glob capability in the omp-extended package).
-/// See the module docs.
-///
-/// Canonical ids stay namespaced (`builtin.*`); only the model-visible names
-/// are overridden to the exact unqualified omp names.
+/// Canonical capability id of the omp `glob` engine.
 pub const OMP_GLOB_CAPABILITY_ID: &str = GLOB_CAPABILITY_ID;
-/// The omp `grep` engine rides the existing `builtin.grep` canonical id
-/// (replacing the stock v1 grep capability in the omp-extended package).
+/// Canonical capability id of the omp `grep` engine.
 pub const OMP_GREP_CAPABILITY_ID: &str = GREP_CAPABILITY_ID;
+
+const OMP_ARTIFACT_PREVIEW_MAX_BYTES: usize = 8 * 1024;
 
 /// Exact model-visible provider names (the pinned omp tool names).
 const OMP_READ_PROVIDER_TOOL_NAME: &str = "read";
@@ -171,40 +144,18 @@ const OMP_CAPABILITIES: &[OmpCapabilityMetadata] = &[
     },
 ];
 
-/// The built-in first-party package extended with the five omp capabilities.
-///
-/// Starts from the ordinary builtin package, applies the process-backend
-/// restriction, and swaps the two overlapping ids (`builtin.glob`/
-/// `builtin.grep`) for their omp counterparts while appending the three new
-/// ids (`builtin.read`/`builtin.write`/`builtin.edit`). The four old coding
-/// tools (`read_file`, `write_file`, `list_dir`, `apply_patch`) are REMOVED
-/// so the benchmark arm's model surface is omp-only for coding tools —
-/// otherwise models keep calling the familiar old names and the A/B measures
-/// tool preference instead of tool quality.
-///
-/// ⚠️ TEMPORARY benchmark override (issue #7392 bench arm): this removal is
-/// part of the flip and is exactly the atomic cutover's end-state; revert the
-/// whole override at cutover.
+/// The canonical always-on first-party package with the five omp coding
+/// capabilities, restricted for the selected process backend.
 pub fn omp_coding_package(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
     let mut package = builtin_first_party_package()?;
     super::restrict_package_for_process_backend(&mut package, process_backend)?;
-    let mut manifest = package.manifest;
-    manifest.capabilities.retain(|capability| {
-        let id = capability.id.as_str();
-        id != GLOB_CAPABILITY_ID
-            && id != GREP_CAPABILITY_ID
-            && id != READ_FILE_CAPABILITY_ID
-            && id != WRITE_FILE_CAPABILITY_ID
-            && id != LIST_DIR_CAPABILITY_ID
-            && id != APPLY_PATCH_CAPABILITY_ID
-    });
-    manifest.capabilities.extend(omp_coding_manifests()?);
+    let manifest = package.manifest;
     ExtensionPackage::from_manifest(manifest, VirtualPath::new("/system/extensions/builtin")?)
 }
 
-fn omp_coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
+pub(super) fn omp_coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     OMP_CAPABILITIES
         .iter()
         .map(omp_capability_manifest)
@@ -234,11 +185,7 @@ fn omp_capability_manifest(
     })
 }
 
-/// Register the omp handler adapter for the five omp capability ids.
-///
-/// Overwrites the stock builtin handler for `builtin.glob`/`builtin.grep`
-/// (upsert semantics of [`FirstPartyCapabilityRegistry::insert_handler`]);
-/// the other builtin ids keep their stock handlers.
+/// Register handlers for the five canonical omp coding capabilities.
 pub fn insert_omp_coding_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
 ) -> Result<(), HostApiError> {
@@ -291,6 +238,7 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
         })?;
         let context = OmpEngineContext {
             filesystem: Arc::clone(&request.services.filesystem),
+            artifact_reader: request.services.artifact_reader.clone(),
             mounts,
             scope: request.scope.clone(),
             run_id: request.run_id,
@@ -342,19 +290,141 @@ impl FirstPartyCapabilityHandler for OmpCodingTools {
                 process_count = 1;
             }
         }
+        let canonical_output_digest = canonical_output_digest(&output)?;
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        let output_bytes =
-            super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES).map_err(
-                |error| error.with_usage(ResourceUsage::default().set_wall_clock_ms(wall_clock_ms)),
-            )?;
-        Ok(FirstPartyCapabilityResult::new(
+        let (output, pending_artifact, output_bytes) = artifact_backed_output(&request, output)
+            .await
+            .map_err(|error| {
+                error.with_usage(ResourceUsage::default().set_wall_clock_ms(wall_clock_ms))
+            })?;
+        let result = FirstPartyCapabilityResult::new(
             output,
             ResourceUsage::default()
                 .set_wall_clock_ms(wall_clock_ms)
                 .set_output_bytes(output_bytes)
                 .set_process_count(process_count),
-        ))
+        )
+        .with_canonical_output_digest(canonical_output_digest);
+        Ok(match pending_artifact {
+            Some(artifact) => result.with_pending_artifact(artifact),
+            None => result,
+        })
     }
+}
+
+fn canonical_output_digest(
+    output: &serde_json::Value,
+) -> Result<OutputDigest, FirstPartyCapabilityError> {
+    ContentDigest::from_json_value(output)
+        .map(|digest| OutputDigest::new(digest.0))
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))
+}
+
+async fn artifact_backed_output(
+    request: &FirstPartyCapabilityRequest,
+    output: serde_json::Value,
+) -> Result<(serde_json::Value, Option<PendingFirstPartyArtifact>, u64), FirstPartyCapabilityError>
+{
+    let serde_json::Value::Object(mut object) = output else {
+        let output_bytes =
+            super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+        return Ok((output, None, output_bytes));
+    };
+    let Some(serde_json::Value::String(raw_output)) = object.remove("output") else {
+        let output = serde_json::Value::Object(object);
+        let output_bytes =
+            super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+        return Ok((output, None, output_bytes));
+    };
+    if raw_output.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES {
+        object.insert("output".to_string(), serde_json::Value::String(raw_output));
+        let output = serde_json::Value::Object(object);
+        let output_bytes =
+            super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+        return Ok((output, None, output_bytes));
+    }
+
+    let namespace = request
+        .services
+        .artifact_namespace
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    let persistence = request
+        .services
+        .artifact_persistence
+        .as_ref()
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::MethodMissing))?;
+    let raw_len = u64::try_from(raw_output.len())
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Resource))?;
+    let handle = persistence
+        .allocate(ArtifactWriteMetadata {
+            write_key: Some(request.scope.invocation_id),
+            owner_scope: ArtifactOwnerScope::from_resource_scope(&request.scope),
+            namespace,
+            producer_capability_id: request.capability_id.clone(),
+            content_type: "text/plain; charset=utf-8".to_string(),
+            expected_bytes: Some(raw_len),
+        })
+        .await
+        .map_err(artifact_write_error)?;
+    let artifact_ref = ArtifactRef::new(handle.artifact_id());
+    let preview = artifact_preview(&raw_output, &artifact_ref);
+    let output = serde_json::json!({
+        "output": preview,
+        "artifact_ref": artifact_ref.to_string(),
+        "total_bytes": raw_len,
+    });
+    Ok((
+        output,
+        Some(PendingFirstPartyArtifact {
+            handle,
+            bytes: raw_output.into_bytes(),
+        }),
+        raw_len,
+    ))
+}
+
+fn artifact_write_error(error: ArtifactWriteError) -> FirstPartyCapabilityError {
+    let kind = match error {
+        ArtifactWriteError::Budget => RuntimeDispatchErrorKind::Resource,
+        ArtifactWriteError::InvalidHandle
+        | ArtifactWriteError::DigestMismatch
+        | ArtifactWriteError::Storage => RuntimeDispatchErrorKind::OperationFailed,
+    };
+    FirstPartyCapabilityError::new(kind)
+}
+
+fn artifact_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
+    let footer = format!("\n[raw output: {artifact_ref}]");
+    let marker = "\n\n... [artifact output elided] ...\n\n";
+    let content_budget = OMP_ARTIFACT_PREVIEW_MAX_BYTES
+        .saturating_sub(footer.len())
+        .saturating_sub(marker.len());
+    let head_budget = content_budget / 2;
+    let tail_budget = content_budget.saturating_sub(head_budget);
+    let head_end = floor_char_boundary(raw_output, head_budget);
+    let tail_start = ceil_char_boundary(raw_output, raw_output.len().saturating_sub(tail_budget));
+    format!(
+        "{}{marker}{}{}",
+        &raw_output[..head_end],
+        &raw_output[tail_start..],
+        footer
+    )
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn omp_capability_metadata(capability_id: &str) -> Option<OmpCapabilityMetadata> {
@@ -417,5 +487,32 @@ mod tests {
         assert!(bounded.is_char_boundary(bounded.len()));
         assert!(bounded.len() <= 31, "{} bytes", bounded.len());
         assert!(bounded.ends_with("[diagnostic truncated]"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_digest_covers_the_full_output_before_artifact_previewing() {
+        let prefix = "a".repeat(8 * 1024);
+        let suffix = "z".repeat(8 * 1024);
+        let first = serde_json::json!({
+            "output": format!("{prefix}{}{}", "m".repeat(32 * 1024), suffix),
+        });
+        let same = first.clone();
+        let changed_middle = serde_json::json!({
+            "output": format!("{prefix}{}{}", "n".repeat(32 * 1024), suffix),
+        });
+
+        assert_eq!(
+            canonical_output_digest(&first).expect("first digest"),
+            canonical_output_digest(&same).expect("same digest"),
+        );
+        assert_ne!(
+            canonical_output_digest(&first).expect("first digest"),
+            canonical_output_digest(&changed_middle).expect("changed digest"),
+        );
     }
 }

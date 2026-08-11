@@ -25,12 +25,17 @@
 
 mod support;
 
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use ironclaw_extension_support::coding::omp::{
     OmpEngineContext, OmpEngineError, OmpEngineErrorKind, OmpSnapshotRegistry, harness,
 };
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind};
+use ironclaw_host_api::artifact::{
+    ArtifactAccessError, ArtifactLineRange, ArtifactReadChunk, ArtifactReadTarget,
+    ArtifactSelector, ScopedArtifactReader,
+};
 use ironclaw_host_api::ids::{InvocationId, RunId, UserId};
 use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
 use ironclaw_host_api::path::{MountAlias, VirtualPath};
@@ -129,6 +134,7 @@ impl Fixture {
 
     fn ctx(&self) -> OmpEngineContext {
         OmpEngineContext {
+            artifact_reader: None,
             filesystem: self.filesystem.clone(),
             mounts: self.mounts.clone(),
             scope: self.scope.clone(),
@@ -139,6 +145,7 @@ impl Fixture {
 
     fn ctx_with_run(&self, run_id: Option<RunId>) -> OmpEngineContext {
         OmpEngineContext {
+            artifact_reader: None,
             filesystem: self.filesystem.clone(),
             mounts: self.mounts.clone(),
             scope: self.scope.clone(),
@@ -235,6 +242,53 @@ impl Fixture {
             .expect("tag")
             .trim_end_matches(']')
             .to_string()
+    }
+}
+
+struct FixedArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for FixedArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Lines(ArtifactLineRange { start: 2, end: 3 })
+        );
+        Ok(Some(ArtifactReadChunk {
+            content: b"beta\ngamma\n".to_vec(),
+            content_type: "application/json".to_string(),
+            total_bytes: 17,
+            total_lines: Some(3),
+            complete: false,
+        }))
+    }
+}
+
+struct ByteRangeArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for ByteRangeArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Bytes(ironclaw_host_api::artifact::ArtifactByteRange {
+                start: 60_000,
+                end: 60_127,
+            })
+        );
+        Ok(Some(ArtifactReadChunk {
+            content: vec![b'x'; 128],
+            content_type: "application/json".to_string(),
+            total_bytes: 100_000,
+            total_lines: Some(1),
+            complete: false,
+        }))
     }
 }
 
@@ -356,6 +410,37 @@ async fn read_range_selector_with_context() {
     assert!(!text.contains("39:line 39"), "no extra trailing context");
 }
 
+#[tokio::test]
+async fn read_artifact_uri_uses_scoped_reader_and_inline_selector() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(FixedArtifactReader));
+
+    let output = ironclaw_extension_support::coding::omp::read(
+        &context,
+        json!({ "path": "artifact://7:2-3" }),
+    )
+    .await
+    .expect("artifact selector reads");
+
+    assert_eq!(output["output"], "2:beta\n3:gamma");
+}
+
+#[tokio::test]
+async fn read_artifact_byte_selector_reaches_compact_large_results() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(ByteRangeArtifactReader));
+
+    let output = ironclaw_extension_support::coding::omp::read(
+        &context,
+        json!({ "path": "artifact://7:bytes:60000-60127" }),
+    )
+    .await
+    .expect("artifact byte selector reads");
+
+    assert_eq!(output["output"], "x".repeat(128));
+}
 #[tokio::test]
 async fn read_multi_range_elision_footer() {
     let fixture = Fixture::new();

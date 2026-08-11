@@ -348,6 +348,9 @@ impl HostRuntime for SingleToolHostRuntime {
             .push(request.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,

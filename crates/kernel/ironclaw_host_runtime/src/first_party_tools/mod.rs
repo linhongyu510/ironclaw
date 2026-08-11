@@ -70,6 +70,7 @@ pub use memory::{
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
 };
+use omp::omp_coding_manifests;
 pub use omp::{
     OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
     OMP_WRITE_CAPABILITY_ID, OmpCodingTools, insert_omp_coding_handlers, omp_coding_package,
@@ -155,8 +156,6 @@ const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
 struct CodingCapabilityMetadata {
     id: &'static str,
     kind: CodingCapabilityKind,
-    description: &'static str,
-    effects: &'static [EffectKind],
     max_input_bytes: usize,
 }
 
@@ -164,43 +163,31 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
     CodingCapabilityMetadata {
         id: READ_FILE_CAPABILITY_ID,
         kind: CodingCapabilityKind::ReadFile,
-        description: "Read text files, and extract text from supported document files, through scoped mounts with v1 read_file output shape",
-        effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
     CodingCapabilityMetadata {
         id: WRITE_FILE_CAPABILITY_ID,
         kind: CodingCapabilityKind::WriteFile,
-        description: "Write content through scoped mounts with v1 write_file output shape",
-        effects: &[EffectKind::WriteFilesystem],
         max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
     },
     CodingCapabilityMetadata {
         id: LIST_DIR_CAPABILITY_ID,
         kind: CodingCapabilityKind::ListDir,
-        description: "List directory contents through scoped mounts with v1 list_dir output shape",
-        effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
     CodingCapabilityMetadata {
         id: GLOB_CAPABILITY_ID,
         kind: CodingCapabilityKind::Glob,
-        description: "Find files under a scoped directory with v1 glob output shape",
-        effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
     CodingCapabilityMetadata {
         id: GREP_CAPABILITY_ID,
         kind: CodingCapabilityKind::Grep,
-        description: "Search scoped file contents with v1 grep output modes",
-        effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
     CodingCapabilityMetadata {
         id: APPLY_PATCH_CAPABILITY_ID,
         kind: CodingCapabilityKind::ApplyPatch,
-        description: "Apply exact/fuzzy search-replace edits through scoped mounts",
-        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
         max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
     },
 ];
@@ -243,7 +230,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     outbound_deliver::manifest()?,
                     reply_attachment::manifest()?,
                 ];
-                capabilities.extend(coding_manifests()?);
+                capabilities.extend(omp_coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities.extend(trigger_management::manifests()?);
                 capabilities
@@ -260,10 +247,8 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
 pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
-    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
-    // for the /benchmark panel (issue #7392). The atomic cutover removes the
-    // old tools; the omp surface then becomes the only surface and this
-    // marker goes away.
+    // Process restrictions are applied after assembling the canonical
+    // omp-first builtin package.
     omp_coding_package(process_backend)
 }
 
@@ -403,21 +388,6 @@ fn remove_builtin_capability_effect(
     Ok(())
 }
 
-fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
-    CODING_CAPABILITIES
-        .iter()
-        .map(|metadata| {
-            first_party_capability_manifest(
-                metadata.id,
-                metadata.description,
-                metadata.effects.to_vec(),
-                PermissionMode::Allow,
-                resource_profile(),
-            )
-        })
-        .collect()
-}
-
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository.
 pub fn builtin_first_party_handlers(
@@ -433,11 +403,6 @@ pub fn builtin_first_party_handlers_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers(trigger_repository)?;
-    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
-    // for the /benchmark panel (issue #7392). The atomic cutover removes the
-    // old tools; the omp surface then becomes the only surface and this
-    // marker goes away.
-    insert_omp_coding_handlers(&mut registry)?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
     }
@@ -457,11 +422,6 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
-    // ⚠️ TEMPORARY benchmark override (revert at cutover): omp surface enabled
-    // for the /benchmark panel (issue #7392). The atomic cutover removes the
-    // old tools; the omp surface then becomes the only surface and this
-    // marker goes away.
-    insert_omp_coding_handlers(&mut registry)?;
     trigger_management::insert_handlers_with_create_hook(
         &mut registry,
         trigger_repository,
@@ -555,9 +515,7 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
-    for metadata in CODING_CAPABILITIES {
-        registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
-    }
+    insert_omp_coding_handlers(&mut registry)?;
     registry.insert_handler(
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         handler.clone(),
@@ -1000,4 +958,42 @@ fn coding_capability_metadata(capability_id: &str) -> Option<CodingCapabilityMet
         .iter()
         .copied()
         .find(|metadata| metadata.id == capability_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_builtin_package_exposes_only_omp_coding_and_no_result_reader() {
+        let package = builtin_first_party_package().expect("canonical built-in package");
+        let provider_names = package
+            .capabilities
+            .iter()
+            .filter_map(|descriptor| descriptor.provider_tool_name.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["read", "write", "edit", "glob", "grep"] {
+            assert!(
+                provider_names.contains(name),
+                "canonical package must expose omp tool {name}"
+            );
+        }
+        let capability_ids = package
+            .capabilities
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for retired in [
+            "builtin.read_file",
+            "builtin.write_file",
+            "builtin.list_dir",
+            "builtin.apply_patch",
+            "builtin.result_read",
+        ] {
+            assert!(
+                !capability_ids.contains(retired),
+                "retired capability {retired} must not remain in the canonical package"
+            );
+        }
+    }
 }

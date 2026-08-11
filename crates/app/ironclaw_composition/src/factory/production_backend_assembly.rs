@@ -223,6 +223,20 @@ where
         &scoped_filesystem,
     )));
     let (runtime_policy, process_binding) = runtime_policy.into_parts();
+    let artifact_store = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::clone(&filesystem)).map_err(
+            |error| crate::RebornCompositionError::InvalidConfig {
+                reason: format!("tool artifact store initialization failed: {error}"),
+            },
+        )?,
+    );
+    let artifact_access: Arc<dyn ironclaw_host_api::artifact::ArtifactAccessPort> =
+        artifact_store.clone();
+    let artifact_persistence: Arc<dyn ironclaw_host_api::artifact::ArtifactPersistencePort> =
+        artifact_store.clone();
+    let accounted_artifact_persistence: Arc<
+        dyn ironclaw_host_api::artifact::AccountedArtifactPersister,
+    > = artifact_store;
 
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
@@ -246,6 +260,8 @@ where
             ironclaw_turn_runner::planned_driver_factory::default_planned_run_profile_resolver()?,
         ),
     )
+    .with_artifact_ports(artifact_access, artifact_persistence)
+    .with_accounted_artifact_persistence(accounted_artifact_persistence)
     .with_turn_run_wake_notifier(turn_run_wake_notifier);
     let services = match event_store {
         ProductionEventStoresInput::Config(config) => {
@@ -497,13 +513,6 @@ pub(super) async fn build_backend_production(
     }
     let skill_auto_activate_learned = Arc::new(AtomicBool::new(true));
     let process_backend = production_wiring.runtime_policy.process_backend;
-    #[cfg(any(test, feature = "test-support"))]
-    let extension_registry = if omp_coding_tools_for_test {
-        omp_extended_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?
-    } else {
-        production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?
-    };
-    #[cfg(not(any(test, feature = "test-support")))]
     let extension_registry =
         production_builtin_extension_registry(process_backend, resolved_memory.package.as_ref())?;
     let extension_registry = Arc::new(extension_registry);
@@ -616,17 +625,6 @@ pub(super) async fn build_backend_production(
         trigger_active_run_lookup,
         process_backend,
     )?;
-    #[cfg(any(test, feature = "test-support"))]
-    if omp_coding_tools_for_test {
-        // The omp handler adapter replaces the stock builtin handler for
-        // `builtin.glob`/`builtin.grep` and adds `builtin.read`/`write`/`edit`
-        // (issue #7392 slice 3 registration seam).
-        ironclaw_host_runtime::insert_omp_coding_handlers(&mut first_party_registry).map_err(
-            |error| RebornBuildError::InvalidConfig {
-                reason: format!("omp first-party handlers are invalid: {error}"),
-            },
-        )?;
-    }
     if let (Some(package), Some(handler)) = (
         resolved_memory.package.as_ref(),
         resolved_memory.tool_handler.as_ref(),
@@ -638,6 +636,25 @@ pub(super) async fn build_backend_production(
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    let artifact_store = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::clone(&stores.filesystem)).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("tool artifact store initialization failed: {error}"),
+            },
+        )?,
+    );
+    artifact_store
+        .bind_legacy_result_service(Arc::clone(&thread_service))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("legacy result artifact projection wiring failed: {error}"),
+        })?;
+    let artifact_access: Arc<dyn ironclaw_host_api::artifact::ArtifactAccessPort> =
+        artifact_store.clone();
+    let artifact_persistence: Arc<dyn ironclaw_host_api::artifact::ArtifactPersistencePort> =
+        artifact_store.clone();
+    let accounted_artifact_persistence: Arc<
+        dyn ironclaw_host_api::artifact::AccountedArtifactPersister,
+    > = artifact_store.clone();
     let services = with_shared_host_runtime_wiring!(
         HostRuntimeServices::new(
             Arc::clone(&extension_registry),
@@ -658,6 +675,8 @@ pub(super) async fn build_backend_production(
         turn_state = Arc::clone(&process_turn_state),
         run_profile_resolver = planned_run_profile_resolver()?,
     )
+    .with_artifact_ports(artifact_access, artifact_persistence)
+    .with_accounted_artifact_persistence(Arc::clone(&accounted_artifact_persistence))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
     .with_production_reborn_event_stores(event_stores)
@@ -1329,6 +1348,9 @@ pub(super) async fn build_backend_production(
 
     Ok(RebornRuntimeStores {
         host_runtime,
+        artifact_persistence: accounted_artifact_persistence,
+        artifact_store,
+        artifact_governor: resource_governor,
         user_sandbox_process_port,
         #[cfg(test)]
         turn_coordinator,

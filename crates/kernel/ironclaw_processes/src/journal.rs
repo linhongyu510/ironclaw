@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
+    artifact::CompletedArtifact,
     decision::RuntimeCredentialAuthRequirement,
     ids::{ProcessId, TenantId, UserId},
     resource::ResourceScope,
@@ -619,6 +620,7 @@ pub struct ProcessTreeReservation {
 #[serde(rename_all = "snake_case")]
 pub enum ProcessDependencyState {
     Open,
+    Settling,
     Settled,
     Consumed,
     Abandoned,
@@ -633,6 +635,12 @@ pub struct ProcessTerminalEvidence {
     pub sanitized_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessDependencySettlement {
+    pub claim_token: String,
+    pub lease_expires_at: Timestamp,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessDependencyRecord {
     pub dependent_process_id: ProcessId,
@@ -644,6 +652,10 @@ pub struct ProcessDependencyRecord {
     pub state: ProcessDependencyState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<ProcessTerminalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<ProcessDependencySettlement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_artifact: Option<CompletedArtifact>,
     pub created_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<Timestamp>,
@@ -664,6 +676,27 @@ pub struct OpenProcessDependencyRequest {
     pub created_at: Timestamp,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimProcessDependencySettlementRequest {
+    pub dependent_process_id: ProcessId,
+    pub dependency_process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub claim_token: String,
+    pub claimed_at: Timestamp,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompleteProcessDependencySettlementRequest {
+    pub dependent_process_id: ProcessId,
+    pub dependency_process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub claim_token: String,
+    pub terminal: ProcessTerminalEvidence,
+    pub completed_artifact: CompletedArtifact,
+    pub settled_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -905,9 +938,14 @@ pub trait ProcessDependencyPort: Send + Sync {
         request: OpenProcessDependencyRequest,
     ) -> Result<ProcessDependencyRecord, Self::Error>;
 
-    async fn settle_process_dependency(
+    async fn claim_process_dependency_settlement(
         &self,
-        request: SettleProcessDependencyRequest,
+        request: ClaimProcessDependencySettlementRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
+
+    async fn complete_process_dependency_settlement(
+        &self,
+        request: CompleteProcessDependencySettlementRequest,
     ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
 
     /// Atomically marks a settled dependency consumed and releases its one

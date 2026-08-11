@@ -293,6 +293,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
@@ -377,6 +378,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
@@ -497,6 +499,8 @@ impl BoundCapabilityAdapter for EchoBinding {
                 model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output,
             display_preview: None,
             output_bytes,
@@ -540,7 +544,9 @@ fn authorized_in_process(
         id if id.contains("first_party") => RuntimeLane::FirstParty,
         _ => RuntimeLane::Wasm,
     };
+    let artifact_namespace = request.artifact_namespace;
     let invocation = Invocation {
+        artifact_namespace,
         activity_id: ActivityId::new(),
         capability: request.capability_id,
         input: request.input,
@@ -569,6 +575,7 @@ fn authorized_in_process(
 
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -593,6 +600,7 @@ fn loop_run_request_in_process(
 ) -> Authorized {
     authorized_in_process(
         CapabilityDispatchRequest {
+            artifact_namespace: None,
             run_id: Some(run_id),
             origin: InvocationOrigin::LoopRun(run_id),
             capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -613,6 +621,7 @@ fn loop_run_request_in_process(
 
 fn loop_run_request(run_id: RunId, capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        artifact_namespace: None,
         run_id: Some(run_id),
         origin: InvocationOrigin::LoopRun(run_id),
         capability_id: CapabilityId::new(capability_id).unwrap(),

@@ -72,23 +72,14 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 }
 
 /// Same capability set as [`file_tools`], but opts the harness into the real
-/// `StagedCapabilityIo` (durable tool-result projection seam, issue #5838)
-/// instead of the ephemeral `ProductLiveCapabilityIo` test double, so
-/// `read_file`'s large output is persisted durably and `result_read` can page
-/// through it. Auto-approve on, like `file_tools`.
+/// `StagedCapabilityIo` so large outputs are persisted as artifacts that the
+/// omp `read` tool can consume. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
         ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();
-    // Grants the synthetic `result_read` id so
-    // `apply_synthetic_capability_wrappers` wraps it onto this harness's
-    // port (mirrors `project_create`'s `PROJECT_CREATE_CAPABILITY_ID`
-    // opt-in pattern -- see `profiles/project.rs`).
-    profile.capability_ids.push(CapabilityId::new(
-        ironclaw_composition::test_support::RESULT_READ_CAPABILITY_ID,
-    )?);
     // `builtin.json` (`parse`) is the minimal granted capability whose output
     // is a top-level JSON array, needed to drive the truncated-array
     // `item_count` observation through this durable-io seam.

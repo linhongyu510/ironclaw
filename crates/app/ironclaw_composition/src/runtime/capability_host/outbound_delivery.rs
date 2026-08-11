@@ -179,6 +179,9 @@ pub(super) async fn write_completed_result(
     let write_result = invocation
         .result_writer
         .write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &invocation.run_context,
             input_ref: invocation_effective_input_ref(&invocation),
             invocation_id: InvocationId::new(),

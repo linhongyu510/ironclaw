@@ -286,7 +286,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "subagent_type": {
                     "type": "string",
                     "enum": ["general", "explorer", "coder", "planner"],
-                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read_file, list_dir, grep)\n- explorer: read + glob over filesystem (read_file, list_dir, grep, glob)\n- coder: read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)"
+                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read, grep)\n- explorer: read + glob over filesystem (read, grep, glob)\n- coder: read + write + edit + shell (read, write, edit, shell, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read, grep, glob, http)"
                 },
                 "task": {
                     "type": "string",

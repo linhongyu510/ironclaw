@@ -496,13 +496,6 @@ reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contract
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-[[exemption]]
-path = "crates/loop/ironclaw_loop_host/src/result_read.rs"
-lines = [39, 42, 45]
-owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/app/ironclaw_composition/src/lib.rs"

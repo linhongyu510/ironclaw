@@ -178,24 +178,10 @@ effects = [
 mounts = "ambient"
 network = "dev_wildcard"
 
-[[grants]]
-capability = "builtin.read_file"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
-
-[[grants]]
-capability = "builtin.write_file"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
-
-# ⚠️ TEMPORARY benchmark override (issue #7392 bench arm): grants for the
-# omp-parity capability ids so the /benchmark surface advertises read/write/edit
-# alongside glob/grep. Revert at cutover alongside the omp.rs override.
+# Canonical omp coding surface.
 [[grants]]
 capability = "builtin.read"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem"]
 mounts = "workspace"
 network = "default"
 
@@ -211,29 +197,19 @@ effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete
 mounts = "workspace"
 network = "default"
 
-[[grants]]
-capability = "builtin.list_dir"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
 
 [[grants]]
 capability = "builtin.glob"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem"]
 mounts = "workspace"
 network = "default"
 
 [[grants]]
 capability = "builtin.grep"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem"]
 mounts = "workspace"
 network = "default"
 
-[[grants]]
-capability = "builtin.apply_patch"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
-mounts = "workspace"
-network = "default"
 
 [[grants]]
 capability = "builtin.extension_search"

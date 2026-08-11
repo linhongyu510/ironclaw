@@ -835,13 +835,12 @@ struct WorkspaceListingGateway {
     requests: StdMutex<Vec<HostManagedModelRequest>>,
 }
 
-// Standalone model replay is a bounded reference observation: for a
-// result under the inline first-look preview cap (issue #5838,
-// the standalone result-preview limit), the raw content legitimately
-// appears inline in `detail.preview` so the model does not need a
-// follow-up `result_read` call; only content beyond the cap requires one.
-// Both fixtures below are well under the cap.
-fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw_marker: &str) {
+// Standalone model replay is a bounded artifact-backed observation: for a
+// result under the inline first-look preview cap, the canonical content appears
+// in `detail.content`, so the model does not need a follow-up read. Results
+// beyond the cap advertise their artifact URI instead. Both fixtures below are
+// well under the cap.
+fn assert_standalone_result_observation(tool_result: &HostManagedModelMessage, raw_marker: &str) {
     assert!(
         tool_result.content.contains(raw_marker),
         "a result under the first-look preview cap should appear inline in model replay: {}",
@@ -851,7 +850,7 @@ fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw
         tool_result.tool_result_content.as_ref()
     else {
         panic!(
-            "model replay should carry a result-reference envelope, got {:?}",
+            "model replay should carry an artifact-backed tool-result envelope, got {:?}",
             tool_result.tool_result_content
         );
     };
@@ -860,16 +859,18 @@ fn assert_standalone_result_reference(tool_result: &HostManagedModelMessage, raw
     let observation = envelope
         .model_observation
         .as_ref()
-        .expect("result-reference replay should include a model observation");
+        .expect("artifact-backed replay should include a model observation");
     assert_eq!(observation["schema_version"], serde_json::json!(1));
     assert_eq!(observation["status"], serde_json::json!("success"));
     assert_eq!(
         observation["detail"]["kind"],
-        serde_json::json!("result_reference")
+        serde_json::json!("inline_result")
     );
-    assert_eq!(
-        observation["detail"]["result_ref"],
-        serde_json::json!(envelope.result_ref)
+    assert!(
+        observation["detail"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains(raw_marker)),
+        "inline observation must retain the complete small result"
     );
 }
 
@@ -988,7 +989,7 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("second model call should include tool result");
-            assert_standalone_result_reference(tool_result, "hello from tool");
+            assert_standalone_result_observation(tool_result, "hello from tool");
             let provider_call = tool_result
                 .tool_result_provider_call
                 .as_ref()
@@ -1186,8 +1187,8 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 tool_result.content.len()
             );
             assert!(
-                tool_result.content.contains("result_reference"),
-                "model replay must carry a bounded result-reference observation"
+                tool_result.content.contains("artifact_reference"),
+                "model replay must carry a bounded artifact-reference observation"
             );
             assert!(
                 tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
@@ -1196,21 +1197,21 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             );
             assert!(
                 tool_result.content.contains("Secretary of the Treasury"),
-                "the initial result-reference preview must retain ordinary document text"
+                "the initial artifact-reference preview must retain ordinary document text"
             );
-            let result_ref = match tool_result.tool_result_content.as_ref() {
-                Some(HostManagedToolResultContent::Reference { envelope }) => {
-                    envelope.result_ref.clone()
-                }
-                other => panic!("expected a result reference, got {other:?}"),
-            };
-            let result_read_id = CapabilityId::new("builtin.result_read").expect("reader id");
-            let result_read_tool = capabilities
+            let observation: serde_json::Value =
+                serde_json::from_str(&tool_result.content).expect("result observation");
+            let artifact_ref = observation["model_observation"]["detail"]["artifact_ref"]
+                .as_str()
+                .expect("large result advertises artifact URI")
+                .to_string();
+            let read_id = CapabilityId::new("builtin.read").expect("reader id");
+            let read_tool = capabilities
                 .tool_definitions()
                 .map_err(model_capability_error)?
                 .into_iter()
-                .find(|definition| definition.capability_id == result_read_id)
-                .expect("result_read provider tool definition");
+                .find(|definition| definition.capability_id == read_id)
+                .expect("omp read provider tool definition");
             let candidate = capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                     ProviderToolCall {
@@ -1218,11 +1219,9 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                         provider_model_id: "test-model".to_string(),
                         turn_id: Some("provider-turn-2".to_string()),
                         id: "call-2".to_string(),
-                        name: result_read_tool.name,
+                        name: read_tool.name,
                         arguments: serde_json::json!({
-                            "result_ref": result_ref,
-                            "offset": 0,
-                            "max_bytes": 2048,
+                            "path": artifact_ref,
                         }),
                         response_reasoning: None,
                         reasoning: None,
@@ -1246,37 +1245,16 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                         && message
                             .tool_result_provider_call
                             .as_ref()
-                            .is_some_and(|call| {
-                                call.capability_id.as_str() == "builtin.result_read"
-                            })
+                            .is_some_and(|call| call.capability_id.as_str() == "builtin.read")
                 })
-                .expect("third model call should include result_read output");
+                .expect("third model call should include omp read output");
             assert!(
                 tool_result.content.contains(LARGE_ECHO_MESSAGE),
-                "result_read must expose its bounded chunk to the model"
+                "omp read must expose the artifact-backed result to the model"
             );
             assert!(
                 !tool_result.content.contains(LARGE_ECHO_TAIL),
-                "the result_read response must remain bounded"
-            );
-            let observation: serde_json::Value =
-                serde_json::from_str(&tool_result.content).expect("result_read observation");
-            let detail = &observation["model_observation"]["detail"];
-            assert_eq!(
-                detail["result_ref"], observation["result_ref"],
-                "result_read replay must expose only the original pageable result reference"
-            );
-            assert!(
-                detail["total_bytes"]
-                    .as_u64()
-                    .is_some_and(|total_bytes| total_bytes > 2048),
-                "result_read replay must expose total bytes for continuation: {}",
-                tool_result.content
-            );
-            assert_eq!(
-                detail["next_offset"].as_u64(),
-                Some(2048),
-                "result_read replay must expose the next offset for continuation"
+                "omp read must retain its pinned bounded output shape"
             );
             return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
         }
@@ -1400,7 +1378,7 @@ impl HostManagedModelGateway for WorkspaceListingGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
                 .expect("second model call should include tool result");
-            assert_standalone_result_reference(tool_result, "workspace-sentinel.txt");
+            assert_standalone_result_observation(tool_result, "workspace-sentinel.txt");
             return Ok(HostManagedModelResponse::assistant_reply("workspace ok"));
         }
 
@@ -4476,7 +4454,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: RUNTIME_SEND_TIMEOUT,
     })
     // Raw (not safe-preview) so we can assert verbatim arguments + output.
     .with_raw_trajectory_observer(observer.clone())
@@ -4487,13 +4465,24 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
     runtime
         .enable_global_auto_approve_for_test(&conversation)
         .await;
-    let reply = tokio::time::timeout(
+    let reply = match tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool"),
     )
     .await
-    .expect("runtime send should finish")
-    .expect("runtime send should succeed");
+    {
+        Ok(Ok(reply)) => reply,
+        outcome => panic!(
+            "runtime send failed after {} capability-aware calls, {} plain calls, and {}/{} observed inputs/results: {outcome:?}",
+            *gateway.calls.lock().expect("gateway calls"),
+            *gateway
+                .stream_model_calls
+                .lock()
+                .expect("plain gateway calls"),
+            observer.inputs.lock().expect("observer inputs").len(),
+            observer.results.lock().expect("observer results").len(),
+        ),
+    };
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
     // Shut down before inspecting the recorded callbacks so the std-Mutex
     // guards are never held across an `.await` (clippy::await_holding_lock).
@@ -4553,7 +4542,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: RUNTIME_SEND_TIMEOUT,
     })
     // Default path → safe-preview truncation applied before the observer.
     .with_trajectory_observer(observer.clone())
@@ -4564,13 +4553,20 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     runtime
         .enable_global_auto_approve_for_test(&conversation)
         .await;
-    let reply = tokio::time::timeout(
+    let reply = match tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
         runtime.send_user_message(&conversation, "echo a big payload"),
     )
     .await
-    .expect("runtime send should finish")
-    .expect("runtime send should succeed");
+    {
+        Ok(Ok(reply)) => reply,
+        outcome => panic!(
+            "runtime send failed after {} model calls and {}/{} observed inputs/results: {outcome:?}",
+            *gateway.calls.lock().expect("gateway calls"),
+            observer.inputs.lock().expect("observer inputs").len(),
+            observer.results.lock().expect("observer results").len(),
+        ),
+    };
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
     // Shut down before inspecting the recorded callbacks so the std-Mutex
     // guards are never held across an `.await` (clippy::await_holding_lock).
@@ -4579,22 +4575,22 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     let original_len = large_echo_message().len();
 
     let inputs = observer.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 2, "echo and result_read inputs observed");
+    assert_eq!(inputs.len(), 2, "echo and omp read inputs observed");
     let observed_message = inputs[0].2["message"].as_str().expect("message string");
     assert!(
         observed_message.len() < original_len && observed_message.contains("[truncated"),
         "observer should receive a truncated preview of the large argument, got {} bytes",
         observed_message.len()
     );
-    assert_eq!(inputs[1].1, "builtin.result_read");
+    assert_eq!(inputs[1].1, "builtin.read");
 
     let results = observer.results.lock().expect("results lock");
-    assert_eq!(results.len(), 2, "echo and result_read outputs observed");
+    assert_eq!(results.len(), 2, "echo and omp read outputs observed");
     assert!(
         results[0].2.to_string().contains("[truncated"),
         "observer should receive a truncated preview of the large result"
     );
-    assert_eq!(results[1].1, "builtin.result_read");
+    assert_eq!(results[1].1, "builtin.read");
 }
 
 #[tokio::test]

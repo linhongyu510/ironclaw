@@ -29,7 +29,7 @@ use ironclaw_assistant::{
 };
 use ironclaw_authorization::in_memory_backed_capability_lease_store;
 use ironclaw_composition::test_support::{
-    PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID, RefreshingCapabilityPortTestParts,
+    PROJECT_CREATE_CAPABILITY_ID, RefreshingCapabilityPortTestParts,
     create_refreshing_capability_port_for_test,
 };
 use ironclaw_host_api::{
@@ -111,6 +111,9 @@ impl HostRuntime for StubHostRuntime {
             .push(request.0.clone());
         Ok(RuntimeCapabilityOutcome::Completed(Box::new(
             ironclaw_host_runtime::RuntimeCapabilityCompleted {
+                completed_artifact: None,
+                canonical_output_digest: None,
+                receipt: None,
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
@@ -412,7 +415,6 @@ fn test_parts(
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::new(StubProjectService),
-        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
         outbound_preference_write_requires_approval: false,
@@ -510,11 +512,7 @@ async fn capability_id_filter_narrows_visible_surface() {
     let builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| {
-            id.starts_with("builtin.")
-                && *id != PROJECT_CREATE_CAPABILITY_ID
-                && *id != RESULT_READ_CAPABILITY_ID
-        })
+        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
         .collect();
     assert_eq!(
         builtin_ids,
@@ -546,11 +544,7 @@ async fn capability_id_filter_some_empty_grants_zero_capabilities() {
     let builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| {
-            id.starts_with("builtin.")
-                && *id != PROJECT_CREATE_CAPABILITY_ID
-                && *id != RESULT_READ_CAPABILITY_ID
-        })
+        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
         .collect();
     assert!(
         builtin_ids.is_empty(),
@@ -561,12 +555,6 @@ async fn capability_id_filter_some_empty_grants_zero_capabilities() {
             .iter()
             .any(|definition| definition.capability_id.as_str() == PROJECT_CREATE_CAPABILITY_ID),
         "synthetic project_create capability bypasses the filter entirely: {definitions:?}"
-    );
-    assert!(
-        definitions
-            .iter()
-            .any(|definition| definition.capability_id.as_str() == RESULT_READ_CAPABILITY_ID),
-        "synthetic result_read capability bypasses the filter entirely (issue #5838): {definitions:?}"
     );
 }
 
@@ -845,11 +833,7 @@ async fn multi_entry_collection_knobs_round_trip() {
     let mut builtin_ids: Vec<&str> = definitions
         .iter()
         .map(|definition| definition.capability_id.as_str())
-        .filter(|id| {
-            id.starts_with("builtin.")
-                && *id != PROJECT_CREATE_CAPABILITY_ID
-                && *id != RESULT_READ_CAPABILITY_ID
-        })
+        .filter(|id| id.starts_with("builtin.") && *id != PROJECT_CREATE_CAPABILITY_ID)
         .collect();
     builtin_ids.sort_unstable();
     assert_eq!(

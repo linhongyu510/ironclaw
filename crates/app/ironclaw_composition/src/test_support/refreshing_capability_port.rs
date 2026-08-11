@@ -55,10 +55,6 @@ pub struct RefreshingCapabilityPortTestParts {
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
     pub project_service:
         std::sync::Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
-    /// Backs the `result_read` synthetic capability's durable tool-result
-    /// reads; production wires the runtime's session thread service
-    /// (`standalone.rs` `create_capability_port`).
-    pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
     /// [`build_extension_management_for_test`]. Wraps the extension-host
     /// local management port; mirrors `skill_activation_source` above.

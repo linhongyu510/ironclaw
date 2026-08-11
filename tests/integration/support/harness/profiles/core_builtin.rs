@@ -381,7 +381,6 @@ fn core_builtin_tools_from_runtime(
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),
         result_writer_io: Mutex::new(result_writer_io),
-        durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
         workspace_root,

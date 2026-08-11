@@ -413,6 +413,8 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
                 model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output,
             display_preview: None,
             usage,

@@ -30,7 +30,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
     ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
-    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    resource::{ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage},
     result_meta::{FailureFate, FailureKind},
     runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
@@ -402,6 +402,10 @@ pub struct RuntimeCapabilityCompleted {
     pub output: Value,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
+    pub receipt: Option<ResourceReceipt>,
+    pub completed_artifact: Option<ironclaw_host_api::artifact::CompletedArtifact>,
+    /// Stable digest of the full canonical output before bounded transport.
+    pub canonical_output_digest: Option<ironclaw_host_api::result_meta::OutputDigest>,
 }
 
 /// Approval suspension state.

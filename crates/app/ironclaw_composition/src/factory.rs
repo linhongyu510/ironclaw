@@ -274,6 +274,10 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub(crate) user_sandbox_process_port:
         Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
+    pub(crate) artifact_persistence:
+        Arc<dyn ironclaw_host_api::artifact::AccountedArtifactPersister>,
+    pub(crate) artifact_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    pub(crate) artifact_store: Arc<ironclaw_threads::DurableToolArtifactStore>,
     #[cfg(test)]
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
@@ -1199,33 +1203,6 @@ fn extend_builtin_package(package: ExtensionPackage) -> Result<ExtensionPackage,
         }
     })?;
     Ok(package)
-}
-
-/// Issue #7392 slice 3 seam (test-support only): the built-in first-party
-/// registry whose coding capabilities are the omp-extended package
-/// (`ironclaw_host_runtime::omp_coding_package`) — the stock surface plus
-/// the five omp tools under the exact `read`/`write`/`edit`/`glob`/`grep`
-/// names. The extension layers and the bound memory package ride on top
-/// exactly as in production.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn omp_extended_builtin_extension_registry(
-    process_backend: ProcessBackendKind,
-    memory_package: Option<&ironclaw_extension_registry::ExtensionPackage>,
-) -> Result<ExtensionRegistry, RebornBuildError> {
-    let package = ironclaw_host_runtime::omp_coding_package(process_backend).map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("omp-extended built-in package is invalid: {error}"),
-        }
-    })?;
-    let package = extend_builtin_package(package)?;
-    let mut registry = ExtensionRegistry::new();
-    registry
-        .insert(package)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("omp-extended first-party registry is invalid: {error}"),
-        })?;
-    insert_bound_memory_package(&mut registry, memory_package)?;
-    Ok(registry)
 }
 
 fn production_first_party_registry_with_trigger_create_hook(

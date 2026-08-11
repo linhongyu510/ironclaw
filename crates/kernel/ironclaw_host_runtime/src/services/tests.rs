@@ -868,6 +868,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
         invocation_id,
     };
     let context = ExecutionContext {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         invocation_id,
@@ -890,6 +891,8 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
     };
     let capability_id = CapabilityId::new("echo.say").unwrap();
     let dispatch = CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
@@ -967,6 +970,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1025,6 +1029,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1088,6 +1093,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1146,6 +1152,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1211,6 +1218,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1343,6 +1351,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1494,6 +1503,7 @@ async fn assert_first_party_denies_before_handler(
 
     let result = adapter
         .dispatch_json(RuntimeLaneRequest {
+            artifact_namespace: None,
             run_id: None,
             origin: None,
             package: &package,
@@ -1557,6 +1567,8 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
                 model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
+            canonical_output_digest: None,
+            completed_artifact: None,
             output: Value::Null,
             display_preview: None,
             usage,

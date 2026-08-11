@@ -2369,6 +2369,8 @@ impl TrustPolicy for PanicTrustPolicy {
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id("echo.say"),
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,

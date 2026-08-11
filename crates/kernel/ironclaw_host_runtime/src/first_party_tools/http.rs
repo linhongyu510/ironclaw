@@ -685,6 +685,9 @@ mod tests {
             mounts: Some(workspace_mount()),
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
+                artifact_namespace: None,
+                artifact_reader: None,
+                artifact_persistence: None,
                 runtime_http_egress: Some(runtime_http_egress),
                 tool_call_http_egress: Some(Arc::new(PanickingToolCallHttpEgress)),
                 runtime_secret_material_stager: None,

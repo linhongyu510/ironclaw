@@ -1212,6 +1212,7 @@ impl RebornIntegrationGroupBuilder {
             process_system: process_system.clone(),
             thread_service: runtime_thread_service,
             thread_scope: group_thread_scope,
+            legacy_result_artifacts: None,
             model_gateway,
             loop_checkpoint_store,
             milestone_sink,

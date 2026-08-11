@@ -20,7 +20,8 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::ProcessRuntimePort;
 use crate::journal::{
-    CancelProcessRequest, ClaimProcessesRequest, ClaimedProcess, CloseProcessDependencyRequest,
+    CancelProcessRequest, ClaimProcessDependencySettlementRequest, ClaimProcessesRequest,
+    ClaimedProcess, CloseProcessDependencyRequest, CompleteProcessDependencySettlementRequest,
     FailProcessRequest, GetProcessCheckpointRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, KillProcessRequest, OpenProcessDependencyRequest,
     ProcessCheckpointPort, ProcessCheckpointRecord, ProcessConcurrencyLimits, ProcessControlPort,
@@ -32,9 +33,8 @@ use crate::journal::{
     ProcessSubmissionPort, ProcessSuspension, ProcessTransitionPort, ProcessTreePort,
     ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
-    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
-    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest, StopProcessRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -1077,16 +1077,32 @@ where
         }
     }
 
-    async fn settle_process_dependency(
+    async fn claim_process_dependency_settlement(
         &self,
-        request: SettleProcessDependencyRequest,
+        request: ClaimProcessDependencySettlementRequest,
     ) -> Result<Option<ProcessDependencyRecord>, Self::Error> {
         match self
-            .execute(StoredProcessCommand::SettleDependency(request))
+            .execute(StoredProcessCommand::ClaimDependencySettlement(request))
             .await?
         {
             StoredCommandOutcome::Dependency(record) => Ok(record),
-            outcome => Err(unexpected_outcome("settle_dependency", outcome)),
+            outcome => Err(unexpected_outcome("claim_dependency_settlement", outcome)),
+        }
+    }
+
+    async fn complete_process_dependency_settlement(
+        &self,
+        request: CompleteProcessDependencySettlementRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error> {
+        match self
+            .execute(StoredProcessCommand::CompleteDependencySettlement(request))
+            .await?
+        {
+            StoredCommandOutcome::Dependency(record) => Ok(record),
+            outcome => Err(unexpected_outcome(
+                "complete_dependency_settlement",
+                outcome,
+            )),
         }
     }
 

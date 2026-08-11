@@ -16,13 +16,14 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     action::NetworkPolicy,
+    artifact::{ArtifactNamespaceId, ArtifactRef},
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::DenyReason,
     ids::{
         ActivityId, CapabilityGrantId, CapabilityId, CorrelationId, DenyRef, ExtensionId, GateRef,
-        InvocationId, ProcessRef, ProductKind, ResultRef,
+        InvocationId, ProcessRef, ProductKind, ResultRef, RunId,
     },
     invocation::InvocationOrigin,
     mount::MountView,
@@ -33,8 +34,8 @@ use ironclaw_host_api::{
     },
     resource::{ResourceEstimate, ResourceScope},
     result_meta::{
-        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, ResultProgress, ResumeToken,
-        TerminateHint,
+        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, OutputDigest, ResultProgress,
+        ResumeToken, TerminateHint,
     },
     runtime::{RuntimeKind, TrustClass},
     safe_summary::SafeSummary,
@@ -45,6 +46,7 @@ use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceEr
 
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -70,6 +72,13 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
 #[derive(Clone)]
 pub(crate) enum ProductResultFilesystem {
     Composite(Arc<ScopedFilesystem<CompositeRootFilesystem>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProductResultArtifactMetadata {
+    artifact_ref: ArtifactRef,
+    byte_len: u64,
+    output_digest: Option<OutputDigest>,
 }
 
 impl RuntimeProductCapabilityInvoker {
@@ -194,6 +203,9 @@ fn product_execution_context(
         })
         .unwrap_or_default();
     let context = ExecutionContext {
+        artifact_namespace: Some(ArtifactNamespaceId::from_root_run(RunId::from_uuid(
+            activity_id.as_uuid(),
+        ))),
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -341,16 +353,23 @@ async fn product_resolution(
                 ));
             }
             let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-            results.persist(scope, result_ref, body.clone()).await?;
+            results
+                .persist(
+                    scope,
+                    result_ref,
+                    body.clone(),
+                    completed.completed_artifact.as_ref().map(|artifact| {
+                        ProductResultArtifactMetadata {
+                            artifact_ref: artifact.artifact_ref,
+                            byte_len: artifact.byte_len,
+                            output_digest: completed.canonical_output_digest,
+                        }
+                    }),
+                )
+                .await?;
+            let refs = completed_product_outcome_refs(result_ref, body.len(), &completed);
             Ok(Resolution::Done(Outcome {
-                refs: OutcomeRefs {
-                    result: result_ref,
-                    byte_len: body.len() as u64,
-                    preview: None,
-                    preview_meta: ResultPreviewMeta::default(),
-                    origin: None,
-                    output_digest: None,
-                },
+                refs,
                 verdict: ToolVerdict::Success,
                 summary: fixed_summary("capability completed"),
                 progress: ResultProgress::MadeProgress,
@@ -433,6 +452,30 @@ async fn product_resolution(
                 diagnostic,
             ))
         }
+    }
+}
+
+fn completed_product_outcome_refs(
+    result_ref: ResultRef,
+    preview_bytes: usize,
+    completed: &ironclaw_host_runtime::RuntimeCapabilityCompleted,
+) -> OutcomeRefs {
+    let (byte_len, artifact_ref) = completed
+        .completed_artifact
+        .as_ref()
+        .map_or((preview_bytes as u64, None), |artifact| {
+            (artifact.byte_len, Some(artifact.artifact_ref))
+        });
+    OutcomeRefs {
+        result: result_ref,
+        byte_len,
+        preview: None,
+        preview_meta: ResultPreviewMeta {
+            artifact_ref,
+            ..ResultPreviewMeta::default()
+        },
+        origin: None,
+        output_digest: completed.canonical_output_digest,
     }
 }
 
@@ -526,10 +569,12 @@ impl ProductResultFilesystem {
         scope: &ResourceScope,
         result_ref: ResultRef,
         body: Vec<u8>,
+        artifact: Option<ProductResultArtifactMetadata>,
     ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
+                persist_product_result_with_metadata(filesystem, scope, result_ref, body, artifact)
+                    .await
             }
         }
     }
@@ -546,6 +591,62 @@ where
 {
     let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
         .map_err(ProductSurfaceError::internal_from)?;
+    let write_body = body.clone();
+    cas_update(
+        filesystem,
+        scope,
+        &path,
+        |stored| Ok::<_, String>(stored.to_vec()),
+        |stored| {
+            Ok::<_, String>(Entry::bytes(stored.clone()).with_content_type(ContentType::json()))
+        },
+        move |existing| {
+            let write_body = write_body.clone();
+            async move {
+                match existing {
+                    None => Ok(CasApply::new(write_body, ())),
+                    Some(existing) if existing == write_body => Ok(CasApply::no_op(existing, ())),
+                    Some(_) => Err(
+                        "product result replay produced different bytes for one activity"
+                            .to_string(),
+                    ),
+                }
+            }
+        },
+    )
+    .await
+    .map_err(ProductSurfaceError::internal_from)
+}
+
+async fn persist_product_result_with_metadata<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+    body: Vec<u8>,
+    artifact: Option<ProductResultArtifactMetadata>,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    persist_product_result(filesystem, scope, result_ref, body).await?;
+    let Some(artifact) = artifact else {
+        return Ok(());
+    };
+    let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.artifact.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let encoded = serde_json::to_vec(&artifact).map_err(ProductSurfaceError::internal_from)?;
+    persist_product_result_entry(filesystem, scope, path, encoded).await
+}
+
+async fn persist_product_result_entry<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: ScopedPath,
+    body: Vec<u8>,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
     let write_body = body.clone();
     cas_update(
         filesystem,
@@ -592,14 +693,45 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
+    let metadata_path =
+        ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.artifact.json"))
+            .map_err(ProductSurfaceError::internal_from)?;
+    let artifact = match filesystem
+        .read_bytes_bounded(scope, &metadata_path, 4 * 1024)
+        .await
+    {
+        Ok(Some(encoded)) => {
+            let metadata = serde_json::from_slice::<ProductResultArtifactMetadata>(&encoded)
+                .map_err(ProductSurfaceError::internal_from)?;
+            if metadata.byte_len < body.len() as u64 {
+                return Err(ProductSurfaceError::internal_from(
+                    "product artifact metadata is shorter than its bounded preview",
+                ));
+            }
+            Some(metadata)
+        }
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => None,
+        Err(error) => return Err(ProductSurfaceError::internal_from(error)),
+    };
+    let (byte_len, artifact_ref, output_digest) =
+        artifact.map_or((body.len() as u64, None, None), |metadata| {
+            (
+                metadata.byte_len,
+                Some(metadata.artifact_ref),
+                metadata.output_digest,
+            )
+        });
     Ok(Some(Resolution::Done(Outcome {
         refs: OutcomeRefs {
             result: result_ref,
-            byte_len: body.len() as u64,
+            byte_len,
             preview: None,
-            preview_meta: ResultPreviewMeta::default(),
+            preview_meta: ResultPreviewMeta {
+                artifact_ref,
+                ..ResultPreviewMeta::default()
+            },
             origin: None,
-            output_digest: None,
+            output_digest,
         },
         verdict: ToolVerdict::Success,
         summary: fixed_summary("capability completed"),
@@ -618,13 +750,41 @@ mod tests {
             RuntimeCredentialRequirementSource,
         },
         http::RuntimeCredentialTarget,
-        ids::SecretHandle,
+        ids::{AgentId, SecretHandle, TenantId, UserId},
         mount::{MountGrant, MountPermissions},
         path::{MountAlias, VirtualPath},
         runtime::{RuntimeKind, TrustClass},
     };
 
     use super::*;
+
+    #[test]
+    fn product_execution_context_derives_stable_artifact_namespace_from_activity() {
+        let activity_id = ActivityId::new();
+        let caller = ProductSurfaceCaller {
+            tenant_id: TenantId::new("product-artifact-tenant").expect("tenant"),
+            user_id: UserId::new("product-artifact-user").expect("user"),
+            agent_id: Some(AgentId::new("product-artifact-agent").expect("agent")),
+            project_id: None,
+            operator_config: false,
+        };
+        let skill_mount_resolver = |_scope: &ResourceScope| Ok(MountView::default());
+        let context = product_execution_context(
+            &caller,
+            activity_id,
+            None,
+            &skill_mount_resolver,
+            &MountView::default(),
+        )
+        .expect("product execution context");
+
+        assert_eq!(
+            context.artifact_namespace,
+            Some(ArtifactNamespaceId::from_root_run(RunId::from_uuid(
+                activity_id.as_uuid(),
+            )))
+        );
+    }
 
     #[test]
     fn product_gesture_grant_keeps_no_egress_policy_unconstrained() {
@@ -806,6 +966,76 @@ mod tests {
         assert_eq!(outcome.refs.result, result_ref);
         assert_eq!(outcome.refs.byte_len, body.len() as u64);
         assert_eq!(outcome.verdict, ToolVerdict::Success);
+    }
+
+    #[tokio::test]
+    async fn product_result_replay_retains_artifact_metadata() {
+        let filesystem = scoped_product_results_filesystem();
+        let scope = resource_scope();
+        let invocation_id = InvocationId::new();
+        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+        let body = br#""bounded preview""#.to_vec();
+        let artifact_ref = ironclaw_host_api::artifact::ArtifactRef::new(
+            ironclaw_host_api::artifact::ArtifactId::new(11),
+        );
+        let output_digest = ironclaw_host_api::result_meta::OutputDigest::new(73);
+        persist_product_result_with_metadata(
+            &filesystem,
+            &scope,
+            result_ref,
+            body,
+            Some(ProductResultArtifactMetadata {
+                artifact_ref,
+                byte_len: 100_000,
+                output_digest: Some(output_digest),
+            }),
+        )
+        .await
+        .expect("artifact-backed product result persists");
+
+        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .await
+            .expect("product result replays")
+            .expect("persisted result");
+        let Resolution::Done(outcome) = replayed else {
+            panic!("persisted product result should replay as completed");
+        };
+        assert_eq!(outcome.refs.byte_len, 100_000);
+        assert_eq!(outcome.refs.preview_meta.artifact_ref, Some(artifact_ref));
+        assert_eq!(outcome.refs.output_digest, Some(output_digest));
+    }
+    #[test]
+    fn completed_product_result_retains_artifact_evidence() {
+        let artifact_ref = ironclaw_host_api::artifact::ArtifactRef::new(
+            ironclaw_host_api::artifact::ArtifactId::new(7),
+        );
+        let digest = ironclaw_host_api::result_meta::OutputDigest::new(41);
+        let completed = ironclaw_host_runtime::RuntimeCapabilityCompleted {
+            capability_id: CapabilityId::new("demo.large").expect("capability"),
+            output: serde_json::Value::String("bounded preview".to_string()),
+            display_preview: None,
+            usage: ironclaw_host_api::resource::ResourceUsage::default().set_output_bytes(100_000),
+            receipt: None,
+            completed_artifact: Some(ironclaw_host_api::artifact::CompletedArtifact {
+                artifact_ref,
+                byte_len: 100_000,
+                total_lines: Some(1),
+                content_type: "application/json".to_string(),
+                digest: ironclaw_host_api::artifact::ArtifactDigest::from_bytes(
+                    b"full product result",
+                ),
+            }),
+            canonical_output_digest: Some(digest),
+        };
+
+        let refs = completed_product_outcome_refs(
+            ResultRef::from_uuid(InvocationId::new().as_uuid()),
+            "bounded preview".len(),
+            &completed,
+        );
+        assert_eq!(refs.byte_len, 100_000);
+        assert_eq!(refs.preview_meta.artifact_ref, Some(artifact_ref));
+        assert_eq!(refs.output_digest, Some(digest));
     }
 
     #[tokio::test]

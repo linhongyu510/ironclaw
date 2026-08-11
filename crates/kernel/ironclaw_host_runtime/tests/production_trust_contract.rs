@@ -161,6 +161,8 @@ fn assert_authorization_failed(outcome: RuntimeCapabilityOutcome) {
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id(),
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,

@@ -536,6 +536,13 @@
       "note": "Read output-format examples; templates verbatim from cited upstream sources"
     },
     {
+      "path": "golden/artifacts.json",
+      "sha256": "5a14e63ec8f1c2d21ffa4cc741b57feb124f0bfe10c70653e7e85a8c52bb8eea",
+      "bytes": 1435,
+      "role": "artifact-golden",
+      "note": "Artifact URI allocation, parse, resolution, and hosted oversized-error cases transcribed from pinned artifact-protocol.ts and session/artifacts.ts"
+    },
+    {
       "path": "golden/selectors.json",
       "sha256": "48c6b964a4fd04bff613cdfb3b2b644a1dc0f601b33d66a1574b3112ea83554b",
       "bytes": 5608,

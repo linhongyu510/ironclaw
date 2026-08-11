@@ -308,6 +308,8 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
 
         Ok(CapabilityDispatchResult {
+            completed_artifact: None,
+            canonical_output_digest: None,
             capability_id: invocation.capability,
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,

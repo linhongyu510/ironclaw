@@ -1441,6 +1441,8 @@ impl ApprovalRequestStorePort for RecordingInvocationApprovalStores {
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id(),
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
@@ -1466,6 +1468,8 @@ fn dispatch_result_with_output(
     output: serde_json::Value,
 ) -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id,
         provider,
         runtime: RuntimeKind::Wasm,

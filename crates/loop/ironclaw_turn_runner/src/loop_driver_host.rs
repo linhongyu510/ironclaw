@@ -19,8 +19,9 @@ use ironclaw_hooks::middleware::{
     HookedLoopTranscriptPort,
 };
 use ironclaw_host_api::{
+    artifact::ArtifactNamespaceId,
     capability_surface::CapabilitySurfacePolicy,
-    ids::{CapabilityId, ExtensionId},
+    ids::{CapabilityId, ExtensionId, RunId},
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_loop_host::{
@@ -1021,6 +1022,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
+    legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1139,6 +1141,7 @@ where
             skill_context_source: None,
             attachment_read_port: None,
             prompt_diagnostic_sink: None,
+            legacy_result_artifacts: None,
             reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1232,6 +1235,14 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_legacy_result_artifacts(
+        mut self,
+        artifacts: Arc<ironclaw_threads::DurableToolArtifactStore>,
+    ) -> Self {
+        self.legacy_result_artifacts = Some(artifacts);
         self
     }
 
@@ -1932,6 +1943,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        legacy_result_artifacts: self.legacy_result_artifacts.clone(),
                     },
                 ))
             } else {
@@ -1951,6 +1963,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        legacy_result_artifacts: self.legacy_result_artifacts.clone(),
                     },
                 ))
             };
@@ -2419,12 +2432,18 @@ where
         Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>,
         crate::turn_runner::HostFactoryError,
     > {
+        let artifact_root_run_id = claimed
+            .spawn_tree_root_run_id
+            .unwrap_or(claimed.state.run_id);
         let mut loop_run_context = LoopRunContext::new(
             claimed.state.scope.clone(),
             claimed.state.turn_id,
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
         )
+        .with_artifact_namespace(ArtifactNamespaceId::from_root_run(RunId::from_uuid(
+            artifact_root_run_id.as_uuid(),
+        )))
         .with_accepted_message_ref(claimed.state.accepted_message_ref.clone());
         if let Some(actor) = claimed.state.actor.clone() {
             loop_run_context = loop_run_context.with_actor(actor);

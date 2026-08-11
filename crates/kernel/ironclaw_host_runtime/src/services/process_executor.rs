@@ -321,6 +321,8 @@ mod tests {
 
     fn dispatch_result() -> CapabilityDispatchResult {
         CapabilityDispatchResult {
+            completed_artifact: None,
+            canonical_output_digest: None,
             capability_id: CapabilityId::new("demo.background").unwrap(),
             provider: ExtensionId::new("demo").unwrap(),
             runtime: RuntimeKind::Script,
@@ -596,6 +598,7 @@ mod tests {
             RuntimeLane::from_runtime_kind(runtime).map(|lane| ProcessAuthorizedContinuation {
                 invocation: ProcessAuthorizedInvocation {
                     activity_id: ActivityId::from_uuid(invocation_id.as_uuid()),
+                    artifact_namespace: None,
                     capability: capability_id.clone(),
                     scope: scope.clone(),
                     actor: Actor::System,

@@ -356,6 +356,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
         .adapter
         .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
+            artifact_namespace: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: ping.clone(),
             scope: sample_scope(),
@@ -421,6 +422,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         .adapter
         .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
+            artifact_namespace: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),

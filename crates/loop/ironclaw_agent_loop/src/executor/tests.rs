@@ -51,7 +51,8 @@ use super::{
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
     HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
     StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
-    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    model_observation_from_outcome, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -5255,6 +5256,37 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
         model_observation.trust,
         ObservationTrust::UntrustedToolOutput
     );
+}
+
+#[test]
+fn completed_outcome_reconstructs_complete_inline_result() {
+    let observation = ModelVisibleToolObservation {
+        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed; inline content contains the full result.".to_string(),
+        detail: ToolObservationDetail::InlineResult {
+            content: "{\"output\":\"small result\"}".to_string(),
+            byte_len: 25,
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+    let resolution = resolution::completed(
+        LoopResultRef::new("result:inline-provider-call").expect("valid result ref"),
+        "capability completed".to_string(),
+        ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        false,
+        25,
+        None,
+        Some(observation.clone()),
+    );
+    let ironclaw_host_api::resolution::Resolution::Done(outcome) = resolution else {
+        panic!("completed result must produce a done outcome");
+    };
+
+    assert_eq!(model_observation_from_outcome(&outcome), Some(observation));
 }
 
 #[tokio::test]

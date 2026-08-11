@@ -1382,6 +1382,9 @@ fn completed_outcome_from(
         output: result.dispatch.output,
         display_preview: result.dispatch.display_preview,
         usage: result.dispatch.usage,
+        receipt: Some(result.dispatch.receipt),
+        completed_artifact: result.dispatch.completed_artifact,
+        canonical_output_digest: result.dispatch.canonical_output_digest,
     }
 }
 

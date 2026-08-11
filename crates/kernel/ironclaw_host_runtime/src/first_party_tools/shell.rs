@@ -93,7 +93,7 @@ pub(super) async fn dispatch(
         .map_err(process_error)?;
 
     let saved_output_path =
-        publish_saved_output_for_file_read(request, output.saved_output.as_ref()).await?;
+        publish_saved_output_for_read(request, output.saved_output.as_ref()).await?;
     let rendered_output = render_shell_output(
         &output.output,
         output.saved_output.as_ref(),
@@ -108,7 +108,7 @@ pub(super) async fn dispatch(
     Ok((output_value, output.duration))
 }
 
-async fn publish_saved_output_for_file_read(
+async fn publish_saved_output_for_read(
     request: &FirstPartyCapabilityRequest,
     saved_output: Option<&SavedCommandOutput>,
 ) -> Result<Option<String>, FirstPartyCapabilityError> {
@@ -193,7 +193,7 @@ fn render_shell_output(
     };
     let Some(saved_output_path) = saved_output_path else {
         return format!(
-            "{output}\n\nFull output was captured but no file_read-accessible scoped path was available"
+            "{output}\n\nFull output was captured but no `read`-accessible scoped path was available"
         );
     };
     let mut note = match saved_output.sanitization {
@@ -209,7 +209,7 @@ fn render_shell_output(
             format!("Full output saved to: {saved_output_path}")
         }
     };
-    note.push_str("\nUse file_read to inspect it");
+    note.push_str("\nUse read to inspect it");
     if saved_output.stream_was_capped {
         note.push_str(&format!(
             " (saved output capped at {} bytes per stream)",
@@ -422,7 +422,7 @@ mod tests {
         assert!(rendered.contains("Full output saved to: /workspace/command-outputs/command.log"));
         assert!(!rendered.contains("/tmp/command.log"));
         assert!(rendered.contains("secret-like values redacted"));
-        assert!(rendered.contains("Use file_read to inspect it"));
+        assert!(rendered.contains("Use read to inspect it"));
     }
 
     #[test]

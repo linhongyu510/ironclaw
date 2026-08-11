@@ -5783,7 +5783,7 @@ async fn host_runtime_services_cancel_does_not_reclassify_committed_kill_when_cl
     let runtime = HostRuntimeServices::new(
         registry,
         Arc::new(DiskFilesystem::new()),
-        Arc::new(FailingCleanupResourceGovernor),
+        Arc::new(FailingCleanupResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -6129,7 +6129,7 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
 async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_terminal_transition() {
     let reservation_id = ResourceReservationId::new();
     let inner_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
-    let governor = Arc::new(FailingCleanupResourceGovernor);
+    let governor = Arc::new(FailingCleanupResourceGovernor::new());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(SecretStore::ephemeral()),

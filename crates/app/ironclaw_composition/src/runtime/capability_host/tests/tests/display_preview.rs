@@ -56,23 +56,23 @@ async fn capability_io_writes_display_preview_to_durable_history() {
     let capability_id = CapabilityId::new("builtin.write_file").expect("capability id");
 
     capability_io
-        .write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"success": true}),
-            display_preview: Some(CapabilityDisplayOutputPreview {
-                output_summary: Some("Edited 1 file: +1/-1".to_string()),
-                output_preview:
-                    "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-                        .to_string(),
-                output_kind: "unified_diff".to_string(),
-                subtitle: Some("/workspace/main.rs".to_string()),
-                truncated: false,
-            }),
-            durable_persistence: DurablePersistence::Persist,
-        })
+        .write_capability_result(CapabilityResultWrite { receipt: None, run_context: &run_context,
+        completed_artifact: None,
+        canonical_output_digest: None,
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability_id,
+        output: serde_json::json!({"success": true}),
+        display_preview: Some(CapabilityDisplayOutputPreview {
+            output_summary: Some("Edited 1 file: +1/-1".to_string()),
+            output_preview:
+                "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                    .to_string(),
+            output_kind: "unified_diff".to_string(),
+            subtitle: Some("/workspace/main.rs".to_string()),
+            truncated: false,
+        }),
+        durable_persistence: DurablePersistence::Persist, })
         .await
         .map(|_| ())
         .expect("result stages");

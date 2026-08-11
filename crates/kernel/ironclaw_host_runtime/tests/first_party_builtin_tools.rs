@@ -498,14 +498,11 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
-/// ⚠️ TEMPORARY benchmark override (issue #7392): the process-backend
-/// production builders advertise the omp surface (`builtin.read`/`write`/
-/// `edit` plus the omp `builtin.glob`/`builtin.grep` replacements) until the
-/// atomic cutover removes the old tools. This pins the override so the
-/// cutover revert is a deliberate diff, not a silent drift; the plain
-/// (non-process-backend) builders keep the stock surface.
+/// The always-on first-party package exposes only the exact omp coding
+/// surface. Every process-backend variant and trigger-aware handler builder
+/// must preserve the same cutover.
 #[tokio::test]
-async fn production_process_backend_builders_advertise_omp_coding_surface() {
+async fn production_builders_advertise_only_omp_coding_surface() {
     const OMP_IDS: [&str; 5] = [
         OMP_READ_CAPABILITY_ID,
         OMP_WRITE_CAPABILITY_ID,
@@ -513,6 +510,37 @@ async fn production_process_backend_builders_advertise_omp_coding_surface() {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
     ];
+    const RETIRED_IDS: [&str; 4] = [
+        READ_FILE_CAPABILITY_ID,
+        WRITE_FILE_CAPABILITY_ID,
+        LIST_DIR_CAPABILITY_ID,
+        APPLY_PATCH_CAPABILITY_ID,
+    ];
+    let package = builtin_first_party_package().expect("builtin package");
+    let handlers = builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default()))
+        .expect("builtin handlers");
+    for id in OMP_IDS {
+        assert!(
+            package
+                .capabilities
+                .iter()
+                .any(|item| item.id.as_str() == id)
+        );
+        assert!(handlers.contains_handler(&capability_id(id)));
+    }
+    for id in RETIRED_IDS {
+        assert!(
+            package
+                .capabilities
+                .iter()
+                .all(|item| item.id.as_str() != id),
+            "retired capability {id} remains in the builtin package"
+        );
+        assert!(
+            !handlers.contains_handler(&capability_id(id)),
+            "retired handler {id} remains in the builtin registry"
+        );
+    }
     for process_backend in [
         ProcessBackendKind::None,
         ProcessBackendKind::LocalHost,
@@ -535,6 +563,15 @@ async fn production_process_backend_builders_advertise_omp_coding_surface() {
                     .iter()
                     .any(|capability| capability.id.as_str() == id),
                 "omp capability {id} missing from {process_backend:?} manifest"
+            );
+        }
+        for id in RETIRED_IDS {
+            assert!(
+                package
+                    .capabilities
+                    .iter()
+                    .all(|descriptor| descriptor.id.as_str() != id),
+                "retired capability {id} remains in {process_backend:?} package"
             );
         }
         // The omp engines REPLACE the v1 glob/grep manifests in the

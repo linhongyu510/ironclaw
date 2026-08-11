@@ -63,10 +63,9 @@ pub(super) enum RebornCapabilityBackend {
     /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
     BuiltinHttpToolsRealEgress,
     /// `write_file`/`read_file` (same as `file_tools()`), but backed by the
-    /// REAL `StagedCapabilityIo` (durable tool-result projection seam,
-    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
-    /// double -- so a large `read_file` result is persisted durably and
-    /// `result_read` can page through it.
+    /// real `StagedCapabilityIo` instead of the ephemeral
+    /// `ProductLiveCapabilityIo` test double, so artifact-backed result
+    /// projection follows the production path.
     FileToolsDurableIo,
     /// Harness-port-seam Change 4: the same `BuiltinHttpTools` backend with an
     /// additional confirmed `/host` mount grant, so

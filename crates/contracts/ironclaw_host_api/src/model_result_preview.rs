@@ -27,9 +27,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::HostApiError;
 
 /// Maximum size of a model-visible result preview, in bytes. Mirrors
-/// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB) — the
-/// largest raw first-look chunk a `result_read` returns — so the inline preview
-/// and a follow-up read share one cap.
+/// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB), so
+/// inline previews and artifact-backed omp `read` continuations share one cap.
 pub const MODEL_RESULT_PREVIEW_MAX_BYTES: usize = 24 * 1024;
 
 /// A bounded, credential-redacted, model-visible preview of a tool result's

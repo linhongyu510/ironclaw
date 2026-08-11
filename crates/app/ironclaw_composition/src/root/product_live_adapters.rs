@@ -28,10 +28,11 @@ use ironclaw_loop_contracts::{
     LoopRunContext, ProviderToolCall,
 };
 use ironclaw_loop_host::{
-    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
-    CapabilityWriteResult, HostIdentityContextSource, HostInputQueue,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
+    CapabilityResolveError, CapabilityResultUpdate, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
+    HostInputQueue, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
@@ -258,6 +259,9 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             capability_id,
             output,
             display_preview,
+            receipt: _,
+            completed_artifact: _,
+            canonical_output_digest: _,
             // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
             // (see crate CONTRACT.md / #5902) that never durably persists a
             // result, so the durable-vs-inline distinction does not apply here.
@@ -341,7 +345,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
         output: serde_json::Value,
-    ) -> Result<u64, AgentLoopHostError> {
+    ) -> Result<CapabilityResultUpdate, AgentLoopHostError> {
         ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
         let byte_len = serialized_json_len(&output, "capability result")?;
         let mut results = self
@@ -392,7 +396,10 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 byte_len,
             },
         );
-        Ok(byte_len as u64)
+        Ok(CapabilityResultUpdate {
+            byte_len: byte_len as u64,
+            completed_artifact: None,
+        })
     }
 
     async fn delete_capability_result(
@@ -959,6 +966,9 @@ mod tests {
         let invocation_id = InvocationId::new();
         let capability_id = CapabilityId::new("builtin.read_file").unwrap();
         io.write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id,
@@ -1032,6 +1042,9 @@ mod tests {
 
         let invocation_id = InvocationId::new();
         io.write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id,
@@ -1074,23 +1087,23 @@ mod tests {
             .expect("input staged");
         let invocation_id = InvocationId::new();
         let capability_id = CapabilityId::new("builtin.write_file").unwrap();
-        io.write_capability_result(CapabilityResultWrite {
-            run_context: &run_context,
-            input_ref: &input_ref,
-            invocation_id,
-            capability_id: &capability_id,
-            output: serde_json::json!({"success": true}),
-            display_preview: Some(CapabilityDisplayOutputPreview {
-                output_summary: Some("Edited 1 file: +1/-1".to_string()),
-                output_preview:
-                    "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-                        .to_string(),
-                output_kind: "unified_diff".to_string(),
-                subtitle: Some("/workspace/main.rs".to_string()),
-                truncated: false,
-            }),
-            durable_persistence: DurablePersistence::Persist,
-        })
+        io.write_capability_result(CapabilityResultWrite { receipt: None, run_context: &run_context,
+        completed_artifact: None,
+        canonical_output_digest: None,
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability_id,
+        output: serde_json::json!({"success": true}),
+        display_preview: Some(CapabilityDisplayOutputPreview {
+            output_summary: Some("Edited 1 file: +1/-1".to_string()),
+            output_preview:
+                "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                    .to_string(),
+            output_kind: "unified_diff".to_string(),
+            subtitle: Some("/workspace/main.rs".to_string()),
+            truncated: false,
+        }),
+        durable_persistence: DurablePersistence::Persist, })
         .await
         .map(|_| ())
         .expect("result staged");
@@ -1122,6 +1135,9 @@ mod tests {
         let invocation_id = InvocationId::new();
         let capability_id = CapabilityId::new("demo.echo").unwrap();
         io.write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id,

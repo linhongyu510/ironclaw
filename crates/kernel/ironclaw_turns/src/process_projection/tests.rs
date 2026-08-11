@@ -1157,11 +1157,13 @@ fn claimed_turn_run_projects_to_process_claim() {
         product_context: None,
         resume_disposition: None,
     };
+    let root_run_id = TurnRunId::new();
     let claimed = ClaimedTurnRun {
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 3,
         spawn_tree_descendant_cap: Some(17),
+        spawn_tree_root_run_id: Some(root_run_id),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -1171,6 +1173,10 @@ fn claimed_turn_run_projects_to_process_claim() {
     assert_eq!(
         process.state.process_id,
         process_id_from_turn_run_id(state.run_id)
+    );
+    assert_eq!(
+        process.state.root_process_id,
+        Some(process_id_from_turn_run_id(root_run_id))
     );
     assert_eq!(process.state.status, ProcessLifecycleStatus::Running);
     assert_eq!(
@@ -1215,11 +1221,13 @@ fn claimed_process_round_trips_to_turn_executor_view() {
         product_context: None,
         resume_disposition: None,
     };
+    let root_run_id = TurnRunId::new();
     let claimed = ClaimedTurnRun {
         state: state.clone(),
         resolved_run_profile: profile().resolved,
         subagent_depth: 4,
         spawn_tree_descendant_cap: Some(23),
+        spawn_tree_root_run_id: Some(root_run_id),
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
@@ -1236,6 +1244,7 @@ fn claimed_process_round_trips_to_turn_executor_view() {
     );
     assert_eq!(round_trip.subagent_depth, 4);
     assert_eq!(round_trip.spawn_tree_descendant_cap, Some(23));
+    assert_eq!(round_trip.spawn_tree_root_run_id, Some(root_run_id));
 }
 
 #[tokio::test]

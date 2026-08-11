@@ -933,6 +933,9 @@ impl SubagentSpawnCapabilityPort {
             .deps
             .result_writer
             .write_capability_result(CapabilityResultWrite {
+                receipt: None,
+                completed_artifact: None,
+                canonical_output_digest: None,
                 run_context: &self.run_context,
                 input_ref: &invocation.input_ref,
                 invocation_id: InvocationId::new(),

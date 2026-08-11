@@ -1,10 +1,8 @@
 //! Reborn integration — omp registration seam (issue #7392 slice 3).
 //!
-//! Drives the omp-extended first-party surface end to end through the REAL
-//! turn stack (product workflow → turn coordinator → agent loop → real
-//! `ironclaw_llm` decorator chain → scripted model at the vendor-SDK seam),
-//! with the composed runtime's built-in package + handlers swapped to the
-//! omp-extended variants via `with_omp_coding_tools()`:
+//! Drives the production first-party surface end to end through the REAL turn
+//! stack (product workflow → turn coordinator → agent loop → real
+//! `ironclaw_llm` decorator chain → scripted model at the vendor-SDK seam).
 //!
 //! 1. The model-visible tool surface advertises EXACTLY the pinned names
 //!    `read`/`write`/`edit`/`glob`/`grep` with the pinned fixture schemas
@@ -22,9 +20,8 @@
 //! 4. A gated omp `write` raises a real `BlockedApproval` gate through the
 //!    ordinary approval path and persists after approval.
 //!
-//! The harness default surface stays byte-identical to today (the stock
-//! `tool_disclosure`/`golden_payload` suites still pin it): the omp seam is
-//! opt-in only.
+//! The production-shaped harness selects the canonical omp-first package via
+//! its focused coding-tools profile; there is no old/new factory split.
 //!
 //! Stack note: every test here runs on a dedicated 16 MiB-stack thread
 //! ([`run_async_test_with_stack`]), mirroring `process_port.rs`'s
@@ -75,7 +72,7 @@ fn output_text(value: &serde_json::Value) -> String {
     value
         .get("output")
         .and_then(serde_json::Value::as_str)
-        .expect("omp tool result carries an output text")
+        .unwrap_or_else(|| panic!("omp tool result carries an output text: {value}"))
         .to_string()
 }
 
@@ -136,26 +133,19 @@ fn omp_surface_advertises_exact_names_schemas_and_descriptions() {
                 );
             }
 
-            // The benchmark surface is OMP-only for coding tools: legacy
-            // read/write/list/apply-patch names must not remain advertised.
-            for old_tool in [
+            // Retired coding tools and derived glob/grep spellings are absent.
+            for retired in [
                 "builtin__read_file",
                 "builtin__write_file",
                 "builtin__list_dir",
                 "builtin__apply_patch",
+                "builtin__glob",
+                "builtin__grep",
+                "builtin__result_read",
             ] {
                 assert!(
-                    !seen.contains_key(old_tool),
-                    "legacy tool {old_tool} leaked"
-                );
-            }
-            // ...and the two ids the omp engines reuse (`builtin.glob`/`builtin.grep`)
-            // no longer advertise the derived spellings — `glob`/`grep` are the omp
-            // engines now.
-            for replaced in ["builtin__glob", "builtin__grep"] {
-                assert!(
-                    !seen.contains_key(replaced),
-                    "derived spelling {replaced} must be replaced by the omp exact name"
+                    !seen.contains_key(retired),
+                    "retired tool {retired} must not remain after the atomic cutover"
                 );
             }
         },
@@ -175,12 +165,12 @@ fn omp_read_edit_read_chain_flows_exact_shapes() {
         let h = RebornIntegrationHarness::test_default()
             .with_omp_coding_tools()
             .script([
-                RebornScriptedReply::tool_call("read", json!({ "path": "foo.txt" })),
+                RebornScriptedReply::tool_call("read", json!({ "path": "/workspace/foo.txt" })),
                 RebornScriptedReply::tool_call(
                     "edit",
-                    json!({ "input": format!("[foo.txt#{tag}]\nPUT 2:\n+CHANGED\n") }),
+                    json!({ "input": format!("[/workspace/foo.txt#{tag}]\nPUT 2:\n+CHANGED\n") }),
                 ),
-                RebornScriptedReply::tool_call("read", json!({ "path": "foo.txt" })),
+                RebornScriptedReply::tool_call("read", json!({ "path": "/workspace/foo.txt" })),
                 RebornScriptedReply::text("edited"),
             ])
             .build()
@@ -216,7 +206,7 @@ fn omp_read_edit_read_chain_flows_exact_shapes() {
                 .expect("edit result"),
         );
         assert!(
-            edit_output.starts_with("[foo.txt#"),
+            edit_output.starts_with("[/workspace/foo.txt#"),
             "edit output leads with the new snapshot header: {edit_output}"
         );
         assert!(
@@ -287,6 +277,48 @@ fn omp_derived_spelling_still_resolves() {
             "the derived spelling builtin__read resolved to the omp engine: {output}"
         );
     });
+}
+
+/// A large omp result is persisted before the model sees its bounded preview,
+/// and the same run can recover an exact line range through `read artifact://`.
+#[test]
+fn omp_large_read_spills_and_is_readable_by_artifact_selector() {
+    run_async_test_with_stack(
+        "omp_large_read_spills_and_is_readable_by_artifact_selector",
+        || async {
+            let content = (0..2_000)
+                .map(|line| format!("payload-{line:04}-{}\n", "x".repeat(32)))
+                .collect::<String>();
+            let h = RebornIntegrationHarness::test_default()
+                .with_omp_coding_tools()
+                .script([
+                    RebornScriptedReply::tool_call("read", json!({ "path": "large.txt" })),
+                    RebornScriptedReply::tool_call("read", json!({ "path": "artifact://0:1-2" })),
+                    RebornScriptedReply::text("artifact recovered"),
+                ])
+                .build()
+                .await
+                .expect("harness builds");
+            let path = h
+                .capability_recorder
+                .workspace_file_path("large.txt")
+                .expect("host-runtime harness exposes the workspace root");
+            std::fs::write(&path, content).expect("seed large workspace file");
+
+            h.submit_turn("read the large file, then recover its first two artifact lines")
+                .await
+                .expect("turn completes");
+            let recovered = output_text(
+                &h.tool_result_output("builtin.read")
+                    .await
+                    .expect("artifact read result"),
+            );
+            assert!(
+                recovered.contains("1:[large.txt#") && recovered.contains("2:1:payload-0000-"),
+                "artifact selector returns the first two exact spilled lines: {recovered}"
+            );
+        },
+    );
 }
 
 /// The approval gate applies to the NEW capabilities: a scripted omp `write`

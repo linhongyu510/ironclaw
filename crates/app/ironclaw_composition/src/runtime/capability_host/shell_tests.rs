@@ -103,7 +103,6 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::clone(&runtime_surfaces.project_service),
-        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
         outbound_preference_write_requires_approval: false,

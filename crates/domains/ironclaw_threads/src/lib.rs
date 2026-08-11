@@ -20,6 +20,7 @@ mod service;
 mod stored_message;
 mod summary_artifacts;
 mod title;
+mod tool_artifacts;
 mod tool_result_records;
 mod tool_result_reference;
 
@@ -51,7 +52,6 @@ pub use contract::{
     ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
     ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
-    effective_tool_result_read_max_bytes,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
@@ -62,6 +62,9 @@ pub use in_memory::InMemorySessionThreadService;
 // dependency.
 pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 pub use service::SessionThreadService;
+pub use tool_artifacts::{
+    DurableToolArtifactStore, LegacyResultArtifactRequest, TOOL_ARTIFACT_CHUNK_BYTES,
+};
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };

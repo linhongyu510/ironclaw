@@ -14,6 +14,8 @@ pub struct ClaimedTurnRun {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_descendant_cap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tree_root_run_id: Option<crate::TurnRunId>,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
 }

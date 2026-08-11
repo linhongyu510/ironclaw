@@ -1139,6 +1139,8 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 
 fn dispatch_result() -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id(),
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,
@@ -1161,6 +1163,8 @@ fn sample_dispatch(
     output: serde_json::Value,
 ) -> CapabilityDispatchResult {
     CapabilityDispatchResult {
+        completed_artifact: None,
+        canonical_output_digest: None,
         capability_id: capability_id.clone(),
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,
@@ -1241,6 +1245,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
+        artifact_namespace: None,
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id,

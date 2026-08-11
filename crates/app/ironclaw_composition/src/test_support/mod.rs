@@ -52,10 +52,7 @@
 //!     production `StagedCapabilityIo` constructor (`capability_wiring`'s
 //!     `new_with_durable_previews` call), for durable tool-result projection
 //!     coverage (issue #5838).
-//! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
-//!     production `result_read` synthetic-capability wrap, for the same
-//!     durable tool-result projection coverage (issue #5838).
-//! 15. [`channel_connection`] — [`ChannelConnectionTestBundle`],
+//! 14. [`channel_connection`] — [`ChannelConnectionTestBundle`],
 //!     `build_channel_connection_for_test` — the REAL generic
 //!     channel-connection service (§6.4) + OAuth-callback-shaped identity
 //!     binding over a composed harness's own stores, late-bound into the
@@ -108,7 +105,6 @@ mod outbound_delivery;
 mod project_create;
 mod projection;
 mod refreshing_capability_port;
-mod result_read;
 mod skill_activation;
 mod standalone_boot;
 mod trace_capture;
@@ -166,8 +162,6 @@ pub use refreshing_capability_port::{
     build_extension_management_for_test, create_refreshing_capability_port_for_test,
     scoped_workspace_mount_view_for_test,
 };
-#[cfg(feature = "test-support")]
-pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,

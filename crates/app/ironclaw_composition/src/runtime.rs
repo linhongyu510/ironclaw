@@ -394,8 +394,6 @@ mod test_support;
 
 #[cfg(feature = "test-support")]
 pub(crate) use capability_host::PROJECT_CREATE_CAPABILITY_ID;
-#[cfg(feature = "test-support")]
-pub(crate) use capability_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use capability_host::SKILL_ACTIVATE_CAPABILITY_ID;
 
@@ -768,32 +766,6 @@ pub(crate) struct InteractionServiceTestParts {
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     product_auth: Arc<RebornProductAuthServices>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
-}
-
-/// Test-support forwarder for the `result_read` synthetic-capability wrap
-/// (durable tool-result projection seam, issue #5838). Bridges the private
-/// `capability_host` module to `test_support.rs`; mirrors the `project_create`
-/// forwarder above.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_result_read_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
-    thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::ids::UserId,
-    run_context: ironclaw_loop_contracts::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
-    ironclaw_loop_contracts::AgentLoopHostError,
-> {
-    capability_host::wrap_result_read_capability_for_test(
-        inner,
-        thread_service,
-        fallback_user_id,
-        run_context,
-        input_resolver,
-        result_writer,
-    )
 }
 
 /// Test-support forwarder (harness-port-seam P1 seam) for
@@ -3762,6 +3734,7 @@ async fn build_runtime_with_resource_governor_inner(
                 filesystem,
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
         }),
+        legacy_result_artifacts: Some(Arc::clone(&services.artifact_store)),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME

@@ -99,6 +99,9 @@ async fn write_capability_result_for_test(
     let capability_id = capability_id(capability);
     let CapabilityWriteResult { result_ref, .. } = io
         .write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context,
             input_ref,
             invocation_id: InvocationId::new(),
@@ -184,6 +187,9 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
 
     let CapabilityWriteResult { byte_len, .. } = io
         .write_capability_result(CapabilityResultWrite {
+            receipt: None,
+            completed_artifact: None,
+            canonical_output_digest: None,
             run_context: &run_context,
             input_ref: &input_ref,
             invocation_id: InvocationId::new(),
@@ -1398,6 +1404,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        legacy_result_artifacts: None,
         prompt_diagnostic_sink: None,
         reply_attachment_intent_port: None,
         gate_record_store: None,
