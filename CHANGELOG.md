@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.3] - 2026-08-12
+
+### Fixed
+
+- The runtime container image now installs `curl`, so in-container HTTP
+  healthchecks can execute. Orchestrators probe the worker with
+  `curl -fsS http://localhost:3000/`; the image shipped no HTTP client, so the
+  probe could never run, the container was never marked healthy, and the deploy
+  timed out into `error` while the listener served 200s throughout.
+
+### Changed
+
+- Reborn PR test planning and the root-partition runner now share one test
+  inventory covering every `tests/*.rs` target, and container image inputs
+  select the root test that asserts them. Previously the two sides disagreed on
+  partition assignment, so a scheduled root test could be reported green
+  without having run.
+
 ## [1.2.0-rc.2] - 2026-08-12
 
 ### Fixed
