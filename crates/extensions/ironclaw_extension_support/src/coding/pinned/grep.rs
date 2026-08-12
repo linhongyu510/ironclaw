@@ -209,6 +209,12 @@ pub(crate) async fn grep(
         };
         let stat = stat_optional(ctx, &resolved.virtual_path).await?;
         let Some(stat) = stat else {
+            // A missing mount ROOT behaves as an empty result set (the grant
+            // names it; nothing has been written under it yet), matching the
+            // never-written mount-root rule.
+            if resolved.is_mount_root() {
+                return Ok(String::new());
+            }
             let scope_path = display_path(&workspace_root, &resolved.virtual_path);
             return Err(coding_error(
                 CodingEngineErrorKind::PathNotFound,

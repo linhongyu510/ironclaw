@@ -875,7 +875,6 @@ impl RebornIntegrationGroupBuilder {
     /// construction: `workspace_scoping_tests` (crate tier) and the two-user
     /// `webui_v2_e2e` workspace test.
     pub async fn multiuser_scoped_workspace(self) -> HarnessResult<RebornIntegrationGroup> {
-        use ironclaw_host_api::ids::CapabilityId;
         let base = self.build_base().await?;
         let actor_user = base.canonical_actor_user()?;
         let product_scope = &base.product_harness.scope;
@@ -893,12 +892,16 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
         )
         .map_err(|error| format!("scoped workspace mount view: {error}"))?;
-        let mut profile =
-            super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
-        profile.capability_ids.extend([
-            CapabilityId::new(ironclaw_host_runtime::GLOB_CAPABILITY_ID)?,
-            CapabilityId::new(ironclaw_host_runtime::GREP_CAPABILITY_ID)?,
-        ]);
+        let mut profile = super::super::harness::profiles::pinned_coding::coding_tools_requiring_approval_profile()?;
+        profile.capability_ids.retain(|capability| {
+            matches!(
+                capability.as_str(),
+                ironclaw_host_runtime::CODING_READ_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_GLOB_CAPABILITY_ID
+                    | ironclaw_host_runtime::CODING_GREP_CAPABILITY_ID
+            )
+        });
         profile.options.mounts = scoped_view;
         profile.options = profile.options.with_workspace_scoped_per_caller();
         let host_runtime = profile

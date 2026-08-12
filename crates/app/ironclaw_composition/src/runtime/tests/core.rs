@@ -1077,11 +1077,11 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
             );
             let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
                 .expect("tool result should be a structured reference envelope");
-            let preview = envelope["model_observation"]["detail"]["preview"]
+            let preview = envelope["model_observation"]["detail"]["content"]
                 .as_str()
-                .expect("tool result should include an inline preview");
+                .expect("tool result should include an inline result observation");
             let shell_output: serde_json::Value =
-                serde_json::from_str(preview).expect("shell preview should be structured JSON");
+                serde_json::from_str(preview).expect("shell result should be structured JSON");
             assert_eq!(
                 shell_output["sandboxed"],
                 serde_json::json!(true),
@@ -1253,8 +1253,14 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 "coding read must expose the artifact-backed result to the model"
             );
             assert!(
-                !tool_result.content.contains(LARGE_ECHO_TAIL),
-                "coding read must retain its pinned bounded output shape"
+                tool_result.content.contains("artifact output elided"),
+                "coding read must retain its pinned bounded output shape (elided head/tail preview): {}",
+                tool_result.content.chars().take(200).collect::<String>()
+            );
+            assert!(
+                tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
+                "coding read replay must stay bounded, got {} bytes",
+                tool_result.content.len()
             );
             return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
         }

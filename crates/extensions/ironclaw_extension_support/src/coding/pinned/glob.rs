@@ -106,9 +106,15 @@ pub(crate) async fn glob(
     for pattern in &effective_patterns {
         let (base_path, glob_pattern, has_glob) = parse_find_pattern(pattern);
         let resolved_base = resolve_pattern_base(ctx, &base_path).await?;
-        let scope_path = display_path(&workspace_root, &resolved_base);
+        let is_mount_root = resolved_base.is_mount_root();
+        let scope_path = display_path(&workspace_root, &resolved_base.virtual_path);
         targets.push(GlobTarget {
-            search_path: resolved_base,
+            search_path: resolved_base.virtual_path,
+            // A mount root the caller is authorized for exists by definition:
+            // a missing mount root lists as empty rather than NotFound (the
+            // never-written mount-root rule), so carry the grant target for
+            // the stat fallback below.
+            is_mount_root,
             glob_pattern,
             has_glob,
             scope_path,
@@ -132,6 +138,12 @@ pub(crate) async fn glob(
             }
         };
         let Some(stat) = stat else {
+            // A missing mount ROOT lists as empty (the grant names it; nothing
+            // has been written under it yet); any other missing path stays an
+            // error, as before.
+            if target.is_mount_root {
+                continue;
+            }
             if is_single {
                 return Err(coding_error(
                     CodingEngineErrorKind::PathNotFound,
@@ -214,6 +226,10 @@ pub(crate) async fn glob(
 
 struct GlobTarget {
     search_path: ironclaw_host_api::path::VirtualPath,
+    /// Whether `search_path` is the grant's mount root itself (see
+    /// `ResolvedCodingPath::is_mount_root`): a missing root behaves as an
+    /// empty directory rather than `NotFound`.
+    is_mount_root: bool,
     glob_pattern: String,
     has_glob: bool,
     scope_path: String,
@@ -287,9 +303,8 @@ async fn pattern_base_exists(
 async fn resolve_pattern_base(
     ctx: &CodingEngineContext,
     base_path: &str,
-) -> Result<ironclaw_host_api::path::VirtualPath, CodingEngineError> {
-    let resolved = resolve_input_path(ctx, base_path, FilesystemOperation::ListDir)?;
-    Ok(resolved.virtual_path)
+) -> Result<super::ResolvedCodingPath, CodingEngineError> {
+    resolve_input_path(ctx, base_path, FilesystemOperation::ListDir)
 }
 
 fn mtime_ms(stat: &ironclaw_filesystem::FileStat) -> u64 {

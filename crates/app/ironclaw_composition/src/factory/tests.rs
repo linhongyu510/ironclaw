@@ -1778,6 +1778,7 @@ async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
     assert_eq!(
         mounted_roots,
         vec![
+            "/artifacts",
             "/events",
             "/memory",
             "/projects",

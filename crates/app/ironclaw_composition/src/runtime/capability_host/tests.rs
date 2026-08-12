@@ -1156,10 +1156,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_io_rejects_result_when_durable_thread_is_missing() {
+    async fn capability_io_writes_inline_result_without_durable_thread() {
         let run_context = run_context("durable-preview-failure").await;
         let fallback_user_id = UserId::new("durable-preview-owner").expect("fallback user id");
-        // No thread is registered, so the result cannot be made retrievable.
+        // No thread is registered: the durable artifact cutover makes the
+        // result retrievable through the staged/inline result path, so the
+        // write must still succeed; only the durable preview append is
+        // skipped (best-effort).
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
         let capability_io = StagedCapabilityIo::new_with_durable_previews(
@@ -1178,7 +1181,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let error = capability_io
+        let write_result = capability_io
             .write_capability_result(CapabilityResultWrite {
                 receipt: None,
                 completed_artifact: None,
@@ -1193,12 +1196,18 @@ mod tests {
                 canonical_item_count: None,
             })
             .await
-            .expect_err("missing thread must reject an unreadable result reference");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+            .expect("missing thread must not reject a result that stays retrievable inline");
         assert!(
-            display_previews
-                .record_for_invocation(invocation_id)
-                .is_none()
+            write_result
+                .model_observation
+                .as_ref()
+                .is_some_and(|observation| {
+                    matches!(
+                        observation.detail,
+                        ironclaw_loop_contracts::ToolObservationDetail::InlineResult { .. }
+                    )
+                }),
+            "inline result observation expected without a durable thread: {write_result:?}"
         );
     }
 
@@ -2100,7 +2109,7 @@ mod tests {
         let read_grant = grant_for(CODING_READ_CAPABILITY_ID);
         assert_eq!(
             read_grant.constraints.allowed_effects,
-            local_host_allowed_effects
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
         );
         assert_eq!(read_grant.constraints.mounts, workspace_mounts);
         assert_eq!(read_grant.constraints.network, NetworkPolicy::default());
@@ -3868,7 +3877,7 @@ mod tests {
         assert!(
             output["output"]
                 .as_str()
-                .is_some_and(|text| text.contains("1: safe host file")),
+                .is_some_and(|text| text.contains("1:safe host file")),
             "the confirmed host file must be readable through /host, got {output}"
         );
 
@@ -3902,7 +3911,7 @@ mod tests {
         assert!(
             output["output"]
                 .as_str()
-                .is_some_and(|text| text.contains("1: safe workspace file")),
+                .is_some_and(|text| text.contains("1:safe workspace file")),
             "the workspace file must be readable through /workspace, got {output}"
         );
     }
@@ -4116,11 +4125,17 @@ mod tests {
             .iter()
             .find(|descriptor| descriptor.capability_id.as_str() == CODING_READ_CAPABILITY_ID)
             .expect("read descriptor visible");
+        // The pinned read docs legitimately mention the `ssh://host/` URL
+        // scheme, so a bare "/host" substring is not a disclosure marker.
+        // The actual disclosure is the scoped-roots note, which is appended
+        // only when the host mount is confirmed.
         assert!(
-            !read_descriptor.safe_description.contains("/host")
+            !read_descriptor
+                .safe_description
+                .contains("Available scoped roots")
                 && !read_descriptor
                     .safe_description
-                    .contains("Available scoped roots"),
+                    .contains("confirmed host home mount"),
             "normal standalone read description must not disclose host roots: {}",
             read_descriptor.safe_description
         );
@@ -4142,8 +4157,8 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == CODING_READ_CAPABILITY_ID)
             .expect("read tool definition visible");
         assert!(
-            !read_tool.description.contains("/host")
-                && !read_tool.description.contains("Available scoped roots"),
+            !read_tool.description.contains("Available scoped roots")
+                && !read_tool.description.contains("confirmed host home mount"),
             "normal standalone provider tool description must not disclose host roots: {}",
             read_tool.description
         );
