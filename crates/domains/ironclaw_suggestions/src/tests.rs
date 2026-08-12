@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, Entry, FileStat, FilesystemError, InMemoryBackend,
-    RootFilesystem, VersionedEntry,
+    RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
-use ironclaw_host_api::path::VirtualPath;
+use ironclaw_host_api::ids::{InvocationId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+use ironclaw_host_api::path::{MountAlias, VirtualPath};
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_host_api::turn::TurnRunId;
 use uuid::Uuid;
 
@@ -79,6 +81,51 @@ fn tenant() -> TenantId {
 
 fn user() -> UserId {
     UserId::new("suggestions-user").expect("user id")
+}
+
+fn scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant(),
+        user_id: user(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn scope_for(tenant_id: &str, user_id: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(tenant_id).expect("tenant id"),
+        user_id: UserId::new(user_id).expect("user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+/// Grants the `/suggestions` alias to the caller's tenant/user cell, the
+/// same shape production wiring grants via `PER_USER_ALIASES` in
+/// `ironclaw_composition`.
+fn suggestions_mount_view(scope: &ResourceScope) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/suggestions")?,
+        VirtualPath::new(format!(
+            "/tenants/{}/users/{}/suggestions",
+            scope.tenant_id, scope.user_id
+        ))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn scoped<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(backend, suggestions_mount_view))
 }
 
 fn card(title: &str) -> SuggestionCard {
@@ -242,17 +289,14 @@ fn card_extension_id_is_optional_on_the_wire() {
 
 // --- SuggestionsStore CAS semantics -----------------------------------------
 
-fn store() -> SuggestionsStore {
-    SuggestionsStore::new(Arc::new(InMemoryBackend::default()))
+fn store() -> SuggestionsStore<InMemoryBackend> {
+    SuggestionsStore::new(scoped(Arc::new(InMemoryBackend::default())))
 }
 
 #[tokio::test]
 async fn read_doc_on_absent_path_returns_none() {
     let store = store();
-    let doc = store
-        .read_doc(&tenant(), &user())
-        .await
-        .expect("read succeeds");
+    let doc = store.read_doc(&scope()).await.expect("read succeeds");
     assert!(doc.is_none());
 }
 
@@ -281,9 +325,9 @@ async fn wrong_schema_version_reads_as_absent() {
     .await
     .expect("write raw doc directly, bypassing the store's own schema version");
 
-    let store_over_raw = SuggestionsStore::new(raw);
+    let store_over_raw = SuggestionsStore::new(scoped(raw));
     let doc = store_over_raw
-        .read_doc(&tenant(), &user())
+        .read_doc(&scope())
         .await
         .expect("read succeeds");
     assert!(doc.is_none());
@@ -311,11 +355,11 @@ async fn wrong_schema_version_reads_as_absent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winner() {
-    let filesystem = Arc::new(RaceBarrierFilesystem {
+    let filesystem = scoped(Arc::new(RaceBarrierFilesystem {
         inner: Arc::new(InMemoryBackend::default()),
         read_barrier: Arc::new(tokio::sync::Barrier::new(2)),
         barriered_reads_remaining: std::sync::atomic::AtomicUsize::new(2),
-    });
+    }));
     let store = Arc::new(SuggestionsStore::new(filesystem));
 
     // Two real `claim_active_job` calls, actually concurrent (separate
@@ -326,8 +370,7 @@ async fn concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winn
     let racer_a = tokio::spawn(async move {
         store_a
             .claim_active_job(
-                &tenant(),
-                &user(),
+                &scope(),
                 ThreadId::new("racer-a").expect("thread id"),
                 TurnRunId::new(),
             )
@@ -337,8 +380,7 @@ async fn concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winn
     let racer_b = tokio::spawn(async move {
         store_b
             .claim_active_job(
-                &tenant(),
-                &user(),
+                &scope(),
                 ThreadId::new("racer-b").expect("thread id"),
                 TurnRunId::new(),
             )
@@ -375,7 +417,7 @@ async fn concurrent_claim_conflict_is_rejected_and_the_loser_dedupes_to_the_winn
     };
 
     let doc = store
-        .read_doc(&tenant(), &user())
+        .read_doc(&scope())
         .await
         .expect("read")
         .expect("doc present");
@@ -391,8 +433,7 @@ async fn record_result_for_superseded_job_is_a_noop() {
     let store = store();
     let ClaimOutcome::Claimed { job_id: stale_job } = store
         .claim_active_job(
-            &tenant(),
-            &user(),
+            &scope(),
             ThreadId::new("t1").expect("thread id"),
             TurnRunId::new(),
         )
@@ -402,13 +443,12 @@ async fn record_result_for_superseded_job_is_a_noop() {
         panic!("expected claim");
     };
     store
-        .record_failure(&tenant(), &user(), stale_job, "stale".to_string())
+        .record_failure(&scope(), stale_job, "stale".to_string())
         .await
         .expect("clear stale claim");
     let ClaimOutcome::Claimed { job_id: fresh_job } = store
         .claim_active_job(
-            &tenant(),
-            &user(),
+            &scope(),
             ThreadId::new("t2").expect("thread id"),
             TurnRunId::new(),
         )
@@ -421,12 +461,12 @@ async fn record_result_for_superseded_job_is_a_noop() {
 
     // A late outcome for the stale job must not clobber the fresh claim.
     store
-        .record_result(&tenant(), &user(), stale_job, vec![card("stale cards")])
+        .record_result(&scope(), stale_job, vec![card("stale cards")])
         .await
         .expect("stale outcome is a no-op, not an error");
 
     let doc = store
-        .read_doc(&tenant(), &user())
+        .read_doc(&scope())
         .await
         .expect("read")
         .expect("doc present");
@@ -442,8 +482,7 @@ async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
     let store = store();
     let ClaimOutcome::Claimed { job_id } = store
         .claim_active_job(
-            &tenant(),
-            &user(),
+            &scope(),
             ThreadId::new("t1").expect("thread id"),
             TurnRunId::new(),
         )
@@ -453,7 +492,7 @@ async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
         panic!("expected claim");
     };
     store
-        .record_result(&tenant(), &user(), job_id, vec![card("first result")])
+        .record_result(&scope(), job_id, vec![card("first result")])
         .await
         .expect("record result clears active_job");
 
@@ -464,8 +503,7 @@ async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
     let never_claimed_job = Uuid::new_v4();
     store
         .record_failure(
-            &tenant(),
-            &user(),
+            &scope(),
             never_claimed_job,
             "late duplicate".to_string(),
         )
@@ -473,7 +511,7 @@ async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
         .expect("stale outcome for an already-cleared slot is a no-op, not an error");
 
     let doc = store
-        .read_doc(&tenant(), &user())
+        .read_doc(&scope())
         .await
         .expect("read")
         .expect("doc present");
@@ -513,7 +551,7 @@ async fn claim_succeeds_over_an_incompatible_schema_document() {
     .await
     .expect("write a future-schema doc directly, bypassing the store's own schema version");
 
-    let store_over_raw = SuggestionsStore::new(raw);
+    let store_over_raw = SuggestionsStore::new(scoped(raw));
 
     // Before the fix, this always hit `CasExpectation::Absent` against a
     // path that already exists, so every attempt returned
@@ -522,8 +560,7 @@ async fn claim_succeeds_over_an_incompatible_schema_document() {
     // superseded.
     let outcome = store_over_raw
         .claim_active_job(
-            &tenant(),
-            &user(),
+            &scope(),
             ThreadId::new("t1").expect("thread id"),
             TurnRunId::new(),
         )
@@ -536,7 +573,7 @@ async fn claim_succeeds_over_an_incompatible_schema_document() {
     // claim at a different path fails this assertion instead of a
     // `read_versioned` that returns `Absent` and lets it pass vacuously.
     let doc = store_over_raw
-        .read_doc(&tenant(), &user())
+        .read_doc(&scope())
         .await
         .expect("read")
         .expect("the incompatible doc must be replaced by a current-schema doc");
@@ -550,3 +587,47 @@ async fn claim_succeeds_over_an_incompatible_schema_document() {
 // here — `dead_run_derives_failed_and_a_fresh_generate_claims_cleanly` in
 // the integration suite drives `record_failure` through the real product
 // service.
+
+// --- ScopedFilesystem scoping (#7498) ---------------------------------------
+
+/// Proves the `/suggestions` alias resolution — not tenant/user string
+/// comparison in this crate — is what keeps one user's doc invisible to
+/// another. A single `SuggestionsStore` instance is shared across two
+/// distinct `ResourceScope`s (same backend, same store), so this can only
+/// pass if `ScopedFilesystem` actually resolves each scope to a disjoint
+/// mount target.
+#[tokio::test]
+async fn store_scoping_isolates_docs_per_user() {
+    let store = store();
+    let user_a = scope_for("tenant-a", "user-a");
+    let user_b = scope_for("tenant-b", "user-b");
+
+    let ClaimOutcome::Claimed { job_id } = store
+        .claim_active_job(
+            &user_a,
+            ThreadId::new("t1").expect("thread id"),
+            TurnRunId::new(),
+        )
+        .await
+        .expect("claim")
+    else {
+        panic!("expected claim");
+    };
+    store
+        .record_result(&user_a, job_id, vec![card("user a's suggestion")])
+        .await
+        .expect("record result");
+
+    let doc_a = store
+        .read_doc(&user_a)
+        .await
+        .expect("read a")
+        .expect("user a's doc present");
+    assert_eq!(doc_a.last_result.expect("result").cards.len(), 1);
+
+    let doc_b = store.read_doc(&user_b).await.expect("read b");
+    assert!(
+        doc_b.is_none(),
+        "a different user's scope must not observe user a's suggestions doc"
+    );
+}

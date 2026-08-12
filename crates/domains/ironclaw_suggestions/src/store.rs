@@ -1,14 +1,18 @@
 //! The single writer for the suggestions doc (spec §5): every mutation —
 //! CAS claim, success result, failure — goes through `SuggestionsStore`.
-//! Nothing else touches the mount. Backed by a `RootFilesystem` mount, one
-//! JSON doc per `(tenant_id, user_id)`.
+//! Nothing else touches the mount. Backed by a `/suggestions` mount alias on
+//! a [`ScopedFilesystem`], one JSON doc per `(tenant_id, user_id)` — the
+//! [`ScopedFilesystem`] resolves the alias against its caller-supplied
+//! [`ResourceScope`] and enforces per-grant ACL before backend dispatch, so
+//! tenant/user isolation is structural rather than something this crate must
+//! re-derive.
 
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RecordVersion, RootFilesystem};
-use ironclaw_host_api::ids::{TenantId, UserId};
-use ironclaw_host_api::path::VirtualPath;
+use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::path::ScopedPath;
+use ironclaw_host_api::resource::ResourceScope;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -18,6 +22,12 @@ use super::types::{ActiveJob, LastError, LastResult, SuggestionCard, Suggestions
 /// only retries on a genuine concurrent-writer conflict
 /// (`FilesystemError::VersionMismatch`); anything else surfaces immediately.
 const MAX_CAS_ATTEMPTS: u32 = 8;
+
+/// Mount-relative path for the single per-(tenant, user) suggestions
+/// document. The `/suggestions` alias resolves through the caller's
+/// `ResourceScope` to `/tenants/<tenant>/users/<user>/suggestions`, so this
+/// suffix is constant across every scope.
+const DOC_PATH: &str = "/suggestions/doc.json";
 
 #[derive(Debug, Error)]
 pub enum SuggestionsStoreError {
@@ -44,13 +54,29 @@ pub enum ClaimOutcome {
     AlreadyClaimed { job_id: Uuid },
 }
 
-#[derive(Clone)]
-pub struct SuggestionsStore {
-    filesystem: Arc<dyn RootFilesystem>,
+pub struct SuggestionsStore<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl SuggestionsStore {
-    pub fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
+impl<F> Clone for SuggestionsStore<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            filesystem: Arc::clone(&self.filesystem),
+        }
+    }
+}
+
+impl<F> SuggestionsStore<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
@@ -59,10 +85,9 @@ impl SuggestionsStore {
     /// `derive_suggestions_view` in that case.
     pub async fn read_doc(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
     ) -> Result<Option<SuggestionsDoc>, SuggestionsStoreError> {
-        Ok(match self.read_versioned(tenant_id, user_id).await? {
+        Ok(match self.read_versioned(scope).await? {
             ReadOutcome::Current(doc, _) => Some(doc),
             ReadOutcome::Absent | ReadOutcome::Incompatible(_) => None,
         })
@@ -76,14 +101,13 @@ impl SuggestionsStore {
     /// calling this again.
     pub async fn claim_active_job(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
         thread_id: ironclaw_host_api::ids::ThreadId,
         run_id: ironclaw_host_api::turn::TurnRunId,
     ) -> Result<ClaimOutcome, SuggestionsStoreError> {
-        let path = doc_path(tenant_id, user_id)?;
+        let path = doc_path()?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (doc, cas) = read_outcome_for_write(self.read_versioned(tenant_id, user_id).await?);
+            let (doc, cas) = read_outcome_for_write(self.read_versioned(scope).await?);
             if let Some(active_job) = &doc.active_job {
                 return Ok(ClaimOutcome::AlreadyClaimed {
                     job_id: active_job.job_id,
@@ -97,7 +121,7 @@ impl SuggestionsStore {
                 run_id,
                 started_at: Utc::now(),
             });
-            match self.write_doc(&path, &next, cas).await {
+            match self.write_doc(scope, &path, &next, cas).await {
                 Ok(()) => return Ok(ClaimOutcome::Claimed { job_id }),
                 Err(SuggestionsStoreError::Backend(FilesystemError::VersionMismatch {
                     ..
@@ -121,12 +145,11 @@ impl SuggestionsStore {
     /// it must not clobber a newer claim.
     pub async fn record_result(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
         job_id: Uuid,
         cards: Vec<SuggestionCard>,
     ) -> Result<(), SuggestionsStoreError> {
-        self.apply_job_outcome(tenant_id, user_id, job_id, |doc| {
+        self.apply_job_outcome(scope, job_id, |doc| {
             doc.active_job = None;
             doc.last_error = None;
             doc.last_result = Some(LastResult {
@@ -143,12 +166,11 @@ impl SuggestionsStore {
     /// claim (spec §5): the caller passes the dead job's own `job_id`.
     pub async fn record_failure(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
         job_id: Uuid,
         message: String,
     ) -> Result<(), SuggestionsStoreError> {
-        self.apply_job_outcome(tenant_id, user_id, job_id, |doc| {
+        self.apply_job_outcome(scope, job_id, |doc| {
             doc.active_job = None;
             doc.last_error = Some(LastError {
                 message: message.clone(),
@@ -168,12 +190,11 @@ impl SuggestionsStore {
     /// a superseded claim's correction is silently dropped.
     pub async fn update_active_job_run_id(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
         job_id: Uuid,
         run_id: ironclaw_host_api::turn::TurnRunId,
     ) -> Result<(), SuggestionsStoreError> {
-        self.apply_job_outcome(tenant_id, user_id, job_id, |doc| {
+        self.apply_job_outcome(scope, job_id, |doc| {
             if let Some(active_job) = doc.active_job.as_mut() {
                 active_job.run_id = run_id;
             }
@@ -183,14 +204,13 @@ impl SuggestionsStore {
 
     async fn apply_job_outcome(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
         job_id: Uuid,
         mut apply: impl FnMut(&mut SuggestionsDoc),
     ) -> Result<(), SuggestionsStoreError> {
-        let path = doc_path(tenant_id, user_id)?;
+        let path = doc_path()?;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let (doc, cas) = read_outcome_for_write(self.read_versioned(tenant_id, user_id).await?);
+            let (doc, cas) = read_outcome_for_write(self.read_versioned(scope).await?);
             let matches_active_job = doc
                 .active_job
                 .as_ref()
@@ -206,7 +226,7 @@ impl SuggestionsStore {
             }
             let mut next = doc;
             apply(&mut next);
-            match self.write_doc(&path, &next, cas).await {
+            match self.write_doc(scope, &path, &next, cas).await {
                 Ok(()) => return Ok(()),
                 Err(SuggestionsStoreError::Backend(FilesystemError::VersionMismatch {
                     ..
@@ -223,11 +243,10 @@ impl SuggestionsStore {
 
     async fn read_versioned(
         &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
+        scope: &ResourceScope,
     ) -> Result<ReadOutcome, SuggestionsStoreError> {
-        let path = doc_path(tenant_id, user_id)?;
-        let Some(entry) = self.filesystem.get(&path).await? else {
+        let path = doc_path()?;
+        let Some(entry) = self.filesystem.get(scope, &path).await? else {
             return Ok(ReadOutcome::Absent);
         };
         let doc: SuggestionsDoc = serde_json::from_slice(&entry.entry.body).map_err(|error| {
@@ -248,14 +267,17 @@ impl SuggestionsStore {
 
     async fn write_doc(
         &self,
-        path: &VirtualPath,
+        scope: &ResourceScope,
+        path: &ScopedPath,
         doc: &SuggestionsDoc,
         cas: CasExpectation,
     ) -> Result<(), SuggestionsStoreError> {
         let body = serde_json::to_vec(doc).map_err(|error| SuggestionsStoreError::Corrupt {
             reason: error.to_string(),
         })?;
-        self.filesystem.put(path, Entry::bytes(body), cas).await?;
+        self.filesystem
+            .put(scope, path, Entry::bytes(body), cas)
+            .await?;
         Ok(())
     }
 }
@@ -286,13 +308,8 @@ fn read_outcome_for_write(outcome: ReadOutcome) -> (SuggestionsDoc, CasExpectati
     }
 }
 
-fn doc_path(tenant_id: &TenantId, user_id: &UserId) -> Result<VirtualPath, SuggestionsStoreError> {
-    VirtualPath::new(format!(
-        "/tenants/{}/users/{}/suggestions/doc.json",
-        tenant_id.as_str(),
-        user_id.as_str()
-    ))
-    .map_err(|error| SuggestionsStoreError::InvalidPath {
+fn doc_path() -> Result<ScopedPath, SuggestionsStoreError> {
+    ScopedPath::new(DOC_PATH).map_err(|error| SuggestionsStoreError::InvalidPath {
         reason: error.to_string(),
     })
 }
