@@ -27,11 +27,6 @@ impl IronhubSharedKeyStore {
         Ok(())
     }
 
-    /// Lets `ironclaw_cli` write without depending on `ironclaw_secrets`.
-    pub async fn put_plaintext(&self, value: String) -> Result<(), IronhubSharedKeyStoreError> {
-        self.put(SecretMaterial::from(value)).await
-    }
-
     pub async fn exists(&self) -> Result<bool, IronhubSharedKeyStoreError> {
         Ok(self
             .store

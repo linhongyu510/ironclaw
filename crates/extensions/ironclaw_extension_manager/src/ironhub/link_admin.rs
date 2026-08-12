@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ironclaw_product_contracts::ironhub::{IronhubLinkAdminService, IronhubLinkError};
 use ironclaw_product_contracts::product_wire::RebornIronhubLinkResponse;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
-use ironclaw_secrets::SecretStorePort;
+use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 use secrecy::{ExposeSecret, SecretString};
 
 use super::agent_link::IronhubSharedKey;
@@ -71,7 +71,7 @@ impl IronhubLinkAdminService for RebornIronhubLinkAdminService {
                 reason: error.to_string(),
             }
         })?;
-        if let Err(error) = self.keys.put_plaintext(accepted).await {
+        if let Err(error) = self.keys.put(SecretMaterial::from(accepted)).await {
             tracing::debug!(
                 user = %caller.user_id,
                 %error,
