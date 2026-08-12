@@ -358,7 +358,12 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let doc = doc.expect("RecoveryRequired must clear active_job within the poll window");
-        assert!(doc.last_error.unwrap().message.contains("recovery_required"));
+        assert!(
+            doc.last_error
+                .unwrap()
+                .message
+                .contains("recovery_required")
+        );
     }
 
     #[tokio::test]
