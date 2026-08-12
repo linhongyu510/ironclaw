@@ -4430,6 +4430,18 @@ fn onboard_hosted_profile_initializes_home_without_opening_a_standalone_secret_s
         stdout.contains("external secret store"),
         "hosted onboarding must explain credential admission: {stdout}"
     );
+    assert!(
+        stdout.contains(
+            "- configure LLM credentials through deployment secrets or the hosted operator surface"
+        ),
+        "hosted onboarding must direct credential setup to the hosted secret authority: {stdout}"
+    );
+    assert!(
+        !stdout.contains("rerun `ironclaw onboard` from an interactive terminal")
+            && !stdout.contains("`ironclaw models set-provider <provider> --model <model>`")
+            && !stdout.contains("export a provider's LLM environment variables"),
+        "hosted onboarding must not advertise local credential flows that cannot write its external secret store: {stdout}"
+    );
     assert!(reborn_home.join("config.toml").is_file());
     assert!(reborn_home.join("providers.json").is_file());
     assert!(reborn_home.join("webui-token").is_file());

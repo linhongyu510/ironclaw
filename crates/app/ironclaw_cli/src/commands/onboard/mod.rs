@@ -152,6 +152,13 @@ impl OnboardCommand {
         println!("remaining:");
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
+        } else if matches!(
+            llm_outcome,
+            LlmCredentialProvisionOutcome::SkippedHostedExternal
+        ) {
+            println!(
+                "- configure LLM credentials through deployment secrets or the hosted operator surface"
+            );
         } else {
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \

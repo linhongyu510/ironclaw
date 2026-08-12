@@ -96,14 +96,150 @@ struct ProfileControl {
     in_deployment_config_for_profile: bool,
 }
 
+const REBORN_COMPOSITION_PROFILE: &str = "RebornCompositionProfile";
+
+fn is_reborn_composition_profile_variant(name: &str) -> bool {
+    matches!(
+        name,
+        "Disabled"
+            | "Standalone"
+            | "StandaloneUnrestricted"
+            | "HostedSingleTenant"
+            | "HostedSingleTenantVolume"
+            | "HostedSingleTenantVolumeSandboxed"
+            | "HostedSingleTenantVolumeSandboxedRailway"
+            | "Production"
+            | "MigrationDryRun"
+    )
+}
+
+struct ProfileImports {
+    type_names: BTreeSet<String>,
+    imported_variant_names: BTreeSet<String>,
+    imports_all_variants: bool,
+}
+
+impl Default for ProfileImports {
+    fn default() -> Self {
+        Self {
+            type_names: BTreeSet::from([REBORN_COMPOSITION_PROFILE.to_string()]),
+            imported_variant_names: BTreeSet::new(),
+            imports_all_variants: false,
+        }
+    }
+}
+
+impl ProfileImports {
+    fn from_file(file: &syn::File) -> Self {
+        let mut visitor = ProfileImportVisitor {
+            imports: Self::default(),
+        };
+        visitor.visit_file(file);
+        visitor.imports
+    }
+
+    fn path_is_variant(&self, path: &syn::Path) -> bool {
+        path.segments.iter().enumerate().any(|(index, segment)| {
+            self.type_names.contains(&segment.ident.to_string()) && index + 1 < path.segments.len()
+        }) || (path.segments.len() == 1
+            && path.segments.last().is_some_and(|segment| {
+                let name = segment.ident.to_string();
+                self.imported_variant_names.contains(&name)
+                    || (self.imports_all_variants && is_reborn_composition_profile_variant(&name))
+            }))
+    }
+
+    fn identifier_is_imported_variant(&self, identifier: &proc_macro2::Ident) -> bool {
+        let name = identifier.to_string();
+        self.imported_variant_names.contains(&name)
+            || (self.imports_all_variants && is_reborn_composition_profile_variant(&name))
+    }
+}
+
+struct ProfileImportVisitor {
+    imports: ProfileImports,
+}
+
+impl<'ast> Visit<'ast> for ProfileImportVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        collect_profile_imports(&node.tree, false, &mut self.imports);
+    }
+}
+
+fn collect_profile_imports(tree: &syn::UseTree, profile_scope: bool, imports: &mut ProfileImports) {
+    match tree {
+        syn::UseTree::Path(path) => collect_profile_imports(
+            &path.tree,
+            profile_scope || path.ident == REBORN_COMPOSITION_PROFILE,
+            imports,
+        ),
+        syn::UseTree::Name(name) => {
+            if name.ident == REBORN_COMPOSITION_PROFILE {
+                imports
+                    .type_names
+                    .insert(REBORN_COMPOSITION_PROFILE.to_string());
+            } else if profile_scope
+                && is_reborn_composition_profile_variant(&name.ident.to_string())
+            {
+                imports
+                    .imported_variant_names
+                    .insert(name.ident.to_string());
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if rename.ident == REBORN_COMPOSITION_PROFILE {
+                imports.type_names.insert(rename.rename.to_string());
+            } else if profile_scope
+                && is_reborn_composition_profile_variant(&rename.ident.to_string())
+            {
+                imports
+                    .imported_variant_names
+                    .insert(rename.rename.to_string());
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            if profile_scope {
+                imports.imports_all_variants = true;
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_profile_imports(tree, profile_scope, imports);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct ProfileControlVisitor {
     deployment_config_impl_depth: usize,
     for_profile_depth: usize,
     controls: Vec<ProfileControl>,
+    imports: ProfileImports,
 }
 
 impl ProfileControlVisitor {
+    fn from_file(file: &syn::File) -> Self {
+        Self {
+            imports: ProfileImports::from_file(file),
+            ..Self::default()
+        }
+    }
+
     fn record(&mut self, kind: ProfileControlKind) {
         self.controls.push(ProfileControl {
             kind,
@@ -163,7 +299,7 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
         if node
             .arms
             .iter()
-            .any(|arm| pattern_contains_reborn_profile_variant(&arm.pat))
+            .any(|arm| pattern_contains_reborn_profile_variant(&arm.pat, &self.imports))
         {
             self.record(ProfileControlKind::Match);
         }
@@ -177,7 +313,7 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
             .segments
             .last()
             .is_some_and(|segment| segment.ident == "matches")
-            && token_stream_contains_reborn_profile_variant(node.mac.tokens.clone())
+            && token_stream_contains_reborn_profile_variant(node.mac.tokens.clone(), &self.imports)
         {
             self.record(ProfileControlKind::MatchesMacro);
         }
@@ -185,7 +321,7 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
     }
 
     fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
-        if pattern_contains_reborn_profile_variant(&node.pat) {
+        if pattern_contains_reborn_profile_variant(&node.pat, &self.imports) {
             self.record(ProfileControlKind::IfLet);
         }
         visit::visit_expr_let(self, node);
@@ -193,8 +329,8 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
 
     fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
         if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-            && (expression_contains_reborn_profile_variant(&node.left)
-                || expression_contains_reborn_profile_variant(&node.right))
+            && (expression_contains_reborn_profile_variant(&node.left, &self.imports)
+                || expression_contains_reborn_profile_variant(&node.right, &self.imports))
         {
             self.record(ProfileControlKind::Equality);
         }
@@ -215,50 +351,55 @@ fn is_cfg_test_item(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
-fn path_is_reborn_profile_variant(path: &syn::Path) -> bool {
-    path.segments
-        .iter()
-        .position(|segment| segment.ident == "RebornCompositionProfile")
-        .is_some_and(|profile_segment| profile_segment + 1 < path.segments.len())
-}
-
-#[derive(Default)]
-struct PatternProfileVariantFinder {
+struct PatternProfileVariantFinder<'a> {
+    imports: &'a ProfileImports,
     found: bool,
 }
 
-impl<'ast> Visit<'ast> for PatternProfileVariantFinder {
+impl<'ast> Visit<'ast> for PatternProfileVariantFinder<'_> {
     fn visit_path(&mut self, node: &'ast syn::Path) {
-        self.found |= path_is_reborn_profile_variant(node);
+        self.found |= self.imports.path_is_variant(node);
         visit::visit_path(self, node);
     }
 }
 
-fn pattern_contains_reborn_profile_variant(pattern: &syn::Pat) -> bool {
-    let mut finder = PatternProfileVariantFinder::default();
+fn pattern_contains_reborn_profile_variant(pattern: &syn::Pat, imports: &ProfileImports) -> bool {
+    let mut finder = PatternProfileVariantFinder {
+        imports,
+        found: false,
+    };
     finder.visit_pat(pattern);
     finder.found
 }
 
-#[derive(Default)]
-struct ExpressionProfileVariantFinder {
+struct ExpressionProfileVariantFinder<'a> {
+    imports: &'a ProfileImports,
     found: bool,
 }
 
-impl<'ast> Visit<'ast> for ExpressionProfileVariantFinder {
+impl<'ast> Visit<'ast> for ExpressionProfileVariantFinder<'_> {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        self.found |= path_is_reborn_profile_variant(&node.path);
+        self.found |= self.imports.path_is_variant(&node.path);
         visit::visit_expr_path(self, node);
     }
 }
 
-fn expression_contains_reborn_profile_variant(expression: &syn::Expr) -> bool {
-    let mut finder = ExpressionProfileVariantFinder::default();
+fn expression_contains_reborn_profile_variant(
+    expression: &syn::Expr,
+    imports: &ProfileImports,
+) -> bool {
+    let mut finder = ExpressionProfileVariantFinder {
+        imports,
+        found: false,
+    };
     finder.visit_expr(expression);
     finder.found
 }
 
-fn token_stream_contains_reborn_profile_variant(tokens: proc_macro2::TokenStream) -> bool {
+fn token_stream_contains_reborn_profile_variant(
+    tokens: proc_macro2::TokenStream,
+    imports: &ProfileImports,
+) -> bool {
     let tokens: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     for index in 0..tokens.len().saturating_sub(3) {
         let (
@@ -275,21 +416,29 @@ fn token_stream_contains_reborn_profile_variant(tokens: proc_macro2::TokenStream
         else {
             continue;
         };
-        if profile == "RebornCompositionProfile"
+        if imports.type_names.contains(&profile.to_string())
             && first_colon.as_char() == ':'
             && second_colon.as_char() == ':'
         {
             return true;
         }
     }
-    tokens.into_iter().any(|token| {
-        matches!(token, proc_macro2::TokenTree::Group(group) if token_stream_contains_reborn_profile_variant(group.stream()))
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(identifier)
+            if imports.identifier_is_imported_variant(&identifier) =>
+        {
+            true
+        }
+        proc_macro2::TokenTree::Group(group) => {
+            token_stream_contains_reborn_profile_variant(group.stream(), imports)
+        }
+        _ => false,
     })
 }
 
 fn assert_only_deployment_config_for_profile_control(source: &str) {
     let file = syn::parse_file(source).unwrap_or_else(|error| panic!("parse source: {error}"));
-    let mut visitor = ProfileControlVisitor::default();
+    let mut visitor = ProfileControlVisitor::from_file(&file);
     visitor.visit_file(&file);
 
     assert_eq!(
@@ -343,7 +492,7 @@ fn collect(dir: &Path, root: &Path, found: &mut BTreeSet<String>) {
         }
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        if !strip_comments_and_strings(&source).contains("RebornCompositionProfile::") {
+        if !source_names_reborn_profile_variant(&source) {
             continue;
         }
         let relative = path
@@ -352,6 +501,49 @@ fn collect(dir: &Path, root: &Path, found: &mut BTreeSet<String>) {
             .to_string_lossy()
             .replace('\\', "/");
         found.insert(relative);
+    }
+}
+
+fn source_names_reborn_profile_variant(source: &str) -> bool {
+    let file = syn::parse_file(source).unwrap_or_else(|error| panic!("parse source: {error}"));
+    let imports = ProfileImports::from_file(&file);
+    let mut finder = SourceProfileVariantFinder {
+        imports: &imports,
+        found: false,
+    };
+    finder.visit_file(&file);
+    finder.found
+}
+
+struct SourceProfileVariantFinder<'a> {
+    imports: &'a ProfileImports,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for SourceProfileVariantFinder<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        self.found |= self.imports.path_is_variant(node);
+        visit::visit_path(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.found |=
+            token_stream_contains_reborn_profile_variant(node.tokens.clone(), self.imports);
+        visit::visit_macro(self, node);
     }
 }
 
@@ -469,6 +661,39 @@ fn scanner_strips_comments_and_strings() {
 }
 
 #[test]
+fn scanner_detects_glob_and_renamed_profile_variant_imports() {
+    let cases = [
+        (
+            "glob import",
+            r#"
+                use RebornCompositionProfile::*;
+
+                fn bypass(profile: RebornCompositionProfile) {
+                    if matches!(profile, Production) {}
+                }
+            "#,
+        ),
+        (
+            "renamed profile import",
+            r#"
+                use RebornCompositionProfile as Profile;
+
+                fn bypass(profile: RebornCompositionProfile) {
+                    if profile == Profile::Production {}
+                }
+            "#,
+        ),
+    ];
+
+    for (name, source) in cases {
+        assert!(
+            source_names_reborn_profile_variant(source),
+            "{name} must count as a profile-variant reference"
+        );
+    }
+}
+
+#[test]
 fn syntax_aware_profile_control_scanner_ignores_cfg_test_items_structurally() {
     let source = r#"
         struct DeploymentConfig;
@@ -577,6 +802,26 @@ fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
             r#"
                 fn bypass(selected_profile: RebornCompositionProfile) {
                     if selected_profile == RebornCompositionProfile::Production {}
+                }
+            "#,
+        ),
+        (
+            "glob-imported variant",
+            r#"
+                use RebornCompositionProfile::*;
+
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if matches!(selected_profile, Production) {}
+                }
+            "#,
+        ),
+        (
+            "renamed profile import",
+            r#"
+                use RebornCompositionProfile as Profile;
+
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if selected_profile == Profile::Production {}
                 }
             "#,
         ),

@@ -58,12 +58,20 @@ pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    options.open(path).with_context(|| {
+    let file = options.open(path).with_context(|| {
         format!(
             "open advisory lock without following links {}",
             path.display()
         )
-    })
+    })?;
+    if !file
+        .metadata()
+        .with_context(|| format!("inspect opened advisory lock {}", path.display()))?
+        .is_file()
+    {
+        bail!("expected an ordinary file at {}", path.display());
+    }
+    Ok(file)
 }
 
 #[cfg(windows)]

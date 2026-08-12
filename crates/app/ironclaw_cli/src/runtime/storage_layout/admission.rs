@@ -15,20 +15,7 @@ pub(crate) fn admit_startup_layout(
     let manifest_path = home_path.join(LAYOUT_MANIFEST_FILE);
     let adoption_journal = paths.runtime_root().join(ADOPTION_DIR).join(JOURNAL_FILE);
     if manifest_path.exists() {
-        let manifest = read_manifest(&manifest_path)?;
-        if adoption_journal.exists() {
-            let journal = read_journal(&adoption_journal)?;
-            if journal.phase != AdoptionPhase::StoreVerified
-                || journal.target_requirement != manifest.requirement()
-            {
-                bail!(
-                    "ready layout manifest and adoption journal disagree at {}; refusing to open durable state",
-                    adoption_journal.display()
-                );
-            }
-        }
-        admit_manifest(&manifest, requirement)?;
-        validate_ready_namespace_roots(&paths)?;
+        admit_existing_manifest(&manifest_path, &adoption_journal, &paths, requirement)?;
         return Ok(StartupLayoutAdmission::Ready(paths));
     }
 
@@ -88,9 +75,21 @@ pub(crate) fn inspect_ready_layout(
             home.path().display()
         );
     }
-    let manifest = read_manifest(&manifest_path)?;
+    admit_existing_manifest(&manifest_path, &journal_path, &paths, requirement)?;
+    Ok(paths)
+}
+
+/// Admit a published layout only when its completed adoption journal agrees
+/// with the manifest and every canonical namespace remains safe to open.
+fn admit_existing_manifest(
+    manifest_path: &Path,
+    journal_path: &Path,
+    paths: &RebornStoragePaths,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<()> {
+    let manifest = read_manifest(manifest_path)?;
     if journal_path.exists() {
-        let journal = read_journal(&journal_path)?;
+        let journal = read_journal(journal_path)?;
         if journal.phase != AdoptionPhase::StoreVerified
             || journal.target_requirement != manifest.requirement()
         {
@@ -101,8 +100,7 @@ pub(crate) fn inspect_ready_layout(
         }
     }
     admit_manifest(&manifest, requirement)?;
-    validate_ready_namespace_roots(&paths)?;
-    Ok(paths)
+    validate_ready_namespace_roots(paths)
 }
 
 fn validate_ready_namespace_roots(paths: &RebornStoragePaths) -> anyhow::Result<()> {

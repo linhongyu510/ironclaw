@@ -706,9 +706,20 @@ pub(super) fn copy_ordinary_file(source: &Path, destination: &Path) -> anyhow::R
         .parent()
         .ok_or_else(|| anyhow!("destination has no parent: {}", destination.display()))?;
     require_ordinary_directory(destination_parent)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    let source_mode = {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let mode = input
+            .metadata()
+            .with_context(|| format!("read opened source mode {}", source.display()))?
+            .mode()
+            & 0o777;
+        options.mode(mode);
+        mode
+    };
+    let mut output = options
         .open(destination)
         .with_context(|| format!("create destination file {}", destination.display()))?;
     std::io::copy(&mut input, &mut output)
@@ -719,11 +730,7 @@ pub(super) fn copy_ordinary_file(source: &Path, destination: &Path) -> anyhow::R
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = fs::metadata(source)
-            .with_context(|| format!("read source mode {}", source.display()))?
-            .permissions()
-            .mode();
-        fs::set_permissions(destination, fs::Permissions::from_mode(mode))
+        fs::set_permissions(destination, fs::Permissions::from_mode(source_mode))
             .with_context(|| format!("preserve mode on {}", destination.display()))?;
         output
             .sync_all()

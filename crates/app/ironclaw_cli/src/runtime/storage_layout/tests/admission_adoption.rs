@@ -114,6 +114,34 @@ fn ready_manifest_requires_every_canonical_namespace_to_remain_an_ordinary_direc
 }
 
 #[test]
+fn startup_and_dry_run_reject_the_same_manifest_journal_disagreement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let legacy = temp.path().join("local-dev");
+    let requirement = embedded_single_user_requirement();
+    seed_legacy_embedded_store(&legacy);
+    adopt_layout(&home, requirement, confirmed_options()).expect("adopt legacy layout");
+
+    let journal_path = temp.path().join("runtime/layout-adoption/journal.toml");
+    let mut journal = read_journal(&journal_path).expect("completed journal");
+    journal.phase = AdoptionPhase::MigrationPending;
+    write_journal(&journal_path, &journal).expect("persist disagreement");
+
+    let startup_error = admit_startup_layout(&home, requirement)
+        .expect_err("startup must reject a manifest with an incomplete journal");
+    let dry_run_error = inspect_ready_layout(&home, requirement)
+        .expect_err("dry-run must reject the same manifest and journal disagreement");
+
+    assert_eq!(startup_error.to_string(), dry_run_error.to_string());
+    assert!(
+        startup_error
+            .to_string()
+            .contains("ready layout manifest and adoption journal disagree"),
+        "{startup_error:#}"
+    );
+}
+
+#[test]
 fn startup_classifies_one_legacy_root_for_adoption_without_mutating_it() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());

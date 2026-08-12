@@ -20,6 +20,35 @@ fn adoption_lock_rejects_an_existing_non_file_path() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ordinary_file_copy_preserves_the_opened_source_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source.db");
+    let destination = temp.path().join("destination.db");
+    fs::write(&source, b"durable state").expect("source contents");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600))
+        .expect("owner-only source mode");
+
+    copy_ordinary_file(&source, &destination).expect("copy ordinary file");
+
+    assert_eq!(
+        fs::read(&destination).expect("copied contents"),
+        b"durable state"
+    );
+    assert_eq!(
+        fs::metadata(&destination)
+            .expect("destination metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "the post-copy mode check must retain the mode set before copying bytes"
+    );
+}
+
 #[test]
 fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     let temp = tempfile::tempdir().expect("tempdir");
