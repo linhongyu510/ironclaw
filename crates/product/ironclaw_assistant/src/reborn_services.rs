@@ -3784,6 +3784,7 @@ where
             &client_action_id,
             content,
             requested_model,
+            &attachments,
         )?;
         let core = self.session_inbound_core();
         let outcome = if attachments.is_empty() {
@@ -6596,6 +6597,7 @@ fn session_inbound_request(
     client_action_id: &IdempotencyKey,
     content: String,
     requested_model: Option<String>,
+    attachments: &[ironclaw_host_api::attachment::InboundAttachment],
 ) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
     let adapter_id = ProductAdapterId::new(session_surface)
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
@@ -6604,6 +6606,39 @@ fn session_inbound_request(
             .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
+    let attachments = attachments
+        .iter()
+        .cloned()
+        .map(|fetched| {
+            let kind = match fetched.mime_type.split('/').next().unwrap_or_default() {
+                "image" => ironclaw_extension_contracts::external::ProductAttachmentKind::Image,
+                "audio" => ironclaw_extension_contracts::external::ProductAttachmentKind::Audio,
+                "video" => ironclaw_extension_contracts::external::ProductAttachmentKind::Video,
+                _ => ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
+            };
+            let descriptor =
+                ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
+                    fetched.id.clone(),
+                    fetched.mime_type.clone(),
+                    fetched.filename.clone(),
+                    Some(fetched.bytes.len() as u64),
+                    kind,
+                )
+                .map_err(|error| {
+                    tracing::debug!(%error, "session attachment descriptor rejected");
+                    ProductSurfaceError::validation(
+                        "attachments",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+            Ok(
+                ironclaw_extension_contracts::channel_adapter::NormalizedAttachment {
+                    descriptor,
+                    fetched,
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, ProductSurfaceError>>()?;
     let message = ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage {
         actor: ironclaw_extension_contracts::external::ExternalActorRef::new(
             SESSION_ACTOR_KIND,
@@ -6624,7 +6659,7 @@ fn session_inbound_request(
         .map_err(|_| ProductSurfaceError::internal_invariant())?,
         text: content,
         trigger: ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
-        attachments: Vec::new(),
+        attachments,
         conversation_context: None,
         reply_context: None,
     };

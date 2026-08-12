@@ -1,5 +1,5 @@
 //! Generic ingress router contract tests (extension-runtime P4, workstream E).
-//!
+// arch-exempt: large_file, ingress generations stay in one caller-level regression suite, plan #7477
 //! Drives [`ExtensionIngressRouter`] over a REAL `ExtensionHost` snapshot
 //! (activation publishes the route; removal unpublishes it — no router
 //! rebuild) and pins the per-request order: match → method/body/rate/deadline

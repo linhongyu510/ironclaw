@@ -2023,7 +2023,8 @@ async fn enroll_web_app_browser(
         "enroll response: {body}"
     );
     assert_eq!(body["enabled"], true, "{body}");
-    assert_eq!(body["detail"]["outcome"], "enrolled", "{body}");
+    assert_eq!(body["extension_id"], "web-app", "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
 }
 
 /// The web-app notifier: [`background_run_notifier`]'s services with the
@@ -2105,9 +2106,9 @@ async fn web_app_subscription_count(
         axum::http::StatusCode::OK,
         "status response: {body}"
     );
-    body["detail"]["subscription_count"]
+    body["detail"]["registration_count"]
         .as_u64()
-        .expect("status detail carries subscription_count")
+        .expect("status detail carries registration_count")
 }
 
 /// A blocked routine fire's gate notice reaches an enrolled browser as a

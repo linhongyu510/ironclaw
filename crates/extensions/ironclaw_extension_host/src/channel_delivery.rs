@@ -166,6 +166,27 @@ impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
             .map(|channel| channel.requires_enrollment())
     }
 
+    fn declared_egress_hosts(&self, extension_id: &str) -> Option<Vec<String>> {
+        if let Some(extension) = self.deployment_channels.extension(extension_id) {
+            return extension.resolved.channel.as_ref().map(|channel| {
+                channel
+                    .egress
+                    .iter()
+                    .map(|egress| egress.host.clone())
+                    .collect()
+            });
+        }
+        let snapshot = self.watch.current();
+        let extension = snapshot.extension(extension_id)?;
+        extension.resolved.channel.as_ref().map(|channel| {
+            channel
+                .egress
+                .iter()
+                .map(|egress| egress.host.clone())
+                .collect()
+        })
+    }
+
     fn channel_reply_transport(
         &self,
         extension_id: &str,

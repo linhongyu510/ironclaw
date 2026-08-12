@@ -2491,7 +2491,7 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     assert_eq!(body["extension_id"], "web-app", "{body}");
     assert_eq!(body["requires_setup"], true, "{body}");
     assert_eq!(body["enabled"], false, "{body}");
-    let vapid_public_key = body["detail"]["vapid_public_key"]
+    let vapid_public_key = body["detail"]["bootstrap"]["vapid_public_key"]
         .as_str()
         .expect("status detail carries the vapid key")
         .to_string();
@@ -2500,7 +2500,7 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
         .expect("vapid key is base64url");
     assert_eq!(decoded.len(), 65, "uncompressed P-256 point");
     assert_eq!(decoded[0], 0x04, "uncompressed point marker");
-    assert_eq!(body["detail"]["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
 
     // The catalog offers the browser channel beside the vendor channels.
     let (status, body) = get_json(router(), "/api/webchat/v2/outbound/targets").await;
@@ -2544,8 +2544,8 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
         "web-app must be hidden from the installed extensions list: {body}"
     );
 
-    // Enroll → enrolled; identical repeat → refreshed. The wire body wraps
-    // the channel-opaque payload; the outcome comes back in the opaque detail.
+    // Enroll, then repeat the same endpoint. The host-owned generic store
+    // refreshes in place, so the registration count remains one.
     let subscription = serde_json::json!({ "payload": browser_subscription_body(ENDPOINT) });
     let (status, body) = post_json(
         router(),
@@ -2555,7 +2555,7 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     .await;
     assert_eq!(status, StatusCode::OK, "enable response: {body}");
     assert_eq!(body["enabled"], true, "{body}");
-    assert_eq!(body["detail"]["outcome"], "enrolled", "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
     let (status, body) = post_json(
         router(),
         "/api/webchat/v2/channels/web-app/notifications/enable",
@@ -2563,29 +2563,24 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     )
     .await;
     assert_eq!(status, StatusCode::OK, "re-enable response: {body}");
-    assert_eq!(body["detail"]["outcome"], "refreshed", "{body}");
+    assert_eq!(body["enabled"], true, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
 
-    // Status redacts the endpoint capability URL to its push-service host.
+    // Status returns only host-minted registration identities and timestamps;
+    // the endpoint capability URL never crosses the product boundary.
     let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
     assert_eq!(body["enabled"], true, "{body}");
-    assert_eq!(body["detail"]["subscription_count"], 1, "{body}");
-    assert_eq!(
-        body["detail"]["subscriptions"][0]["endpoint_host"], "fcm.googleapis.com",
-        "{body}"
-    );
-    // The endpoint is redacted to its host, but a 64-char hex digest is
-    // published so the browser can correlate its own subscription with this
-    // account without the URL ever leaving the backend.
-    let digest = body["detail"]["subscriptions"][0]["endpoint_digest"]
+    assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+    let registration_id = body["detail"]["registrations"][0]["registration_id"]
         .as_str()
-        .expect("endpoint_digest present");
-    assert_eq!(digest.len(), 64, "SHA-256 hex digest: {body}");
+        .expect("host-minted registration id is present");
+    assert_eq!(registration_id.len(), 32, "registration id shape: {body}");
     assert!(
-        digest
+        registration_id
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-        "digest must be lowercase hex: {body}"
+        "registration id must be lowercase hex: {body}"
     );
     assert!(
         !body.to_string().contains(ENDPOINT),
@@ -2627,11 +2622,11 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     )
     .await;
     assert_eq!(status, StatusCode::OK, "disable response: {body}");
-    assert_eq!(body["detail"]["removed"], true, "{body}");
     assert_eq!(body["enabled"], false, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
     let (status, body) = get_json(router(), "/api/webchat/v2/channels/web-app/notifications").await;
     assert_eq!(status, StatusCode::OK, "status response: {body}");
-    assert_eq!(body["detail"]["subscription_count"], 0, "{body}");
+    assert_eq!(body["detail"]["registration_count"], 0, "{body}");
 
     // The generic surface fails closed on a channel that is not active in
     // this deployment: unknown extension ids are a 404, never an empty

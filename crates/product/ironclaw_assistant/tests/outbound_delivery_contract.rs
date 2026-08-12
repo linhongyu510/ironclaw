@@ -279,7 +279,7 @@ struct ScriptedChannelAdapter {
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
-    notification_sends: std::sync::atomic::AtomicUsize,
+    delivery_sends: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedChannelAdapter {
@@ -294,12 +294,12 @@ impl ScriptedChannelAdapter {
             observed_status: Mutex::new(Vec::new()),
             store,
             scope,
-            notification_sends: std::sync::atomic::AtomicUsize::new(0),
+            delivery_sends: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn notification_sends(&self) -> usize {
-        self.notification_sends
+    fn delivery_sends(&self) -> usize {
+        self.delivery_sends
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -314,27 +314,10 @@ impl ScriptedChannelAdapter {
     fn observed_statuses(&self) -> Vec<ironclaw_outbound::OutboundDeliveryStatus> {
         self.observed_status.lock().expect("status lock").clone()
     }
-}
 
-#[async_trait]
-impl ChannelReply for ScriptedChannelAdapter {
-    async fn send_reply(
+    async fn send_scripted(
         &self,
         envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        // Reply and delivery share one mechanism for this double, as they do
-        // for a conversational vendor; the axis is the coordinator\'s choice.
-        self.deliver(envelope, egress).await
-    }
-}
-
-#[async_trait]
-impl ChannelDelivery for ScriptedChannelAdapter {
-    async fn deliver(
-        &self,
-        envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         let attempts = self
             .store
@@ -355,7 +338,34 @@ impl ChannelDelivery for ScriptedChannelAdapter {
             .lock()
             .expect("reports lock")
             .pop_front()
-            .unwrap_or_else(|| Err(ChannelError::Unsupported))
+            .unwrap_or(Err(ChannelError::Unsupported))
+    }
+}
+
+#[async_trait]
+impl ChannelReply for ScriptedChannelAdapter {
+    async fn send_reply(
+        &self,
+        envelope: OutboundEnvelope,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        // Reply and delivery share one mechanism for this double, as they do
+        // for a conversational vendor; the axis is the coordinator\'s choice.
+        let _ = egress;
+        self.send_scripted(envelope).await
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for ScriptedChannelAdapter {
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        self.delivery_sends
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.send_scripted(envelope).await
     }
 }
 
@@ -1934,8 +1944,8 @@ async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
             .await
             .expect("a streaming skip is a clean outcome, not an error");
         assert!(
-            matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery),
-            "{intent:?} is source-routed: a streaming channel renders it from the \
+            matches!(outcome, CoordinatedDeliveryOutcome::StreamDelivered { .. }),
+            "{intent:?} is source-routed: a streaming channel renders and audits it through the \
              projection stream, got {outcome:?}"
         );
     }
@@ -1968,7 +1978,7 @@ async fn streaming_channel_skips_source_routed_notices_but_not_notifications() {
         "a notification-routed send must still reach a streaming channel, got {outcome:?}"
     );
     assert_eq!(
-        adapter.notification_sends(),
+        adapter.delivery_sends(),
         1,
         "and it must ride the adapter's notification send"
     );
@@ -2436,8 +2446,8 @@ async fn streaming_channel_conversation_reply_skips_batched_delivery() {
         .expect("streaming skip is a clean outcome, not an error");
 
     assert!(
-        matches!(outcome, CoordinatedDeliveryOutcome::NoDelivery),
-        "a streaming channel's final reply must not batch-deliver, got {outcome:?}"
+        matches!(outcome, CoordinatedDeliveryOutcome::StreamDelivered { .. }),
+        "a streaming channel's final reply must be audited without batch delivery, got {outcome:?}"
     );
     assert_eq!(
         adapter.deliver_calls(),
@@ -2550,13 +2560,13 @@ async fn streaming_channel_delivers_a_notification_routed_gate_prompt() {
         "a notification-routed gate prompt must flow to a streaming channel, got {outcome:?}"
     );
     assert_eq!(
-        adapter.notification_sends(),
+        adapter.delivery_sends(),
         1,
         "the notification route must ride the adapter's notification send"
     );
 }
 
-// ─── §7a adapter dispatch: notifications ride deliver_notification ─────────
+// ─── §7a adapter dispatch: notifications ride ChannelDelivery ──────────────
 
 fn coordinated_notification<'a>(
     scope: TurnScope,
@@ -2613,9 +2623,9 @@ async fn notification_class_delivery_rides_the_adapters_notification_send() {
         CoordinatedDeliveryOutcome::Delivered { .. }
     ));
     assert_eq!(
-        adapter.notification_sends(),
+        adapter.delivery_sends(),
         1,
-        "a run notification must ride ChannelAdapter::deliver_notification"
+        "a run notification must ride ChannelDelivery::deliver"
     );
 }
 
@@ -2655,7 +2665,7 @@ async fn conversation_reply_rides_the_adapters_ordinary_delivery() {
         CoordinatedDeliveryOutcome::Delivered { .. }
     ));
     assert_eq!(
-        adapter.notification_sends(),
+        adapter.delivery_sends(),
         0,
         "a conversation reply must ride the ordinary delivery, not the notification send"
     );

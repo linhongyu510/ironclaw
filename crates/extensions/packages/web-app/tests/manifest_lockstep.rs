@@ -66,10 +66,9 @@ fn manifest_identity_matches_the_grammar_constants() {
         Some(ironclaw_web_app::WEB_APP_EXTENSION_ID)
     );
     let channel = parsed.get("channel").expect("channel surface declared");
-    assert_eq!(
-        channel.get("inbound").and_then(toml::Value::as_bool),
-        Some(true),
-        "the web app's browser chat enters through the session entrypoint"
+    assert!(
+        channel.get("inbound").is_none(),
+        "presence of [channel.ingress], not a retired boolean, declares inbound"
     );
     let ingress = channel
         .get("ingress")
@@ -86,13 +85,22 @@ fn manifest_identity_matches_the_grammar_constants() {
         Some("authenticated_session"),
         "the web app's entrypoint is the authenticated session"
     );
+    assert!(channel.get("outbound").is_none());
+    assert!(channel.get("notifications").is_none());
+    let reply = channel.get("reply").expect("stream reply is declared");
     assert_eq!(
-        channel.get("outbound").and_then(toml::Value::as_bool),
-        Some(true)
+        reply.get("transport").and_then(toml::Value::as_str),
+        Some("stream")
+    );
+    let delivery = channel.get("delivery").expect("push delivery is declared");
+    assert_eq!(
+        delivery.get("transport").and_then(toml::Value::as_str),
+        Some("push")
     );
     assert_eq!(
-        channel.get("notifications").and_then(toml::Value::as_bool),
-        Some(true),
-        "the web app declares the notifications capability"
+        delivery
+            .get("requires_enrollment")
+            .and_then(toml::Value::as_bool),
+        Some(true)
     );
 }

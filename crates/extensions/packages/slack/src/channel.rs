@@ -1,6 +1,6 @@
 //! The Slack channel halves (generic ingress cutover P4; delivery
 //! coordinator cutover P5).
-//!
+// arch-exempt: large_file, Slack protocol conformance stays co-located pending adapter split, plan #7477
 //! `inbound` parses one HOST-VERIFIED Slack Events API request into a
 //! normalized outcome (signature verification lives in the host's generic
 //! recipe verifier; this adapter never sees signing secrets). `deliver`

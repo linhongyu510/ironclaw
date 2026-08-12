@@ -92,11 +92,12 @@ fn registration(id: &str, token: &str, document: &str) -> DeliveryRegistration {
 fn valid_document() -> String {
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let mut point = vec![0x04u8];
-    point.extend_from_slice(&[7u8; 64]);
+    let point = ironclaw_web_app::generate_vapid_key_material("mailto:test@example.com")
+        .expect("generate a valid P-256 point")
+        .public_key_b64url;
     serde_json::json!({
         "keys": {
-            "p256dh": URL_SAFE_NO_PAD.encode(point),
+            "p256dh": point,
             "auth": URL_SAFE_NO_PAD.encode([9u8; 16]),
         },
         "user_agent": "Test Browser",

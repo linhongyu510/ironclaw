@@ -125,19 +125,27 @@ struct StoredRegistration {
 }
 
 impl StoredRegistration {
-    fn into_view(self) -> DeliveryRegistration {
-        let document = self.document.unwrap_or_else(|| {
+    fn migrate_legacy_fields(&mut self) {
+        if self.document.is_some() {
+            return;
+        }
+        self.document = Some({
             // Forward migration: fold the legacy top-level fields into the
             // opaque document under the same names the adapter reads.
             let mut folded = serde_json::Map::new();
-            if let Some(keys) = self.keys {
+            if let Some(keys) = self.keys.take() {
                 folded.insert("keys".to_string(), keys);
             }
-            if let Some(user_agent) = self.user_agent {
+            if let Some(user_agent) = self.user_agent.take() {
                 folded.insert("user_agent".to_string(), serde_json::json!(user_agent));
             }
             serde_json::Value::Object(folded).to_string()
         });
+    }
+
+    fn into_view(mut self) -> DeliveryRegistration {
+        self.migrate_legacy_fields();
+        let document = self.document.unwrap_or_else(|| "{}".to_string());
         DeliveryRegistration {
             registration_id: self.registration_id,
             endpoint: self.endpoint,
@@ -262,9 +270,14 @@ fn resource_scope(scope: &DeliveryRegistrationScope) -> ResourceScope {
 }
 
 fn decode_document(bytes: &[u8]) -> Result<RegistrationDocument, DeliveryRegistrationError> {
-    serde_json::from_slice(bytes).map_err(|error| DeliveryRegistrationError::Unavailable {
-        reason: format!("registration document decode failed: {error}"),
-    })
+    let mut document: RegistrationDocument =
+        serde_json::from_slice(bytes).map_err(|error| DeliveryRegistrationError::Unavailable {
+            reason: format!("registration document decode failed: {error}"),
+        })?;
+    for registration in &mut document.records {
+        registration.migrate_legacy_fields();
+    }
+    Ok(document)
 }
 
 fn encode_document(document: &RegistrationDocument) -> Result<Entry, DeliveryRegistrationError> {

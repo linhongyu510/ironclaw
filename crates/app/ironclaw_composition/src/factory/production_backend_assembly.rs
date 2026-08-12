@@ -476,9 +476,9 @@ pub(super) async fn build_backend_production(
     let outbound_stores = build_outbound_stores(Arc::clone(&stores.filesystem));
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
-    // Extension-owned catalog providers arrive opaquely on the channel
-    // bindings (e.g. web-app's constant per-user entry); register each under
-    // its extension id so composition never names a concrete extension.
+    // arch-exempt: large_file, channel assembly stays co-located pending factory decomposition, plan #7477
+    // Extension-owned catalog providers arrive opaquely on channel bindings (e.g.
+    // web-app's constant per-user entry); register by extension id.
     for binding in &channel_extension_bindings {
         if let Some(provider) = &binding.outbound_target_provider {
             outbound_delivery_targets
