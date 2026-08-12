@@ -92,7 +92,16 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         RENDER_SUGGESTIONS_CAPABILITY_ID,
         DESCRIPTION,
-        vec![EffectKind::DispatchCapability],
+        // `WriteFilesystem`: the hook (`RenderSuggestionsHook`, implemented
+        // in `ironclaw_assistant` over the filesystem-backed
+        // `SuggestionsStore`) durably persists these cards — the effect list
+        // must declare that write so it participates in the effect-based
+        // policy/trust-ceiling model (PR review: ironloopai), matching the
+        // sibling `ironclaw.memory.write` capability's declared effects.
+        // `mounts = "ambient"` in `builtin_capability_policy.toml` stays
+        // correct: the write happens inside the product-owned hook, never
+        // through this dispatch's own `InvocationServices::filesystem`.
+        vec![EffectKind::DispatchCapability, EffectKind::WriteFilesystem],
         PermissionMode::Allow,
         resource_profile(),
     )
@@ -174,12 +183,29 @@ impl RenderSuggestionsHook for UnavailableRenderSuggestionsHook {
 
 /// Byte-length bounds on every card string field before persistence — the
 /// card-count check above bounds fan-out, but nothing previously bounded an
-/// individual field's size (PR review: coderabbitai).
+/// individual field's size (PR review: coderabbitai). The schema
+/// (`render_suggestions.input.v1.json`) also declares `title`,
+/// `description`, `suggested_prompt`, and `category` as non-empty required
+/// strings, so a lower bound of 1 byte is enforced here too — the schema is
+/// documentation only (see the `MAX_*` comment above), so this is the actual
+/// enforcement (PR review: ironloopai) that keeps an empty-string card (e.g.
+/// a blank `suggested_prompt`) from clearing the claim and persisting a
+/// broken ready card. `extension_id` stays exempt: it is optional (`None`
+/// means "not extension-specific"), so an empty string has no meaning to
+/// require against.
 fn card_length_issues(cards: &[SuggestionCard]) -> Vec<DispatchInputIssue> {
     let mut issues = Vec::new();
     for (index, card) in cards.iter().enumerate() {
         let mut check = |field: &'static str, value: &str, max_len: usize| {
-            if value.len() > max_len {
+            if value.is_empty() {
+                issues.push(
+                    DispatchInputIssue::new(
+                        format!("cards[{index}].{field}"),
+                        DispatchInputIssueCode::InvalidValue,
+                    )
+                    .expected("a non-empty string"),
+                );
+            } else if value.len() > max_len {
                 issues.push(
                     DispatchInputIssue::new(
                         format!("cards[{index}].{field}"),
@@ -197,8 +223,20 @@ fn card_length_issues(cards: &[SuggestionCard]) -> Vec<DispatchInputIssue> {
             MAX_SUGGESTED_PROMPT_LEN,
         );
         check("category", &card.category, MAX_CATEGORY_LEN);
-        if let Some(extension_id) = &card.extension_id {
-            check("extension_id", extension_id, MAX_EXTENSION_ID_LEN);
+        // `extension_id` is optional (`None` means "not extension-specific")
+        // and not in the schema's required-non-empty set, so it only gets
+        // the max-length bound, not the empty-string rejection `check` above
+        // applies to the four required fields.
+        if let Some(extension_id) = &card.extension_id
+            && extension_id.len() > MAX_EXTENSION_ID_LEN
+        {
+            issues.push(
+                DispatchInputIssue::new(
+                    format!("cards[{index}].extension_id"),
+                    DispatchInputIssueCode::InvalidValue,
+                )
+                .expected(format!("at most {MAX_EXTENSION_ID_LEN} bytes")),
+            );
         }
     }
     issues
@@ -382,6 +420,45 @@ mod tests {
                 .dispatch(sample_request(json!({ "cards": [oversized_card] })))
                 .await
                 .expect_err(&format!("oversized {field} must fail"));
+
+            let expected_path = format!("cards[0].{field}");
+            assert_eq!(
+                error.kind(),
+                Some(RuntimeDispatchErrorKind::InputEncode),
+                "field {field}"
+            );
+            let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+                panic!("expected Dispatch variant for {field}");
+            };
+            let Some(DispatchFailureDetail::InvalidInput { issues }) = detail.as_deref() else {
+                panic!("expected InvalidInput detail for {field}, got {detail:?}");
+            };
+            assert!(
+                issues.iter().any(|issue| issue.path == expected_path),
+                "field {field}: expected issue at {expected_path}, got {issues:?}"
+            );
+            assert!(hook.seen.lock().unwrap().is_empty(), "field {field}");
+        }
+    }
+
+    /// PR review (ironloopai): the handler only rejected strings LONGER than
+    /// their max, so a required field sent as `""` slipped past validation,
+    /// cleared the claim, and persisted a broken card (e.g. a blank
+    /// `suggested_prompt` with nothing for the user to click). `extension_id`
+    /// is excluded (see `card_length_issues`'s doc comment): it is optional
+    /// and not part of the schema's required-non-empty set.
+    #[tokio::test]
+    async fn empty_required_card_field_is_rejected_before_the_hook() {
+        for field in ["title", "description", "suggested_prompt", "category"] {
+            let hook = Arc::new(FakeHook::new(Ok(())));
+            let handler = RenderSuggestionsHandler { hook: hook.clone() };
+            let mut blank_card = card("Triage inbox");
+            blank_card[field] = json!("");
+
+            let error = handler
+                .dispatch(sample_request(json!({ "cards": [blank_card] })))
+                .await
+                .expect_err(&format!("empty {field} must fail"));
 
             let expected_path = format!("cards[0].{field}");
             assert_eq!(

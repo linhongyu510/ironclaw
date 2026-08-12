@@ -342,7 +342,7 @@ network = "default"
 
 [[grants]]
 capability = "builtin.render_suggestions"
-effects = ["dispatch_capability"]
+effects = ["dispatch_capability", "write_filesystem"]
 mounts = "ambient"
 network = "default"
 
