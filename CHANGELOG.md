@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0-rc.2] - 2026-08-12
+
+### Fixed
+
+- Windows first-start filesystem publication now uses native atomic rename
+  semantics instead of hard links and tolerates unsupported directory syncs.
+- Release smoke runs preserve the Windows account identity required to secure
+  the standalone secrets key, isolate workspace state, and keep `icacls`
+  status output from contaminating machine-readable CLI JSON.
+
 ## [1.2.0-rc.1] - 2026-08-11
 
 ### Added
