@@ -1439,7 +1439,7 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
         .expect("created trigger id")
         .to_string();
 
-    let standalone_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
+    let standalone_db = libsql_db_at(dir.path().join("state/reborn-local-dev.db")).await;
     assert_eq!(libsql_trigger_record_count(&standalone_db).await, 1);
 
     let listed = invoke_trigger_management(
