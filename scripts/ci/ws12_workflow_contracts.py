@@ -92,6 +92,15 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "previous_tag: ironclaw-v1.1.1-rc.1",
         "scripts/ci/release-upgrade-canary.py",
         "needs.release-upgrade-canary.result == 'success'",
+        # The dist installer download flakes and one lost download skips host,
+        # docker-image and announce (ironclaw-v1.2.0-rc.3). This file is
+        # cargo-dist-generated, so `dist generate` would quietly restore the
+        # bare one-shot install; pin the retry, both shells, and the
+        # `dist --version` probe that makes a silent installer failure loud.
+        "dist install failed after 3 attempts",
+        "Install dist (Windows)",
+        "if: runner.os != 'Windows'",
+        "if: runner.os == 'Windows'",
     ),
 }
 

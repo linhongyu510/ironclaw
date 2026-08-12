@@ -64,8 +64,26 @@ jobs:
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
+        #
+        # Retried and probed for the same reason as the build jobs' install
+        # step below: the release-asset download flakes, and `… | sh` reports
+        # the pipeline's status rather than the download's.
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if [ "${attempt}" -gt 1 ]; then
+              delay=$((attempt * 15))
+              echo "dist install attempt $((attempt - 1)) failed; retrying in ${delay}s" >&2
+              sleep "${delay}"
+            fi
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh || true
+            if dist --version; then
+              exit 0
+            fi
+          done
+          echo "dist install failed after 3 attempts" >&2
+          exit 1
       - name: Cache dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -142,8 +160,59 @@ jobs:
         with:
           key: ${{ join(matrix.targets, '-') }}
           cache-provider: ${{ matrix.cache_provider }}
+      # dist's installer pulls a tarball from github.com release assets, and
+      # that download flakes: `curl: (56) Connection died, tried 5 times before
+      # giving up` killed the x86_64-unknown-linux-musl leg of
+      # ironclaw-v1.2.0-rc.3 after 18s, before anything compiled, while the
+      # other six targets built fine. One lost download skips host,
+      # docker-image and announce, so the whole release has to be re-run.
+      #
+      # The installer's own curl retries are immediate; these are spaced. The
+      # command comes from the dist plan and is shell-specific (`curl … | sh`
+      # on Unix, `irm … | iex` on Windows), so each shell gets its own step —
+      # a single `shell: bash` wrapper would break the Windows leg.
+      #
+      # Success is probed with `dist --version` rather than the pipeline's exit
+      # status: `… | sh` and `irm … | iex` both report the *pipeline's* result,
+      # so a failed download inside them can still surface as success.
       - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          INSTALL_DIST_RUN: ${{ matrix.install_dist.run }}
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if [ "${attempt}" -gt 1 ]; then
+              delay=$((attempt * 15))
+              echo "dist install attempt $((attempt - 1)) failed; retrying in ${delay}s" >&2
+              sleep "${delay}"
+            fi
+            bash -c "${INSTALL_DIST_RUN}" || true
+            if dist --version; then
+              exit 0
+            fi
+          done
+          echo "dist install failed after 3 attempts" >&2
+          exit 1
+      - name: Install dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          INSTALL_DIST_RUN: ${{ matrix.install_dist.run }}
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if ($attempt -gt 1) {
+              $delay = $attempt * 15
+              Write-Host "dist install attempt $($attempt - 1) failed; retrying in ${delay}s"
+              Start-Sleep -Seconds $delay
+            }
+            try { Invoke-Expression $env:INSTALL_DIST_RUN } catch { Write-Host "installer raised: $_" }
+            dist --version
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+          }
+          Write-Host "dist install failed after 3 attempts"
+          exit 1
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
