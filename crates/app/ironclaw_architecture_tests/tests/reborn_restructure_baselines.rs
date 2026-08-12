@@ -128,7 +128,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Union re-measured on the #7373 merge (2026-08-08): the gate audit's
 /// independent re-equalization (40_423 → 40_524, same drift class) folds into
 /// the merged-tree figure, recorded with `[gate].loc_ceiling`/`loc_observed`.
-/// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
+/// Re-measured on the MERGED tree (web-app channel assembly + #7171 skills
 /// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
 /// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
 /// this ratchet fails when the two disagree.
@@ -144,6 +144,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// manifest ceiling (41_810, seeded from the merge-queue commit where
 /// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
 /// the nudge window of this record.
+/// ✎ Union re-measured 41_731 → 41_942 after merging #7471 with the channel
+/// capability branch. The process-journal pool assembly and channel
+/// registration/capability assembly are disjoint; the manifest ceiling and
+/// observed value move with this measured merged-tree record.
 /// ✎ Union re-measured 41_731 → 41_820 on 2026-08-12 (#7373 refresh merge
 /// of main): the audit branch's record (40_804) and main's chain fold;
 /// measured on the merged tree with `bash
@@ -157,28 +161,19 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// commit — the gate's NUDGE fired, so the eviction is locked in rather than
 /// banked as headroom. Measured on this branch's merged tree with
 /// `bash scripts/ci/check-composition-budget.sh`.
-/// ✎ Re-recorded 41_533 → 41_821 on 2026-08-12 merging #7038 (PR #7498):
-/// measured on the merged tree, not either side's pre-merge number. Moves
-/// with `[gate].loc_ceiling`.
-/// ✎ Re-recorded 41_821 → 41_830 on 2026-08-12 (#7498, `SuggestionsStore`
-/// `ScopedFilesystem` migration): the store now takes a pre-scoped handle
-/// instead of a raw `Arc<dyn RootFilesystem>`, matching the
-/// `ironclaw_web_push`/`ironclaw_threads` convention; a few lines of generic
-/// bounds/`wrap_scoped` calls at each construction site. Measured with
-/// `bash scripts/ci/check-composition-budget.sh --print`. Moves with
-/// `[gate].loc_ceiling`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_830;
+/// ✎ Union re-measured on 2026-08-12 after merging main (#7365's composition
+/// eviction + #7373 re-equalization) into the unified-channel branch; the
+/// merged tree is measured, not summed, and the manifest ceiling/observed
+/// move with this record in the same commit.
+/// ✎ Re-recorded 41_780 → 42_077 on 2026-08-12 merging #7038 (PR #7498) with
+/// #7477: measured on the merged tree, not either side's pre-merge number.
+/// Moves with `[gate].loc_ceiling`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_077;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
-/// ✎ Re-recorded 827 → 835 on 2026-08-12 (#7038, PR #7498): the 4 new
-/// construction-site casts described in `[gate].arc_dyn_ceiling`.
-/// ✎ Re-recorded 835 → 832 on 2026-08-12 (#7498, `SuggestionsStore`
-/// `ScopedFilesystem` migration): the 3 `Arc::clone(...) as Arc<dyn
-/// RootFilesystem>` casts at `SuggestionsStore::new` call sites are replaced
-/// by `crate::wrap_scoped(...)`, a concrete `Arc<ScopedFilesystem<F>>` — no
-/// `dyn` dispatch at those sites anymore. Moves with `[gate].arc_dyn_ceiling`.
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 832;
+/// ✎ Re-recorded 827 → 839 on 2026-08-12 (merge of #7038 and #7477).
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 839;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

@@ -344,6 +344,10 @@ struct SuggestionsProdHarness {
     tenant_id: TenantId,
     user_id: UserId,
     agent_id: AgentId,
+    /// The one deployment-resolved authenticated-session channel (installed by
+    /// `with_test_authenticated_session_channel` above) — same discovery a
+    /// real browser does via `GET /session`'s `session_channel_extension_id`.
+    session_channel_extension_id: String,
     // Kept alive for the harness's lifetime: `build_reborn_runtime` seeds the
     // standalone identity prompt file (`SYSTEM.md`) under this tempdir and
     // reads it back on every turn. Dropping the `TempDir` guard when the
@@ -375,14 +379,24 @@ async fn build_suggestions_prod_harness(
     let tenant_id = TenantId::new(format!("suggestions-{test_name}-tenant"))?;
     let agent_id = AgentId::new(format!("suggestions-{test_name}-agent"))?;
     let user_id = UserId::new(format!("suggestions-{test_name}-user"))?;
-    let input =
+    // A card click submits through the unified channel model's session-inbound
+    // route (`POST /channels/{extension_id}/messages`, #7477), which requires
+    // a deployment-registered authenticated-session channel to resolve
+    // `is_session_channel`. The shipping binary links the concrete `web-app`
+    // package for this; this test crate does not, so it installs the same
+    // neutral manifest-backed fixture `ironclaw_composition`'s own
+    // `webui_v2_e2e.rs` uses to exercise session-channel discovery generically
+    // (`with_test_authenticated_session_channel`), rather than hardcoding the
+    // `web-app` extension id or bypassing the directory check.
+    let input = ironclaw_composition::test_support::with_test_authenticated_session_channel(
         ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(standalone_runtime_policy()?)
             .with_bundled_first_party_for_test()
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-            ));
+            )),
+    );
 
     let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(replies));
     let raw: Arc<dyn LlmProvider> = scripted_llm;
@@ -415,6 +429,10 @@ async fn build_suggestions_prod_harness(
             .with_model_gateway_override(gateway),
     )
     .await?;
+    let session_channel_extension_id = runtime
+        .session_channel_extension_id()
+        .ok_or("test deployment must resolve exactly one session channel")?
+        .to_string();
     let webui = runtime.product_surface(None)?;
     let caller = ProductSurfaceCaller::new(
         tenant_id.clone(),
@@ -452,6 +470,7 @@ async fn build_suggestions_prod_harness(
         tenant_id,
         user_id,
         agent_id,
+        session_channel_extension_id,
         _storage_root_guard: root,
         _session_root_guard: session_root,
     })
@@ -855,9 +874,13 @@ async fn card_click_round_trips_suggested_prompt_as_an_ordinary_message() -> Har
 
     let (status, send_body) = post_json(
         mount_webui_v2_router(Arc::clone(&harness.webui), harness.caller.clone()),
-        &format!("/api/webchat/v2/threads/{thread_id}/messages"),
+        &format!(
+            "/api/webchat/v2/channels/{}/messages",
+            harness.session_channel_extension_id
+        ),
         json!({
             "client_action_id": "card-click-send-message",
+            "thread_id": thread_id,
             "content": suggested_prompt,
         }),
     )

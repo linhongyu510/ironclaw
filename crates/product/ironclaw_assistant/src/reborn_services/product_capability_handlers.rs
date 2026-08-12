@@ -37,8 +37,8 @@ pub(super) enum ProductCommandHandler {
     AutomationDelete,
     SuggestionsGenerate,
     NotificationChannelsSet,
-    WebPushSubscribe,
-    WebPushUnsubscribe,
+    NotificationSetupEnable,
+    NotificationSetupDisable,
 }
 
 impl ProductCommandHandler {
@@ -78,8 +78,8 @@ impl ProductCommandHandler {
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
             SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
-            WEB_PUSH_SUBSCRIBE_COMMAND_ID => Some(Self::WebPushSubscribe),
-            WEB_PUSH_UNSUBSCRIBE_COMMAND_ID => Some(Self::WebPushUnsubscribe),
+            NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
+            NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
             _ => None,
         }
     }
@@ -323,16 +323,21 @@ impl ProductCommandHandler {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
                 command_output(services.set_notification_channels(caller, request).await?)
             }
-            Self::WebPushSubscribe => {
-                let request: RebornWebPushSubscribeRequest = product_command_input(input)?;
-                command_output(services.web_push_service.subscribe(caller, request).await?)
-            }
-            Self::WebPushUnsubscribe => {
-                let request: RebornWebPushUnsubscribeRequest = product_command_input(input)?;
+            Self::NotificationSetupEnable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
                 command_output(
                     services
-                        .web_push_service
-                        .unsubscribe(caller, request)
+                        .notification_setup_service
+                        .enable(caller, request)
+                        .await?,
+                )
+            }
+            Self::NotificationSetupDisable => {
+                let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .notification_setup_service
+                        .disable(caller, request)
                         .await?,
                 )
             }
