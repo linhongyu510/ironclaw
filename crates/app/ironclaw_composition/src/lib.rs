@@ -411,6 +411,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/approvals",
     "/gate-records",
     "/replay-payloads",
+    "/suggestions",
     "/threads",
     "/conversations",
     "/turns",

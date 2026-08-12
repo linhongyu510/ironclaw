@@ -244,8 +244,9 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // filesystem the channel workflow factory mounts its own product state
     // on (`extension_filesystem`), keyed per tenant/user by the store itself.
     api = api.with_suggestions_product_service(Arc::new(RebornSuggestionsProductService::new(
-        ironclaw_suggestions::SuggestionsStore::new(Arc::clone(&runtime.extension_filesystem)
-            as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+        ironclaw_suggestions::SuggestionsStore::new(crate::wrap_scoped(Arc::clone(
+            &runtime.extension_filesystem,
+        ))),
         runtime.product_thread_service(),
         runtime.product_turn_coordinator(),
     )));

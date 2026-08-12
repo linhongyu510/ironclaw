@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
@@ -81,15 +82,21 @@ const MIN_CLAIM_AGE_BEFORE_RECLAIM: chrono::Duration = chrono::Duration::millise
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RebornSuggestionsGenerateRequest {}
 
-pub struct RebornSuggestionsProductService {
-    store: SuggestionsStore,
+pub struct RebornSuggestionsProductService<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    store: SuggestionsStore<F>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
-impl RebornSuggestionsProductService {
+impl<F> RebornSuggestionsProductService<F>
+where
+    F: RootFilesystem + ?Sized,
+{
     pub fn new(
-        store: SuggestionsStore,
+        store: SuggestionsStore<F>,
         thread_service: Arc<dyn SessionThreadService>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
@@ -110,7 +117,7 @@ impl RebornSuggestionsProductService {
     ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
         let doc = self
             .store
-            .read_doc(&caller.tenant_id, &caller.user_id)
+            .read_doc(&caller.to_resource_scope())
             .await
             .map_err(ProductSurfaceError::internal_from)?
             .unwrap_or_else(ironclaw_suggestions::SuggestionsDoc::empty);
@@ -148,14 +155,17 @@ impl RebornSuggestionsProductService {
 }
 
 #[async_trait]
-impl SuggestionsProductService for RebornSuggestionsProductService {
+impl<F> SuggestionsProductService for RebornSuggestionsProductService<F>
+where
+    F: RootFilesystem + ?Sized,
+{
     async fn get_suggestions(
         &self,
         caller: ProductAgentBoundCaller,
     ) -> Result<RebornSuggestionsResponse, ProductSurfaceError> {
         let doc = self
             .store
-            .read_doc(&caller.tenant_id, &caller.user_id)
+            .read_doc(&caller.to_resource_scope())
             .await
             .map_err(ProductSurfaceError::internal_from)?
             .unwrap_or_else(ironclaw_suggestions::SuggestionsDoc::empty);
@@ -178,7 +188,10 @@ impl SuggestionsProductService for RebornSuggestionsProductService {
     }
 }
 
-impl RebornSuggestionsProductService {
+impl<F> RebornSuggestionsProductService<F>
+where
+    F: RootFilesystem + ?Sized,
+{
     /// Test-only entry point that lets an integration test pre-mint the
     /// hidden thread's id, so it can register a scripted model gateway for
     /// the exact resolved `TurnScope` before calling this (the same reason
@@ -205,9 +218,10 @@ impl RebornSuggestionsProductService {
         // Resolve current state once: a live claim dedupes (no second loop);
         // a dead claim is cleared before a fresh one is attempted (spec §5
         // crash-recovery path — "subsequent POST claims cleanly").
+        let caller_scope = caller.to_resource_scope();
         if let Some(doc) = self
             .store
-            .read_doc(&caller.tenant_id, &caller.user_id)
+            .read_doc(&caller_scope)
             .await
             .map_err(ProductSurfaceError::internal_from)?
             && let Some(active_job) = &doc.active_job
@@ -228,8 +242,7 @@ impl RebornSuggestionsProductService {
                 RunLiveness::Terminal | RunLiveness::Missing => {
                     self.store
                             .record_failure(
-                                &caller.tenant_id,
-                                &caller.user_id,
+                                &caller_scope,
                                 active_job.job_id,
                                 "generation run ended without a live claim; superseded by a new request".to_string(),
                             )
@@ -242,12 +255,7 @@ impl RebornSuggestionsProductService {
         let run_id = ironclaw_host_api::turn::TurnRunId::new();
         let claim = self
             .store
-            .claim_active_job(
-                &caller.tenant_id,
-                &caller.user_id,
-                thread_id.clone(),
-                run_id,
-            )
+            .claim_active_job(&caller_scope, thread_id.clone(), run_id)
             .await
             .map_err(ProductSurfaceError::internal_from)?;
 
@@ -275,12 +283,7 @@ impl RebornSuggestionsProductService {
                 // not a placeholder that never exists.
                 if accepted_run_id != run_id {
                     self.store
-                        .update_active_job_run_id(
-                            &caller.tenant_id,
-                            &caller.user_id,
-                            job_id,
-                            accepted_run_id,
-                        )
+                        .update_active_job_run_id(&caller_scope, job_id, accepted_run_id)
                         .await
                         .map_err(ProductSurfaceError::internal_from)?;
                 }
@@ -304,12 +307,7 @@ impl RebornSuggestionsProductService {
                     // remain the backstop once the run goes terminal.
                     if let Err(reconcile_error) = self
                         .store
-                        .update_active_job_run_id(
-                            &caller.tenant_id,
-                            &caller.user_id,
-                            job_id,
-                            accepted_run_id,
-                        )
+                        .update_active_job_run_id(&caller_scope, job_id, accepted_run_id)
                         .await
                     {
                         tracing::debug!(
@@ -338,8 +336,7 @@ impl RebornSuggestionsProductService {
                 if let Err(release_error) = self
                     .store
                     .record_failure(
-                        &caller.tenant_id,
-                        &caller.user_id,
+                        &caller_scope,
                         job_id,
                         format!("failed to start suggestion generation: {error}"),
                     )
@@ -378,7 +375,10 @@ enum SubmitGenerationOutcome {
     NotAccepted(TurnError),
 }
 
-impl RebornSuggestionsProductService {
+impl<F> RebornSuggestionsProductService<F>
+where
+    F: RootFilesystem + ?Sized,
+{
     async fn submit_generation_turn(
         &self,
         caller: &ProductAgentBoundCaller,

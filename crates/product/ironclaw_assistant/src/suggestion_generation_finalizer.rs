@@ -33,21 +33,31 @@
 //! that residual gap, not the primary correctness mechanism.
 
 use async_trait::async_trait;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_suggestions::SuggestionsStore;
 use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
 
-pub struct SuggestionGenerationFinalizerSink {
-    store: SuggestionsStore,
+pub struct SuggestionGenerationFinalizerSink<F>
+where
+    F: RootFilesystem + ?Sized + 'static,
+{
+    store: SuggestionsStore<F>,
 }
 
-impl SuggestionGenerationFinalizerSink {
-    pub fn new(store: SuggestionsStore) -> Self {
+impl<F> SuggestionGenerationFinalizerSink<F>
+where
+    F: RootFilesystem + ?Sized + 'static,
+{
+    pub fn new(store: SuggestionsStore<F>) -> Self {
         Self { store }
     }
 }
 
 #[async_trait]
-impl TurnEventSink for SuggestionGenerationFinalizerSink {
+impl<F> TurnEventSink for SuggestionGenerationFinalizerSink<F>
+where
+    F: RootFilesystem + ?Sized + 'static,
+{
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         // Cheap filter only, same shape as every sibling `TurnEventSink`
         // (`trace_capture.rs`, `skill_learning.rs`): the actual store I/O is
@@ -71,11 +81,23 @@ impl TurnEventSink for SuggestionGenerationFinalizerSink {
             return Ok(());
         };
         let store = self.store.clone();
-        let tenant_id = event.scope.tenant_id.clone();
+        // No agent/project/mission axis is available from a `TurnLifecycleEvent`
+        // (the suggestions doc mount is keyed on tenant/user only), so those
+        // scope fields stay `None` — matching the doc store's own per-user
+        // keying, not a narrower per-agent cell.
+        let scope = ironclaw_host_api::resource::ResourceScope {
+            tenant_id: event.scope.tenant_id.clone(),
+            user_id,
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        };
         let run_id = event.run_id;
         let status = event.status;
         tokio::spawn(async move {
-            finalize_claim_if_owned(&store, &tenant_id, &user_id, run_id, status).await;
+            finalize_claim_if_owned(&store, &scope, run_id, status).await;
         });
         Ok(())
     }
@@ -85,14 +107,15 @@ impl TurnEventSink for SuggestionGenerationFinalizerSink {
 /// `publish` path (see [`SuggestionGenerationFinalizerSink::publish`]) while
 /// staying directly callable — synchronously, no spawn-completion race — from
 /// tests.
-async fn finalize_claim_if_owned(
-    store: &SuggestionsStore,
-    tenant_id: &ironclaw_host_api::ids::TenantId,
-    user_id: &ironclaw_host_api::ids::UserId,
+async fn finalize_claim_if_owned<F>(
+    store: &SuggestionsStore<F>,
+    scope: &ironclaw_host_api::resource::ResourceScope,
     run_id: ironclaw_host_api::turn::TurnRunId,
     status: ironclaw_host_api::turn::TurnStatus,
-) {
-    let doc = match store.read_doc(tenant_id, user_id).await {
+) where
+    F: RootFilesystem + ?Sized + 'static,
+{
+    let doc = match store.read_doc(scope).await {
         Ok(doc) => doc,
         // Best-effort: a backend hiccup here must never fail the turn
         // commit. The claim is still recoverable via
@@ -101,7 +124,7 @@ async fn finalize_claim_if_owned(
         Err(error) => {
             tracing::debug!(
                 %error,
-                %tenant_id,
+                tenant_id = %scope.tenant_id,
                 %run_id,
                 "suggestion-generation finalizer: read_doc failed, deferring to the claim-age mitigation"
             );
@@ -118,8 +141,7 @@ async fn finalize_claim_if_owned(
     }
     if let Err(error) = store
         .record_failure(
-            tenant_id,
-            user_id,
+            scope,
             active_job.job_id,
             format!(
                 "generation run ended ({}) without calling render_suggestions",
@@ -130,7 +152,7 @@ async fn finalize_claim_if_owned(
     {
         tracing::debug!(
             %error,
-            %tenant_id,
+            tenant_id = %scope.tenant_id,
             %run_id,
             "suggestion-generation finalizer: record_failure failed, deferring to the claim-age mitigation"
         );
@@ -140,12 +162,43 @@ async fn finalize_claim_if_owned(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{InvocationId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
     use ironclaw_host_api::turn::TurnRunId;
     use ironclaw_suggestions::{ClaimOutcome, SuggestionCard};
     use std::sync::Arc;
     use uuid::Uuid;
+
+    fn scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn test_store() -> SuggestionsStore<InMemoryBackend> {
+        SuggestionsStore::new(Arc::new(ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::default()),
+            |scope: &ResourceScope| {
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/suggestions")?,
+                    VirtualPath::new(format!(
+                        "/tenants/{}/users/{}/suggestions",
+                        scope.tenant_id, scope.user_id
+                    ))?,
+                    MountPermissions::read_write_list_delete(),
+                )])
+            },
+        )))
+    }
 
     fn card() -> SuggestionCard {
         SuggestionCard {
@@ -196,15 +249,10 @@ mod tests {
 
     #[tokio::test]
     async fn finalizer_clears_active_job_when_its_own_run_goes_terminal() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let run_id = TurnRunId::new();
         let ClaimOutcome::Claimed { job_id } = store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap()
         else {
@@ -216,18 +264,13 @@ mod tests {
         // race a background task.
         finalize_claim_if_owned(
             &store,
-            &TenantId::new("t").unwrap(),
-            &UserId::new("u").unwrap(),
+            &scope("t", "u"),
             run_id,
             ironclaw_host_api::turn::TurnStatus::Failed,
         )
         .await;
 
-        let doc = store
-            .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope("t", "u")).await.unwrap().unwrap();
         assert!(doc.active_job.is_none());
         assert!(doc.last_error.unwrap().message.contains("failed"));
         let _ = job_id;
@@ -235,16 +278,11 @@ mod tests {
 
     #[tokio::test]
     async fn finalizer_ignores_a_terminal_event_for_a_different_run() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let claimed_run_id = TurnRunId::new();
         let unrelated_run_id = TurnRunId::new();
         store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                claimed_run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), claimed_run_id)
             .await
             .unwrap();
 
@@ -252,44 +290,29 @@ mod tests {
         // sink must never touch a claim it doesn't own.
         finalize_claim_if_owned(
             &store,
-            &TenantId::new("t").unwrap(),
-            &UserId::new("u").unwrap(),
+            &scope("t", "u"),
             unrelated_run_id,
             ironclaw_host_api::turn::TurnStatus::Completed,
         )
         .await;
 
-        let doc = store
-            .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope("t", "u")).await.unwrap().unwrap();
         assert_eq!(doc.active_job.unwrap().run_id, claimed_run_id);
     }
 
     #[tokio::test]
     async fn finalizer_is_a_noop_when_render_suggestions_already_cleared_the_claim() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let run_id = TurnRunId::new();
         let ClaimOutcome::Claimed { job_id } = store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap()
         else {
             panic!("expected claim");
         };
         store
-            .record_result(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                job_id,
-                vec![card()],
-            )
+            .record_result(&scope("t", "u"), job_id, vec![card()])
             .await
             .unwrap();
 
@@ -298,18 +321,13 @@ mod tests {
         // clobber the successful result with a synthetic failure.
         finalize_claim_if_owned(
             &store,
-            &TenantId::new("t").unwrap(),
-            &UserId::new("u").unwrap(),
+            &scope("t", "u"),
             run_id,
             ironclaw_host_api::turn::TurnStatus::Completed,
         )
         .await;
 
-        let doc = store
-            .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope("t", "u")).await.unwrap().unwrap();
         assert!(doc.active_job.is_none());
         assert!(doc.last_error.is_none());
         assert_eq!(doc.last_result.unwrap().cards.len(), 1);
@@ -323,15 +341,10 @@ mod tests {
     /// as dead.
     #[tokio::test]
     async fn finalizer_clears_active_job_on_recovery_required() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let run_id = TurnRunId::new();
         store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap();
 
@@ -347,10 +360,7 @@ mod tests {
 
         let mut doc = None;
         for _ in 0..100 {
-            let current = store
-                .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-                .await
-                .unwrap();
+            let current = store.read_doc(&scope("t", "u")).await.unwrap();
             if current.as_ref().is_some_and(|doc| doc.active_job.is_none()) {
                 doc = current;
                 break;
@@ -368,15 +378,10 @@ mod tests {
 
     #[tokio::test]
     async fn finalizer_ignores_non_terminal_event_kinds() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let run_id = TurnRunId::new();
         store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap();
 
@@ -385,11 +390,7 @@ mod tests {
             .await
             .unwrap();
 
-        let doc = store
-            .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope("t", "u")).await.unwrap().unwrap();
         assert!(
             doc.active_job.is_some(),
             "a non-terminal event must never touch the claim"
@@ -402,15 +403,10 @@ mod tests {
     /// "capture task is detached; poll briefly" pattern.
     #[tokio::test]
     async fn publish_spawns_the_finalize_work_and_it_completes() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let run_id = TurnRunId::new();
         store
-            .claim_active_job(
-                &TenantId::new("t").unwrap(),
-                &UserId::new("u").unwrap(),
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap();
 
@@ -422,10 +418,7 @@ mod tests {
         // The finalize work is detached; poll briefly for it to land.
         let mut doc = None;
         for _ in 0..100 {
-            let current = store
-                .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
-                .await
-                .unwrap();
+            let current = store.read_doc(&scope("t", "u")).await.unwrap();
             if current.as_ref().is_some_and(|doc| doc.active_job.is_none()) {
                 doc = current;
                 break;

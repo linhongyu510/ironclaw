@@ -1018,6 +1018,22 @@ impl ProductAgentBoundCaller {
             project_id,
         }
     }
+
+    /// The `ResourceScope` this caller resolves to for `ScopedFilesystem`
+    /// mount grants — `agent_id`/`project_id` carried through, `mission_id`/
+    /// `thread_id` unset (this caller identity predates any particular
+    /// thread), fresh `invocation_id` per call.
+    pub fn to_resource_scope(&self) -> ResourceScope {
+        ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

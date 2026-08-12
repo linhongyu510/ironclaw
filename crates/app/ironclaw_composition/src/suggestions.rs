@@ -13,22 +13,32 @@
 //! only constructs and registers it (see `runtime.rs`).
 
 use async_trait::async_trait;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ids::RunId, resource::ResourceScope, turn::TurnRunId};
 use ironclaw_host_runtime::{RenderSuggestionsHook, RenderSuggestionsHookError};
 use ironclaw_suggestions::{SuggestionCard, SuggestionsStore, SuggestionsStoreError};
 
-pub(crate) struct StoreBackedRenderSuggestionsHook {
-    store: SuggestionsStore,
+pub(crate) struct StoreBackedRenderSuggestionsHook<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    store: SuggestionsStore<F>,
 }
 
-impl StoreBackedRenderSuggestionsHook {
-    pub(crate) fn new(store: SuggestionsStore) -> Self {
+impl<F> StoreBackedRenderSuggestionsHook<F>
+where
+    F: RootFilesystem + ?Sized,
+{
+    pub(crate) fn new(store: SuggestionsStore<F>) -> Self {
         Self { store }
     }
 }
 
 #[async_trait]
-impl RenderSuggestionsHook for StoreBackedRenderSuggestionsHook {
+impl<F> RenderSuggestionsHook for StoreBackedRenderSuggestionsHook<F>
+where
+    F: RootFilesystem + ?Sized,
+{
     async fn record_cards(
         &self,
         scope: &ResourceScope,
@@ -37,7 +47,7 @@ impl RenderSuggestionsHook for StoreBackedRenderSuggestionsHook {
     ) -> Result<(), RenderSuggestionsHookError> {
         let active_job = self
             .store
-            .read_doc(&scope.tenant_id, &scope.user_id)
+            .read_doc(scope)
             .await
             .map_err(store_error)?
             .and_then(|doc| doc.active_job)
@@ -64,7 +74,7 @@ impl RenderSuggestionsHook for StoreBackedRenderSuggestionsHook {
             }
         }
         self.store
-            .record_result(&scope.tenant_id, &scope.user_id, active_job.job_id, cards)
+            .record_result(scope, active_job.job_id, cards)
             .await
             .map_err(store_error)
     }
@@ -79,8 +89,11 @@ fn store_error(error: SuggestionsStoreError) -> RenderSuggestionsHookError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::ids::{InvocationId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::MountAlias;
+    use ironclaw_host_api::path::VirtualPath;
     use ironclaw_host_api::turn::TurnRunId;
     use ironclaw_suggestions::ClaimOutcome;
     use std::sync::Arc;
@@ -98,6 +111,22 @@ mod tests {
         }
     }
 
+    fn test_store() -> SuggestionsStore<InMemoryBackend> {
+        SuggestionsStore::new(Arc::new(ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::default()),
+            |scope: &ResourceScope| {
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/suggestions")?,
+                    VirtualPath::new(format!(
+                        "/tenants/{}/users/{}/suggestions",
+                        scope.tenant_id, scope.user_id
+                    ))?,
+                    MountPermissions::read_write_list_delete(),
+                )])
+            },
+        )))
+    }
+
     fn card() -> SuggestionCard {
         SuggestionCard {
             id: Uuid::new_v4(),
@@ -112,16 +141,11 @@ mod tests {
 
     #[tokio::test]
     async fn records_cards_against_the_active_claim() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let scope = scope("t", "u");
         let run_id = TurnRunId::new();
         let ClaimOutcome::Claimed { .. } = store
-            .claim_active_job(
-                &scope.tenant_id,
-                &scope.user_id,
-                ThreadId::new("t1").unwrap(),
-                run_id,
-            )
+            .claim_active_job(&scope, ThreadId::new("t1").unwrap(), run_id)
             .await
             .unwrap()
         else {
@@ -137,18 +161,14 @@ mod tests {
         .await
         .unwrap();
 
-        let doc = store
-            .read_doc(&scope.tenant_id, &scope.user_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope).await.unwrap().unwrap();
         assert!(doc.active_job.is_none());
         assert_eq!(doc.last_result.unwrap().cards.len(), 1);
     }
 
     #[tokio::test]
     async fn no_active_claim_is_reported_as_no_active_job() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let scope = scope("t", "u");
         let hook = StoreBackedRenderSuggestionsHook::new(store);
 
@@ -162,16 +182,11 @@ mod tests {
 
     #[tokio::test]
     async fn cards_do_not_leak_across_tenants() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let a = scope("tenant-a", "user-a");
         let b = scope("tenant-b", "user-b");
         store
-            .claim_active_job(
-                &a.tenant_id,
-                &a.user_id,
-                ThreadId::new("t1").unwrap(),
-                TurnRunId::new(),
-            )
+            .claim_active_job(&a, ThreadId::new("t1").unwrap(), TurnRunId::new())
             .await
             .unwrap();
 
@@ -189,7 +204,7 @@ mod tests {
     /// hook must bind to the job the CALLING run itself claimed.
     #[tokio::test]
     async fn stale_run_render_suggestions_call_does_not_overwrite_a_newer_claim() {
-        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let store = test_store();
         let scope = scope("t", "u");
         let thread_id = ThreadId::new("t1").unwrap();
 
@@ -197,26 +212,21 @@ mod tests {
         // path in `suggestions_product_service.rs`) and its claim cleared.
         let run_a = TurnRunId::new();
         let ClaimOutcome::Claimed { job_id: job_a } = store
-            .claim_active_job(&scope.tenant_id, &scope.user_id, thread_id.clone(), run_a)
+            .claim_active_job(&scope, thread_id.clone(), run_a)
             .await
             .unwrap()
         else {
             panic!("expected claim");
         };
         store
-            .record_failure(
-                &scope.tenant_id,
-                &scope.user_id,
-                job_a,
-                "run A superseded".to_string(),
-            )
+            .record_failure(&scope, job_a, "run A superseded".to_string())
             .await
             .unwrap();
 
         // A fresh request claims a new job (run B) for the same caller.
         let run_b = TurnRunId::new();
         let ClaimOutcome::Claimed { job_id: job_b } = store
-            .claim_active_job(&scope.tenant_id, &scope.user_id, thread_id, run_b)
+            .claim_active_job(&scope, thread_id, run_b)
             .await
             .unwrap()
         else {
@@ -236,11 +246,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, RenderSuggestionsHookError::NoActiveJob);
 
-        let doc = store
-            .read_doc(&scope.tenant_id, &scope.user_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let doc = store.read_doc(&scope).await.unwrap().unwrap();
         // Job B's claim must still be active and untouched by run A's stale
         // cards.
         assert_eq!(doc.active_job.unwrap().job_id, job_b);

@@ -3544,8 +3544,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // this composition file only constructs and registers it).
     let suggestion_generation_finalizer_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
         Arc::new(ironclaw_assistant::SuggestionGenerationFinalizerSink::new(
-            ironclaw_suggestions::SuggestionsStore::new(Arc::clone(&services.extension_filesystem)
-                as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+            ironclaw_suggestions::SuggestionsStore::new(crate::wrap_scoped(Arc::clone(
+                &services.extension_filesystem,
+            ))),
         ));
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> = vec![
         trace_capture_sink,
