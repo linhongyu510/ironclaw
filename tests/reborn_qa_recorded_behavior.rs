@@ -465,9 +465,26 @@ fn assert_tool_argument_string_field_eq(trace: &LlmTrace, tool: &str, field: &st
 fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
     let trace = load_qa_trace(case.fixture);
     assert_tool_called_with(&trace, "builtin.trigger_create", &[cron_fragment]);
+    assert_structured_trigger_create(&trace);
     assert!(
         final_text_reply(&trace).is_some(),
         "routine phrase should end with a finalized assistant reply"
+    );
+}
+
+fn assert_structured_trigger_create(trace: &LlmTrace) {
+    let arguments = recorded_tool_calls(trace)
+        .into_iter()
+        .find(|(name, _)| name == "builtin.trigger_create")
+        .map(|(_, arguments)| arguments)
+        .expect("routine phrase must create a trigger");
+    assert!(
+        arguments.contains("execution_contract"),
+        "routine creation fixtures must exercise the structured execution contract: {arguments}"
+    );
+    assert!(
+        !arguments.contains("\"prompt\""),
+        "routine creation fixtures must not use the retired raw prompt field: {arguments}"
     );
 }
 
@@ -479,6 +496,7 @@ async fn contract_routine_crm_inbox_creates_30_minute_trigger() {
 #[tokio::test]
 async fn contract_routine_bare_send_me_from_web_app_pins_no_delivery_step() {
     let trace = load_qa_trace(ROUTINE_BARE_SEND_ME_WEBUI.fixture);
+    assert_structured_trigger_create(&trace);
     // Web-app half of the source-channel default: results are already in the
     // run thread the user is looking at, so a bare "send me" writes NO
     // delivery step and the creation turn performs no delivery itself.
@@ -500,6 +518,7 @@ async fn contract_routine_bare_send_me_from_web_app_pins_no_delivery_step() {
 #[tokio::test]
 async fn contract_routine_multi_channel_delivery_pins_both_targets_in_prompt() {
     let trace = load_qa_trace(ROUTINE_MULTI_CHANNEL_DELIVERY.fixture);
+    assert_structured_trigger_create(&trace);
     // "to Slack and Telegram" resolves BOTH destinations while the user is
     // present and pins each in the routine's own prompt as an explicit
     // delivery step — one delivery call per channel at fire time.

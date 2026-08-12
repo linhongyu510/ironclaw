@@ -212,7 +212,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 "qa_heartbeat_create",
                 serde_json::json!({
                     "name": "qa-reborn-heartbeat-smoke",
-                    "prompt": "reborn heartbeat smoke",
+                    "execution_contract": support::trigger_execution_contract("reborn heartbeat smoke"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "*/2 * * * *",
@@ -236,7 +236,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
                 "qa_cron_create",
                 serde_json::json!({
                     "name": "qa-reborn-cron-smoke",
-                    "prompt": "summarize repo status",
+                    "execution_contract": support::trigger_execution_contract("summarize repo status"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 9 * * 1",

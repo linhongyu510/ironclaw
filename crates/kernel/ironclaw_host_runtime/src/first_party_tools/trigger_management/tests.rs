@@ -2,20 +2,31 @@ use chrono::{Datelike, TimeZone};
 
 use super::*;
 
-/// Delivery is now a step the *prompt* owns, not a stored routing field: a
+fn execution_contract(goal: impl Into<String>) -> Value {
+    let goal = goal.into();
+    json!({
+        "version": 1,
+        "goal": goal,
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result"
+    })
+}
+
+/// Delivery is now a step the structured contract owns, not a stored routing field: a
 /// routine's fire delivers externally only by calling
 /// `builtin__outbound_deliver` itself. The description must therefore teach
-/// (a) the prompt is the whole task, written for a memory-less future run,
-/// (b) any wanted delivery is an explicit prompt step naming its destination,
+/// (a) the goal is the whole task, written for a memory-less future run,
+/// (b) any wanted delivery is an explicit goal step naming its destination,
 /// picked while the user is present, and (c) a fire that makes no delivery
 /// call delivers nothing externally — its reply only lands in the routine's
 /// own run thread. It must NOT resurrect the retired `delivery_target_id`
 /// input, which no longer exists on this capability.
 #[test]
-fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_target() {
+fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
-        "trigger_create description must say the prompt is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
+        "trigger_create description must say the goal is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
@@ -23,8 +34,8 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
-            .contains("write that as an explicit step in the prompt naming the destination"),
-        "trigger_create description must make delivery an explicit prompt step: {TRIGGER_CREATE_DESCRIPTION}"
+            .contains("write delivery as an explicit goal step naming the destination"),
+        "trigger_create description must make delivery an explicit goal step: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_deliver"),
@@ -122,7 +133,7 @@ fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
 fn trigger_create_input_rejects_missing_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
@@ -136,7 +147,7 @@ fn trigger_create_input_rejects_missing_timezone() {
 fn trigger_create_input_rejects_invalid_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -157,7 +168,13 @@ fn trigger_create_input_rejects_invalid_timezone() {
 fn trigger_create_input_accepts_cron_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Check mail",
+            "success_criteria": ["Report the mail check result"],
+            "output_instructions": "Return a concise summary",
+            "no_result_text": "No mail found"
+        },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -171,6 +188,24 @@ fn trigger_create_input_accepts_cron_schedule() {
         }
         TriggerSchedule::Once { .. } => panic!("expected Cron"),
     }
+}
+
+#[test]
+fn trigger_create_input_rejects_new_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily",
+        "prompt": "check mail",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+        Ok(_) => panic!("new trigger creation must require an execution contract"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unknown field `prompt`"),
+        "prompt-only creation should fail as a retired field: {error}"
+    );
 }
 
 #[test]
@@ -192,14 +227,11 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
     });
 
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
-    assert!(matches!(
-        parsed.definition,
-        TriggerDefinitionInput::Structured { .. }
-    ));
+    assert_eq!(parsed.execution_contract.version, 1);
 }
 
 #[test]
-fn trigger_create_input_rejects_both_or_neither_definition() {
+fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
     let both = serde_json::json!({
         "name": "invalid",
         "prompt": "legacy",
@@ -267,7 +299,7 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
 fn trigger_create_input_rejects_missing_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail"
+        "execution_contract": execution_contract("check mail")
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
     assert!(
@@ -281,7 +313,7 @@ fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
     // 2099-06-24T17:00:00 UTC is unambiguous and in the future
     let input = serde_json::json!({
         "name": "one-off reminder",
-        "prompt": "remind me about the meeting",
+        "execution_contract": execution_contract("remind me about the meeting"),
         "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
     });
     let parsed: TriggerCreateInput =
@@ -305,7 +337,7 @@ fn trigger_create_input_rejects_dst_ambiguous_time() {
     // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
     let input = serde_json::json!({
         "name": "ambiguous",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -327,7 +359,7 @@ fn trigger_create_input_rejects_dst_gap_time() {
     // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
     let input = serde_json::json!({
         "name": "dst-gap",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -472,7 +504,7 @@ const MUTATION_CAPABILITIES: &[&str] = &[
 fn once_create_input(name: &str) -> Value {
     json!({
         "name": name,
-        "prompt": "remind me later",
+        "execution_contract": execution_contract("remind me later"),
         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
     })
 }
@@ -678,7 +710,7 @@ async fn trigger_create_rejects_the_retired_delivery_target_id_input() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "retired-target-field",
-            "prompt": "deliver here",
+            "execution_contract": execution_contract("deliver here"),
             "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
             "delivery_target_id": "slack:personal-dm:T123:user-a",
         }),

@@ -451,7 +451,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 "call_trigger_create_first_party",
                 serde_json::json!({
                     "name": "Daily trace summary",
-                    "prompt": "Summarize trace state",
+                    "execution_contract": support::trigger_execution_contract("Summarize trace state"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 8 * * *",

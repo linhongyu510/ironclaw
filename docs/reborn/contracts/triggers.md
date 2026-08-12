@@ -80,10 +80,14 @@ The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as t
 
 ### 3.3 Structured execution contracts
 
-Trigger creation accepts exactly one of the legacy `prompt` field or a
-versioned `execution_contract`. A structured contract stores canonical JSON in
-`execution_spec_json` and stores its rendered prompt alongside it. Existing
-rows retain `NULL` and are never interpreted or backfilled.
+New trigger creation requires a versioned `execution_contract`; the create
+surface does not accept or advertise the legacy raw `prompt` field. A
+structured contract stores canonical JSON in `execution_spec_json` and stores
+its rendered prompt alongside it.
+
+This is a new-write rule, not a destructive migration. Existing rows with a
+raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
+to execute their frozen prompt without interpretation or backfill.
 
 The v1 contract contains a goal, one or more success criteria, output
 instructions, no-result text, an optional capability allowlist, and required
