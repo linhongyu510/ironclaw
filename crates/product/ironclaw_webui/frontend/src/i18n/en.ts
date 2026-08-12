@@ -968,7 +968,7 @@ registerPack("en", {
   "ironhub.link.agentUrlUnset": "No public URL is configured for this deployment.",
   "ironhub.link.sharedKey": "Shared key",
   "ironhub.link.saveFailed": "The shared key could not be saved.",
-  "ironhub.link.saveKey": "Save key",
+  "ironhub.link.saveKey": "Apply key",
   "ironhub.link.clearKey": "Remove key",
   "ironhub.link.clearFailed": "The shared key could not be removed.",
   "ironhub.link.keyTooShort": "A shared key is at least 32 characters.",

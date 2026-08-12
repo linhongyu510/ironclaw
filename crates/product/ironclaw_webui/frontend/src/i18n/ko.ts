@@ -879,7 +879,7 @@ registerPack("ko", {
   "ironhub.link.agentUrlUnset": "이 배포에 공개 URL이 설정되어 있지 않습니다.",
   "ironhub.link.sharedKey": "공유 키",
   "ironhub.link.saveFailed": "공유 키를 저장하지 못했습니다.",
-  "ironhub.link.saveKey": "키 저장",
+  "ironhub.link.saveKey": "키 적용",
   "ironhub.link.clearKey": "키 삭제",
   "ironhub.link.clearFailed": "공유 키를 삭제하지 못했습니다.",
   "ironhub.link.keyTooShort": "공유 키는 32자 이상이어야 합니다.",

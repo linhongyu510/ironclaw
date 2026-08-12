@@ -879,7 +879,7 @@ registerPack("ja", {
   "ironhub.link.agentUrlUnset": "このデプロイには公開 URL が設定されていません。",
   "ironhub.link.sharedKey": "共有キー",
   "ironhub.link.saveFailed": "共有キーを保存できませんでした。",
-  "ironhub.link.saveKey": "キーを保存",
+  "ironhub.link.saveKey": "キーを適用",
   "ironhub.link.clearKey": "キーを削除",
   "ironhub.link.clearFailed": "共有キーを削除できませんでした。",
   "ironhub.link.keyTooShort": "共有キーは 32 文字以上です。",

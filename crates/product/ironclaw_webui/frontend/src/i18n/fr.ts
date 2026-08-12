@@ -880,7 +880,7 @@ registerPack("fr", {
   "ironhub.link.agentUrlUnset": "Aucune URL publique n'est configurée pour ce déploiement.",
   "ironhub.link.sharedKey": "Clé partagée",
   "ironhub.link.saveFailed": "La clé partagée n'a pas pu être enregistrée.",
-  "ironhub.link.saveKey": "Enregistrer la clé",
+  "ironhub.link.saveKey": "Appliquer la clé",
   "ironhub.link.clearKey": "Supprimer la clé",
   "ironhub.link.clearFailed": "La clé partagée n'a pas pu être supprimée.",
   "ironhub.link.keyTooShort": "Une clé partagée fait au moins 32 caractères.",

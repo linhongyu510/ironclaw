@@ -879,7 +879,7 @@ registerPack("uk", {
   "ironhub.link.agentUrlUnset": "Для цього розгортання не налаштовано публічну URL-адресу.",
   "ironhub.link.sharedKey": "Спільний ключ",
   "ironhub.link.saveFailed": "Не вдалося зберегти спільний ключ.",
-  "ironhub.link.saveKey": "Зберегти ключ",
+  "ironhub.link.saveKey": "Застосувати ключ",
   "ironhub.link.clearKey": "Видалити ключ",
   "ironhub.link.clearFailed": "Не вдалося видалити спільний ключ.",
   "ironhub.link.keyTooShort": "Спільний ключ має щонайменше 32 символи.",

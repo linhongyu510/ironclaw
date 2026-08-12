@@ -879,7 +879,7 @@ registerPack("de", {
   "ironhub.link.agentUrlUnset": "Für diese Installation ist keine öffentliche URL konfiguriert.",
   "ironhub.link.sharedKey": "Gemeinsamer Schlüssel",
   "ironhub.link.saveFailed": "Der gemeinsame Schlüssel konnte nicht gespeichert werden.",
-  "ironhub.link.saveKey": "Schlüssel speichern",
+  "ironhub.link.saveKey": "Schlüssel übernehmen",
   "ironhub.link.clearKey": "Schlüssel entfernen",
   "ironhub.link.clearFailed": "Der gemeinsame Schlüssel konnte nicht entfernt werden.",
   "ironhub.link.keyTooShort": "Ein gemeinsamer Schlüssel hat mindestens 32 Zeichen.",
