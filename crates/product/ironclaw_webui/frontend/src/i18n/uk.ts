@@ -879,6 +879,7 @@ registerPack("uk", {
   "ironhub.link.agentUrlUnset": "Для цього розгортання не налаштовано публічну URL-адресу.",
   "ironhub.link.sharedKey": "Спільний ключ",
   "ironhub.link.saveFailed": "Не вдалося зберегти спільний ключ.",
+  "ironhub.link.envOverride": "У цьому розгортанні задано IRONHUB_AGENT_SHARED_KEY. Ця змінна має пріоритет, і збережений тут ключ не використовуватиметься, доки її не буде видалено.",
   "ironhub.link.saveKey": "Застосувати ключ",
   "ironhub.link.clearKey": "Видалити ключ",
   "ironhub.link.clearFailed": "Не вдалося видалити спільний ключ.",

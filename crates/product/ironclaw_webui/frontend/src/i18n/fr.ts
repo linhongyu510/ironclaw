@@ -880,6 +880,7 @@ registerPack("fr", {
   "ironhub.link.agentUrlUnset": "Aucune URL publique n'est configurée pour ce déploiement.",
   "ironhub.link.sharedKey": "Clé partagée",
   "ironhub.link.saveFailed": "La clé partagée n'a pas pu être enregistrée.",
+  "ironhub.link.envOverride": "IRONHUB_AGENT_SHARED_KEY est définie sur ce déploiement. Elle est prioritaire, et une clé enregistrée ici restera inutilisée tant que cette variable ne sera pas supprimée.",
   "ironhub.link.saveKey": "Appliquer la clé",
   "ironhub.link.clearKey": "Supprimer la clé",
   "ironhub.link.clearFailed": "La clé partagée n'a pas pu être supprimée.",

@@ -879,6 +879,7 @@ registerPack("ko", {
   "ironhub.link.agentUrlUnset": "이 배포에 공개 URL이 설정되어 있지 않습니다.",
   "ironhub.link.sharedKey": "공유 키",
   "ironhub.link.saveFailed": "공유 키를 저장하지 못했습니다.",
+  "ironhub.link.envOverride": "이 배포에는 IRONHUB_AGENT_SHARED_KEY가 설정되어 있습니다. 이 변수가 우선하므로 여기에 저장한 키는 변수를 제거할 때까지 사용되지 않습니다.",
   "ironhub.link.saveKey": "키 적용",
   "ironhub.link.clearKey": "키 삭제",
   "ironhub.link.clearFailed": "공유 키를 삭제하지 못했습니다.",

@@ -879,6 +879,7 @@ registerPack("ar", {
   "ironhub.link.agentUrlUnset": "لا يوجد عنوان عام مُهيأ لهذا النشر.",
   "ironhub.link.sharedKey": "المفتاح المشترك",
   "ironhub.link.saveFailed": "تعذر حفظ المفتاح المشترك.",
+  "ironhub.link.envOverride": "المتغير IRONHUB_AGENT_SHARED_KEY مُعيَّن في هذا النشر. له الأسبقية، ويبقى المفتاح المحفوظ هنا غير مستخدم حتى تتم إزالة ذلك المتغير.",
   "ironhub.link.saveKey": "تطبيق المفتاح",
   "ironhub.link.clearKey": "إزالة المفتاح",
   "ironhub.link.clearFailed": "تعذر إزالة المفتاح المشترك.",

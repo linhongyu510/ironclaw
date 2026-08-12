@@ -1052,6 +1052,9 @@ pub struct RebornIronhubLinkResponse {
     pub register_url: Option<String>,
     pub key_stored: bool,
     pub key_active: bool,
+    /// `IRONHUB_AGENT_SHARED_KEY` is set, so a stored key is never consulted
+    /// and no restart will promote one.
+    pub env_override: bool,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.

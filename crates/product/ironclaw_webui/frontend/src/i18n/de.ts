@@ -879,6 +879,7 @@ registerPack("de", {
   "ironhub.link.agentUrlUnset": "Für diese Installation ist keine öffentliche URL konfiguriert.",
   "ironhub.link.sharedKey": "Gemeinsamer Schlüssel",
   "ironhub.link.saveFailed": "Der gemeinsame Schlüssel konnte nicht gespeichert werden.",
+  "ironhub.link.envOverride": "IRONHUB_AGENT_SHARED_KEY ist in dieser Bereitstellung gesetzt. Diese Variable hat Vorrang; ein hier gespeicherter Schlüssel bleibt ungenutzt, bis sie entfernt wird.",
   "ironhub.link.saveKey": "Schlüssel übernehmen",
   "ironhub.link.clearKey": "Schlüssel entfernen",
   "ironhub.link.clearFailed": "Der gemeinsame Schlüssel konnte nicht entfernt werden.",

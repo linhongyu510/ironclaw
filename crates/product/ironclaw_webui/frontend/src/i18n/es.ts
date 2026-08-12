@@ -879,6 +879,7 @@ registerPack("es", {
   "ironhub.link.agentUrlUnset": "No hay una URL pública configurada para esta instalación.",
   "ironhub.link.sharedKey": "Clave compartida",
   "ironhub.link.saveFailed": "No se pudo guardar la clave compartida.",
+  "ironhub.link.envOverride": "IRONHUB_AGENT_SHARED_KEY está definida en esta implementación. Tiene prioridad, y una clave guardada aquí no se usará hasta que se elimine esa variable.",
   "ironhub.link.saveKey": "Aplicar clave",
   "ironhub.link.clearKey": "Eliminar clave",
   "ironhub.link.clearFailed": "No se pudo eliminar la clave compartida.",

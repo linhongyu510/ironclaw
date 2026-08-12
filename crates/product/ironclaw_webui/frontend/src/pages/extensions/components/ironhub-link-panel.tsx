@@ -51,7 +51,7 @@ export function IronhubLinkPanel() {
   }
 
   const status = link.data;
-  const pendingRestart = status.key_stored && !status.key_active;
+  const pendingRestart = status.key_stored && !status.key_active && !status.env_override;
   const trimmedKey = key.trim();
   const tooShort = trimmedKey.length > 0 && trimmedKey.length < MIN_SHARED_KEY_LENGTH;
 
@@ -77,6 +77,12 @@ export function IronhubLinkPanel() {
                 {t("ironhub.link.agentUrlUnset")}
               </p>)}
         </div>
+
+        {status.env_override
+          ? (<p className="text-xs text-[var(--v2-text-muted)]">
+              {t("ironhub.link.envOverride")}
+            </p>)
+          : null}
 
         <div className="space-y-2">
           <label

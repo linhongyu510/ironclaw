@@ -13,6 +13,7 @@ use super::shared_key_store::IronhubSharedKeyStore;
 pub struct RebornIronhubLinkAdminService {
     register_url: Option<String>,
     booted_with_key: bool,
+    env_override: bool,
     stored_since_boot: AtomicBool,
     keys: IronhubSharedKeyStore,
 }
@@ -21,11 +22,13 @@ impl RebornIronhubLinkAdminService {
     pub fn new(
         register_url: Option<String>,
         booted_with_key: bool,
+        env_override: bool,
         secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         Self {
             register_url,
             booted_with_key,
+            env_override,
             stored_since_boot: AtomicBool::new(false),
             keys: IronhubSharedKeyStore::new(secret_store),
         }
@@ -42,9 +45,11 @@ impl RebornIronhubLinkAdminService {
         Ok(RebornIronhubLinkResponse {
             register_url: self.register_url.clone(),
             key_stored,
-            // The gateway validates with the key it booted with, so a key
-            // stored since then is not in use until the next restart.
-            key_active: self.booted_with_key && !self.stored_since_boot.load(Ordering::Relaxed),
+            // A key stored since boot is not in use until a restart, and under
+            // an env override no restart ever promotes it.
+            key_active: self.booted_with_key
+                && (self.env_override || !self.stored_since_boot.load(Ordering::Relaxed)),
+            env_override: self.env_override,
         })
     }
 }
@@ -120,10 +125,19 @@ mod tests {
         register_url: Option<&str>,
         booted_with_key: bool,
     ) -> (RebornIronhubLinkAdminService, Arc<dyn SecretStorePort>) {
+        service_with_env_override(register_url, booted_with_key, false)
+    }
+
+    fn service_with_env_override(
+        register_url: Option<&str>,
+        booted_with_key: bool,
+        env_override: bool,
+    ) -> (RebornIronhubLinkAdminService, Arc<dyn SecretStorePort>) {
         let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let service = RebornIronhubLinkAdminService::new(
             register_url.map(str::to_string),
             booted_with_key,
+            env_override,
             Arc::clone(&store),
         );
         (service, store)
@@ -196,6 +210,24 @@ mod tests {
         assert!(
             !status.key_active,
             "the gateway still validates with its boot key until the next restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_env_override_never_promises_a_restart_that_would_promote_a_stored_key() {
+        let (service, _store) = service_with_env_override(Some(URL), true, true);
+        assert!(service.status().await.expect("status").env_override);
+
+        let status = service
+            .set_shared_key(caller(), SecretString::from(KEY))
+            .await
+            .expect("accepted");
+
+        assert!(status.key_stored);
+        assert!(status.env_override);
+        assert!(
+            status.key_active,
+            "the env key stays live; no restart promotes the stored one"
         );
     }
 

@@ -879,6 +879,7 @@ registerPack("hi", {
   "ironhub.link.agentUrlUnset": "इस परिनियोजन के लिए कोई सार्वजनिक URL कॉन्फ़िगर नहीं है।",
   "ironhub.link.sharedKey": "साझा कुंजी",
   "ironhub.link.saveFailed": "साझा कुंजी सहेजी नहीं जा सकी।",
+  "ironhub.link.envOverride": "इस परिनियोजन पर IRONHUB_AGENT_SHARED_KEY सेट है। इसे प्राथमिकता मिलती है, और यहाँ सहेजी गई कुंजी तब तक अप्रयुक्त रहती है जब तक वह वेरिएबल हटाया न जाए।",
   "ironhub.link.saveKey": "कुंजी लागू करें",
   "ironhub.link.clearKey": "कुंजी हटाएं",
   "ironhub.link.clearFailed": "साझा कुंजी हटाई नहीं जा सकी।",

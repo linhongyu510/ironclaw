@@ -4288,9 +4288,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
     }
 
     let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
+    let ironhub_env_override = ironhub_agent_shared_key.is_some();
     let ironhub_agent_shared_key = match ironhub_agent_shared_key {
         Some(shared_key) => Some(shared_key),
-        None => resolve_stored_ironhub_shared_key(&services.secret_store).await,
+        None => resolve_stored_ironhub_shared_key(&services.secret_store).await?,
     };
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
@@ -4323,6 +4324,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironclaw_extension_manager::ironhub::RebornIronhubLinkAdminService::new(
             crate::ironhub_link_serve::ironhub_register_url(ironhub_agent_base_url),
             ironhub_link_service.is_some(),
+            ironhub_env_override,
             Arc::clone(&services.secret_store),
         ),
     );
@@ -4449,29 +4451,30 @@ pub(crate) async fn build_runtime_with_resource_governor(
     Ok((runtime, resource_governor))
 }
 
-/// Reads a WebUI-stored key from the store this deployment mounted. Missing,
-/// unreadable, or invalid leaves the gateway off rather than failing boot.
+/// Reads a WebUI-stored key from the store this deployment mounted. Only a
+/// genuinely absent key yields `None`; an unreadable store or an unusable
+/// stored key fails the boot rather than presenting as "no key configured".
 async fn resolve_stored_ironhub_shared_key(
     secret_store: &Arc<dyn ironclaw_secrets::SecretStorePort>,
-) -> Option<ironclaw_extension_manager::ironhub::IronhubSharedKey> {
+) -> Result<Option<ironclaw_extension_manager::ironhub::IronhubSharedKey>, RebornRuntimeError> {
     let store =
         ironclaw_extension_manager::ironhub::IronhubSharedKeyStore::new(Arc::clone(secret_store));
-    let stored = match store.read().await {
-        Ok(stored) => stored?,
-        Err(error) => {
-            tracing::warn!(%error, "could not read the stored IronHub shared key");
-            return None;
-        }
+    let Some(stored) = store
+        .read()
+        .await
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("could not read the stored IronHub shared key: {error}"),
+        })?
+    else {
+        return Ok(None);
     };
-    match ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
+    ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
         secrecy::ExposeSecret::expose_secret(&stored).trim(),
-    ) {
-        Ok(shared_key) => Some(shared_key),
-        Err(error) => {
-            tracing::warn!(%error, "the stored IronHub shared key is invalid");
-            None
-        }
-    }
+    )
+    .map(Some)
+    .map_err(|error| RebornRuntimeError::MalformedConfig {
+        reason: format!("the stored IronHub shared key is unusable: {error}"),
+    })
 }
 
 /// Thin wrapper over

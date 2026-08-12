@@ -120,6 +120,28 @@ test("an active key shows no restart notice", () => {
   assert.ok(text.some((entry) => entry.includes("ironhub.link.stateActive")));
 });
 
+test("an env override explains itself and promises no restart", () => {
+  const rendered = renderPanel({
+    isPending: false,
+    error: null,
+    data: {
+      register_url: "https://agent.example.com/api/ironhub/register",
+      key_stored: true,
+      key_active: true,
+      env_override: true,
+    },
+  });
+  const text = renderedText(rendered);
+  assert.ok(
+    text.some((entry) => entry.includes("ironhub.link.envOverride")),
+    "the operator must be told the environment variable wins",
+  );
+  assert.ok(
+    !text.some((entry) => entry.includes("settings.restartRequired")),
+    "no restart would promote the stored key, so none may be promised",
+  );
+});
+
 test("the remove affordance appears only when a key is stored", () => {
   const stored = renderedText(
     renderPanel({

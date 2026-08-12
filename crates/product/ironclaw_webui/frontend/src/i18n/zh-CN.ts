@@ -878,6 +878,7 @@ registerPack("zh-CN", {
   "ironhub.link.agentUrlUnset": "此部署未配置公开 URL。",
   "ironhub.link.sharedKey": "共享密钥",
   "ironhub.link.saveFailed": "共享密钥保存失败。",
+  "ironhub.link.envOverride": "此部署已设置 IRONHUB_AGENT_SHARED_KEY。该环境变量优先生效，在其被移除之前，此处保存的密钥不会被使用。",
   "ironhub.link.saveKey": "应用密钥",
   "ironhub.link.clearKey": "删除密钥",
   "ironhub.link.clearFailed": "共享密钥删除失败。",

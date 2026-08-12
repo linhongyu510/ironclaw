@@ -968,6 +968,7 @@ registerPack("en", {
   "ironhub.link.agentUrlUnset": "No public URL is configured for this deployment.",
   "ironhub.link.sharedKey": "Shared key",
   "ironhub.link.saveFailed": "The shared key could not be saved.",
+  "ironhub.link.envOverride": "IRONHUB_AGENT_SHARED_KEY is set on this deployment. It takes precedence, and a key saved here stays unused until that variable is removed.",
   "ironhub.link.saveKey": "Apply key",
   "ironhub.link.clearKey": "Remove key",
   "ironhub.link.clearFailed": "The shared key could not be removed.",

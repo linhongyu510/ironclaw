@@ -879,6 +879,7 @@ registerPack("ja", {
   "ironhub.link.agentUrlUnset": "このデプロイには公開 URL が設定されていません。",
   "ironhub.link.sharedKey": "共有キー",
   "ironhub.link.saveFailed": "共有キーを保存できませんでした。",
+  "ironhub.link.envOverride": "このデプロイでは IRONHUB_AGENT_SHARED_KEY が設定されています。この環境変数が優先されるため、ここで保存したキーは変数を削除するまで使用されません。",
   "ironhub.link.saveKey": "キーを適用",
   "ironhub.link.clearKey": "キーを削除",
   "ironhub.link.clearFailed": "共有キーを削除できませんでした。",
