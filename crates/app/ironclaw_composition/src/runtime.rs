@@ -4288,6 +4288,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
     }
 
     let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
+    let ironhub_agent_shared_key = match ironhub_agent_shared_key {
+        Some(shared_key) => Some(shared_key),
+        None => resolve_stored_ironhub_shared_key(&services.secret_store).await,
+    };
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
             let egress = services.runtime_http_egress.clone().ok_or_else(|| {
@@ -4443,6 +4447,31 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let _ = runtime.channel_facade_slot.set(channel_connection);
     }
     Ok((runtime, resource_governor))
+}
+
+/// Reads a WebUI-stored key from the store this deployment mounted. Missing,
+/// unreadable, or invalid leaves the gateway off rather than failing boot.
+async fn resolve_stored_ironhub_shared_key(
+    secret_store: &Arc<dyn ironclaw_secrets::SecretStorePort>,
+) -> Option<ironclaw_extension_manager::ironhub::IronhubSharedKey> {
+    let store =
+        ironclaw_extension_manager::ironhub::IronhubSharedKeyStore::new(Arc::clone(secret_store));
+    let stored = match store.read().await {
+        Ok(stored) => stored?,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the stored IronHub shared key");
+            return None;
+        }
+    };
+    match ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
+        secrecy::ExposeSecret::expose_secret(&stored).trim(),
+    ) {
+        Ok(shared_key) => Some(shared_key),
+        Err(error) => {
+            tracing::warn!(%error, "the stored IronHub shared key is invalid");
+            None
+        }
+    }
 }
 
 /// Thin wrapper over

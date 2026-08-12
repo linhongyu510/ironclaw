@@ -2450,7 +2450,8 @@ where
             .map_err(ironhub_link::map_ironhub_link_error)
     }
 
-    pub async fn ironhub_link(&self) -> Result<RebornIronhubLinkResponse, ProductSurfaceError> {
+    /// Reached only through the view dispatch, which authorizes first.
+    async fn ironhub_link(&self) -> Result<RebornIronhubLinkResponse, ProductSurfaceError> {
         self.ironhub_link_admin
             .status()
             .await

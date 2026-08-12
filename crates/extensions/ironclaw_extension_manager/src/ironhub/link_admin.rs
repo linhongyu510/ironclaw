@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ironclaw_product_contracts::ironhub::{IronhubLinkAdminService, IronhubLinkError};
 use ironclaw_product_contracts::product_wire::RebornIronhubLinkResponse;
@@ -11,19 +12,21 @@ use super::shared_key_store::IronhubSharedKeyStore;
 
 pub struct RebornIronhubLinkAdminService {
     register_url: Option<String>,
-    key_active: bool,
+    booted_with_key: bool,
+    stored_since_boot: AtomicBool,
     keys: IronhubSharedKeyStore,
 }
 
 impl RebornIronhubLinkAdminService {
     pub fn new(
         register_url: Option<String>,
-        key_active: bool,
+        booted_with_key: bool,
         secret_store: Arc<dyn SecretStorePort>,
     ) -> Self {
         Self {
             register_url,
-            key_active,
+            booted_with_key,
+            stored_since_boot: AtomicBool::new(false),
             keys: IronhubSharedKeyStore::new(secret_store),
         }
     }
@@ -39,7 +42,9 @@ impl RebornIronhubLinkAdminService {
         Ok(RebornIronhubLinkResponse {
             register_url: self.register_url.clone(),
             key_stored,
-            key_active: self.key_active,
+            // The gateway validates with the key it booted with, so a key
+            // stored since then is not in use until the next restart.
+            key_active: self.booted_with_key && !self.stored_since_boot.load(Ordering::Relaxed),
         })
     }
 }
@@ -69,6 +74,12 @@ impl IronhubLinkAdminService for RebornIronhubLinkAdminService {
             );
             return Err(IronhubLinkError::Unavailable);
         }
+        self.stored_since_boot.store(true, Ordering::Relaxed);
+        tracing::debug!(
+            tenant = %caller.tenant_id,
+            user = %caller.user_id,
+            "IronHub shared key stored; the gateway uses it after the next restart"
+        );
         self.snapshot().await
     }
 
@@ -84,6 +95,13 @@ impl IronhubLinkAdminService for RebornIronhubLinkAdminService {
             );
             return Err(IronhubLinkError::Unavailable);
         }
+        // Nothing is stored now, so no stored key differs from the boot key.
+        self.stored_since_boot.store(false, Ordering::Relaxed);
+        tracing::debug!(
+            tenant = %caller.tenant_id,
+            user = %caller.user_id,
+            "IronHub shared key cleared; a running gateway keeps its boot key"
+        );
         self.snapshot().await
     }
 }
@@ -100,12 +118,12 @@ mod tests {
 
     fn service(
         register_url: Option<&str>,
-        key_active: bool,
+        booted_with_key: bool,
     ) -> (RebornIronhubLinkAdminService, Arc<dyn SecretStorePort>) {
         let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
         let service = RebornIronhubLinkAdminService::new(
             register_url.map(str::to_string),
-            key_active,
+            booted_with_key,
             Arc::clone(&store),
         );
         (service, store)
@@ -165,6 +183,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_the_key_of_a_running_gateway_reads_as_pending_restart() {
+        let (service, _store) = service(Some(URL), true);
+        assert!(service.status().await.expect("status").key_active);
+
+        let status = service
+            .set_shared_key(caller(), SecretString::from(KEY))
+            .await
+            .expect("accepted");
+
+        assert!(status.key_stored);
+        assert!(
+            !status.key_active,
+            "the gateway still validates with its boot key until the next restart"
+        );
+    }
+
+    #[tokio::test]
     async fn clearing_forgets_the_stored_key() {
         let (service, _store) = service(Some(URL), false);
         service
@@ -174,6 +209,23 @@ mod tests {
 
         let status = service.clear_shared_key(caller()).await.expect("cleared");
         assert!(!status.key_stored);
+    }
+
+    #[tokio::test]
+    async fn clearing_a_replacement_restores_the_running_gateway_reading() {
+        let (service, _store) = service(Some(URL), true);
+        service
+            .set_shared_key(caller(), SecretString::from(KEY))
+            .await
+            .expect("accepted");
+        assert!(!service.status().await.expect("status").key_active);
+
+        let status = service.clear_shared_key(caller()).await.expect("cleared");
+        assert!(!status.key_stored);
+        assert!(
+            status.key_active,
+            "nothing is stored now, so the gateway's boot key is the only key in play"
+        );
     }
 
     #[tokio::test]
