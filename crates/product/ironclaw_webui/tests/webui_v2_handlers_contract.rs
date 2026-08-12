@@ -7311,6 +7311,7 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
                     id: "message-1".to_string(),
                     run_id: None,
                     body: "projection body".to_string(),
+                    finalized: false,
                 }],
             )
             .expect("projection state"),

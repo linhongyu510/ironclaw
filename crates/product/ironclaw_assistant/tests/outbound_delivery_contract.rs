@@ -748,6 +748,15 @@ fn coordinated_final_reply<'a>(
 }
 
 fn bind_final_reply_projection(coordinator: &DeliveryCoordinator, run_id: TurnRunId, cursor: &str) {
+    bind_text_and_completed_projection(coordinator, run_id, cursor, true);
+}
+
+fn bind_text_and_completed_projection(
+    coordinator: &DeliveryCoordinator,
+    run_id: TurnRunId,
+    cursor: &str,
+    finalized: bool,
+) {
     let stream = Arc::new(FakeProjectionStream::new());
     stream.push(ProjectionEnvelope::new(
         ironclaw_host_api::product_adapter::ProductAdapterId::new("webui_v2")
@@ -763,6 +772,7 @@ fn bind_final_reply_projection(coordinator: &DeliveryCoordinator, run_id: TurnRu
                         id: "durable-final-reply".to_string(),
                         run_id: Some(run_id),
                         body: "final reply".to_string(),
+                        finalized,
                     },
                     ProductProjectionItem::RunStatus {
                         run_id,
@@ -1126,6 +1136,58 @@ async fn streaming_channel_rejects_legacy_direct_final_reply_as_durable_evidence
     let request = coordinated_final_reply(scope, "vendorx", &thread_scope);
     let run_id = request.delivery.turn_run_id.expect("run id");
     bind_legacy_direct_final_reply_projection(&coordinator, run_id, "cursor:volatile-final");
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("missing durable proof is a classified outcome");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
+async fn streaming_channel_rejects_live_text_even_when_completed_is_co_batched() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&store) as Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(&adapter),
+            unavailable: false,
+            reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Stream),
+            requires_enrollment: false,
+        }),
+        Arc::new(FixedReplyContext::new(Vec::new())) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+    let thread_scope = project_thread_scope();
+    let request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    let run_id = request.delivery.turn_run_id.expect("run id");
+    bind_text_and_completed_projection(&coordinator, run_id, "cursor:live-text", false);
 
     let outcome = coordinator
         .deliver(

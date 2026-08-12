@@ -123,6 +123,7 @@ fn stream_delivery_cursor(
                     match item {
                         ProductProjectionItem::Text {
                             run_id: Some(item_run_id),
+                            finalized: true,
                             ..
                         } if *item_run_id == run_id => saw_finalized_text = true,
                         ProductProjectionItem::RunStatus {

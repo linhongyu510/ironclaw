@@ -1019,7 +1019,7 @@ pub(super) async fn build_backend_production(
     let initialized_channel_bootstraps =
         crate::channel_initialization::initialize_first_party_channels(
             &channel_extension_bindings,
-            Arc::clone(&secret_store),
+            secret_store.as_ref(),
             channel_egress_scope.clone(),
         )
         .await

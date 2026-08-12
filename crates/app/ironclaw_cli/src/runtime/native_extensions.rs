@@ -123,7 +123,7 @@ impl WebAppChannelInitializer {
 impl FirstPartyChannelInitializer for WebAppChannelInitializer {
     async fn initialize(
         &self,
-        context: &FirstPartyChannelInitializationContext,
+        context: &FirstPartyChannelInitializationContext<'_>,
     ) -> Result<Option<serde_json::Value>, FirstPartyChannelInitializationError> {
         let handle = ironclaw_host_api::ids::SecretHandle::new(
             ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE,

@@ -639,7 +639,7 @@ test("NotificationChannelsPanel does not hardcode a catalog row's badge to Ready
 function sessionChannelTarget() {
   return {
     target: {
-      target_id: "web-push",
+      target_id: "browser-registration-1",
       display_name: "Web app",
       description: "Browser push notifications to your enrolled devices",
       channel: "session-channel",
@@ -739,7 +739,7 @@ test("NotificationChannelsPanel toggles the session-channel target into the full
   assert.equal(saved.length, 1);
   assert.deepEqual(
     [...saved[0]],
-    ["web-push"],
+    ["browser-registration-1"],
     "Save posts the persisted catalog target id, not the session extension id",
   );
 });

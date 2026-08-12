@@ -387,6 +387,7 @@ async fn finalized_reply_projection_item(
         id: message.message_id.to_string(),
         run_id: Some(event.run_id),
         body,
+        finalized: true,
     }))
 }
 

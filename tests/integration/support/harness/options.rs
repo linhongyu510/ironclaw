@@ -421,7 +421,7 @@ struct TestWebAppChannelInitializer {
 impl ironclaw_composition::FirstPartyChannelInitializer for TestWebAppChannelInitializer {
     async fn initialize(
         &self,
-        context: &ironclaw_composition::FirstPartyChannelInitializationContext,
+        context: &ironclaw_composition::FirstPartyChannelInitializationContext<'_>,
     ) -> Result<Option<serde_json::Value>, ironclaw_composition::FirstPartyChannelInitializationError>
     {
         let handle = SecretHandle::new(ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE).map_err(

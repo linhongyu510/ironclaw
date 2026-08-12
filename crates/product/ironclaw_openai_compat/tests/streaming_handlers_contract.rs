@@ -811,6 +811,7 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
                     id: format!("text-{cursor}"),
                     run_id: None,
                     body: text.to_string(),
+                    finalized: false,
                 }],
             )
             .expect("projection state"),

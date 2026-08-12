@@ -255,13 +255,13 @@ impl PolicyEnforcedChannelEgress {
 
 /// URL structure authorized by a channel egress declaration.
 ///
-/// Declarations grant a scheme, host, method, and path/path-prefix only. Query,
-/// fragment, userinfo, and explicit-port components are therefore never
-/// implicitly authorized. Percent-decoded path segments must also remain one
+/// Declarations grant a scheme, host, method, and path/path-prefix. Query
+/// parameters are request data on that already-authorized endpoint; fragments,
+/// userinfo, and explicit ports can change request authority or interpretation
+/// and remain forbidden. Percent-decoded path segments must also remain one
 /// segment and cannot become traversal instructions at a downstream parser.
 fn channel_url_shape_is_safe(url: &url::Url) -> bool {
-    url.query().is_none()
-        && url.fragment().is_none()
+    url.fragment().is_none()
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
@@ -699,13 +699,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn url_components_outside_the_declared_path_are_rejected_before_transport() {
+    async fn query_data_is_allowed_but_authority_changing_url_components_are_rejected() {
         let mut declared = declared_vendor();
         declared[0].path_prefixes = vec!["/files/".to_string()];
         let (egress, transport) = egress_over(declared);
 
+        egress
+            .send(post(
+                "https://vendor.example/files/report.pdf?download=1&file=F123",
+            ))
+            .await
+            .expect("query data on an authorized endpoint is allowed");
+
         for url in [
-            "https://vendor.example/files/report.pdf?download=1",
             "https://vendor.example/files/report.pdf#fragment",
             "https://user@vendor.example/files/report.pdf",
             "https://vendor.example:8443/files/report.pdf",
@@ -722,7 +728,7 @@ mod tests {
             );
         }
 
-        assert!(transport.approved.lock().unwrap().is_empty());
+        assert_eq!(transport.approved.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

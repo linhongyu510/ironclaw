@@ -823,7 +823,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // transport-consumed descriptors; validation, storage, and request
         // enforcement stay in owning crates. The merged count was measured by
         // this gate after resolving the two disjoint contract changes.
-        ("ironclaw_product_contracts", 16_135),
+        // 16_135 -> 16_155 (2026-08-12, channel final-reply evidence): one
+        // default-false `finalized` bit on projection text distinguishes a
+        // durable transcript row from volatile live text. The contract only
+        // names that fact; projection, delivery, and WebUI behavior remain in
+        // their owning product crates. Count read from this gate.
+        ("ironclaw_product_contracts", 16_155),
         ("ironclaw_prompt_envelope", 832),
     ];
 

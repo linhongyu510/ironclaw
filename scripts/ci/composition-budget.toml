@@ -243,6 +243,12 @@ loc_observed_date = "2026-08-11"
 # `DeliveryRegistrationService` (filesystem production + fakes) and
 # `DeliveryClientBootstrap` (slot-backed production + rejecting default).
 # Observed here: 837; 822 + 15 tolerance = 837, exactly, with no hidden slack.
-arc_dyn_ceiling = 822
+# 822 -> 823 (2026-08-12, channel-owned startup initialization): one generic
+# binding-held `FirstPartyChannelInitializer` seam lets binary-linked packages
+# initialize their own secret material without extension-specific composition
+# branches. The initialization context borrows the existing secret-store port,
+# so this records only the real multi-implementation initializer boundary.
+# Observed after splitting its inline tests out of production mass: 838.
+arc_dyn_ceiling = 823
 arc_dyn_tolerance = 15
-arc_dyn_observed = 837
+arc_dyn_observed = 838
