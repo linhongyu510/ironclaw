@@ -53,12 +53,11 @@ async function pushRegistration() {
   }
 }
 
-/** Lowercase hex SHA-256 of the endpoint URL string — the correlation key
- * the channel's setup-status `detail` exposes as `endpoint_digest`, so the
- * browser can tell whether ITS subscription belongs to the signed-in account
- * without the backend ever echoing full endpoint capability URLs. Returns
- * null when WebCrypto is unavailable (push itself requires a secure context,
- * so this is effectively test-environment-only). */
+/** Lowercase hex SHA-256 of the endpoint URL string. Used only as the local
+ * storage key for this origin's endpoint-to-registration association; it
+ * never crosses the product boundary. Returns null when WebCrypto is
+ * unavailable (push itself requires a secure context, so this is effectively
+ * test-environment-only). */
 export async function endpointDigestHex(endpoint) {
   if (typeof endpoint !== "string" || !endpoint) return null;
   const subtle = globalThis.crypto && globalThis.crypto.subtle;
@@ -74,6 +73,80 @@ export async function endpointDigestHex(endpoint) {
   }
 }
 
+const DEVICE_REGISTRATION_IDS_KEY = "ironclaw.device-push.registration-ids.v1";
+
+function readRegistrationIndex() {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage || typeof storage.getItem !== "function") return {};
+    const raw = storage.getItem(DEVICE_REGISTRATION_IDS_KEY);
+    if (!raw || raw.length > 64 * 1024) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeRegistrationIndex(index) {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage || typeof storage.setItem !== "function") return;
+    storage.setItem(DEVICE_REGISTRATION_IDS_KEY, JSON.stringify(index));
+  } catch (_) {
+    // Correlation is a presentation safeguard, not enrollment authority. A
+    // blocked/full localStorage degrades to enrolled-unverified after reload.
+  }
+}
+
+async function registrationAssociationKey(extensionId, endpoint) {
+  if (typeof extensionId !== "string" || !extensionId) return null;
+  const digest = await endpointDigestHex(endpoint);
+  return digest ? `${extensionId}:${digest}` : null;
+}
+
+async function registrationIdsForEndpoint(extensionId, endpoint) {
+  const key = await registrationAssociationKey(extensionId, endpoint);
+  if (!key) return [];
+  const values = readRegistrationIndex()[key];
+  if (!Array.isArray(values)) return [];
+  return values.filter((value) => typeof value === "string" && value).slice(0, 100);
+}
+
+async function rememberRegistrationId(extensionId, endpoint, registrationId) {
+  if (typeof registrationId !== "string" || !registrationId) return;
+  const key = await registrationAssociationKey(extensionId, endpoint);
+  if (!key) return;
+  const index = readRegistrationIndex();
+  const current = Array.isArray(index[key]) ? index[key] : [];
+  index[key] = [
+    ...new Set([
+      ...current.filter((value) => typeof value === "string" && value),
+      registrationId,
+    ]),
+  ].slice(-100);
+  writeRegistrationIndex(index);
+}
+
+async function forgetRegistrationIds(extensionId, endpoint, registrationIds) {
+  const key = await registrationAssociationKey(extensionId, endpoint);
+  if (!key || !Array.isArray(registrationIds)) return [];
+  const index = readRegistrationIndex();
+  const removed = new Set(
+    registrationIds.filter((value) => typeof value === "string" && value),
+  );
+  const remaining = (Array.isArray(index[key]) ? index[key] : []).filter(
+    (value) => typeof value === "string" && value && !removed.has(value),
+  );
+  if (remaining.length > 0) {
+    index[key] = remaining;
+  } else {
+    delete index[key];
+  }
+  writeRegistrationIndex(index);
+  return remaining;
+}
+
 /**
  * The current browser's push state:
  *   { state: "unsupported" }
@@ -82,17 +155,18 @@ export async function endpointDigestHex(endpoint) {
  *   { state: "enrolled", endpoint, accountMatch }
  *
  * `accountMatch` correlates the browser-global subscription with the
- * SIGNED-IN account's enrollment set (`accountEndpointDigests`, the
- * `endpoint_digest` values from the setup-status `detail`):
+ * SIGNED-IN account's enrollment set (`accountRegistrationIds`, the opaque
+ * host ids from the setup-status `detail`):
  *   true  — this account holds a record for this browser's subscription;
  *   false — a subscription exists but belongs to no record of this account
  *           (typically another account enrolled in this browser profile);
- *   null  — correlation unavailable (no digest list supplied, or WebCrypto
- *           missing).
- * Callers must only offer a local unsubscribe when `accountMatch === true`;
- * anything else risks severing another account's enrollment.
+ *   null  — the account registration-id list was unavailable.
+ * Callers offer account-scoped disable only when `accountMatch === true`.
  */
-export async function getDevicePushState({ accountEndpointDigests = null } = {}) {
+export async function getDevicePushState({
+  extensionId,
+  accountRegistrationIds = null,
+} = {}) {
   if (!pushSupported()) return { state: "unsupported" };
   if (Notification.permission === "denied") return { state: "permission-denied" };
   try {
@@ -102,16 +176,34 @@ export async function getDevicePushState({ accountEndpointDigests = null } = {})
     if (!subscription || !subscription.endpoint) {
       return { state: "not-enrolled" };
     }
-    let accountMatch = null;
-    if (Array.isArray(accountEndpointDigests)) {
-      const digest = await endpointDigestHex(subscription.endpoint);
-      if (digest) {
-        accountMatch = accountEndpointDigests.some(
-          (candidate) => typeof candidate === "string" && candidate.toLowerCase() === digest,
-        );
+    if (Array.isArray(accountRegistrationIds)) {
+      const knownRegistrationIds = await registrationIdsForEndpoint(
+        extensionId,
+        subscription.endpoint,
+      );
+      const accountIds = new Set(
+        accountRegistrationIds.filter(
+          (candidate) => typeof candidate === "string" && candidate,
+        ),
+      );
+      if (knownRegistrationIds.some((registrationId) => accountIds.has(registrationId))) {
+        return { state: "enrolled", endpoint: subscription.endpoint, accountMatch: true };
       }
+      if (knownRegistrationIds.length > 0) {
+        return { state: "enrolled", endpoint: subscription.endpoint, accountMatch: false };
+      }
+      if (accountIds.size === 0) {
+        // A physical PushSubscription may outlive all server registrations.
+        // It is reusable, but this account is definitively not enrolled.
+        return { state: "not-enrolled" };
+      }
+      // The server knows this account has registrations, but this browser no
+      // longer has the local opaque-id association (for example after site
+      // data was cleared). Re-enrollment safely reuses the subscription and
+      // restores correlation without severing any other account.
+      return { state: "enrolled", endpoint: subscription.endpoint, accountMatch: false };
     }
-    return { state: "enrolled", endpoint: subscription.endpoint, accountMatch };
+    return { state: "enrolled", endpoint: subscription.endpoint, accountMatch: null };
   } catch (_) {
     return { state: "not-enrolled" };
   }
@@ -149,7 +241,7 @@ function subscriptionKeys(subscription) {
  * subscription enrolled by a different account: the existing subscription is
  * reused as-is and registered under the current caller — never unsubscribed,
  * so the other account's enrollment is left intact. */
-export async function enrollThisBrowser({ vapidPublicKey } = {}) {
+export async function enrollThisBrowser({ extensionId, vapidPublicKey } = {}) {
   if (!vapidPublicKey) {
     throw new Error("vapidPublicKey is required");
   }
@@ -172,14 +264,20 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
     createdSubscription = true;
   }
   try {
-    await enableNotificationSetup({
-      extensionId: getSessionChannelExtensionId(),
+    const resolvedExtensionId = extensionId || getSessionChannelExtensionId();
+    const response = await enableNotificationSetup({
+      extensionId: resolvedExtensionId,
       payload: {
         endpoint: subscription.endpoint,
         keys: subscriptionKeys(subscription),
         user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
       },
     });
+    await rememberRegistrationId(
+      resolvedExtensionId,
+      subscription.endpoint,
+      response?.detail?.active_registration_id,
+    );
   } catch (error) {
     // Evidence rule: the browser must never report "enrolled" without a
     // server record. Roll back a subscription THIS call created; a
@@ -196,30 +294,31 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
   return { state: "enrolled", endpoint: subscription.endpoint, accountMatch: true };
 }
 
-/** Unsubscribe this browser locally and remove it from the backend.
+/** Remove this account's registration for this browser from the backend.
  * Returns the resulting browser state.
  *
- * Only call this when the subscription is verified to belong to the current
- * account (`accountMatch === true` from [`getDevicePushState`]): the
- * push subscription is browser-global, so unsubscribing it on behalf of the
- * wrong account would silently break the owning account's notifications. */
-export async function unenrollThisBrowser() {
+ * The physical PushSubscription is deliberately retained: multiple signed-in
+ * accounts may register the same browser-global subscription, so locally
+ * unsubscribing for one account could silently break another. A later enable
+ * reuses it. */
+export async function unenrollThisBrowser({ extensionId, accountRegistrationIds = [] } = {}) {
   if (!pushSupported()) return { state: "unsupported" };
   const registration = await pushRegistration();
   if (!registration) return { state: "unsupported" };
   const subscription = await registration.pushManager.getSubscription();
   if (!subscription) return { state: "not-enrolled" };
   const endpoint = subscription.endpoint;
-  await subscription.unsubscribe();
-  // Backend removal is best-effort: the dead subscription is also pruned
-  // server-side on the next 404/410 push response.
-  try {
-    await disableNotificationSetup({
-      extensionId: getSessionChannelExtensionId(),
-      payload: { endpoint },
-    });
-  } catch (error) {
-    console.warn("device push backend unsubscribe failed", error);
-  }
-  return { state: "not-enrolled" };
+  const resolvedExtensionId = extensionId || getSessionChannelExtensionId();
+  await disableNotificationSetup({
+    extensionId: resolvedExtensionId,
+    payload: { endpoint },
+  });
+  const remaining = await forgetRegistrationIds(
+    resolvedExtensionId,
+    endpoint,
+    accountRegistrationIds,
+  );
+  return remaining.length > 0
+    ? { state: "enrolled", endpoint, accountMatch: false }
+    : { state: "not-enrolled" };
 }

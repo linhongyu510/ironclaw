@@ -581,11 +581,14 @@ fn collect_attachments(
         }
     }
     if let Some(doc) = message.document.as_ref() {
+        let mime_type = doc
+            .mime_type
+            .as_deref()
+            .map(normalize_telegram_document_mime)
+            .unwrap_or("application/octet-stream");
         out.push(make_attachment(
             &doc.file_id,
-            doc.mime_type
-                .as_deref()
-                .unwrap_or("application/octet-stream"),
+            mime_type,
             doc.file_name.clone(),
             doc.file_size,
             ProductAttachmentKind::Document,
@@ -628,6 +631,16 @@ fn collect_attachments(
         )?);
     }
     Ok(out)
+}
+
+/// Translate Telegram-specific MIME spellings into the canonical product
+/// attachment vocabulary before the descriptor crosses the adapter boundary.
+fn normalize_telegram_document_mime(mime_type: &str) -> &str {
+    if mime_type.eq_ignore_ascii_case("text/x-web-markdown") {
+        "text/markdown"
+    } else {
+        mime_type
+    }
 }
 
 fn make_attachment(

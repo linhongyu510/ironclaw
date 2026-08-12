@@ -1845,7 +1845,7 @@ fn delivery_vendor_router(
         let body: &[u8] = if request.url.ends_with("/sendMessage") {
             br#"{"ok":true,"result":{"message_id":4242}}"#
         } else if request.url.ends_with("/getFile") {
-            br#"{"ok":true,"result":{"file_path":"documents/report.pdf","file_size":4}}"#
+            br#"{"ok":true,"result":{"file_path":"documents/meeting-notes.md","file_size":4}}"#
         } else {
             // setWebhook / deleteWebhook and friends return a bool result.
             br#"{"ok":true,"result":true}"#

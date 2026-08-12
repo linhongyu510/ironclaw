@@ -128,6 +128,33 @@ fn complete_protocol_metadata_is_normalized_without_file_bytes() {
 }
 
 #[test]
+fn telegram_markdown_mime_is_normalized_to_the_product_contract() {
+    let payload = br#"{
+        "update_id": 506,
+        "message": {
+            "message_id": 76,
+            "date": 1700000000,
+            "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+            "chat": {"id": 777, "type": "private"},
+            "caption": "Could you summarize these notes for me?",
+            "document": {
+                "file_id": "file-markdown",
+                "file_name": "meeting notes.md",
+                "mime_type": "text/x-web-markdown",
+                "file_size": 154
+            }
+        }
+    }"#;
+
+    let message = message(payload);
+    assert_eq!(message.pending_attachments.len(), 1);
+    assert_eq!(
+        message.pending_attachments[0].descriptor.mime_type,
+        "text/markdown"
+    );
+}
+
+#[test]
 fn media_group_fragments_share_one_event_but_keep_distinct_fragment_ids() {
     let payload = |update_id: i64, message_id: i64, file_id: &str| {
         serde_json::to_vec(&serde_json::json!({

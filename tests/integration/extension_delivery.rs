@@ -2105,12 +2105,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "message": {
             "message_id": 12,
             "date": 1710000300,
-            "caption": "review the attached report",
+            "caption": "Could you review these meeting notes for me?",
             "document": {
                 "file_id": "doc-file-1",
                 "file_unique_id": "doc-unique-1",
-                "file_name": "report.pdf",
-                "mime_type": "application/pdf",
+                "file_name": "meeting-notes.md",
+                "mime_type": "text/x-web-markdown",
                 "file_size": 4
             },
             "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
@@ -2240,7 +2240,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         requests.iter().any(|request| {
             request.url
                 == format!(
-                    "https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/documents/report.pdf"
+                    "https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/documents/meeting-notes.md"
                 )
         }),
         "the byte download must ride the manifest's path-prefixed egress with the injected token"
@@ -2266,6 +2266,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         attachment_messages.len(),
         1,
         "the failed receive and successful retry must produce one landed attachment"
+    );
+    assert_eq!(
+        attachment_messages[0].attachments[0].mime_type, "text/markdown",
+        "Telegram's provider-specific Markdown MIME must be canonical before admission"
     );
     let storage_key = attachment_messages[0].attachments[0]
         .storage_key
@@ -2332,7 +2336,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "message": {
             "message_id": 13,
             "date": 1710000400,
-            "text": "send me the report back",
+            "text": "Could you send the meeting notes back to me?",
             "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
             "chat": {"id": 424242, "type": "private"}
         }
@@ -2404,10 +2408,10 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         multipart.contains("DATA"),
         "the delivered document must carry the landed workspace bytes"
     );
-    // The landed segment is `<message_id>-<index>-report.pdf`; the delivered
+    // The landed segment is `<message_id>-<index>-meeting-notes.md`; the delivered
     // filename is derived from that path segment.
     assert!(
-        multipart.contains("report.pdf\""),
+        multipart.contains("meeting-notes.md\""),
         "the delivered document keeps the landed filename; got {multipart}"
     );
     assert!(

@@ -209,6 +209,13 @@ descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
 `tests/webui_v2_descriptors_contract.rs`. Add a route → add a handler **and** a
 `webui_v2_routes()` entry, or that test fails.
 
+For enrollment-required channels, notification status projects only opaque
+host registration ids/timestamps plus channel bootstrap data; endpoint
+capability URLs and endpoint-derived identifiers never cross this boundary.
+The enable response additionally returns the enrolled record as
+`detail.active_registration_id`, allowing the channel's browser client to
+correlate its local subscription after reload without weakening that boundary.
+
 `webui.v2.get_run_artifact` exports one exact caller-owned run as the versioned
 `ironclaw.run_artifact.v1` evidence schema. The facade authorizes the thread
 from authenticated tenant/user scope before selecting records by `turn_run_id`,

@@ -287,7 +287,8 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
         )
         .map_err(|error| map_registration_error(&request.extension_id, error))?;
 
-        self.registrations
+        let registration = self
+            .registrations
             .enroll(
                 &scope,
                 DeliveryRegistrationRequest {
@@ -297,7 +298,10 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
             )
             .await
             .map_err(|error| map_registration_error(&request.extension_id, error))?;
-        self.project(&request.extension_id, &scope).await
+        let mut response = self.project(&request.extension_id, &scope).await?;
+        response.detail["active_registration_id"] =
+            serde_json::Value::String(registration.registration_id);
+        Ok(response)
     }
 
     async fn disable(

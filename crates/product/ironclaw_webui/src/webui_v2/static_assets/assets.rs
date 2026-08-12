@@ -787,8 +787,10 @@ mod tests {
         let events = source_text("pages/chat/lib/useChatEvents.ts");
         assert!(events.contains("isFinalReply: true"));
         assert!(
-            events.contains("isFinalReply: false"),
-            "live projection text must remain in-flight until final reply/timeline finalizes it"
+            events.contains("const finalizedText = item.text.finalized === true;")
+                && events.contains("isFinalReply: finalizedText")
+                && events.contains("isStreaming: !finalizedText"),
+            "projection text must follow its explicit durable finalization evidence"
         );
         assert!(events.contains("const textRunId = item.text.run_id || null;"));
     }

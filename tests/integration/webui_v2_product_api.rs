@@ -2552,6 +2552,12 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     assert_eq!(status, StatusCode::OK, "enable response: {body}");
     assert_eq!(body["enabled"], true, "{body}");
     assert_eq!(body["detail"]["registration_count"], 1, "{body}");
+    let active_registration_id = body["detail"]["active_registration_id"]
+        .as_str()
+        .expect("enable response identifies the enrolled host registration")
+        .to_string();
+    uuid::Uuid::parse_str(&active_registration_id)
+        .unwrap_or_else(|error| panic!("active registration id must be a UUID ({error}): {body}"));
     let (status, body) = post_json(
         router(),
         "/api/webchat/v2/channels/web-app/notifications/enable",
@@ -2571,6 +2577,7 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     let registration_id = body["detail"]["registrations"][0]["registration_id"]
         .as_str()
         .expect("host-minted registration id is present");
+    assert_eq!(registration_id, active_registration_id, "{body}");
     uuid::Uuid::parse_str(registration_id)
         .unwrap_or_else(|error| panic!("registration id must be a UUID ({error}): {body}"));
     assert!(

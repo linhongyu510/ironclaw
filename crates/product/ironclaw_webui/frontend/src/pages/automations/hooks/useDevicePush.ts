@@ -42,14 +42,14 @@ function deriveDeviceState(probe) {
  *
  * The status response's channel-opaque `detail` is interpreted HERE — this
  * hook is part of the session channel's own client — as
- * `{ vapid_public_key, subscription_count, subscriptions[].endpoint_digest }`.
+ * `{ bootstrap: { vapid_public_key }, registration_count,
+ *    registrations[].registration_id }`.
  * The account-level toggle (whether the channel is a notification channel)
  * stays in the ordinary draft/save set — this hook only manages the device
- * dimension underneath it. Browser state is correlated with the signed-in
- * account through the detail's `endpoint_digest` values, so a subscription
- * enrolled by a DIFFERENT account in the same browser profile is never
- * presented as this account's enrollment (and never offered a local
- * unsubscribe that would sever the other account).
+ * dimension underneath it. The server never echoes endpoint capability URLs
+ * (or endpoint-derived identifiers). The browser instead remembers the
+ * opaque registration id returned by enrollment and intersects that local
+ * association with this account's status ids.
  */
 export function useDevicePush({ extensionId } = {}) {
   const queryClient = useQueryClient();
@@ -67,12 +67,12 @@ export function useDevicePush({ extensionId } = {}) {
   React.useEffect(() => {
     if (!statusSettled) return undefined;
     let cancelled = false;
-    const accountEndpointDigests = statusDetail
-      ? (statusDetail.subscriptions || [])
-          .map((subscription) => subscription.endpoint_digest)
-          .filter((digest) => typeof digest === "string" && digest)
+    const accountRegistrationIds = statusDetail
+      ? (statusDetail.registrations || [])
+          .map((registration) => registration.registration_id)
+          .filter((registrationId) => typeof registrationId === "string" && registrationId)
       : null;
-    getDevicePushState({ accountEndpointDigests }).then(
+    getDevicePushState({ extensionId, accountRegistrationIds }).then(
       (state) => {
         if (!cancelled) setProbe(state);
       },
@@ -83,7 +83,7 @@ export function useDevicePush({ extensionId } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [statusSettled, statusDetail]);
+  }, [extensionId, statusSettled, statusDetail]);
 
   const refreshAfterAction = async (nextState) => {
     setProbe(nextState);
@@ -98,23 +98,28 @@ export function useDevicePush({ extensionId } = {}) {
       if (!extensionId) {
         throw new Error("session channel extension is unavailable");
       }
-      const vapidPublicKey = statusQuery.data?.detail?.vapid_public_key;
+      const vapidPublicKey = statusQuery.data?.detail?.bootstrap?.vapid_public_key;
       if (!vapidPublicKey) {
         throw new Error("notification setup key is unavailable");
       }
-      return enrollThisBrowser({ vapidPublicKey });
+      return enrollThisBrowser({ extensionId, vapidPublicKey });
     },
     onSuccess: (nextState) => refreshAfterAction(nextState),
   });
   const unenrollMutation = useMutation({
-    mutationFn: () => unenrollThisBrowser(),
+    mutationFn: () => {
+      const accountRegistrationIds = (statusQuery.data?.detail?.registrations || [])
+        .map((registration) => registration.registration_id)
+        .filter((registrationId) => typeof registrationId === "string" && registrationId);
+      return unenrollThisBrowser({ extensionId, accountRegistrationIds });
+    },
     onSuccess: (nextState) => refreshAfterAction(nextState),
   });
 
   return {
     browser: { ...(probe || {}), state: deriveDeviceState(probe) },
-    subscriptionCount: statusQuery.data?.detail?.subscription_count ?? 0,
-    vapidPublicKey: statusQuery.data?.detail?.vapid_public_key || "",
+    subscriptionCount: statusQuery.data?.detail?.registration_count ?? 0,
+    vapidPublicKey: statusQuery.data?.detail?.bootstrap?.vapid_public_key || "",
     isStatusLoading: statusQuery.isLoading,
     statusError: statusQuery.error || null,
     isBusy: enrollMutation.isPending || unenrollMutation.isPending,

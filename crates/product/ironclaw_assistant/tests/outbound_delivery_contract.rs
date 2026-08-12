@@ -3404,7 +3404,7 @@ async fn enrollment_stores_a_declared_endpoint_with_its_opaque_document() {
         Some(vec!["push.declared.example".to_string()]),
         Arc::clone(&registrations),
     );
-    service
+    let response = service
         .enable(
             setup_caller(),
             ironclaw_product_contracts::product_wire::RebornNotificationSetupMutationRequest {
@@ -3414,6 +3414,7 @@ async fn enrollment_stores_a_declared_endpoint_with_its_opaque_document() {
         )
         .await
         .expect("a declared endpoint enrolls");
+    assert_eq!(response.detail["active_registration_id"], "reg-1");
     assert_eq!(
         *registrations.enrolled.lock().expect("lock"),
         vec!["https://push.declared.example/send/ok".to_string()]

@@ -767,7 +767,7 @@ test("SessionChannelRow stays pending while account enrollment status loads", ()
 });
 
 test("SessionChannelRow cannot be selected when no browser is enrolled", () => {
-  // subscription_count === 0 → nowhere to deliver a push, so the session
+  // registration_count === 0 → nowhere to deliver a push, so the session
   // channel is not selectable and its pill is not "Ready". The nested device
   // block's "Enable notifications in this browser" button is how the user
   // fixes it (covered by the DevicePushBlock tests below).

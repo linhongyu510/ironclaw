@@ -25,6 +25,7 @@ import {
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 const originalNotification = Object.getOwnPropertyDescriptor(globalThis, "Notification");
+const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 
 function setGlobal(name, value) {
   Object.defineProperty(globalThis, name, {
@@ -46,11 +47,21 @@ afterEach(() => {
   restoreGlobal("navigator", originalNavigator);
   restoreGlobal("window", originalWindow);
   restoreGlobal("Notification", originalNotification);
+  restoreGlobal("localStorage", originalLocalStorage);
   vi.clearAllMocks();
 });
 
 function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
 }
 
 function browserEnvironment({
@@ -169,28 +180,52 @@ test("getDevicePushState resolves promptly as unsupported when no registration e
   assert.deepEqual(await getDevicePushState(), { state: "unsupported" });
 });
 
-test("getDevicePushState correlates the subscription with the account's endpoint digests", async () => {
+test("getDevicePushState correlates a subscription with opaque account registration ids", async () => {
   const endpoint = "https://fcm.googleapis.com/fcm/send/mine";
+  setGlobal("localStorage", memoryStorage());
   browserEnvironment({ permission: "granted", subscription: fakeSubscription(endpoint) });
+  enableNotificationSetup.mockResolvedValueOnce({
+    enabled: true,
+    detail: { active_registration_id: "registration-mine" },
+  });
+  await enrollThisBrowser({ extensionId: "web-app", vapidPublicKey: "AQAB" });
 
   const matched = await getDevicePushState({
-    accountEndpointDigests: [sha256Hex(endpoint)],
+    extensionId: "web-app",
+    accountRegistrationIds: ["registration-mine"],
   });
   assert.deepEqual(matched, { state: "enrolled", endpoint, accountMatch: true });
 
-  const matchedCaseInsensitive = await getDevicePushState({
-    accountEndpointDigests: [sha256Hex(endpoint).toUpperCase()],
-  });
-  assert.equal(matchedCaseInsensitive.accountMatch, true);
-
-  // Another account's browser subscription: digests exist, none match.
   const foreign = await getDevicePushState({
-    accountEndpointDigests: [sha256Hex("https://fcm.googleapis.com/fcm/send/other")],
+    extensionId: "web-app",
+    accountRegistrationIds: ["registration-other"],
   });
   assert.deepEqual(foreign, { state: "enrolled", endpoint, accountMatch: false });
 
-  const emptyAccount = await getDevicePushState({ accountEndpointDigests: [] });
-  assert.equal(emptyAccount.accountMatch, false, "an empty digest list is a definite non-match");
+  const emptyAccount = await getDevicePushState({
+    extensionId: "web-app",
+    accountRegistrationIds: [],
+  });
+  assert.deepEqual(
+    emptyAccount,
+    { state: "enrolled", endpoint, accountMatch: false },
+    "a locally known registration for another account remains distinguishable",
+  );
+});
+
+test("getDevicePushState keeps enrollment recoverable when local correlation was cleared", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/recover";
+  setGlobal("localStorage", memoryStorage());
+  browserEnvironment({ permission: "granted", subscription: fakeSubscription(endpoint) });
+
+  assert.deepEqual(
+    await getDevicePushState({
+      extensionId: "web-app",
+      accountRegistrationIds: ["registration-current"],
+    }),
+    { state: "enrolled", endpoint, accountMatch: false },
+    "the UI must offer the safe re-enrollment path when only local correlation is missing",
+  );
 });
 
 test("enrollThisBrowser subscribes with the VAPID key and registers with the backend", async () => {
@@ -258,18 +293,56 @@ test("enrollThisBrowser reports a denied permission without subscribing", async 
   await assert.rejects(enrollThisBrowser({}), /vapidPublicKey is required/);
 });
 
-test("unenrollThisBrowser unsubscribes locally even when the backend removal fails", async () => {
+test("unenrollThisBrowser keeps the shared browser subscription when backend removal fails", async () => {
   const subscription = fakeSubscription("https://fcm.googleapis.com/fcm/send/old");
   browserEnvironment({ permission: "granted", subscription });
   disableNotificationSetup.mockRejectedValueOnce(new Error("backend offline"));
 
-  const state = await unenrollThisBrowser();
+  await assert.rejects(
+    unenrollThisBrowser({
+      extensionId: "web-app",
+      accountRegistrationIds: ["registration-mine"],
+    }),
+    /backend offline/,
+  );
 
-  assert.deepEqual(state, { state: "not-enrolled" });
-  assert.equal(subscription.unsubscribe.mock.calls.length, 1);
+  assert.equal(subscription.unsubscribe.mock.calls.length, 0);
   assert.equal(disableNotificationSetup.mock.calls.length, 1);
   assert.deepEqual(disableNotificationSetup.mock.calls[0][0], {
-    extensionId: "session-channel",
+    extensionId: "web-app",
     payload: { endpoint: "https://fcm.googleapis.com/fcm/send/old" },
   });
+});
+
+test("unenrollThisBrowser removes only this account's local association", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/shared";
+  const subscription = fakeSubscription(endpoint);
+  setGlobal("localStorage", memoryStorage());
+  browserEnvironment({ permission: "granted", subscription });
+  enableNotificationSetup
+    .mockResolvedValueOnce({
+      enabled: true,
+      detail: { active_registration_id: "registration-current" },
+    })
+    .mockResolvedValueOnce({
+      enabled: true,
+      detail: { active_registration_id: "registration-other" },
+    });
+  await enrollThisBrowser({ extensionId: "web-app", vapidPublicKey: "AQAB" });
+  await enrollThisBrowser({ extensionId: "web-app", vapidPublicKey: "AQAB" });
+
+  const state = await unenrollThisBrowser({
+    extensionId: "web-app",
+    accountRegistrationIds: ["registration-current"],
+  });
+
+  assert.deepEqual(state, { state: "enrolled", endpoint, accountMatch: false });
+  assert.equal(subscription.unsubscribe.mock.calls.length, 0);
+  assert.deepEqual(
+    await getDevicePushState({
+      extensionId: "web-app",
+      accountRegistrationIds: ["registration-other"],
+    }),
+    { state: "enrolled", endpoint, accountMatch: true },
+  );
 });

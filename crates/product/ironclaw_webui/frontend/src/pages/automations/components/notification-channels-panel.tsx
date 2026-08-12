@@ -52,9 +52,9 @@ function DevicePushBlock({ device, t }) {
     (state === "not-enrolled" || state === "enrolled-other-account") &&
     !device.isBusy &&
     device.vapidPublicKey;
-  // Local unsubscribe is offered ONLY for a verified own-account enrollment:
-  // the push subscription is browser-global, so disabling from any other
-  // state could sever a different account's notifications.
+  // Account-scoped disable is offered ONLY for a verified own-account
+  // enrollment. The hook deliberately retains the browser-global physical
+  // subscription because another account may share it.
   const canUnenroll = state === "enrolled" && !device.isBusy;
   return (
     <div
