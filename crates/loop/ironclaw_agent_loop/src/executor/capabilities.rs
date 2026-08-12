@@ -2073,7 +2073,12 @@ pub(super) fn model_observation_from_outcome(
                 .unwrap_or_else(|| outcome.summary.as_str().to_string()),
             detail: ToolObservationDetail::InlineResult {
                 content: preview.as_str().to_string(),
-                byte_len: outcome.refs.byte_len,
+                // The inline observation carries the PREVIEW text the model
+                // sees, so `byte_len` must describe that content (the
+                // validator rejects a mismatch). The canonical full-output
+                // size stays on the durable artifact/`total_bytes` when
+                // present; here the preview IS the complete small result.
+                byte_len: preview.as_str().len() as u64,
                 item_count: meta.item_count,
             },
             artifacts: Vec::new(),

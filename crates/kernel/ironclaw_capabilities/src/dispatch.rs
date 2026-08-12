@@ -434,7 +434,15 @@ where
                         })?,
                 );
             }
-            if canonical_bytes.len() > ARTIFACT_INLINE_PREVIEW_MAX_BYTES {
+            // Bounding the transport preview is only safe when the canonical
+            // output was persisted as a durable artifact the model can read
+            // back (the preview is then a reference into that artifact).
+            // Without a persisted artifact, truncating `execution.output`
+            // would silently destroy the result — so the bound applies only
+            // when `completed_artifact` exists.
+            if execution.completed_artifact.is_some()
+                && canonical_bytes.len() > ARTIFACT_INLINE_PREVIEW_MAX_BYTES
+            {
                 let canonical_text = std::str::from_utf8(&canonical_bytes).map_err(|_| {
                     dispatch_resource_error(
                         runtime,

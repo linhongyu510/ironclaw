@@ -1,5 +1,6 @@
 mod support;
 
+use support::host_runtime_harness::WithTestArtifactPersistence;
 use support::legacy_capability_fixture_to_v2;
 
 use std::{path::Path, sync::Arc, time::Duration};
@@ -643,6 +644,7 @@ fn base_services(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .with_test_artifact_persistence()
 }
 
 async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {

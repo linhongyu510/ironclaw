@@ -3281,15 +3281,15 @@ where
                     error,
                 )
             })?;
-        let Some(artifacts) = self.legacy_result_artifacts.as_ref() else {
-            return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
-        };
         let observation_kind = envelope
             .model_observation
             .as_ref()
             .and_then(|value| value.get("detail"))
             .and_then(|value| value.get("kind"))
             .and_then(serde_json::Value::as_str);
+        let Some(artifacts) = self.legacy_result_artifacts.as_ref() else {
+            return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
+        };
         // Only the retired result-reference shape (or an observation with no
         // typed detail) needs lazy artifact migration. Current inline results,
         // artifact references, and failure observations are already complete.

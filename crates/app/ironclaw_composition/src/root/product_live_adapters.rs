@@ -260,7 +260,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             output,
             display_preview,
             receipt: _,
-            completed_artifact: _,
+            completed_artifact,
             canonical_output_digest: _,
             canonical_item_count: _,
             // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
@@ -268,7 +268,17 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             // result, so the durable-vs-inline distinction does not apply here.
             durable_persistence: _,
         } = write;
-        let byte_len = serialized_json_len(&output, "capability result")?;
+        let staged_byte_len = serialized_json_len(&output, "capability result")?;
+        // The transport output may be a bounded preview of a larger durable
+        // artifact (the canonical-size contract the production
+        // `StagedCapabilityIo` enforces). The byte length the LOOP sees must
+        // reflect the FULL result size — it feeds the per-capability
+        // compaction byte-cap, which is about memory pressure, not model
+        // visibility.
+        let byte_len: u64 = completed_artifact
+            .as_ref()
+            .map(|artifact| artifact.byte_len)
+            .unwrap_or(staged_byte_len as u64);
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
                 .map_err(|_| {
@@ -285,14 +295,14 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             "capability result",
             results.len(),
             results.values().map(|result| result.byte_len).sum(),
-            byte_len,
+            staged_byte_len,
         )?;
         results.insert(
             result_ref.as_str().to_string(),
             StagedCapabilityResult {
                 run_id: run_context.run_id.to_string(),
                 output: output.clone(),
-                byte_len,
+                byte_len: staged_byte_len,
             },
         );
         self.display_previews.record_result_with_preview(
@@ -303,14 +313,12 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
                 capability_id,
                 result_ref: result_ref.as_str(),
                 output: &output,
-                output_bytes: byte_len.try_into().unwrap_or(u64::MAX),
+                output_bytes: byte_len,
             },
             display_preview.as_ref(),
         );
         Ok(CapabilityWriteResult::from_output(
-            result_ref,
-            byte_len as u64,
-            &output,
+            result_ref, byte_len, &output,
         ))
     }
 
