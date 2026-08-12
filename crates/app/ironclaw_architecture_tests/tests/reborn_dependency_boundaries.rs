@@ -692,7 +692,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the dispatch-result DTO preserves top-level array cardinality when
         // transport output is bounded. Counting remains in capabilities;
         // persistence and model rendering remain in composition/loop_host.
-        ("ironclaw_host_api", 19_407),
+        // 18_994 -> 19_017 (#7525): add the typed
+        // `UnattendedQuestionEndingResponse` invalid-output reason and its
+        // sanitized user-facing summary. Classification and recovery remain in
+        // ironclaw_agent_loop; this crate owns only shared failure vocabulary.
+        // Merged ceiling re-captured at 19_430 (19_407 + #7525's 23 lines): the
+        // main merge lands the #7525 vocabulary in the crate. Count read from
+        // this test's own failure message.
+        ("ironclaw_host_api", 19_430),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -760,7 +767,26 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Merged ceiling re-captured at 13_531 (13_306 + both deltas): the
         // main merge lands both vocabularies in the crate. Count read from
         // this test's own failure message.
-        ("ironclaw_loop_contracts", 13_531),
+        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // one defaulted port capability declares when ordered batch middleware
+        // must retain batch entry. Scheduling and hook behavior remain in their
+        // owning loop crates. Count read from this test's own failure message.
+        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // one bounded truncation-watermark DTO carried across the existing
+        // context and prompt contracts. Window selection and task-pinning
+        // behavior remain in ironclaw_threads and ironclaw_loop_host.
+        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
+        // tool-result compaction metadata plus window-eviction initiator/mode
+        // variants. Cut-point policy and execution remain in agent_loop and
+        // loop_host. Count read from this test's own failure message.
+        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // the batch-ordering port contract now defaults to ordered entry and
+        // documents the explicit opt-in required for concurrent singles.
+        // Scheduling and wrapper behavior remain in their owning loop crates.
+        // Merged ceiling re-captured at 13_560 (13_531 + #7416's 29 lines): the
+        // main merge lands the parallel-batch port contracts in the crate. Count
+        // read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_560),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -786,7 +812,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // thread, carried through the wire contract), net of the ephemeral-per-ping
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
-        ("ironclaw_product_contracts", 15_909),
+        // Raised 15_909 -> 16_024 by #7419 (tenant model allowlist): the
+        // growth is limited to the policy persistence port, user-safe DTOs,
+        // and transport-consumed descriptors; validation, storage, and request
+        // enforcement stay in owning crates.
+        ("ironclaw_product_contracts", 16_024),
         ("ironclaw_prompt_envelope", 832),
     ];
 
