@@ -223,11 +223,12 @@ cargo run -p ironclaw_stress -- \
   --mock-llm-bind 127.0.0.1:3911
 ```
 
-### Nightly scripted memory matrix (CI lane)
+### Nightly scripted durable-write matrix (CI lane)
 
 `.github/workflows/ironclaw-stress.yml` runs a nightly (03:30 UTC, plus
 `workflow_dispatch`) matrix of the three memory scripts — `memory_roundtrip`,
-`memory_grow`, `memory_mixed` — against a real `ironclaw serve` binary. The
+`memory_grow`, `memory_mixed` — and the workspace `write_file_roundtrip`
+script against a real `ironclaw serve` binary. The
 server profile selects the persistence backend: `hosted-single-tenant` is
 Postgres-backed, `hosted-single-tenant-volume` is embedded libSQL storage
 with no `[storage]` section. The stress runner's `--backend` flag does not
@@ -240,7 +241,9 @@ document sizes 4096, 32768, 131072, and 1048576 bytes, with users=6,
 concurrency=3, operations=4, hot writers=2, mock latency 250ms, a 10000ms
 timeline polling interval, a 120000ms terminal/p95 ceiling, and the
 zero-tolerance gate `--max-failure-rate 0`: any failed, leaked, missing, or
-undisclosed scripted verdict fails the job.
+undisclosed scripted verdict fails the job. The workspace script uses the
+same user, concurrency, operation, size, latency, and failure settings, but no
+hot writers: each operation intentionally owns a distinct workspace path.
 
 Per-script outputs are stored under
 `target/ironclaw-stress/ironclaw-stress-libsql-scripted-<script>/` (JSONL,
@@ -250,7 +253,15 @@ separately, as `ironclaw-stress-libsql-scripted-server-log` (always, even
 when a script fails), so a failed run has a single log artifact to fetch. The
 Postgres job's scripted memory leg is additionally mirrored under
 `ironclaw-stress-postgres-scripted-memory-roundtrip`, alongside its existing
-aggregate `ironclaw-stress-postgres-api-capacity` artifact.
+aggregate `ironclaw-stress-postgres-api-capacity` artifact. Workspace evidence
+is uploaded as `ironclaw-stress-<backend>-scripted-write-file-roundtrip`.
+
+The fail-closed built-in write inventory lives at
+`fixtures/builtin_write_stress_coverage.toml`. Its unit test derives the
+write-effect surface from the shipping `builtin_capability_policy.toml`; a new
+`write_filesystem`, `delete_filesystem`, `external_write`, or
+`modify_approval` grant must be classified as nightly, implemented, or backlog
+in the same change.
 
 ## Presets
 

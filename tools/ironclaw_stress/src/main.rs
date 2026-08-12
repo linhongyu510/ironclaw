@@ -23,6 +23,9 @@ mod tests;
 mod trace;
 mod user_turn;
 
+#[cfg(test)]
+mod write_coverage_tests;
+
 use std::{
     any::Any,
     collections::BTreeMap,

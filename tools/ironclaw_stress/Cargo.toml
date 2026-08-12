@@ -39,3 +39,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 rig = { package = "rig-core", version = "0.33" }
+toml = "1.1"

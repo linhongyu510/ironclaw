@@ -368,6 +368,31 @@ jobs:
               > "${outdir}/summary.json" \
               2> "${outdir}/report.txt" || failed=1
           done
+
+          outdir="target/ironclaw-stress/ironclaw-stress-libsql-scripted-write_file_roundtrip"
+          mkdir -p "${outdir}"
+          target/release/ironclaw_stress \
+            --backend libsql \
+            --scenario api-user-capacity \
+            --api-base-url http://127.0.0.1:18080 \
+            --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+            --users 6 \
+            --concurrency 3 \
+            --operations 4 \
+            --api-scripted-tool write_file_roundtrip \
+            --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+            --mock-llm-bind 127.0.0.1:19090 \
+            --mock-llm-latency-ms 250 \
+            --api-poll-interval-ms 10000 \
+            --api-terminal-timeout-ms 120000 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl "${outdir}/summary.jsonl" \
+            --max-failure-rate 0 \
+            --max-p95-ms 120000 \
+            > "${outdir}/summary.json" \
+            2> "${outdir}/report.txt" || failed=1
           exit "$failed"
 
       - name: Upload libsql scripted memory_roundtrip artifacts
@@ -403,6 +428,18 @@ jobs:
             target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/summary.jsonl
             target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/summary.json
             target/ironclaw-stress/ironclaw-stress-libsql-scripted-memory_mixed/report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload libsql scripted workspace write artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-libsql-scripted-write-file-roundtrip
+          path: |
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-write_file_roundtrip/summary.jsonl
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-write_file_roundtrip/summary.json
+            target/ironclaw-stress/ironclaw-stress-libsql-scripted-write_file_roundtrip/report.txt
           if-no-files-found: error
           retention-days: 14
 
@@ -614,6 +651,29 @@ jobs:
             > target/ironclaw-stress/postgres-api-scripted-summary.json \
             2> target/ironclaw-stress/postgres-api-scripted-report.txt
 
+          target/release/ironclaw_stress \
+            --backend libsql \
+            --scenario api-user-capacity \
+            --api-base-url http://127.0.0.1:18080 \
+            --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+            --users 6 \
+            --concurrency 3 \
+            --operations 4 \
+            --api-scripted-tool write_file_roundtrip \
+            --api-scripted-doc-sizes 4096,32768,131072,1048576 \
+            --mock-llm-bind 127.0.0.1:19090 \
+            --mock-llm-latency-ms 250 \
+            --api-poll-interval-ms 10000 \
+            --api-terminal-timeout-ms 120000 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl target/ironclaw-stress/postgres-api-scripted-workspace.jsonl \
+            --max-failure-rate 0 \
+            --max-p95-ms 120000 \
+            > target/ironclaw-stress/postgres-api-scripted-workspace-summary.json \
+            2> target/ironclaw-stress/postgres-api-scripted-workspace-report.txt
+
       - name: Upload Postgres API capacity artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -627,6 +687,9 @@ jobs:
             target/ironclaw-stress/postgres-api-scripted.jsonl
             target/ironclaw-stress/postgres-api-scripted-summary.json
             target/ironclaw-stress/postgres-api-scripted-report.txt
+            target/ironclaw-stress/postgres-api-scripted-workspace.jsonl
+            target/ironclaw-stress/postgres-api-scripted-workspace-summary.json
+            target/ironclaw-stress/postgres-api-scripted-workspace-report.txt
           if-no-files-found: ignore
 
       - name: Upload Postgres scripted memory roundtrip artifacts
@@ -638,5 +701,17 @@ jobs:
             target/ironclaw-stress/postgres-api-scripted.jsonl
             target/ironclaw-stress/postgres-api-scripted-summary.json
             target/ironclaw-stress/postgres-api-scripted-report.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Postgres scripted workspace write artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ironclaw-stress-postgres-scripted-write-file-roundtrip
+          path: |
+            target/ironclaw-stress/postgres-api-scripted-workspace.jsonl
+            target/ironclaw-stress/postgres-api-scripted-workspace-summary.json
+            target/ironclaw-stress/postgres-api-scripted-workspace-report.txt
           if-no-files-found: error
           retention-days: 14

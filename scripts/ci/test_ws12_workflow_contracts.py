@@ -36,6 +36,7 @@ from ws12_workflow_contracts import (
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
+    validate_scripted_workspace_parity,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -976,6 +977,71 @@ class CrateNameResidueSabotageTests(unittest.TestCase):
         return _Patch()
 
 
+class ScriptedWorkspaceParitySabotageTests(unittest.TestCase):
+    """#7360 Phase 2: workspace writes stay scheduled on both DB backends."""
+
+    JOBS = ("libsql-scripted-memory", "postgres-api-capacity")
+
+    def setUp(self) -> None:
+        self.text = load_workflows(ROOT)[STRESS_WORKFLOW]
+
+    def mutate_job(self, job: str, old: str, new: str) -> str:
+        block, detail = extract_job_block(self.text, job)
+        self.assertIsNotNone(block, detail)
+        mutated = block.replace(old, new)
+        self.assertNotEqual(mutated, block, f"no-op sabotage in {job}: {old!r}")
+        start = self.text.find(block)
+        self.assertNotEqual(start, -1)
+        return self.text[:start] + mutated + self.text[start + len(block) :]
+
+    def test_checked_in_workspace_matrix_meets_the_contract(self) -> None:
+        self.assertEqual(validate_scripted_workspace_parity(self.text), [])
+
+    def test_each_backend_requires_the_workspace_runner(self) -> None:
+        for job in self.JOBS:
+            with self.subTest(job=job):
+                sabotaged = self.mutate_job(
+                    job,
+                    "--api-scripted-tool write_file_roundtrip",
+                    "--api-scripted-tool memory_roundtrip",
+                )
+                errors = validate_scripted_workspace_parity(sabotaged)
+                self.assertTrue(
+                    any(job in error and "exactly one" in error for error in errors),
+                    errors,
+                )
+
+    def test_workspace_runner_rejects_shared_hot_writers(self) -> None:
+        for job in self.JOBS:
+            with self.subTest(job=job):
+                hot_writer_flag = "            --api-hot-writers 2 \\\n"
+                sabotaged = self.mutate_job(
+                    job,
+                    "--api-scripted-tool write_file_roundtrip \\",
+                    "--api-scripted-tool write_file_roundtrip \\\n"
+                    + hot_writer_flag.rstrip("\n"),
+                )
+                errors = validate_scripted_workspace_parity(sabotaged)
+                self.assertTrue(
+                    any(job in error and "must not use" in error for error in errors),
+                    errors,
+                )
+
+    def test_each_backend_requires_workspace_artifacts(self) -> None:
+        artifacts = {
+            "libsql-scripted-memory": "ironclaw-stress-libsql-scripted-write-file-roundtrip",
+            "postgres-api-capacity": "ironclaw-stress-postgres-scripted-write-file-roundtrip",
+        }
+        for job, artifact in artifacts.items():
+            with self.subTest(job=job):
+                sabotaged = self.mutate_job(job, artifact, "removed-workspace-artifact")
+                errors = validate_scripted_workspace_parity(sabotaged)
+                self.assertTrue(
+                    any(job in error and "upload workspace" in error for error in errors),
+                    errors,
+                )
+
+
 class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
     """#7360: the libsql-scripted-memory job's lifecycle and artifact contract.
 
@@ -1564,12 +1630,15 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         fixed = self.fixed_workflows()
         mutated = copy.deepcopy(fixed)
         mutated[STRESS_WORKFLOW] = mutated[STRESS_WORKFLOW].replace(
-            '              2> "${outdir}/report.txt" || failed=1\n'
-            "          done\n"
-            '          exit "$failed"\n',
-            '              2> "${outdir}/report.txt" || failed=1\n'
+            "          done\n\n"
+            '          outdir="target/ironclaw-stress/ironclaw-stress-libsql-',
             '          exit "$failed"\n'
-            "          done\n",
+            "          done\n\n"
+            '          outdir="target/ironclaw-stress/ironclaw-stress-libsql-',
+        ).replace(
+            '            2> "${outdir}/report.txt" || failed=1\n'
+            '          exit "$failed"\n',
+            '            2> "${outdir}/report.txt" || failed=1\n',
         )
         errors = self.errors_for(mutated)
         self.assertTrue(

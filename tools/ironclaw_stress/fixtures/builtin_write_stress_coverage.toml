@@ -1,0 +1,222 @@
+schema_version = 1
+
+# This inventory is deliberately derived from the shipping builtin capability
+# policy, not from the stress driver's current scripts. The companion test
+# fails closed when a grant adds write_filesystem, delete_filesystem,
+# external_write, or modify_approval without classifying its stress posture.
+#
+# Status meanings:
+# - nightly: production-path stress coverage runs on schedule.
+# - implemented: the production-path script exists but is not scheduled yet.
+# - backlog: no qualifying stress scenario exists yet; scenario names the
+#   intended workload family and reason states what must be exercised.
+
+[[entries]]
+capability = "ironclaw.memory.write"
+status = "nightly"
+scenario = "memory_roundtrip,memory_grow,memory_mixed"
+reason = "Postgres and libSQL scripted matrices verify durable read-back and isolation."
+
+[[entries]]
+capability = "builtin.write_file"
+status = "nightly"
+scenario = "write_file_roundtrip"
+reason = "Postgres and libSQL scripted matrices verify isolated workspace write/read-back."
+
+[[entries]]
+capability = "builtin.echo"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Exercise output large enough to cross the inline-result threshold."
+
+[[entries]]
+capability = "builtin.time"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Classify and verify any filesystem-backed result spill caused by the broad grant."
+
+[[entries]]
+capability = "builtin.json"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Exercise bounded large JSON output and result continuation storage."
+
+[[entries]]
+capability = "builtin.http.save"
+status = "backlog"
+scenario = "http_save_roundtrip"
+reason = "Use a hermetic HTTP double and verify the saved workspace file."
+
+[[entries]]
+capability = "ironclaw.memory.profile_set"
+status = "backlog"
+scenario = "profile_set_roundtrip"
+reason = "Write and read back each closed profile field through the production tool path."
+
+[[entries]]
+capability = "builtin.shell"
+status = "backlog"
+scenario = "bounded_shell_write"
+reason = "Pin an allowlisted command that writes through a scoped workspace mount."
+
+[[entries]]
+capability = "builtin.read_file"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Read beyond the inline-result threshold and verify bounded continuation storage."
+
+[[entries]]
+capability = "builtin.list_dir"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "List enough fixture entries to exercise result spill without external I/O."
+
+[[entries]]
+capability = "builtin.glob"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Match enough fixture paths to exercise result spill and continuation reads."
+
+[[entries]]
+capability = "builtin.grep"
+status = "backlog"
+scenario = "large_result_spill"
+reason = "Produce bounded large search output and verify continuation storage."
+
+[[entries]]
+capability = "builtin.apply_patch"
+status = "backlog"
+scenario = "apply_patch_roundtrip"
+reason = "Create, patch, and read back an isolated workspace file."
+
+[[entries]]
+capability = "builtin.extension_register_hosted_mcp"
+status = "backlog"
+scenario = "extension_lifecycle"
+reason = "Use a hermetic hosted-MCP descriptor and verify durable registration."
+
+[[entries]]
+capability = "builtin.extension_install"
+status = "backlog"
+scenario = "extension_lifecycle"
+reason = "Install from a local fixture package and verify activation state."
+
+[[entries]]
+capability = "builtin.extension_remove"
+status = "backlog"
+scenario = "extension_lifecycle"
+reason = "Remove a fixture extension and verify durable lifecycle state."
+
+[[entries]]
+capability = "builtin.ironhub_install"
+status = "backlog"
+scenario = "extension_lifecycle"
+reason = "Use a hermetic IronHub fixture rather than measuring internet latency."
+
+[[entries]]
+capability = "builtin.operator_config_set_auto_approve"
+status = "backlog"
+scenario = "operator_configuration"
+reason = "Drive the authenticated API-only control-plane path and verify revisioned state."
+
+[[entries]]
+capability = "builtin.operator_config_set_tool_permission"
+status = "backlog"
+scenario = "operator_configuration"
+reason = "Drive the authenticated API-only control-plane path and verify scoped state."
+
+[[entries]]
+capability = "builtin.skill_list"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Exercise bootstrap/index writes, if any, against a local fixture catalog."
+
+[[entries]]
+capability = "builtin.skill_install"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Install a local fixture skill and verify durable files and catalog state."
+
+[[entries]]
+capability = "builtin.skill_update"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Update an installed fixture skill and verify read-back."
+
+[[entries]]
+capability = "builtin.skill_auto_activate_set"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Toggle per-skill activation and verify scoped durable configuration."
+
+[[entries]]
+capability = "builtin.skill_remove"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Remove an installed fixture skill and verify files and indexes are gone."
+
+[[entries]]
+capability = "builtin.skill_auto_activate_learned_set"
+status = "backlog"
+scenario = "skill_lifecycle"
+reason = "Exercise the API-only learned-skill selector configuration path."
+
+[[entries]]
+capability = "builtin.trigger_create"
+status = "backlog"
+scenario = "trigger_lifecycle"
+reason = "Create a trigger and verify its durable record through the real tool path."
+
+[[entries]]
+capability = "builtin.trigger_pause"
+status = "backlog"
+scenario = "trigger_lifecycle"
+reason = "Pause a fixture trigger and verify durable state."
+
+[[entries]]
+capability = "builtin.trigger_resume"
+status = "backlog"
+scenario = "trigger_lifecycle"
+reason = "Resume a fixture trigger and verify durable state."
+
+[[entries]]
+capability = "builtin.trigger_remove"
+status = "backlog"
+scenario = "trigger_lifecycle"
+reason = "Remove a fixture trigger without deleting retained run history."
+
+[[entries]]
+capability = "builtin.outbound_deliver"
+status = "backlog"
+scenario = "hermetic_outbound_write"
+reason = "Deliver through a hermetic channel double and separate provider latency from DB latency."
+
+[[entries]]
+capability = "builtin.attach_workspace_file_to_reply"
+status = "backlog"
+scenario = "attachment_delivery"
+reason = "Attach a bounded fixture file and verify the mediated outbound reference."
+
+[[entries]]
+capability = "builtin.trace_commons.onboard"
+status = "backlog"
+scenario = "hermetic_external_write"
+reason = "Use a hermetic Trace Commons double and exercise consent plus local state writes."
+
+[[entries]]
+capability = "builtin.trace_commons.profile_token"
+status = "backlog"
+scenario = "hermetic_external_write"
+reason = "Use a hermetic provider and verify local token-state persistence without secrets in artifacts."
+
+[[entries]]
+capability = "builtin.trace_commons.profile_set"
+status = "backlog"
+scenario = "hermetic_external_write"
+reason = "Use a hermetic provider and verify approval plus external mutation evidence."
+
+[[entries]]
+capability = "builtin.notification_channels_set"
+status = "backlog"
+scenario = "notification_configuration"
+reason = "Write and read back user-scoped notification channel configuration."

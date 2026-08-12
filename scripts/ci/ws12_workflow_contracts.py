@@ -843,6 +843,23 @@ POSTGRES_SCRIPTED_MAX_FAILURE_RATE = re.compile(
     r"--max-failure-rate[ \t]+0(?![0-9.])"
 )
 
+# The workspace script is the first Phase-2 write family. It runs as a
+# separate command because memory hot writers intentionally share one
+# document, while write_file_roundtrip uses one isolated path per operation
+# and rejects --api-hot-writers.
+SCRIPTED_WORKSPACE_TOOL = "--api-scripted-tool write_file_roundtrip"
+SCRIPTED_WORKSPACE_FLAGS = (
+    re.compile(r"--users[ \t]+6(?![0-9.])"),
+    re.compile(r"--concurrency[ \t]+3(?![0-9.])"),
+    re.compile(r"--operations[ \t]+4(?![0-9.])"),
+    POSTGRES_SCRIPTED_DOC_SIZES,
+    POSTGRES_SCRIPTED_MAX_FAILURE_RATE,
+)
+SCRIPTED_WORKSPACE_ARTIFACTS = {
+    LIBSQL_SCRIPTED_MEMORY_JOB: "ironclaw-stress-libsql-scripted-write-file-roundtrip",
+    POSTGRES_API_CAPACITY_JOB: "ironclaw-stress-postgres-scripted-write-file-roundtrip",
+}
+
 
 def validate_postgres_scripted_parity(text: str) -> list[str]:
     """Return every way the Postgres scripted leg stops reaching every
@@ -910,6 +927,64 @@ def validate_postgres_scripted_parity(text: str) -> list[str]:
             "on its runner command — one leak or lost write must fail the "
             "32-operation parity leg"
         )
+    return errors
+
+
+def validate_scripted_workspace_parity(text: str) -> list[str]:
+    """Pin workspace write/read-back coverage in both scheduled backends."""
+
+    errors: list[str] = []
+    for job in (LIBSQL_SCRIPTED_MEMORY_JOB, POSTGRES_API_CAPACITY_JOB):
+        block, detail = extract_job_block(text, job)
+        if block is None:
+            errors.append(f"{STRESS_WORKFLOW}: {detail}")
+            continue
+        label = f"{STRESS_WORKFLOW} ({job} job):"
+        executable = "\n".join(
+            line for line in block.splitlines() if not line.lstrip().startswith("#")
+        )
+        commands = [
+            command
+            for command in extract_continued_commands(
+                executable, "target/release/ironclaw_stress"
+            )
+            if SCRIPTED_WORKSPACE_TOOL in command
+        ]
+        if len(commands) != 1:
+            errors.append(
+                f"{label} must contain exactly one {SCRIPTED_WORKSPACE_TOOL} "
+                f"runner command, found {len(commands)}"
+            )
+            continue
+        runner = commands[0]
+        if any(pattern.search(runner) is None for pattern in SCRIPTED_WORKSPACE_FLAGS):
+            errors.append(
+                f"{label} workspace write coverage must run users=6, concurrency=3, "
+                "operations=4, all four document sizes, and max-failure-rate=0"
+            )
+        if "--api-hot-writers" in runner:
+            errors.append(
+                f"{label} workspace write coverage must not use --api-hot-writers; "
+                "write_file_roundtrip isolates each operation path"
+            )
+        artifact = SCRIPTED_WORKSPACE_ARTIFACTS[job]
+        if artifact not in executable:
+            errors.append(
+                f"{label} must upload workspace write evidence as {artifact!r}"
+            )
+        if job == LIBSQL_SCRIPTED_MEMORY_JOB:
+            if "|| failed=1" not in runner:
+                errors.append(
+                    f"{label} workspace runner must record failure with `|| failed=1` "
+                    "so memory and workspace evidence are both retained"
+                )
+            runner_at = executable.find(SCRIPTED_WORKSPACE_TOOL)
+            exit_at = executable.find('exit "$failed"', runner_at)
+            if exit_at < 0:
+                errors.append(
+                    f"{label} must exit with the accumulated failure status after "
+                    "the workspace runner"
+                )
     return errors
 
 
@@ -1701,6 +1776,7 @@ def validate_workflow_texts(
     if stress is not None:
         errors.extend(validate_libsql_scripted_memory_job(stress))
         errors.extend(validate_postgres_scripted_parity(stress))
+        errors.extend(validate_scripted_workspace_parity(stress))
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))
