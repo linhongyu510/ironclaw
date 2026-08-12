@@ -56,7 +56,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
 async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mounts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");
-    let workspace_root = dir.path().join("workspace");
+    let workspace_root = storage_root.join("workspaces/custom");
     let shell_workdir = workspace_root.join("qa-coding-smoke");
     std::fs::create_dir_all(&shell_workdir).expect("workspace shell dir");
     let host_home = dir.path().join("home");

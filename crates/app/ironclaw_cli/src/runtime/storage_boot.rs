@@ -95,9 +95,18 @@ pub(crate) enum OnboardingSecretStoreMode {
 /// secret store; hosted onboarding leaves credentials to its hosted surface.
 pub(crate) fn prepare_onboarding_layout(
     config: &RebornBootConfig,
+    replace_existing_config: bool,
 ) -> anyhow::Result<OnboardingSecretStoreMode> {
-    let config_file = read_config_file(config)?;
-    let profile = effective_profile(config, config_file.as_ref())?;
+    // `onboard --force` promises to replace an existing config file, including
+    // one that is malformed. Admit against the already validated env/default
+    // profile in that case so the broken file cannot prevent its own repair.
+    // The non-force path still parses before any write and fails closed.
+    let profile = if replace_existing_config {
+        config.profile()
+    } else {
+        let config_file = read_config_file(config)?;
+        effective_profile(config, config_file.as_ref())?
+    };
     let requirement = storage_layout_requirement_for_profile(profile)?;
     ensure_ready_layout_for_profile(config, profile)?;
     Ok(match requirement.durable_state {

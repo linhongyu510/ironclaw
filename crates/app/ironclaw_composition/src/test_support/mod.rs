@@ -65,6 +65,17 @@
 
 use std::path::PathBuf;
 
+/// Seed one virtual file into the canonical standalone database for a
+/// downstream integration test.
+pub async fn write_standalone_database_file_for_test(
+    state_root: &std::path::Path,
+    virtual_path: &str,
+    contents: &[u8],
+) {
+    crate::filesystem_assembly::write_database_file_for_test(state_root, virtual_path, contents)
+        .await;
+}
+
 /// Override the local runtime workspace root for a test-built composition.
 ///
 /// This is intentionally a test-support free function rather than a method on

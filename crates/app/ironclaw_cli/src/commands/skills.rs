@@ -1,7 +1,8 @@
 use clap::{Args, Subcommand};
-use ironclaw_composition::{RebornSkillSummary, reborn_skill_summary_json};
+use ironclaw_composition::{
+    RebornSkillSummary, list_reborn_local_skills_from_state, reborn_skill_summary_json,
+};
 use ironclaw_config::{RebornBootConfig, RebornProfile};
-use ironclaw_extension_host::skill_listing::list_reborn_local_skills;
 use std::path::PathBuf;
 
 use crate::context::RebornCliContext;
@@ -40,7 +41,7 @@ impl SkillsCommand {
 impl SkillsListCommand {
     fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         let config = build_skill_list_config(context.boot_config())?;
-        let skills = crate::runtime::block_on_cli(list_reborn_local_skills(
+        let skills = crate::runtime::block_on_cli(list_reborn_local_skills_from_state(
             config.owner_id.clone(),
             config.standalone_root.clone(),
         ))?;

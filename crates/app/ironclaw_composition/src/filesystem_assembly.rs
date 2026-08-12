@@ -44,7 +44,7 @@ pub(crate) async fn database_file_bytes(
 }
 
 /// Seed a file into the standalone database, for tests that need a skill the runtime can find.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn write_database_file_for_test(
     storage_root: &Path,
     virtual_path: &str,

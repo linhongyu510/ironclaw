@@ -2511,8 +2511,8 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
 
     assert_eq!(history.thread.thread_id, thread_id);
     assert!(
-        root.join("reborn-local-dev.db").exists(),
-        "standalone should use a libSQL database under the standalone root"
+        crate::filesystem_assembly::standalone_db_path(&root.join("state")).exists(),
+        "standalone should use a libSQL database under the canonical state root"
     );
 }
 
@@ -2520,7 +2520,7 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
 async fn standalone_setup_marker_workspace_filesystem_is_read_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");
-    let marker_path = storage_root.join("workspace/markers/setup.done");
+    let marker_path = storage_root.join("workspaces/markers/setup.done");
     std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
         .expect("marker directory");
     std::fs::write(&marker_path, "done").expect("marker file");
@@ -2589,7 +2589,7 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     // readers disagree about the tree skills live in (nearai/ironclaw#7168).
     assert!(
         crate::filesystem_assembly::database_file_bytes(
-            &storage_root,
+            &storage_root.join("state"),
             "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
         )
         .await
@@ -2649,7 +2649,7 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     assert_eq!(auto_activate_output["auto_activate"], false);
     let updated_skill = String::from_utf8(
         crate::filesystem_assembly::database_file_bytes(
-            &storage_root,
+            &storage_root.join("state"),
             "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
         )
         .await
@@ -2669,7 +2669,7 @@ async fn standalone_skill_management_invokes_through_first_party_runtime() {
     assert_eq!(remove_output["removed"], true);
     assert!(
         crate::filesystem_assembly::database_file_bytes(
-            &storage_root,
+            &storage_root.join("state"),
             "/tenants/default/users/standalone-test-user/skills/runtime-sentinel/SKILL.md",
         )
         .await
@@ -2716,12 +2716,9 @@ async fn standalone_workspace_mounts_do_not_authorize_skill_writes() {
 fn standalone_workspace_root_overlapping_skill_root_is_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");
+    let system_root = storage_root.join("system");
 
-    for skill_root in [
-        storage_root.join("skills"),
-        storage_root.join("tenant-shared/skills"),
-        storage_root.join("system/skills"),
-    ] {
+    for skill_root in [system_root.join("skills"), system_root.join("extensions")] {
         for workspace_root in [
             skill_root.clone(),
             skill_root
@@ -2730,7 +2727,7 @@ fn standalone_workspace_root_overlapping_skill_root_is_rejected() {
                 .to_path_buf(),
             skill_root.join("nested-workspace"),
         ] {
-            let error = validate_workspace_skill_isolation(&storage_root, &workspace_root)
+            let error = validate_workspace_skill_isolation(&system_root, &workspace_root)
                 .expect_err("workspace root overlapping skill root should be rejected");
             assert!(
                 matches!(error, RebornBuildError::InvalidConfig { .. }),

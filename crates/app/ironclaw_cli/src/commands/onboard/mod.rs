@@ -55,7 +55,8 @@ impl OnboardCommand {
             return Ok(());
         }
 
-        let secret_store_mode = crate::runtime::prepare_onboarding_layout(context.boot_config())?;
+        let secret_store_mode =
+            crate::runtime::prepare_onboarding_layout(context.boot_config(), self.force)?;
 
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
         // Independent of `--force`: a valid existing token is never regenerated

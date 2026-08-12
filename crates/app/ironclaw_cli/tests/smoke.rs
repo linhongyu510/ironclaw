@@ -1862,20 +1862,17 @@ fn assert_not_implemented(args: &[&str], expected_message: &str) {
 }
 
 fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
-    let skill_dir = reborn_cli_skill_root(reborn_home).join(name);
-    std::fs::create_dir_all(&skill_dir).expect("skill dir");
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
+    write_reborn_skill_contents(
+        reborn_home,
+        name,
         format!("---\nname: {name}\ndescription: {description}\n---\nUse {name}.\n"),
-    )
-    .expect("skill file");
+    );
 }
 
 fn write_verbose_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
-    let skill_dir = reborn_cli_skill_root(reborn_home).join(name);
-    std::fs::create_dir_all(&skill_dir).expect("skill dir");
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
+    write_reborn_skill_contents(
+        reborn_home,
+        name,
         format!(
             r#"---
 name: {name}
@@ -1890,12 +1887,33 @@ requires:
 Use {name}.
 "#
         ),
-    )
-    .expect("skill file");
+    );
 }
 
-fn reborn_cli_skill_root(reborn_home: &std::path::Path) -> std::path::PathBuf {
-    reborn_home.join("tenants/default/users/reborn-cli/skills")
+fn write_reborn_skill_contents(reborn_home: &std::path::Path, name: &str, contents: String) {
+    let initialize = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", reborn_home)
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .output()
+        .expect("onboard should initialize the canonical layout");
+    assert!(
+        initialize.status.success(),
+        "initialize canonical layout stderr: {}",
+        String::from_utf8_lossy(&initialize.stderr)
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("skill seed runtime");
+    runtime.block_on(
+        ironclaw_composition::test_support::write_standalone_database_file_for_test(
+            &reborn_home.join("state"),
+            &format!("/tenants/default/users/reborn-cli/skills/{name}/SKILL.md"),
+            contents.as_bytes(),
+        ),
+    );
 }
 
 #[test]
@@ -2271,18 +2289,15 @@ fn serve_boots_without_user_id_env_var() {
     let _ = child.wait();
 }
 
-/// Proves `serve` boots when launched with cwd=<reborn_home>/workspace, the
-/// cwd the installed launchd/systemd service now uses.
-/// - Regression: unit-content tests only checked `WorkingDirectory` was
-///   present, never that serve actually boots from it.
-/// - Companion negative test below shows the prior cwd (reborn_home itself)
-///   still fails, proving this test discriminates.
+/// Proves `serve` boots when launched with cwd=<reborn_home>, the cwd the
+/// installed launchd/systemd service uses now that canonical state, system,
+/// and workspace namespaces are disjoint.
 #[test]
-fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd() {
+fn serve_boots_from_the_reborn_home_the_installed_service_uses_as_cwd() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
-    let working_directory = reborn_home.join("workspace");
+    let working_directory = reborn_home.clone();
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&working_directory).expect("working directory");
     let _serve_port_guard = SERVE_PORT_LOCK
@@ -2309,52 +2324,6 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
 
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// Companion regression pin: cwd=reborn_home itself (the crate's first,
-/// insufficient fix attempt) still fails, because reborn_home is an
-/// ancestor of the default standalone skill/extension roots and trips
-/// composition's `paths_overlap` check. Guards against reverting the
-/// installer back to cwd=reborn_home.
-#[test]
-fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join("reborn-home");
-    let home = temp.path().join("home");
-    std::fs::create_dir_all(&home).expect("home dir");
-    std::fs::create_dir_all(&reborn_home).expect("reborn home");
-    let _serve_port_guard = SERVE_PORT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let port = unused_local_port();
-
-    let output = reborn_command()
-        .args(["serve", "--host", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .current_dir(&reborn_home)
-        .env("HOME", &home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env_remove("IRONCLAW_REBORN_PROFILE")
-        .env(
-            "IRONCLAW_REBORN_WEBUI_TOKEN",
-            "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
-        )
-        .output()
-        .expect("ironclaw-reborn serve should run and exit");
-
-    assert!(
-        !output.status.success(),
-        "serve launched with cwd=reborn_home must fail closed on the skill-root overlap, \
-         not silently boot: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("workspace root must not overlap default skill root"),
-        "expected the exact composition overlap error this fix eliminates for \
-         <reborn_home>/workspace: stderr={stderr}"
-    );
 }
 
 #[test]
@@ -5214,20 +5183,21 @@ fn patch_config_base_url_replacing_previous(reborn_home: &Path, base_url: &str) 
 /// `onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot`'s
 /// call site for the same rationale).
 fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
-    std::fs::write(
-        reborn_home.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
-        ironclaw_secrets::keychain::generate_master_key_hex(),
-    )
-    .expect("seed cached master key dotfile");
+    let state_root = reborn_home.join("state");
+    std::fs::create_dir_all(&state_root).expect("create canonical state root");
+    write_owner_only_test_file(
+        &state_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        &ironclaw_secrets::keychain::generate_master_key_hex(),
+    );
     let seed_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("current-thread tokio runtime for LLM key seed");
     let provider_id = provider_id.to_string();
     let key = key.to_string();
-    let reborn_home = reborn_home.to_path_buf();
+    let store_root = state_root;
     seed_rt.block_on(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&reborn_home)
+        let store = ironclaw_composition::open_standalone_secret_store(&store_root)
             .await
             .expect("open standalone secret store");
         ironclaw_operator::LlmKeyStore::new(
@@ -5237,6 +5207,20 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         .await
         .expect("seed provider key");
     });
+}
+
+fn write_owner_only_test_file(path: &Path, contents: &str) {
+    std::fs::write(path, contents).expect("write owner-only test file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path)
+            .expect("owner-only test file metadata")
+            .permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions).expect("chmod owner-only test file");
+    }
 }
 
 /// A key stored via `onboard`/`models set-provider` for an
@@ -5449,8 +5433,8 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
 /// in the boot-time LLM reload (`RebornLlmReloadAdapter::reload`) or its
 /// ordering relative to config resolution would still pass it. This test
 /// seeds an encrypted NearAI credential AFTER provider selection, AT THE
-/// SAME CANONICAL REBORN-HOME STORAGE ROOT `serve` actually opens
-/// (`local_runtime_storage_root`, i.e. `<reborn_home>`), with
+/// SAME CANONICAL REBORN-HOME STATE ROOT `serve` actually opens
+/// (`local_runtime_storage_root`, i.e. `<reborn_home>/state`), with
 /// both NearAI env overrides removed. Asserts through the resolved-LLM
 /// boot-trace seam that the late-attached stored credential still resolves
 /// to the cloud endpoint, AND — the discriminating half, since
@@ -5942,25 +5926,11 @@ fn onboard_import_history_records_pending_step() {
     );
 }
 
-/// `config.toml`'s content here ("custom config\n") is deliberately not
-/// valid TOML — it used to prove Preserve-policy writes are byte-for-byte,
-/// unvalidated. That's still true (the Preserve write runs before LLM-
-/// credential provisioning ever inspects the file), but
-/// `already_configured_outcome` now fails loud on an unparseable
-/// `config.toml` rather than silently treating it as "not yet configured"
-/// (see that function's doc): a corrupt config is a real problem onboard
-/// must surface, not quietly succeed over. So the overall command now fails
-/// — this test pins that (a) it fails with a parse-error message, and (b)
-/// the artifacts written/preserved BEFORE that failure (config.toml's exact
-/// bytes, the marker, providers.json) are still correct on disk, since
-/// `write_default_config_files` and the marker/master-key steps all run
-/// ahead of the LLM-credential step that fails.
-// The pinned failure (the LLM-credential step parsing the malformed
-// config.toml) exists only when the provider feature compiles that step in;
-// without it onboard legitimately succeeds, so a provider-free build cannot
-// assert this behavior.
+/// A malformed existing config must fail layout admission before onboarding
+/// writes any sibling artifact. This keeps startup and onboarding aligned on
+/// the same fail-before-mutation contract.
 #[test]
-fn onboard_preserves_existing_config_without_force() {
+fn onboard_rejects_malformed_existing_config_without_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -5993,15 +5963,14 @@ fn onboard_preserves_existing_config_without_force() {
         std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
     assert_eq!(
         config_text, "custom config\n",
-        "the Preserve write runs before the LLM-credential step, so the malformed file on disk \
-         must stay untouched even though the overall command later fails"
+        "layout admission must leave the malformed config untouched"
     );
     let marker_text =
         std::fs::read_to_string(reborn_home.join(".onboard-completed.json")).expect("read marker");
     assert_eq!(marker_text, "custom marker\n");
     assert!(
-        reborn_home.join("providers.json").exists(),
-        "missing providers file — write_default_config_files runs before the failing step"
+        !reborn_home.join("providers.json").exists(),
+        "layout admission must fail before writing providers.json"
     );
     assert!(
         reborn_home.join(".onboard-completed.json").exists(),
@@ -6090,7 +6059,7 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
     // not onboarding's.
     assert!(
         !reborn_home
-            .join(".reborn-local-dev-secrets-master-key")
+            .join("state/.reborn-local-dev-secrets-master-key")
             .exists(),
         "onboard's suppressed keychain path must not write the dotfile itself"
     );
@@ -6100,21 +6069,29 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
 /// keychain again once a cached dotfile exists (from a prior `serve`/onboard
 /// boot) — it's a no-op that reports `cached dotfile already present`.
 ///
-/// The dotfile is seeded at the canonical Reborn-home runtime storage root
-/// (`<reborn_home>/…`) — the same root the real resolver
+/// The dotfile is seeded at the canonical Reborn state root
+/// (`<reborn_home>/state/…`) — the same root the real resolver
 /// (`resolve_standalone_secret_master_key_with_env`) reads/writes and
 /// `serve` actually boots against.
 #[test]
 fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    let runtime_root = reborn_home.clone();
-    std::fs::create_dir_all(&runtime_root).expect("mkdir");
-    std::fs::write(
-        runtime_root.join(".reborn-local-dev-secrets-master-key"),
-        "a".repeat(64),
-    )
-    .expect("seed cached master-key dotfile");
+    let initial_output = reborn_command()
+        .arg("onboard")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("initial onboard should create the canonical layout");
+    assert!(
+        initial_output.status.success(),
+        "initial onboard stderr: {}",
+        String::from_utf8_lossy(&initial_output.stderr)
+    );
+    let runtime_root = reborn_home.join("state");
+    write_owner_only_test_file(
+        &runtime_root.join(".reborn-local-dev-secrets-master-key"),
+        &"a".repeat(64),
+    );
 
     let output = reborn_command()
         .arg("onboard")

@@ -2530,7 +2530,7 @@ mod tests {
         // correctly invisible now, so seeding to disk would make this test pass on nothing
         // (nearai/ironclaw#7168).
         crate::filesystem_assembly::write_database_file_for_test(
-            &storage_root,
+            &storage_root.join("state"),
             "/tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
             skill_md(
                 "unit-activate-helper",
@@ -4817,7 +4817,7 @@ mod tests {
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
-        let workspace_root = dir.path().join("workspace");
+        let workspace_root = storage_root.join("workspaces/confirmed-host-test");
         std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(workspace_root.join("note.txt"), "safe workspace file\n")
             .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
@@ -5195,7 +5195,7 @@ mod tests {
         // (nearai/ironclaw#7168).
         assert!(
             crate::filesystem_assembly::database_file_bytes(
-                &storage_root,
+                &storage_root.join("state"),
                 "/tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md",
             )
             .await
@@ -5216,7 +5216,7 @@ mod tests {
     async fn capability_port_omits_host_disclosure_without_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
-        let workspace_root = dir.path().join("workspace");
+        let workspace_root = storage_root.join("workspaces/no-host-test");
         std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(workspace_root.join("note.txt"), "hidden workspace file\n")
             .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
