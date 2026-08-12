@@ -1654,6 +1654,51 @@ async fn libsql_query_filters_on_indexed_projection() {
         .count();
     assert_eq!(acme_active_count, 2);
 }
+
+async fn query_filters_on_structural_record_kind(filesystem: &dyn RootFilesystem) {
+    let selected = RecordKind::new("selected").unwrap();
+    for (path, kind) in [
+        ("/secrets/kind-query/selected", Some(selected.clone())),
+        (
+            "/secrets/kind-query/other",
+            Some(RecordKind::new("other").unwrap()),
+        ),
+        ("/secrets/kind-query/opaque", None),
+    ] {
+        let entry = match kind {
+            Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+            None => Entry::bytes(Vec::new()),
+        };
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    let results = filesystem
+        .query(
+            &VirtualPath::new("/secrets/kind-query").unwrap(),
+            &Filter::Kind { kind: selected },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].path,
+        VirtualPath::new("/secrets/kind-query/selected").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn libsql_query_filters_on_structural_record_kind() {
+    query_filters_on_structural_record_kind(&*libsql_root().await).await;
+}
 #[tokio::test]
 async fn libsql_query_prefix_filter_matches_text_prefix() {
     let filesystem = libsql_root().await;
@@ -3363,6 +3408,39 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_query_filters_on_structural_record_kind() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let selected = RecordKind::new("selected").unwrap();
+        for (leaf, kind) in [
+            ("selected", Some(selected.clone())),
+            ("other", Some(RecordKind::new("other").unwrap())),
+            ("opaque", None),
+        ] {
+            let entry = match kind {
+                Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+                None => Entry::bytes(Vec::new()),
+            };
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let results = fs
+            .query(
+                &VirtualPath::new(&prefix).unwrap(),
+                &Filter::Kind { kind: selected },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, vpath(&prefix, "selected"));
     }
 
     #[tokio::test]

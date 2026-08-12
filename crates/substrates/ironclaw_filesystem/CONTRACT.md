@@ -153,10 +153,11 @@ boundary. The current rule is codified in
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.
    Runtime `Unsupported` errors are a fallback, not the primary signal.
-4. **Indexed projection is the only queryable surface.** Backends never
-   parse `Entry::body` to evaluate filters. Everything queryable lives in
-   `Entry::indexed`. This keeps the indexing contract portable across SQL,
-   filesystem-sidecar, and HSM backends.
+4. **Indexed projection and structural kind are the only queryable surfaces.**
+   Backends never parse `Entry::body` to evaluate filters. Domain fields that
+   need queries live in `Entry::indexed`; `Entry::kind` may be matched through
+   the typed `Filter::Kind` predicate. This keeps the query contract portable
+   across SQL, filesystem-sidecar, and HSM backends.
 5. **Request queries are bounded index traversals.** Ordered request paths
    use `query_ordered`, name the declared exact/prefix index, and carry a
    keyset cursor. Backends fail closed when the equality-filter prefix,

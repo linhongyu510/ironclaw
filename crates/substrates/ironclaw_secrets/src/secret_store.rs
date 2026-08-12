@@ -157,21 +157,55 @@ pub async fn verify_existing_encrypted_records<F>(
 where
     F: RootFilesystem,
 {
+    verify_existing_encrypted_records_with_limit(
+        filesystem,
+        crypto,
+        MASTER_KEY_VERIFICATION_RECORD_LIMIT,
+    )
+    .await
+}
+
+async fn verify_existing_encrypted_records_with_limit<F>(
+    filesystem: &F,
+    crypto: &SecretsCrypto,
+    record_limit: u64,
+) -> Result<(), SecretStoreError>
+where
+    F: RootFilesystem,
+{
     let tenants_root = VirtualPath::new("/tenants").map_err(host_api_to_secret_store_error)?;
+    let encrypted_record_filter = Filter::Or(
+        [
+            SECRET_RECORD_KIND,
+            CREDENTIAL_ACCOUNT_KIND,
+            CREDENTIAL_SESSION_KIND,
+        ]
+        .into_iter()
+        .map(|kind| {
+            RecordKind::new(kind)
+                .map(|kind| Filter::Kind { kind })
+                .map_err(host_api_to_secret_store_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?,
+    );
     let mut offset = 0_u64;
     let mut saw_unverifiable_session = false;
     let mut record_verification_error = None;
     loop {
-        if offset >= MASTER_KEY_VERIFICATION_RECORD_LIMIT {
+        if offset >= record_limit {
             return Err(SecretStoreError::StoreUnavailable {
                 reason: "encrypted-record master-key verification exceeded its bounded scan"
                     .to_string(),
             });
         }
-        let remaining = MASTER_KEY_VERIFICATION_RECORD_LIMIT - offset;
+        let remaining = record_limit - offset;
         let limit = u64::from(Page::MAX_LIMIT).min(remaining) as u32;
         let entries = filesystem
-            .query(&tenants_root, &Filter::All, Page::new(offset, limit))
+            .query(
+                &tenants_root,
+                &encrypted_record_filter,
+                Page::new(offset, limit),
+            )
             .await
             .map_err(fs_to_secret_store_error)?;
         let entry_count = entries.len();
@@ -1704,6 +1738,45 @@ mod tests {
         verify_existing_encrypted_records(backend.as_ref(), test_crypto().as_ref())
             .await
             .expect_err("every encrypted record must authenticate before cutover");
+    }
+
+    #[tokio::test]
+    async fn encrypted_record_verification_ignores_unrelated_tenant_records_in_its_bound() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let unrelated_kind = RecordKind::new("unrelated_activity").expect("record kind");
+        let verification_limit = 8;
+        for index in 0..verification_limit {
+            let path = VirtualPath::new(format!("/tenants/bulk/{index:06}.json"))
+                .expect("unrelated record path");
+            backend
+                .put(
+                    &path,
+                    Entry::record(unrelated_kind.clone(), &json!({"index": index}))
+                        .expect("unrelated record"),
+                    CasExpectation::Absent,
+                )
+                .await
+                .expect("seed unrelated tenant record");
+        }
+
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        SecretStore::new(scoped, test_crypto())
+            .put(
+                sample_scope("test", "test"),
+                SecretHandle::new("verification-sentinel").expect("secret handle"),
+                SecretMaterial::from("encrypted-value".to_string()),
+                None,
+            )
+            .await
+            .expect("seed encrypted record");
+
+        verify_existing_encrypted_records_with_limit(
+            backend.as_ref(),
+            test_crypto().as_ref(),
+            verification_limit,
+        )
+        .await
+        .expect("only encrypted record families consume the verification bound");
     }
 
     #[tokio::test]
