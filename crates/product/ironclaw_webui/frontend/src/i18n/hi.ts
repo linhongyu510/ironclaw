@@ -879,6 +879,7 @@ registerPack("hi", {
   "ironhub.link.agentUrlUnset": "इस परिनियोजन के लिए कोई सार्वजनिक URL कॉन्फ़िगर नहीं है।",
   "ironhub.link.sharedKey": "साझा कुंजी",
   "ironhub.link.saveFailed": "साझा कुंजी सहेजी नहीं जा सकी।",
+  "ironhub.link.saveKey": "कुंजी सहेजें",
   "ironhub.link.clearKey": "कुंजी हटाएं",
   "ironhub.link.clearFailed": "साझा कुंजी हटाई नहीं जा सकी।",
   "ironhub.link.keyTooShort": "साझा कुंजी कम से कम 32 वर्ण की होती है।",

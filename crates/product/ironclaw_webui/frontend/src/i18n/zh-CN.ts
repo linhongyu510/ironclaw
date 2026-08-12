@@ -878,6 +878,7 @@ registerPack("zh-CN", {
   "ironhub.link.agentUrlUnset": "此部署未配置公开 URL。",
   "ironhub.link.sharedKey": "共享密钥",
   "ironhub.link.saveFailed": "共享密钥保存失败。",
+  "ironhub.link.saveKey": "保存密钥",
   "ironhub.link.clearKey": "删除密钥",
   "ironhub.link.clearFailed": "共享密钥删除失败。",
   "ironhub.link.keyTooShort": "共享密钥至少 32 个字符。",

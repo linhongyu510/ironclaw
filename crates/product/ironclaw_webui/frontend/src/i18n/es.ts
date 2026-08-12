@@ -879,6 +879,7 @@ registerPack("es", {
   "ironhub.link.agentUrlUnset": "No hay una URL pública configurada para esta instalación.",
   "ironhub.link.sharedKey": "Clave compartida",
   "ironhub.link.saveFailed": "No se pudo guardar la clave compartida.",
+  "ironhub.link.saveKey": "Guardar clave",
   "ironhub.link.clearKey": "Eliminar clave",
   "ironhub.link.clearFailed": "No se pudo eliminar la clave compartida.",
   "ironhub.link.keyTooShort": "Una clave compartida tiene al menos 32 caracteres.",

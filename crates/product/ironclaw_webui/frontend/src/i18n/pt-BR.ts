@@ -879,6 +879,7 @@ registerPack("pt-BR", {
   "ironhub.link.agentUrlUnset": "Nenhuma URL pública está configurada para esta implantação.",
   "ironhub.link.sharedKey": "Chave compartilhada",
   "ironhub.link.saveFailed": "Não foi possível salvar a chave compartilhada.",
+  "ironhub.link.saveKey": "Salvar chave",
   "ironhub.link.clearKey": "Remover chave",
   "ironhub.link.clearFailed": "Não foi possível remover a chave compartilhada.",
   "ironhub.link.keyTooShort": "Uma chave compartilhada tem pelo menos 32 caracteres.",

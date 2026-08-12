@@ -100,7 +100,7 @@ export function IronhubLinkPanel() {
               onClick={() => save.mutate()}
               disabled={save.isPending || trimmedKey.length === 0 || tooShort}
             >
-              {save.isPending ? t("common.saving") : t("common.save")}
+              {save.isPending ? t("common.saving") : t("ironhub.link.saveKey")}
             </Button>
             {status.key_stored
               ? (<Button

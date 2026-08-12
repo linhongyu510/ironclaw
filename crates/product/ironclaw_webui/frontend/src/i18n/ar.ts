@@ -879,6 +879,7 @@ registerPack("ar", {
   "ironhub.link.agentUrlUnset": "لا يوجد عنوان عام مُهيأ لهذا النشر.",
   "ironhub.link.sharedKey": "المفتاح المشترك",
   "ironhub.link.saveFailed": "تعذر حفظ المفتاح المشترك.",
+  "ironhub.link.saveKey": "حفظ المفتاح",
   "ironhub.link.clearKey": "إزالة المفتاح",
   "ironhub.link.clearFailed": "تعذر إزالة المفتاح المشترك.",
   "ironhub.link.keyTooShort": "المفتاح المشترك لا يقل عن 32 حرفًا.",
