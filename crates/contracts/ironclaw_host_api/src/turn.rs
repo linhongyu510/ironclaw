@@ -539,6 +539,7 @@ const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
 #[serde(rename_all = "snake_case")]
 pub enum ModelInvalidOutputDetailReason {
     EmptyAssistantResponse,
+    UnattendedQuestionEndingResponse,
     TextualToolCallSyntax,
     OutsideCapabilitySurface,
     ToolUseFinishWithoutToolCalls,
@@ -555,6 +556,9 @@ impl ModelInvalidOutputDetailReason {
     pub fn safe_summary(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "model returned an empty assistant response",
+            Self::UnattendedQuestionEndingResponse => {
+                "scheduled run ended by requesting user input"
+            }
             Self::TextualToolCallSyntax => {
                 "model returned textual tool-call syntax instead of structured tool calls"
             }
@@ -576,6 +580,7 @@ impl ModelInvalidOutputDetailReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "empty_assistant_response",
+            Self::UnattendedQuestionEndingResponse => "unattended_question_ending_response",
             Self::TextualToolCallSyntax => "textual_tool_call_syntax",
             Self::OutsideCapabilitySurface => "outside_capability_surface",
             Self::ToolUseFinishWithoutToolCalls => "tool_use_finish_without_tool_calls",
@@ -604,6 +609,9 @@ impl ModelInvalidOutputDetailReason {
         }
         match safe_summary {
             "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "scheduled run ended by requesting user input" => {
+                Some(Self::UnattendedQuestionEndingResponse)
+            }
             "model returned textual tool-call syntax instead of structured tool calls" => {
                 Some(Self::TextualToolCallSyntax)
             }
@@ -1290,6 +1298,7 @@ mod tests {
 
         for reason in [
             Reason::EmptyAssistantResponse,
+            Reason::UnattendedQuestionEndingResponse,
             Reason::TextualToolCallSyntax,
             Reason::OutsideCapabilitySurface,
             Reason::ToolUseFinishWithoutToolCalls,

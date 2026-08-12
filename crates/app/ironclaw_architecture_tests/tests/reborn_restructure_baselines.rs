@@ -125,6 +125,9 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// observed value move with this record so the increase is explicit.
 /// ✎ Union re-measured 40_432 → 40_747 on 2026-08-07 after merging #7157's
 /// delivery refactor with #7214's sandbox profile and binding assembly.
+/// ✎ Union re-measured on the #7373 merge (2026-08-08): the gate audit's
+/// independent re-equalization (40_423 → 40_524, same drift class) folds into
+/// the merged-tree figure, recorded with `[gate].loc_ceiling`/`loc_observed`.
 /// Re-measured on the MERGED tree (web-push channel assembly + #7171 skills
 /// assembly) with `bash scripts/ci/check-composition-budget.sh` -> 41_509.
 /// Paired with `[gate].loc_ceiling` in scripts/ci/composition-budget.toml --
@@ -141,15 +144,29 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// manifest ceiling (41_810, seeded from the merge-queue commit where
 /// concurrent mainline growth adds ~79 LOC on top of this tree) stays within
 /// the nudge window of this record.
-/// ✎ Re-recorded 41_731 → 42_098 on 2026-08-11 merging #7038 (PR #7498)
-/// with #7471: both branches re-ratcheted independently, so this is the
-/// measured value on the merged tree, not either side's. Moves with
-/// `[gate].loc_ceiling`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_098;
+/// ✎ Union re-measured 41_731 → 41_820 on 2026-08-12 (#7373 refresh merge
+/// of main): the audit branch's record (40_804) and main's chain fold;
+/// measured on the merged tree with `bash
+/// scripts/ci/check-composition-budget.sh --print`, and the manifest's
+/// `loc_ceiling`/`loc_observed` re-equalize to the same figure in this
+/// commit.
+/// ✎ Re-ratcheted 41_731 → 41_533 on 2026-08-12 for #7185: the memory-save
+/// guidance and its content pins moved out of composition into the
+/// memory-native package that owns them, and the prompt tests split out of the
+/// production file. This record moves with the manifest ceiling in the same
+/// commit — the gate's NUDGE fired, so the eviction is locked in rather than
+/// banked as headroom. Measured on this branch's merged tree with
+/// `bash scripts/ci/check-composition-budget.sh`.
+/// ✎ Re-recorded 41_533 → 41_821 on 2026-08-12 merging #7038 (PR #7498):
+/// measured on the merged tree, not either side's pre-merge number. Moves
+/// with `[gate].loc_ceiling`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_821;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 827;
+/// ✎ Re-recorded 827 → 835 on 2026-08-12 (#7038, PR #7498): the 4 new
+/// construction-site casts described in `[gate].arc_dyn_ceiling`.
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 835;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's
