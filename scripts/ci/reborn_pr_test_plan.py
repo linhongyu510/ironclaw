@@ -888,7 +888,21 @@ def build_plan(
             integration_lanes.add(integration_inventory[owner])
             reasons.append(f"integration test support changed: {path}")
             continue
-        if path.startswith("tests/support/") or path == "tests/support_unit_tests.rs":
+        # `tests/fixtures/llm_traces/README.md` is the format contract of the
+        # shared `TraceLlm` replay provider (`tests/support/trace_llm.rs`): it
+        # documents the fixture JSON every replay consumer loads, so editing it
+        # signals the fixture format (or its documented tool surface) changed
+        # and must run the same representative root partition as the support
+        # file it documents. It is not prose — the coding-tool cutover renamed
+        # the pinned tool surface and edited this README to match, and the
+        # fail-closed arm rejected that PR as an unmapped test path. Exact
+        # path on purpose: the rest of the `llm_traces/` tree stays unmapped
+        # until each subtree is decided (`reborn_qa/` has its own arm below).
+        if (
+            path.startswith("tests/support/")
+            or path == "tests/support_unit_tests.rs"
+            or path == "tests/fixtures/llm_traces/README.md"
+        ):
             root_partitions.add(0)
             reasons.append(
                 "shared root-test support changed; PR runs a representative partition"

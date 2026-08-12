@@ -285,7 +285,11 @@ impl FirstPartyCapabilityHandler for CodingTools {
                 ironclaw_extension_support::coding::pinned::grep(&context, request.input.clone())
                     .await
             }
-            _ => unreachable!("coding handler is registered only for the five coding ids"),
+            _ => {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::UndeclaredCapability,
+                ));
+            }
         }
         .map_err(coding_error)?;
         let mut process_count = 0;

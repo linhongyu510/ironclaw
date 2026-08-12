@@ -1355,31 +1355,31 @@ fn split_hashline_lines(text: &str) -> Vec<String> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 static HL_PREFIX_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\s*(?:>>>|>>)?\s*(?:[+*-]\s*)?\d+[:|]").expect("static prefix regex")
+    regex::Regex::new(r"^\s*(?:>>>|>>)?\s*(?:[+*-]\s*)?\d+[:|]").expect("static prefix regex") // safety: hardcoded compile-time regex literal
 });
 static HL_PREFIX_PLUS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\s*(?:>>>|>>)?\s*\+\s*\d+:").expect("static prefix plus regex")
+    regex::Regex::new(r"^\s*(?:>>>|>>)?\s*\+\s*\d+:").expect("static prefix plus regex") // safety: hardcoded compile-time regex literal
 });
 static HL_HEADER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\s*\[[^#\r\n]+#[0-9a-fA-F]{4}\]\s*$").expect("static header regex")
+    regex::Regex::new(r"^\s*\[[^#\r\n]+#[0-9a-fA-F]{4}\]\s*$").expect("static header regex") // safety: hardcoded compile-time regex literal
 });
 static DIFF_PLUS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^[+]([^+]|$)").expect("static diff plus regex")
+    regex::Regex::new(r"^[+]([^+]|$)").expect("static diff plus regex") // safety: hardcoded compile-time regex literal
 });
 static READ_TRUNCATION_NOTICE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
     || {
         regex::Regex::new(
         r"^\s*\[(?:(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bUse :L?\d+|(?:…|\.\.\.)?\d+\s*ln elided;\s*re-read needed ranges with .+)\]\s*$",
     )
-    .expect("static truncation regex")
+    .expect("static truncation regex") // safety: hardcoded compile-time regex literal
     },
 );
 static READ_RANGE_ELISION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^\s*[1-9]\d*\s*-\s*[1-9]\d*:.*(?:…|\.\.\.).*$")
-        .expect("static range elision regex")
+        .expect("static range elision regex") // safety: hardcoded compile-time regex literal
 });
 static READ_SINGLE_ELISION_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\s*(?:…|\.\.\.)\s*$").expect("static single elision regex")
+    regex::Regex::new(r"^\s*(?:…|\.\.\.)\s*$").expect("static single elision regex") // safety: hardcoded compile-time regex literal
 });
 
 /// Whether a row is display-only metadata emitted by `read`, never source.
@@ -1601,15 +1601,16 @@ fn bodyless_target_message(target: &BlockTarget, had_colon: bool) -> Option<&'st
 
 static TOP_LEVEL_SNAPSHOT_ROW_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^\s*([1-9]\d*)[:|](.*)$").expect("static snapshot row regex")
+        regex::Regex::new(r"^\s*([1-9]\d*)[:|](.*)$").expect("static snapshot row regex") // safety: hardcoded compile-time regex literal
     });
 static TOP_LEVEL_BARE_RANGE_HEADER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^\s*([1-9]\d*)(?:\s|[-.=…])+([1-9]\d*)\s*:\s*$")
-            .expect("static bare range regex")
+            .expect("static bare range regex") // safety: hardcoded compile-time regex literal
     });
-static MD_BULLET_ROW_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^\s*- \S").expect("static bullet regex"));
+static MD_BULLET_ROW_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\s*- \S").expect("static bullet regex") // safety: hardcoded compile-time regex literal
+});
 static BARE_LITERAL_VALUE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r#"^\s*(?:"[^"]*"|'[^']*'|[-+]?\d+(?:\.\d+)?)\s*,?\s*$"#)
         .expect("static literal regex") // safety: hardcoded literal
@@ -1653,7 +1654,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
     }
     let unified_header = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@")
-            .expect("static unified header regex")
+            .expect("static unified header regex") // safety: hardcoded compile-time regex literal
     });
     if unified_header.is_match(trimmed) {
         return Some(format!(
@@ -1677,7 +1678,7 @@ fn detect_apply_patch_contamination(text: &str) -> Option<String> {
         ));
     }
     let bare_range = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^([1-9]\d*)\s+(?:[1-9]\d*)\s*:?$").expect("static bare range regex")
+        regex::Regex::new(r"^([1-9]\d*)\s+(?:[1-9]\d*)\s*:?$").expect("static bare range regex") // safety: hardcoded compile-time regex literal
     });
     if bare_range.is_match(trimmed) {
         return Some(format!(
@@ -1947,33 +1948,40 @@ impl Executor {
                     && !prev_hunk.clipboard_dependent
             });
             if exact {
-                let previous = previous.expect("exact implies previous");
-                dropped.insert(previous);
-                for line in &hunk.source_lines {
-                    if owner_by_line.get(line) == Some(&previous) {
-                        owner_by_line.remove(line);
+                // `exact` is only true when `previous` was Some, so this
+                // binding always succeeds; if it ever did not, skipping the
+                // coalesce fails closed instead of panicking.
+                if let Some(previous) = previous {
+                    dropped.insert(previous);
+                    for line in &hunk.source_lines {
+                        if owner_by_line.get(line) == Some(&previous) {
+                            owner_by_line.remove(line);
+                        }
                     }
-                }
-                for line in &hunk.source_lines {
-                    owner_by_line.insert(*line, hunk.line_num);
-                }
-                if !self
-                    .warnings
-                    .contains(&REPLACE_PAIR_COALESCED_WARNING.to_string())
-                {
-                    self.warnings
-                        .push(REPLACE_PAIR_COALESCED_WARNING.to_string());
+                    for line in &hunk.source_lines {
+                        owner_by_line.insert(*line, hunk.line_num);
+                    }
+                    if !self
+                        .warnings
+                        .contains(&REPLACE_PAIR_COALESCED_WARNING.to_string())
+                    {
+                        self.warnings
+                            .push(REPLACE_PAIR_COALESCED_WARNING.to_string());
+                    }
                 }
                 continue;
             }
             let previous_text = previous
                 .map(|line| line.to_string())
                 .unwrap_or_else(|| "an earlier line".to_string());
+            // `first_overlap` is set in the same iteration that makes
+            // `overlaps` non-empty (guarded by the `continue` above), so it
+            // is always Some here; fall back to the hunk's own line number
+            // rather than panicking on the impossible state.
+            let first_overlap = first_overlap.unwrap_or(hunk.line_num);
             return Err(format!(
                 "line {}: anchor line {} is already targeted by another hunk on line {}. Issue ONE hunk per range; payload is only the final desired content, never a before/after pair.",
-                hunk.line_num,
-                first_overlap.expect("overlap exists"),
-                previous_text
+                hunk.line_num, first_overlap, previous_text
             ));
         }
         if !dropped.is_empty() {
@@ -2456,7 +2464,16 @@ impl Executor {
             }
             BlockTarget::Bof { .. } => Cursor::Bof,
             BlockTarget::Eof { .. } => Cursor::Eof,
-            _ => unreachable!("gap targets handled above"),
+            // Every non-gap target returned from the match above, so this
+            // arm cannot be reached; fail closed by recording a parse
+            // failure instead of panicking.
+            _ => {
+                self.parse_failure = Some(format!(
+                    "line {}: unsupported target for gap insertion",
+                    pending.line_num
+                ));
+                return;
+            }
         };
         let register = pending.target.register().map(ToString::to_string);
         if register.is_some() || (!pending.had_colon && payloads.is_empty()) {
@@ -2854,7 +2871,7 @@ pub(crate) fn apply_edits(
     // edit, across all buckets — buckets apply bottom-up, so keeping only
     // the first-set value would report the highest changed line instead.
     let mut track_first_changed = |line: u64| {
-        if first_changed_line.is_none() || line < first_changed_line.unwrap() {
+        if first_changed_line.is_none_or(|first| line < first) {
             first_changed_line = Some(line);
         }
     };
@@ -2964,7 +2981,7 @@ pub(crate) fn apply_edits(
 // ═══════════════════════════════════════════════════════════════════════════
 
 static STRUCTURAL_CLOSER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("static closer regex")
+    regex::Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("static closer regex") // safety: hardcoded compile-time regex literal
 });
 
 /// A line that is nothing but closing delimiters: `}`, `)`, `];`, `})`, `},`.
@@ -2996,7 +3013,13 @@ fn lexical_block_resolver(text: &str, line: u64) -> Option<(u64, u64)> {
         let line_number = line_index as u64 + 1;
         let mut index = 0usize;
         while index < line_text.len() {
-            let ch = line_text[index..].chars().next().expect("char");
+            // `index` advances only by char-boundary widths and stays below
+            // `line_text.len()`, so the slice is always non-empty; stop
+            // scanning this line instead of panicking on the impossible
+            // case.
+            let Some(ch) = line_text[index..].chars().next() else {
+                break;
+            };
             let next = line_text[index + ch.len_utf8()..].chars().next();
             match mode {
                 ScannerMode::BlockComment => {
@@ -3100,7 +3123,13 @@ fn match_braces(
         };
         let mut index = start_col;
         while index < line_text.len() {
-            let ch = line_text[index..].chars().next().expect("char");
+            // `index` advances only by char-boundary widths and stays below
+            // `line_text.len()`, so the slice is always non-empty; stop
+            // scanning this line instead of panicking on the impossible
+            // case.
+            let Some(ch) = line_text[index..].chars().next() else {
+                break;
+            };
             let next = line_text[index + ch.len_utf8()..].chars().next();
             match mode {
                 ScannerMode::BlockComment => {
@@ -3265,7 +3294,14 @@ pub(crate) fn resolve_block_edits(
             let op = match op {
                 BlockOp::Replace => AbsoluteRangeOp::Replace,
                 BlockOp::Cut => AbsoluteRangeOp::Cut,
-                BlockOp::InsertAfter | BlockOp::PasteAfter => unreachable!("handled above"),
+                // `InsertAfter` and `PasteAfter` returned from the branch
+                // above, so this arm cannot be reached; fail closed with the
+                // unresolved-block error path instead of panicking.
+                BlockOp::InsertAfter | BlockOp::PasteAfter => {
+                    return Err(format!(
+                        "line {line_num}: unsupported insert/paste-after for an unresolved block"
+                    ));
+                }
             };
             return Err(format!(
                 "line {line_num}: {}",
@@ -3384,7 +3420,7 @@ pub(crate) fn resolve_block_edits(
 static APPLY_PATCH_PATH_NOISE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
     || {
         regex::Regex::new(r"^\*{0,3}\s*(?:(?:update|add|delete|move)[^A-Za-z0-9]*(?:file|to)?[^A-Za-z0-9]*:)?\s*\*{0,3}\s*")
-        .expect("static noise regex")
+        .expect("static noise regex") // safety: hardcoded compile-time regex literal
     },
 );
 
@@ -3425,17 +3461,23 @@ fn try_parse_recovery_header(line: &str) -> Option<(String, Option<String>)> {
         return None;
     }
     let trailing = std::sync::LazyLock::new(|| {
+        // `HL_FILE_HASH_LENGTH` is a const, so the formatted pattern is a
+        // fixed literal that always compiles.
         regex::Regex::new(&format!(r"#([0-9A-Fa-f]{{{HL_FILE_HASH_LENGTH}}})\s*$"))
-            .expect("static trailing tag regex")
+            .expect("static trailing tag regex") // safety: pattern built from const HL_FILE_HASH_LENGTH
     });
-    let (path_text, file_hash) = if let Some(captures) = trailing.captures(&body) {
-        let hash_start = captures.get(1).expect("capture").start();
-        (
-            body[..hash_start].to_string(),
-            Some(captures[1].to_ascii_uppercase()),
-        )
-    } else {
-        (body.trim_end().to_string(), None)
+    // The pattern's only capture group is mandatory, so `get(1)` is Some
+    // whenever the overall match succeeded; the `None` arm below (treated
+    // as "no tag") fails closed rather than panicking.
+    let (path_text, file_hash) = match trailing
+        .captures(&body)
+        .and_then(|captures| captures.get(1))
+    {
+        Some(hash) => (
+            body[..hash.start()].to_string(),
+            Some(hash.as_str().to_ascii_uppercase()),
+        ),
+        None => (body.trim_end().to_string(), None),
     };
     if path_text.contains('#') {
         return None;
@@ -3509,7 +3551,7 @@ fn split_raw_sections(input: &str) -> Result<Vec<(String, Option<String>, String
         let first_trimmed = first_line.trim_end();
         let unified_header = std::sync::LazyLock::new(|| {
             regex::Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@")
-                .expect("static unified regex")
+                .expect("static unified regex") // safety: hardcoded compile-time regex literal
         });
         if unified_header.is_match(first_trimmed) {
             return Err(
@@ -3610,8 +3652,15 @@ impl PatchSection {
             return Ok(parsed);
         }
         let parsed = parse_patch(&self.diff)?;
+        // The cell was empty above and `set` only fails on a concurrent
+        // writer, which still leaves the cell initialized, so `get` below
+        // is guaranteed Some; fail closed on the parse-error path rather
+        // than panicking.
         let _ = self.parsed.set(parsed);
-        Ok(self.parsed.get().expect("parsed cell was just initialized"))
+        match self.parsed.get() {
+            Some(parsed) => Ok(parsed),
+            None => Err("internal: parsed patch cell was not initialized".to_string()),
+        }
     }
 
     pub(crate) fn edits(&self) -> Result<&[Edit], String> {

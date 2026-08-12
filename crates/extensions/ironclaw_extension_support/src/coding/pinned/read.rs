@@ -699,7 +699,13 @@ async fn render_directory_tree(
             return 0;
         }
         let dropped = len - limit;
-        let oldest = all.pop().expect("non-empty");
+        // `len > limit` (checked above) with the caller's constant limit
+        // (>= 1) implies the vector is non-empty, so `pop` is guaranteed
+        // Some; fail closed by leaving the list uncapped rather than
+        // panicking.
+        let Some(oldest) = all.pop() else {
+            return 0;
+        };
         all.truncate(limit - 1);
         all.push(oldest);
         dropped
@@ -980,13 +986,21 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
             continue;
         }
 
+        // Every marker below that sets a phase also sets `partial`, and the
+        // two are cleared together, so `partial` is Some whenever the guard
+        // above passes. Bind it once instead of re-checking per use; the
+        // reset paths below run only after `p`'s last use on their path.
+        let p = match partial.as_mut() {
+            Some(p) => p,
+            None => continue, // unreachable: guarded above
+        };
+
         if let Some(label) = match_marker(line, BASE_PREFIX) {
             if phase != Phase::Ours {
                 partial = None;
                 phase = Phase::Idle;
                 continue;
             }
-            let p = partial.as_mut().expect("checked");
             p.base_label = if label.is_empty() { None } else { Some(label) };
             p.base_lines = Some(Vec::new());
             phase = Phase::Base;
@@ -995,7 +1009,6 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
 
         if line == SEPARATOR {
             if phase == Phase::Ours || phase == Phase::Base {
-                let p = partial.as_mut().expect("checked");
                 p.separator_line = Some(ln);
                 p.theirs_lines = Some(Vec::new());
                 phase = Phase::Theirs;
@@ -1007,25 +1020,21 @@ fn scan_conflict_lines(lines: &str, first_line_number: u64) -> Vec<ConflictBlock
         }
 
         if let Some(label) = match_marker(line, THEIRS_PREFIX) {
-            if phase == Phase::Theirs {
-                let p = partial.as_ref().expect("checked");
-                if p.separator_line.is_some() && p.theirs_lines.is_some() {
-                    blocks.push(ConflictBlock {
-                        start_line: p.start_line,
-                        end_line: ln,
-                        ours_label: p.ours_label.clone(),
-                        base_label: p.base_label.clone(),
-                        theirs_label: if label.is_empty() { None } else { Some(label) },
-                        base_lines: p.base_lines.clone(),
-                    });
-                }
+            if phase == Phase::Theirs && p.separator_line.is_some() && p.theirs_lines.is_some() {
+                blocks.push(ConflictBlock {
+                    start_line: p.start_line,
+                    end_line: ln,
+                    ours_label: p.ours_label.clone(),
+                    base_label: p.base_label.clone(),
+                    theirs_label: if label.is_empty() { None } else { Some(label) },
+                    base_lines: p.base_lines.clone(),
+                });
             }
             partial = None;
             phase = Phase::Idle;
             continue;
         }
 
-        let p = partial.as_mut().expect("checked");
         match phase {
             Phase::Ours => {}
             Phase::Base => {
@@ -1281,7 +1290,13 @@ fn read_multi_range(
     text: &str,
 ) -> Result<String, CodingEngineError> {
     let ParsedSelector::Lines { ranges, .. } = parsed else {
-        unreachable!("multi-range implies lines")
+        // Unreachable: the caller dispatches here only when
+        // `parsed.is_multi_range()` is true, which requires the Lines
+        // variant with multiple ranges. Fail closed with an input error
+        // rather than panicking.
+        return Err(input_error(
+            "Multi-range selectors must be a line range list.",
+        ));
     };
     let raw_selector = parsed.is_raw();
     let all_lines: Vec<&str> = text.split('\n').collect();
@@ -1504,7 +1519,12 @@ fn lexical_bracket_context(
         let line_visible = visible.contains(&line_number);
         let mut index = 0usize;
         while index < line.len() {
-            let ch = line[index..].chars().next().expect("char");
+            // `index` advances only by char-boundary widths and stays below
+            // `line.len()`, so the slice is always non-empty; skip the rest
+            // of the line instead of panicking on the impossible case.
+            let Some(ch) = line[index..].chars().next() else {
+                break;
+            };
             let next = line[index + ch.len_utf8()..].chars().next();
 
             if mode == Mode::BlockComment {

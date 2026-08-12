@@ -1685,6 +1685,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
+    def test_llm_trace_fixture_readme_plans_like_shared_replay_support(self) -> None:
+        """`tests/fixtures/llm_traces/README.md` documents the fixture format
+        of the shared `TraceLlm` replay provider (`tests/support/trace_llm.rs`),
+        so it plans exactly like shared root-test support: a representative
+        root partition, no integration lane.
+
+        Regression fixture: the coding-tool cutover renamed the pinned tool
+        surface and edited this README to match, and the fail-closed arm
+        rejected that PR as an unmapped test path. The mapping is exact —
+        a sibling fixture without a decision still fails closed.
+        """
+        plan = self.plan("pull_request", ["tests/fixtures/llm_traces/README.md"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["root_partitions"], [0])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                ["tests/fixtures/llm_traces/spot/tool_echo.json"],
+            )
+
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
             with self.subTest(path=path):

@@ -492,8 +492,11 @@ impl GrepTree {
             if let Some(idx) = idx {
                 node = &mut node.subdirs[idx].1;
             } else {
+                // Index the entry just pushed instead of unwrapping
+                // `last_mut`; the vector is non-empty by construction.
+                let index = node.subdirs.len();
                 node.subdirs.push((segment.to_string(), GrepTree::new()));
-                node = &mut node.subdirs.last_mut().expect("just pushed").1;
+                node = &mut node.subdirs[index].1;
             }
         }
         node.files.push((name, suffix, body));

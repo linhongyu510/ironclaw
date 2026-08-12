@@ -245,7 +245,13 @@ pub(crate) fn parse_line_ranges(sel: &str) -> Result<Option<Vec<LineRange>>, Str
 
     let mut merged: Vec<LineRange> = vec![parsed[0]];
     for current in parsed.into_iter().skip(1) {
-        let last = merged.last_mut().expect("merged is non-empty");
+        // `merged` starts with `parsed[0]` and only grows, so `last_mut` is
+        // always Some; if it ever were not, push and continue instead of
+        // panicking.
+        let Some(last) = merged.last_mut() else {
+            merged.push(current);
+            continue;
+        };
         // Open-ended means "to EOF" — any later range is absorbed.
         if last.open_ended {
             continue;

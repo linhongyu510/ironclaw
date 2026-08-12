@@ -433,8 +433,11 @@ fn format_grouped_paths(paths: &[String]) -> String {
             if let Some(idx) = idx {
                 node = &mut node.subdirs[idx];
             } else {
+                // Index the entry just pushed instead of unwrapping
+                // `last_mut`; the vector is non-empty by construction.
+                let index = node.subdirs.len();
                 node.subdirs.push(Node::new(segment.to_string()));
-                node = node.subdirs.last_mut().expect("just pushed");
+                node = &mut node.subdirs[index];
             }
         }
         let name = segments.last().copied().unwrap_or_default();

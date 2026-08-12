@@ -21,14 +21,15 @@ use super::{
 
 /// `URI_LIKE_WRITE_PATH_RE` from the pinned write.ts (`/^...$/i`).
 static URI_LIKE_WRITE_PATH_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?i)^([a-z][a-z0-9+.-]*):/{1,2}(.*)$").expect("static uri regex")
+    regex::Regex::new(r"(?i)^([a-z][a-z0-9+.-]*):/{1,2}(.*)$").expect("static uri regex") // safety: hardcoded compile-time regex literal
 });
 /// `XD_MISSING_DELIMITER_RE` from the pinned write.ts (`/^xd\/+(.*)$/i`).
-static XD_MISSING_DELIMITER_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^xd/+(.*)$").expect("static xd regex"));
+static XD_MISSING_DELIMITER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
+    || regex::Regex::new(r"(?i)^xd/+(.*)$").expect("static xd regex"), // safety: hardcoded compile-time regex literal
+);
 static LOOSE_HASHLINE_HEADER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").expect("static loose header regex")
+        regex::Regex::new(r"^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$").expect("static loose header regex") // safety: hardcoded compile-time regex literal
     });
 /// `XD_SCHEME_NEAR_MISSES` from the pinned write.ts.
 const XD_SCHEME_NEAR_MISSES: [&str; 3] = ["dx", "xdd", "xdt"];
