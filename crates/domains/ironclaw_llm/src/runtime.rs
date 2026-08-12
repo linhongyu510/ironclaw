@@ -32,7 +32,7 @@ use rust_decimal::Decimal;
 use crate::error::LlmError;
 use crate::provider::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, normalized_model_override,
 };
 
 /// Maximum number of distinct model names interned over a process lifetime.
@@ -198,7 +198,11 @@ impl SwappableLlmProvider {
         if request.deferred_tools.is_empty() {
             return request;
         }
-        let model = match request.model.as_deref() {
+        // Provider execution resolves blank and case-insensitive `"default"`
+        // overrides to the active model, so the capability check must use the
+        // same effective model or a deferred-capable request is folded into
+        // `tools` and loses the cache-prefix benefit.
+        let model = match normalized_model_override(request.model.as_deref()) {
             Some(model) => model.to_string(),
             None => inner.active_model_name(),
         };

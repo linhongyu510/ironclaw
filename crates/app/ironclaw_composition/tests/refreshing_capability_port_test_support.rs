@@ -919,28 +919,59 @@ async fn multi_entry_collection_knobs_round_trip() {
     assert_eq!(last.get(&other_provider), Some(&other_trust));
 }
 
-/// `deferred_tool_definitions()` is forwarded through the refreshing wrapper:
-/// it succeeds through the real production factory and never duplicates a
-/// name already advertised in `tool_definitions()`.
+/// `deferred_tool_definitions()` is forwarded through the refreshing wrapper
+/// and the disclosure decorator production wires around it: the fixture drives
+/// the real factory plus the runner's `ToolDisclosureCapabilityDecorator`
+/// wrap, populates the disclosure catalog through the public
+/// `visible_capabilities` seam, and then asserts the deferred definitions are
+/// non-empty (a real catalog deferral, not a vacuous empty list) and never
+/// duplicate the advertised `tool_definitions()`.
 #[tokio::test]
 async fn deferred_tool_definitions_forwarded_through_refreshing_port() {
     let shared_io = Arc::new(SharedStubCapabilityIo::new());
+    let run_context = run_context("deferred").await;
     let parts = test_parts(
-        run_context("deferred").await,
+        run_context.clone(),
         Arc::new(StubHostRuntime::new()),
-        shared_io,
+        shared_io.clone(),
         None,
         HashMap::new(),
         BTreeMap::new(),
     );
-    let port = create_refreshing_capability_port_for_test(parts)
+    let inner = create_refreshing_capability_port_for_test(parts)
         .await
         .expect("port assembles through the real production factory");
+
+    // Mirror the runner's wiring (`ironclaw_turn_runner::runtime`):
+    // `ToolDisclosureCapabilityDecorator` wraps the refreshed port and is the
+    // only layer that produces deferred definitions from the catalog.
+    let decorator = ironclaw_loop_host::ToolDisclosureCapabilityDecorator::new(
+        shared_io,
+        ironclaw_loop_host::ToolDisclosureMode::Namespaces,
+    );
+    let port = decorator.decorate_with_policy(
+        &run_context,
+        inner,
+        std::sync::Arc::new(
+            ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
+        ),
+    );
+
+    // Populate the disclosure catalog through the same seam a real loop run
+    // uses; without this the decorated port has no turn state and defers
+    // nothing.
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest)
+        .await
+        .expect("visible capabilities refresh");
 
     let tools = port.tool_definitions().expect("tool definitions");
     let deferred = port
         .deferred_tool_definitions()
         .expect("deferred definitions");
+    assert!(
+        !deferred.is_empty(),
+        "disclosure-enabled fixture must produce deferred definitions: {deferred:?}"
+    );
     let tool_names: HashSet<&str> = tools
         .iter()
         .map(|definition| definition.name.as_str())

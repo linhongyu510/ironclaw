@@ -42,7 +42,8 @@ use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
+    normalized_model_override, recover_codex_text_tool_calls_from_tool_names,
+    vision_models::is_vision_model,
 };
 use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_loop_contracts::{
@@ -1408,11 +1409,13 @@ where
             );
         }
         if !tool_definitions.is_empty() || !deferred_tool_definitions.is_empty() {
-            let effective_model = completion
-                .model
-                .as_deref()
-                .map(str::to_owned)
-                .unwrap_or_else(|| provider.active_model_name());
+            // Resolve blank / `"default"` overrides to the provider's active
+            // model, matching provider execution, so the native-deferred
+            // capability decision and the served model cannot diverge.
+            let effective_model = match normalized_model_override(completion.model.as_deref()) {
+                Some(model) => model.to_owned(),
+                None => provider.active_model_name(),
+            };
             let use_native_deferred_tools =
                 provider.supports_deferred_tool_loading(&effective_model);
             let unavailable_capability_guard =

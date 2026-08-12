@@ -898,7 +898,6 @@ fn test_tool(name: &str) -> ToolDefinition {
     }
 }
 
-
 #[test]
 fn deferred_tool_wire_array_is_stable_after_promotion() {
     let initial = convert_anthropic_tools(
@@ -933,7 +932,6 @@ fn deferred_tool_wire_array_is_stable_after_promotion() {
         "ordinary tools must omit defer_loading to keep the cached prefix byte-identical"
     );
 }
-
 
 #[test]
 fn parallel_tool_results_with_references_stay_in_one_user_message() {
@@ -975,7 +973,6 @@ fn parallel_tool_results_with_references_stay_in_one_user_message() {
     );
 }
 
-
 #[test]
 fn deferred_tool_reference_to_unknown_tool_is_dropped() {
     // A `tool_reference` naming a tool absent from `deferred_tools` is a
@@ -997,7 +994,6 @@ fn deferred_tool_reference_to_unknown_tool_is_dropped() {
         }])
     );
 }
-
 
 #[test]
 fn beta_header_value_covers_auth_and_deferred_combinations() {
@@ -1057,7 +1053,6 @@ fn beta_header_value_covers_auth_and_deferred_combinations() {
     assert_eq!(api_key.beta_header_value(&request(false)), None);
 }
 
-
 #[test]
 fn deferred_tool_reference_is_isolated_from_result_text() {
     let message = ChatMessage::tool_result("call-1", "tool_search", "matches")
@@ -1081,7 +1076,6 @@ fn deferred_tool_reference_is_isolated_from_result_text() {
     );
 }
 
-
 #[test]
 fn deferred_loading_is_limited_to_supported_anthropic_models() {
     for model in [
@@ -1099,7 +1093,6 @@ fn deferred_loading_is_limited_to_supported_anthropic_models() {
         assert!(!supports_tool_references(model), "{model}");
     }
 }
-
 
 #[test]
 fn custom_base_url_accepts_host_root_or_v1_root() {
