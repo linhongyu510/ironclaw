@@ -44,7 +44,8 @@ use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use reborn_support::suggestions_submit::{
-    suggestions_service_for_harness, suggestions_thread_id, wait_for_suggestions_view,
+    scoped_suggestions_fs, suggestions_service_for_harness, suggestions_thread_id,
+    wait_for_suggestions_view,
 };
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json};
 use serde_json::{Value, json};
@@ -288,9 +289,7 @@ async fn submit_failure_releases_the_claim_and_a_retry_claims_a_fresh_job() -> H
         seen_idempotency_keys: std::sync::Mutex::new(Vec::new()),
     });
     let service = ironclaw_assistant::RebornSuggestionsProductService::new(
-        ironclaw_suggestions::SuggestionsStore::new(Arc::new(
-            ironclaw_filesystem::InMemoryBackend::default(),
-        )),
+        ironclaw_suggestions::SuggestionsStore::new(scoped_suggestions_fs()),
         harness.thread_harness.service.clone(),
         failing_coordinator.clone(),
     );

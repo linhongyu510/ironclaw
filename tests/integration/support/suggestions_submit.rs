@@ -13,8 +13,11 @@ use ironclaw_assistant::{
     ProductAgentBoundCaller, RebornSuggestionsProductService, RebornSuggestionsResponse,
     SuggestionsProductService,
 };
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+use ironclaw_host_api::path::{MountAlias, VirtualPath};
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_host_api::turn::TurnScope;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
@@ -104,12 +107,30 @@ impl RebornIntegrationHarness {
 /// wiring around it).
 pub(crate) fn suggestions_service_for_harness(
     harness: &RebornIntegrationHarness,
-) -> RebornSuggestionsProductService {
+) -> RebornSuggestionsProductService<InMemoryBackend> {
     RebornSuggestionsProductService::new(
-        SuggestionsStore::new(Arc::new(InMemoryBackend::default())),
+        SuggestionsStore::new(scoped_suggestions_fs()),
         harness.thread_harness.service.clone(),
         harness.coordinator.clone(),
     )
+}
+
+/// `/suggestions` mount grant over a fresh in-memory backend, the same shape
+/// production wiring grants via `PER_USER_ALIASES` in `ironclaw_composition`.
+pub(crate) fn scoped_suggestions_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    Arc::new(ScopedFilesystem::new(
+        Arc::new(InMemoryBackend::default()),
+        |scope: &ResourceScope| {
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/suggestions")?,
+                VirtualPath::new(format!(
+                    "/tenants/{}/users/{}/suggestions",
+                    scope.tenant_id, scope.user_id
+                ))?,
+                MountPermissions::read_write_list_delete(),
+            )])
+        },
+    ))
 }
 
 /// Fresh, distinctive suggestion-generation thread id for a scenario.
@@ -124,7 +145,7 @@ pub(crate) fn suggestions_thread_id(label: &str) -> ThreadId {
 /// scenarios that need the run's terminal effect (`last_result`/`last_error`
 /// written) must poll rather than read once immediately after generating.
 pub(crate) async fn wait_for_suggestions_view(
-    service: &RebornSuggestionsProductService,
+    service: &RebornSuggestionsProductService<InMemoryBackend>,
     caller: ProductAgentBoundCaller,
     predicate: impl Fn(&RebornSuggestionsResponse) -> bool,
 ) -> HarnessResult<RebornSuggestionsResponse> {
