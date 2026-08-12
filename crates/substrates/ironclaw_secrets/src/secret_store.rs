@@ -192,14 +192,13 @@ where
     let mut saw_unverifiable_session = false;
     let mut record_verification_error = None;
     loop {
-        if offset >= record_limit {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "encrypted-record master-key verification exceeded its bounded scan"
-                    .to_string(),
-            });
-        }
-        let remaining = record_limit - offset;
-        let limit = u64::from(Page::MAX_LIMIT).min(remaining) as u32;
+        let remaining = record_limit.saturating_sub(offset);
+        let is_limit_lookahead = remaining == 0;
+        let limit = if is_limit_lookahead {
+            1
+        } else {
+            u64::from(Page::MAX_LIMIT).min(remaining) as u32
+        };
         let entries = filesystem
             .query(
                 &tenants_root,
@@ -209,6 +208,24 @@ where
             .await
             .map_err(fs_to_secret_store_error)?;
         let entry_count = entries.len();
+        if is_limit_lookahead {
+            if entry_count > 0 {
+                return Err(SecretStoreError::StoreUnavailable {
+                    reason: "encrypted-record master-key verification exceeded its bounded scan"
+                        .to_string(),
+                });
+            }
+            if saw_unverifiable_session {
+                return Err(SecretStoreError::StoreUnavailable {
+                    reason: "credential-session ciphertext cannot be fully authenticated from its durable record locator; refusing storage cutover"
+                        .to_string(),
+                });
+            }
+            if let Some(error) = record_verification_error {
+                return Err(error);
+            }
+            return Ok(());
+        }
         for versioned in entries {
             match versioned.entry.kind.as_ref().map(RecordKind::as_str) {
                 Some(SECRET_RECORD_KIND) => {
@@ -1826,6 +1843,29 @@ mod tests {
         )
         .await
         .expect("only encrypted record families consume the verification bound");
+    }
+
+    #[tokio::test]
+    async fn encrypted_record_verification_allows_exactly_the_configured_limit() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        let store = SecretStore::new(scoped, test_crypto());
+        let scope = sample_scope("test", "test");
+        for handle in ["first", "second"] {
+            store
+                .put(
+                    scope.clone(),
+                    SecretHandle::new(handle).expect("secret handle"),
+                    SecretMaterial::from(format!("encrypted-{handle}")),
+                    None,
+                )
+                .await
+                .expect("seed encrypted record");
+        }
+
+        verify_existing_encrypted_records_with_limit(backend.as_ref(), test_crypto().as_ref(), 2)
+            .await
+            .expect("exactly the configured encrypted-record limit is valid");
     }
 
     #[tokio::test]
