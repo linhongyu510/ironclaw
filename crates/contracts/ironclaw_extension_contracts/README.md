@@ -27,13 +27,14 @@ charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
 - `channel_adapter` — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`
   (a package implements only the capabilities its manifest selects) plus
   `ChannelSurfaces` and their DTO family (`NormalizedInboundMessage`/
-  `NormalizedAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
-  `TargetQuery`/`Candidate`, `ChannelError`, `ProductTriggerReason`). Vendor
+  `InboundAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
+  `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). Vendor
   webhook ingress pairs with `ChannelIngress`; message replies pair with
   `ChannelReply`; delivery pairs with `ChannelDelivery`. Authenticated-session
   ingress and stream replies are host-owned, so those sections deliberately
-  bind no adapter half. `ChannelAttachmentRef` is only package-internal
-  parse→fetch state.
+  bind no adapter half. `ChannelDelivery` also has one optional, typed
+  direct-target provisioning operation; it is deliberately not target search.
+  `ChannelAttachmentRef` is only package-internal parse→fetch state.
 - `tool_adapter` — `ToolAdapter` + `RestrictedEgress`; `egress` — channel
   egress transport vocabulary (`ProtocolHttpEgress`, `OutboundDeliverySink`).
 - `extension` — `Extension`, `ExtensionEntrypoint` and bindings; `runtime` —

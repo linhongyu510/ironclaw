@@ -63,8 +63,12 @@ impl RestrictedEgress for RecordingEgress {
         &self,
         request: RestrictedEgressRequest,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
-        let index = self.requests.lock().expect("requests lock").len();
-        self.requests.lock().expect("requests lock").push(request);
+        let index = {
+            let mut requests = self.requests.lock().expect("requests lock");
+            let index = requests.len();
+            requests.push(request);
+            index
+        };
         let statuses = self.statuses.lock().expect("statuses lock");
         let status = statuses
             .get(index)
@@ -107,9 +111,6 @@ fn valid_document() -> String {
 
 fn envelope(registrations: Vec<DeliveryRegistration>) -> OutboundEnvelope {
     OutboundEnvelope {
-        extension_id: "web-app".to_string(),
-        installation_id: "web-app".to_string(),
-        delivery_attempt_id: "attempt-1".to_string(),
         target: OutboundTarget {
             conversation: ExternalConversationRef::new(None, "browser-conversation", None, None)
                 .expect("conversation"),

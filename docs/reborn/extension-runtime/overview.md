@@ -154,7 +154,6 @@ conversation_model = "continuous"   # see notes below
 
 [channel.reply]
 transport = "message"
-max_message_chars = 40000
 
 [channel.delivery]
 transport = "message"
@@ -506,11 +505,11 @@ pub trait ChannelDelivery: Send + Sync {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
 
-    async fn list_targets(
+    async fn provision_direct_target(
         &self,
-        query: TargetQuery,
+        request: DirectTargetProvisionRequest,
         egress: &dyn RestrictedEgress,
-    ) -> Result<Vec<TargetCandidate>, ChannelError>;
+    ) -> Result<Option<ExternalConversationRef>, ChannelError>;
 }
 ```
 
@@ -524,13 +523,12 @@ credential injection.
 `receive` returns a **complete** normalized outcome. It may use only the
 manifest-restricted egress provided for this verified installation. Vendor
 handles such as a Slack private-file URL or Telegram file id stay package-
-internal (`ChannelAttachmentRef`); the host receives `NormalizedAttachment`
-values containing both the declared descriptor and fetched bytes. The host
-then rejects id/MIME/filename/size disagreement, enforces count and total-byte
-budgets, sanitizes any conversation context, permits policy only to filter or
-reorder exact original descriptors, and lands the exact bytes during durable
-message acceptance. Raw bytes never enter events, projections, transcripts,
-or model-visible records.
+internal (`ChannelAttachmentRef`); the host receives canonical
+`InboundAttachment` values containing reconciled metadata and fetched bytes.
+The host enforces count and total-byte budgets, sanitizes any conversation
+context, permits policy only to filter or reorder exact original descriptors,
+and lands the exact bytes during durable message acceptance. Raw bytes never
+enter events, projections, transcripts, or model-visible records.
 
 Provider batches are the bounded exception to purely transient pre-admission
 bytes. A completed fragment is stored in a tenant-scoped, host-private batch

@@ -2373,12 +2373,11 @@ async fn execute_status_command_reflects_owned_thread_and_hides_foreign_thread_e
 // ── Web-push enrollment + notification-channel wire (browser channel) ──────
 
 /// The full web-app channel over the PRODUCTION composition: manifest
-/// bundle, deployment binding, `assemble_web_app` (store install + VAPID
-/// seeding + manifest-derived host allowlist), the product surface wiring,
-/// and the real WebUI routes.
+/// bundle, deployment binding, generic first-party initialization (VAPID
+/// seeding + public bootstrap), manifest-derived host allowlist, the product
+/// surface wiring, and the real WebUI routes.
 fn web_app_build_extras(
     input: ironclaw_composition::RebornHostBindings,
-    slot: &ironclaw_web_app::WebAppRuntimeSlot,
 ) -> ironclaw_composition::RebornHostBindings {
     let mut bundles = ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
     bundles.push(ironclaw_extension_host::FirstPartyPackageBundle {
@@ -2410,8 +2409,11 @@ fn web_app_build_extras(
             outbound_target_provider: Some(Arc::new(
                 ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
             )),
+            first_party_initializer: Some(
+                reborn_support::harness::options::test_web_app_channel_initializer(),
+            ),
+            registration_document_path: Some("/web-push/subscriptions.json".to_string()),
         }])
-        .with_web_app_runtime_slot(slot.clone())
 }
 
 /// A browser-shaped subscription body: a REAL P-256 point (any valid point —
@@ -2441,7 +2443,6 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     let tenant_id = TenantId::new("webui-webpush-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-webpush-agent").expect("agent id");
     let user_id = UserId::new("webui-webpush-user").expect("user id");
-    let slot = ironclaw_web_app::WebAppRuntimeSlot::new();
     let input = web_app_build_extras(
         ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
@@ -2450,7 +2451,6 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             )),
-        &slot,
     );
     let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_build_input(input)
@@ -2466,10 +2466,6 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     )
     .await
     .expect("production Reborn runtime builds");
-    assert!(
-        slot.is_installed(),
-        "composition must install the web-app runtime into the binary's slot"
-    );
     let webui = runtime
         .product_surface(None)
         .expect("production product surface builds");
@@ -2575,13 +2571,8 @@ async fn browser_channel_notification_setup_round_trip_through_production_facade
     let registration_id = body["detail"]["registrations"][0]["registration_id"]
         .as_str()
         .expect("host-minted registration id is present");
-    assert_eq!(registration_id.len(), 32, "registration id shape: {body}");
-    assert!(
-        registration_id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-        "registration id must be lowercase hex: {body}"
-    );
+    uuid::Uuid::parse_str(registration_id)
+        .unwrap_or_else(|error| panic!("registration id must be a UUID ({error}): {body}"));
     assert!(
         !body.to_string().contains(ENDPOINT),
         "the full endpoint capability URL must never leave the backend: {body}"

@@ -42,8 +42,6 @@ commands = ["model", "status", "new", "stop", "interrupt"]
 # separately: `message` here is a coincidence of transport, not one concept.
 [channel.reply]
 transport = "message"
-# Telegram's sendMessage hard limit; the reply sink splits to fit.
-max_message_chars = 4096
 
 [channel.delivery]
 transport = "message"
@@ -150,5 +148,3 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 supports_markdown = false
 supports_threads = true
 can_reply_in_threads = false
-# max_message_chars moved to [channel.reply] — it is a property of the reply
-# transport, not of presentation.

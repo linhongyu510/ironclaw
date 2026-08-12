@@ -177,9 +177,8 @@ use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, Produc
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 pub use ironclaw_product_contracts::surface::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
-    ChannelInboundSurfaceTrust,
 };
 pub use trace_credits::{
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
@@ -256,8 +255,9 @@ pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use notification_setup::{
-    ChannelNotificationSetupService, DeliveryClientBootstrap, NoDeliveryClientBootstrap,
-    RegistrationChannelNotificationSetupService, UnsupportedChannelNotificationSetupService,
+    ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
+    NoDeliveryClientBootstrap, RegistrationChannelNotificationSetupService,
+    UnsupportedChannelNotificationSetupService,
 };
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
@@ -2781,8 +2781,8 @@ where
 
     /// Wire the deployment's session-channel directory so channel-
     /// parameterized session submissions can be validated. Without it, a
-    /// submission naming an extension fails closed as service-unavailable;
-    /// legacy (unparameterized) submissions are unaffected.
+    /// submission naming an extension fails closed as service-unavailable.
+    /// Submissions without an extension identity are always rejected.
     pub fn with_session_channel_directory(
         mut self,
         directory: Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
@@ -3746,26 +3746,16 @@ where
         // A channel-parameterized submission must name a deployment channel
         // whose declared entrypoint is the authenticated session — fail
         // closed (404, indistinguishable from an absent route) otherwise.
-        let session_surface = match &extension_id {
-            // The built-in session surface: always available, because a
-            // deployment that installs no channel extension still has a
-            // browser chat. Named explicitly so the route stays generic
-            // (`/channels/{extension_id}/messages`) without making the
-            // browser's send path depend on an installed extension.
-            Some(extension_id) if extension_id.as_str() == SESSION_SURFACE_ADAPTER_ID => {
-                SESSION_SURFACE_ADAPTER_ID
-            }
-            Some(extension_id) => {
-                let Some(directory) = &self.session_channels else {
-                    return Err(ProductSurfaceError::service_unavailable(false));
-                };
-                if !directory.is_session_channel(extension_id) {
-                    return Err(ProductSurfaceError::not_found());
-                }
-                extension_id.as_str()
-            }
-            None => SESSION_SURFACE_ADAPTER_ID,
+        let Some(extension_id) = &extension_id else {
+            return Err(ProductSurfaceError::not_found());
         };
+        let Some(directory) = &self.session_channels else {
+            return Err(ProductSurfaceError::service_unavailable(false));
+        };
+        if !directory.is_session_channel(extension_id) {
+            return Err(ProductSurfaceError::not_found());
+        }
+        let session_surface = extension_id.as_str();
         let thread_id = scope.thread_id.clone();
         // Serialize with thread deletion (delete_thread holds the same
         // per-thread lock across its active-run probe + delete).
@@ -3784,15 +3774,10 @@ where
             &client_action_id,
             content,
             requested_model,
-            &attachments,
+            attachments,
         )?;
         let core = self.session_inbound_core();
-        let outcome = if attachments.is_empty() {
-            core.admit_channel_inbound(neutral).await
-        } else {
-            core.admit_channel_inbound_with_inline_attachments(neutral, attachments)
-                .await
-        };
+        let outcome = core.admit_channel_inbound(neutral).await;
         self.session_submit_response(&scope, &thread_id, outcome)
             .await
     }
@@ -6580,12 +6565,6 @@ fn webui_reply_target_binding_ref_from_raw(
     })
 }
 
-/// Transport identity stamped on session-lane submissions that did not name
-/// a channel extension (the legacy browser route and API transports). Not a
-/// channel name: `webui` is the product transport itself, the same constant
-/// the turn kernel uses for the WebUi source channel.
-const SESSION_SURFACE_ADAPTER_ID: &str =
-    ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID;
 /// External-actor ref kind for session callers in admission fingerprints.
 const SESSION_ACTOR_KIND: &str = "session_user";
 
@@ -6597,7 +6576,7 @@ fn session_inbound_request(
     client_action_id: &IdempotencyKey,
     content: String,
     requested_model: Option<String>,
-    attachments: &[ironclaw_host_api::attachment::InboundAttachment],
+    attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
 ) -> Result<ChannelInboundSurfaceRequest, ProductSurfaceError> {
     let adapter_id = ProductAdapterId::new(session_surface)
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
@@ -6606,39 +6585,8 @@ fn session_inbound_request(
             .map_err(|_| ProductSurfaceError::internal_invariant())?;
     let installation_id = AdapterInstallationId::new(caller.tenant_id.as_str())
         .map_err(|_| ProductSurfaceError::internal_invariant())?;
-    let attachments = attachments
-        .iter()
-        .cloned()
-        .map(|fetched| {
-            let kind = match fetched.mime_type.split('/').next().unwrap_or_default() {
-                "image" => ironclaw_extension_contracts::external::ProductAttachmentKind::Image,
-                "audio" => ironclaw_extension_contracts::external::ProductAttachmentKind::Audio,
-                "video" => ironclaw_extension_contracts::external::ProductAttachmentKind::Video,
-                _ => ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
-            };
-            let descriptor =
-                ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
-                    fetched.id.clone(),
-                    fetched.mime_type.clone(),
-                    fetched.filename.clone(),
-                    Some(fetched.bytes.len() as u64),
-                    kind,
-                )
-                .map_err(|error| {
-                    tracing::debug!(%error, "session attachment descriptor rejected");
-                    ProductSurfaceError::validation(
-                        "attachments",
-                        ProductSurfaceValidationCode::InvalidValue,
-                    )
-                })?;
-            Ok(
-                ironclaw_extension_contracts::channel_adapter::NormalizedAttachment {
-                    descriptor,
-                    fetched,
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, ProductSurfaceError>>()?;
+    // Session and webhook ingress converge on the same complete attachment
+    // type. Provider descriptors and download handles never cross this edge.
     let message = ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage {
         actor: ironclaw_extension_contracts::external::ExternalActorRef::new(
             SESSION_ACTOR_KIND,
@@ -6664,14 +6612,14 @@ fn session_inbound_request(
         reply_context: None,
     };
     Ok(ChannelInboundSurfaceRequest {
-        adapter_id,
-        source_channel,
-        installation_id,
-        trust: ChannelInboundSurfaceTrust::SessionCaller { caller },
-        binding: ChannelInboundSurfaceBinding::OwnedThread {
-            thread_id: thread_id.clone(),
-        },
-        received_at: Utc::now(),
+        context: ironclaw_product_contracts::inbound::TrustedInboundContext::from_session_caller(
+            adapter_id,
+            source_channel,
+            installation_id,
+            Utc::now(),
+            caller,
+            thread_id.clone(),
+        ),
         message,
         classification: None,
         requested_model,

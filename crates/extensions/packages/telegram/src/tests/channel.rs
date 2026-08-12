@@ -180,10 +180,7 @@ async fn attachment_only_private_message_is_forwarded_with_an_empty_text_body() 
     assert_eq!(messages.len(), 1);
     assert!(messages[0].text.is_empty());
     assert_eq!(messages[0].attachments.len(), 1);
-    assert_eq!(
-        messages[0].attachments[0].descriptor.external_file_id,
-        "file-opaque-1"
-    );
+    assert_eq!(messages[0].attachments[0].id, "file-opaque-1");
     assert!(messages[0].conversation_context.is_none());
 }
 

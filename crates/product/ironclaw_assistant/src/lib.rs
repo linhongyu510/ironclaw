@@ -219,8 +219,8 @@ pub use lifecycle::{
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
-    DeliveryCoordinator, DeliveryIntent, DeliveryOrigin, DeliveryRetryPolicy,
-    NoDeliveryRegistrations, NoReplyContext, NoticeDeliveryRequest, OutboundRoute, ReplyKind,
+    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoDeliveryRegistrations,
+    NoReplyContext, NoticeDeliveryRequest,
 };
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
@@ -268,9 +268,9 @@ pub use reborn_services::{
     AUTOMATIONS_VIEW, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
     CREATE_THREAD_COMMAND, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
-    ChannelNotificationSetupService, DeliveryClientBootstrap, EXTENSION_ACTIVATE_CAPABILITY,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
+    ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
+    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,

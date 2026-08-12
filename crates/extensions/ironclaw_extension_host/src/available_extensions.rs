@@ -119,12 +119,9 @@ pub struct AvailableExtensionPackage {
     /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
     /// `surface_kinds`.
     pub channel_directions: Option<LifecycleChannelDirections>,
-    /// How the model should format output for this channel — the declared
-    /// `[channel.presentation]` facts plus the `[channel.reply]` split bound,
-    /// assembled once by the descriptor. Cached at construction like
-    /// `channel_directions` and fed into prompt construction via the lifecycle
-    /// summary (OUT-11).
-    pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelOutputFacts>,
+    /// How the model should format output for this channel. Cached at
+    /// construction like `channel_directions` and fed into prompt construction.
+    pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_extension_support::packages`). `None` for packages whose
@@ -970,20 +967,16 @@ fn channel_directions_from_manifest_record(
     Ok(directions)
 }
 
-/// The channel surface's output facts: `[channel.presentation]` plus the
-/// `[channel.reply]` split bound, assembled by the descriptor so the bound has
-/// exactly one manifest home and is not re-declared per carrier. Only manifest
-/// v3 declares a channel descriptor; v2 channels have none. Cached at
-/// construction like `channel_directions` and fed into prompt construction
-/// (OUT-11).
+/// The channel surface's presentation facts. Only manifest v3 declares a
+/// channel descriptor; v2 channels have none.
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
-) -> Option<ironclaw_extension_contracts::channel::ChannelOutputFacts> {
+) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
     record
         .resolved()
         .channel
         .as_ref()
-        .map(|channel| channel.output_facts())
+        .map(|channel| channel.presentation.clone())
 }
 
 /// Project the inventory bundle's assets onto the available-extension asset
@@ -2160,17 +2153,9 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             .channel_presentation
             .as_ref()
             .expect("slack declares [channel.presentation]");
-        assert!(
-            presentation.presentation.supports_markdown,
-            "slack declares supports_markdown = true"
-        );
+        assert!(presentation.supports_markdown, "slack declares markdown");
         assert_eq!(
-            presentation.max_message_chars,
-            Some(40_000),
-            "slack's [channel.reply] max_message_chars reaches the output facts"
-        );
-        assert_eq!(
-            presentation.presentation.command_prefix.as_deref(),
+            presentation.command_prefix.as_deref(),
             Some("/ironclaw "),
             "slack declares a command_prefix so channel help renders /ironclaw-namespaced"
         );

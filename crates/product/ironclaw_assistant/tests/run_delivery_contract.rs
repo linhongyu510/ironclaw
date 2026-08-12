@@ -5,9 +5,7 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
-use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelReply, ChannelSurfaces,
-};
+use ironclaw_extension_contracts::channel_adapter::{ChannelDelivery, ChannelReply};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -335,7 +333,7 @@ impl ChannelReply for RecordingChannelAdapter {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         // Reply and delivery share one mechanism for this double, as they do
-        // for a conversational vendor; the axis is the coordinator\'s choice.
+        // for a conversational vendor; the axis is the coordinator's choice.
         self.deliver(envelope, egress).await
     }
 }
@@ -403,11 +401,12 @@ impl ChannelDeliveryResolver for StaticResolver {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            surfaces: ChannelSurfaces::default()
-                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
-                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }
@@ -421,8 +420,9 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
         _: &ExtensionId,
         _: &AdapterInstallationId,
         _: &str,
-    ) -> Option<Vec<u8>> {
-        None
+    ) -> Result<Option<Vec<u8>>, ironclaw_product_contracts::delivery::DeliveryReplyContextError>
+    {
+        Ok(None)
     }
 }
 
@@ -1077,7 +1077,6 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
     assert_eq!(texts, vec!["hello from the run".to_string()]);
     let envelopes = harness.adapter.envelopes();
     assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
-    assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
     let attempts = harness
         .store
         .list_delivery_attempts(binding_scope())
@@ -1180,7 +1179,6 @@ async fn observer_delivers_command_result_through_the_coordinator() {
     let envelopes = harness.adapter.envelopes();
     assert_eq!(envelopes.len(), 1);
     assert_eq!(envelopes[0].target.conversation.conversation_id(), "conv-1");
-    assert_eq!(envelopes[0].extension_id, EXTENSION_ID);
 }
 
 #[tokio::test]
@@ -3676,14 +3674,14 @@ async fn triggered_gate_prompt_reaches_a_channel_activated_after_the_first_fire(
         ],
         "the second fire reaches the newly activated channel too"
     );
-    // The late channel's delivery went out through ITS OWN extension, read
-    // from the catalog entry — not the notifier's attribution bucket.
+    // The late channel's catalog target, which only its newly activated codec
+    // could decode, reached its own conversation.
     let envelopes = harness.adapter.envelopes();
-    let late = envelopes
-        .iter()
-        .find(|envelope| envelope.target.conversation.conversation_id() == "dm-beta")
-        .expect("the late channel received a gate prompt");
-    assert_eq!(late.extension_id, LATE_EXTENSION_ID);
+    assert!(
+        envelopes
+            .iter()
+            .any(|envelope| envelope.target.conversation.conversation_id() == "dm-beta")
+    );
 }
 
 /// The discriminating half of the empty-set rule.
@@ -3931,11 +3929,12 @@ impl ChannelDeliveryResolver for ResolverMissingOneExtension {
             extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
             installation_id: AdapterInstallationId::new("install_alpha")
                 .expect("valid installation id"),
-            surfaces: ChannelSurfaces::default()
-                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
-                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }

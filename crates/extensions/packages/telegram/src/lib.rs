@@ -6,9 +6,9 @@
 //!
 //! * the pure Bot API protocol engine — no I/O and no secrets — in
 //!   [`payload`] (payload normalization: private/group gating, attachment
-//!   descriptors, idempotency from `update_id`, the channel-normalized
-//!   [`TelegramInboundEvent`]) and [`render`] (`FinalReplyView` ->
-//!   `sendMessage` body shaping);
+//!   descriptors, idempotency from `update_id`, and the channel-normalized
+//!   [`TelegramInboundEvent`]) plus [`render`] (opaque reply-target encoding
+//!   and Telegram UTF-16 message chunking);
 //! * the channel capabilities — complete inbound (including the two-hop file
 //!   exchange), reply, and delivery — which stay free of raw token bytes:
 //!   hosts run the manifest-declared `shared_secret_header` verification and
@@ -35,11 +35,8 @@ pub use channel::{
 pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,
     TELEGRAM_USER_ACTOR_KIND, TelegramInboundEvent, normalize_telegram_update,
-    parse_telegram_update,
 };
 pub use preference_targets::TelegramPreferenceTargetCodec;
 pub use render::{
     TelegramRenderError, TelegramReplyTarget, build_reply_target_binding, parse_reply_target,
-    render_auth_prompt, render_final_reply, render_gate_prompt, render_progress_typing,
-    resolve_reply_target,
 };

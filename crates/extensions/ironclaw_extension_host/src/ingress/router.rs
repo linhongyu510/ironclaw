@@ -310,18 +310,16 @@ impl ExtensionIngressRouter {
             return IngressResponse::error(404, "unknown_route");
         };
 
-        // 2. Method / body-limit / rate-limit — before any verification or
-        //    adapter work.
+        // 2. Method / body-limit — before any verification or adapter work.
+        //    The installation-scoped limiter runs only after verification;
+        //    otherwise unauthenticated traffic could drain a real vendor's
+        //    shared bucket. The public transport keeps its own pre-auth cap.
         if !method_allowed(&request.method, ingress) {
             return IngressResponse::error(405, "method_not_allowed");
         }
         if request.body.len() as u64 > ingress.body_limit_bytes {
             return IngressResponse::error(413, "payload_too_large");
         }
-        if !self.rate.try_admit(&request.extension_id) {
-            return IngressResponse::error(429, "capacity");
-        }
-
         // 3. Deadline around verification + adapter + durable admission.
         let deadline = self.config.request_deadline;
         match tokio::time::timeout(
@@ -390,6 +388,15 @@ impl ExtensionIngressRouter {
             }
         };
         drop(candidates); // secrets leave scope before any adapter work
+
+        // Charge only authenticated vendor traffic, keyed by the verified
+        // installation rather than the public extension route. A forged
+        // request may spend verification work, but cannot deny the genuine
+        // installation its bounded admission capacity.
+        let rate_key = format!("{}:{}", binding.extension_id(), verified.installation_id);
+        if !self.rate.try_admit(&rate_key) {
+            return IngressResponse::error(429, "capacity");
+        }
 
         // 5. Resolve only manifest-declared non-secret configuration for the
         //    installation selected by successful verification.
@@ -1014,8 +1021,7 @@ fn method_allowed(method: &str, ingress: &ChannelIngressDescriptor) -> bool {
     }
 }
 
-/// Token-bucket rate limiter keyed by extension id (pre-verification, the
-/// installation is not yet resolved; one installation per extension today).
+/// Token-bucket rate limiter keyed by verified extension installation.
 struct RateLimiter {
     config: IngressRateLimitConfig,
     buckets: Mutex<HashMap<String, Bucket>>,

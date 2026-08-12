@@ -24,6 +24,7 @@ mod automation;
 mod backend_store_assembly;
 mod builtin_capability_policy;
 mod capability_authorization;
+mod channel_initialization;
 #[cfg(test)]
 #[path = "extension_lifecycle_capabilities_auth_tests.rs"]
 mod composition_extension_lifecycle_auth_tests;
@@ -99,6 +100,11 @@ pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master
 pub use filesystem_assembly::standalone_db_path;
 // consumer: `ironclaw_cli` config/set · pinned by: `ironclaw_cli` build (the error is the store's; module is private)
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+// consumer: `ironclaw_cli` native channel bindings · pinned by: `ironclaw_cli` build
+pub use channel_initialization::{
+    FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
+    FirstPartyChannelInitializer,
+};
 // consumer: `ironclaw_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
@@ -404,8 +410,6 @@ pub type PostgresProductionHostRuntimeServices =
 /// resolves to a physical per-user subpath, and `subscriptions.json` is the
 /// name every existing enrollment already lives under. The store's shape
 /// migrated forward; its address deliberately did not.
-pub(crate) const WEB_APP_SUBSCRIPTIONS_DOCUMENT: &str = "/web-push/subscriptions.json";
-
 const PER_USER_ALIASES: &[&str] = &[
     "/product-results",
     "/processes",

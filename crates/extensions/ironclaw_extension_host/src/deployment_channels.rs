@@ -38,6 +38,12 @@ impl DeploymentChannelBinding {
         if !channel.supports_inbound() && !channel.supports_outbound() {
             return Err(DeploymentChannelRegistryError::MissingInboundIngress { extension_id });
         }
+        crate::entrypoint::check_channel_halves(channel, &surfaces).map_err(|source| {
+            DeploymentChannelRegistryError::InvalidChannelBinding {
+                extension_id: extension_id.clone(),
+                source,
+            }
+        })?;
         Ok(Self {
             extension_id,
             resolved,
@@ -102,6 +108,12 @@ pub enum DeploymentChannelRegistryError {
     MissingChannel { extension_id: String },
     #[error("extension `{extension_id}` does not declare inbound channel ingress")]
     MissingInboundIngress { extension_id: String },
+    #[error("deployment channel `{extension_id}` has an invalid axis binding: {source}")]
+    InvalidChannelBinding {
+        extension_id: String,
+        #[source]
+        source: crate::entrypoint::BindError,
+    },
     #[error("deployment channel `{extension_id}` is bound more than once")]
     DuplicateExtension { extension_id: String },
 }
@@ -136,7 +148,7 @@ mod tests {
         let manifest = Arc::new(crate::test_support::outbound_only_channel_manifest());
         let registry = DeploymentChannelRegistry::try_new([DeploymentChannelBinding::new(
             Arc::clone(&manifest),
-            crate::test_support::FakeChannelAdapter::all_halves(),
+            crate::test_support::FakeChannelAdapter::delivery_only(),
         )
         .expect("an outbound-only channel is a legitimate deployment binding")])
         .expect("deployment registry validates");
@@ -150,6 +162,15 @@ mod tests {
                 .resolve_channel_ingress("acme-push", "events")
                 .is_none(),
             "an outbound-only channel mounts no ingress route"
+        );
+    }
+
+    #[test]
+    fn deployment_binding_rejects_a_declared_axis_without_its_half() {
+        let manifest = Arc::new(crate::test_support::outbound_only_channel_manifest());
+        assert!(
+            DeploymentChannelBinding::new(manifest, ChannelSurfaces::default()).is_err(),
+            "[channel.delivery] must not enter the deployment registry without ChannelDelivery"
         );
     }
 

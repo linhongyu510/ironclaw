@@ -28,7 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryRegistrationError, DeliveryRegistrationRequest,
-    DeliveryRegistrationScope, DeliveryRegistrationService,
+    DeliveryRegistrationScope, DeliveryRegistrationService, ResolvedChannelDelivery,
 };
 
 use super::{
@@ -44,15 +44,26 @@ use super::{
 /// generically instead of the channel exposing its own status document.
 /// Absence is a legitimate answer — most channels need no bootstrap at all.
 pub trait DeliveryClientBootstrap: Send + Sync {
-    fn bootstrap(&self, extension_id: &str) -> Option<serde_json::Value>;
+    fn bootstrap(
+        &self,
+        extension_id: &str,
+    ) -> Result<Option<serde_json::Value>, DeliveryClientBootstrapError>;
 }
+
+/// Sanitized failure to publish a channel's client bootstrap document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("delivery client bootstrap is unavailable")]
+pub struct DeliveryClientBootstrapError;
 
 /// Fail-closed default: no channel publishes bootstrap data.
 pub struct NoDeliveryClientBootstrap;
 
 impl DeliveryClientBootstrap for NoDeliveryClientBootstrap {
-    fn bootstrap(&self, _extension_id: &str) -> Option<serde_json::Value> {
-        None
+    fn bootstrap(
+        &self,
+        _extension_id: &str,
+    ) -> Result<Option<serde_json::Value>, DeliveryClientBootstrapError> {
+        Ok(None)
     }
 }
 
@@ -129,12 +140,11 @@ impl RegistrationChannelNotificationSetupService {
         }
     }
 
-    /// The channel's declared setup requirement, failing closed as NotFound
-    /// for extensions the deployment does not know: the generic surface must
-    /// not be an oracle for which channels exist.
-    fn requires_setup(&self, extension_id: &str) -> Result<bool, ProductSurfaceError> {
+    /// Resolve one generation-pinned channel view. Enrollment requirement and
+    /// endpoint allowlist must never come from separate snapshot reads.
+    fn resolve(&self, extension_id: &str) -> Result<ResolvedChannelDelivery, ProductSurfaceError> {
         self.resolver
-            .requires_enrollment(extension_id)
+            .resolve_channel_delivery(extension_id)
             .ok_or_else(ProductSurfaceError::not_found)
     }
 
@@ -184,8 +194,17 @@ impl RegistrationChannelNotificationSetupService {
             "registration_count": registrations.len(),
             "registrations": clients,
         });
-        if let Some(bootstrap) = self.bootstrap.bootstrap(extension_id) {
-            detail["bootstrap"] = bootstrap;
+        match self.bootstrap.bootstrap(extension_id) {
+            Ok(Some(bootstrap)) => detail["bootstrap"] = bootstrap,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    extension_id,
+                    %error,
+                    "delivery client bootstrap is unavailable"
+                );
+                return Err(ProductSurfaceError::service_unavailable(true));
+            }
         }
         Ok(RebornNotificationSetupStatusResponse {
             extension_id: extension_id.to_string(),
@@ -200,10 +219,11 @@ impl RegistrationChannelNotificationSetupService {
     /// error, not a silent no-op).
     fn admit(
         &self,
+        channel: &ResolvedChannelDelivery,
         extension_id: &str,
         mutating: bool,
     ) -> Result<Option<RebornNotificationSetupStatusResponse>, ProductSurfaceError> {
-        if self.requires_setup(extension_id)? {
+        if channel.requires_enrollment {
             return Ok(None);
         }
         if mutating {
@@ -237,7 +257,8 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        if let Some(response) = self.admit(&request.extension_id, false)? {
+        let channel = self.resolve(&request.extension_id)?;
+        if let Some(response) = self.admit(&channel, &request.extension_id, false)? {
             return Ok(response);
         }
         let scope = self.scope(&caller, &request.extension_id)?;
@@ -249,7 +270,8 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupMutationRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        self.admit(&request.extension_id, true)?;
+        let channel = self.resolve(&request.extension_id)?;
+        self.admit(&channel, &request.extension_id, true)?;
         let scope = self.scope(&caller, &request.extension_id)?;
         let submission: EnrollmentSubmission =
             serde_json::from_value(request.payload).map_err(|_| invalid_payload())?;
@@ -259,12 +281,11 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
         // `[[channel.egress]]`. The allowlist is read from the same resolved
         // manifest egress policy enforces with, so there is no second copy to
         // drift.
-        let declared_hosts = self
-            .resolver
-            .declared_egress_hosts(&request.extension_id)
-            .ok_or_else(ProductSurfaceError::not_found)?;
-        ironclaw_auth::validate_registration_endpoint(&submission.endpoint, &declared_hosts)
-            .map_err(|error| map_registration_error(&request.extension_id, error))?;
+        ironclaw_auth::validate_registration_endpoint(
+            &submission.endpoint,
+            &channel.declared_egress_hosts,
+        )
+        .map_err(|error| map_registration_error(&request.extension_id, error))?;
 
         self.registrations
             .enroll(
@@ -284,14 +305,29 @@ impl ChannelNotificationSetupService for RegistrationChannelNotificationSetupSer
         caller: ProductSurfaceCaller,
         request: RebornNotificationSetupMutationRequest,
     ) -> Result<RebornNotificationSetupStatusResponse, ProductSurfaceError> {
-        self.admit(&request.extension_id, true)?;
+        let channel = self.resolve(&request.extension_id)?;
+        self.admit(&channel, &request.extension_id, true)?;
         let scope = self.scope(&caller, &request.extension_id)?;
         let submission: EnrollmentSubmission =
             serde_json::from_value(request.payload).map_err(|_| invalid_payload())?;
-        self.registrations
-            .remove(&scope, &submission.endpoint)
+        // The browser edge still identifies its PushSubscription by endpoint.
+        // Normalize that wire detail once against the caller-scoped canonical
+        // records; internal removal is keyed only by the opaque host id.
+        let registrations = self
+            .registrations
+            .list(&scope)
             .await
             .map_err(|error| map_registration_error(&request.extension_id, error))?;
+        if let Some(registration_id) = registrations
+            .iter()
+            .find(|registration| registration.endpoint == submission.endpoint)
+            .map(|registration| registration.registration_id.clone())
+        {
+            self.registrations
+                .remove(&scope, &registration_id)
+                .await
+                .map_err(|error| map_registration_error(&request.extension_id, error))?;
+        }
         self.project(&request.extension_id, &scope).await
     }
 }

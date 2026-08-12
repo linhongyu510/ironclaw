@@ -32,12 +32,11 @@ use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
 };
 use ironclaw_product_contracts::inbound::{
-    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
+    ProductInboundAck, ProductInboundEnvelope, TrustedInboundContext, classify_channel_inbound_text,
 };
 use ironclaw_product_contracts::surface::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
+    ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
-    ChannelInboundSurfaceTrust,
 };
 use tokio::task::JoinSet;
 
@@ -507,11 +506,6 @@ impl InboundSink for GenericChannelInboundSink {
             .take()
             .and_then(|context| sanitize_channel_conversation_context(&context.text))
             .and_then(|text| ChannelConversationContext::new(text).ok());
-        let attachments = message
-            .attachments
-            .iter()
-            .map(|attachment| attachment.fetched.clone())
-            .collect();
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -520,23 +514,18 @@ impl InboundSink for GenericChannelInboundSink {
         // conversation binding → turn submission) is the deepest subtree in
         // this future; boxing keeps instrumented builds off the stack limit.
         let request = ChannelInboundSurfaceRequest {
-            adapter_id: self.config.adapter_id.clone(),
-            source_channel: ProductSourceChannel::new(self.config.adapter_id.as_str())
-                .map_err(Self::permanent)?,
-            installation_id: installation,
-            trust: ChannelInboundSurfaceTrust::VerifiedInbound { evidence },
-            binding: ChannelInboundSurfaceBinding::ExternalRef,
-            received_at: Utc::now(),
+            context: TrustedInboundContext::from_verified_evidence(
+                self.config.adapter_id.clone(),
+                installation,
+                Utc::now(),
+                &evidence,
+            )
+            .map_err(Self::permanent)?,
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
             requested_model: None,
         };
-        let response = Box::pin(
-            self.config
-                .surface
-                .admit_channel_inbound_with_inline_attachments(request, attachments),
-        )
-        .await;
+        let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -936,17 +925,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extension_contracts::channel_adapter::{
-        ChannelConversationContext, NormalizedAttachment, ProductTriggerReason,
+        ChannelConversationContext, ProductTriggerReason,
     };
     use ironclaw_extension_contracts::external::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
-        ProductAttachmentKind,
+        ExternalActorRef, ExternalConversationRef, ExternalEventId,
     };
     use ironclaw_host_api::ids::UserId;
     use ironclaw_product_contracts::inbound::{
         AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
-        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
-        UserMessagePayload,
+        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
     };
     use ironclaw_product_contracts::surface::{
         ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
@@ -958,7 +945,6 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
-        inline_submissions: AtomicUsize,
         inline_attachments:
             std::sync::Mutex<Vec<Vec<ironclaw_host_api::attachment::InboundAttachment>>>,
         classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
@@ -969,7 +955,6 @@ mod tests {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
-                inline_submissions: AtomicUsize::new(0),
                 inline_attachments: std::sync::Mutex::new(Vec::new()),
                 classifications: std::sync::Mutex::new(Vec::new()),
                 channel_contexts: std::sync::Mutex::new(Vec::new()),
@@ -978,10 +963,6 @@ mod tests {
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
-        }
-
-        fn inline_submit_count(&self) -> usize {
-            self.inline_submissions.load(Ordering::SeqCst)
         }
 
         fn inline_attachments(&self) -> Vec<Vec<u8>> {
@@ -1018,6 +999,10 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
         ) -> ChannelInboundSurfaceOutcome {
+            self.inline_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.message.attachments.clone());
             self.classifications
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1039,18 +1024,8 @@ mod tests {
                 submitted_run_id: TurnRunId::new(),
                 submission: None,
             };
-            let ChannelInboundSurfaceTrust::VerifiedInbound { evidence } = request.trust else {
-                panic!("test surface expects verified-inbound trust");
-            };
             let envelope = ProductInboundEnvelope::from_trusted_parse(
-                TrustedInboundContext::from_verified_evidence_with_source_channel(
-                    request.adapter_id,
-                    request.source_channel,
-                    request.installation_id,
-                    request.received_at,
-                    &evidence,
-                )
-                .expect("verified evidence"),
+                request.context,
                 ParsedProductInbound::new(
                     request.message.event_id,
                     request.message.actor,
@@ -1072,51 +1047,19 @@ mod tests {
                 ack,
             }))
         }
-
-        async fn admit_channel_inbound_with_inline_attachments(
-            &self,
-            request: ChannelInboundSurfaceRequest,
-            attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
-        ) -> ChannelInboundSurfaceOutcome {
-            self.inline_submissions.fetch_add(1, Ordering::SeqCst);
-            self.inline_attachments
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(attachments);
-            self.admit_channel_inbound(request).await
-        }
-    }
-
-    struct DefaultingAttachmentSurface;
-
-    #[async_trait]
-    impl ChannelInboundProductSurface for DefaultingAttachmentSurface {
-        async fn admit_channel_inbound(
-            &self,
-            _request: ChannelInboundSurfaceRequest,
-        ) -> ChannelInboundSurfaceOutcome {
-            panic!("attachment admission must use the inline-attachment entrypoint")
-        }
     }
 
     fn admission_with_attachment() -> InboundAdmission {
         let mut admission = admission_for("review the attached report");
-        admission.message.attachments.push(NormalizedAttachment {
-            descriptor: ProductAttachmentDescriptor::new(
-                "file-1",
-                "application/pdf",
-                Some("report.pdf".to_string()),
-                Some(4),
-                ProductAttachmentKind::Document,
-            )
-            .expect("attachment descriptor"),
-            fetched: ironclaw_host_api::attachment::InboundAttachment {
+        admission
+            .message
+            .attachments
+            .push(ironclaw_host_api::attachment::InboundAttachment {
                 id: "file-1".to_string(),
                 mime_type: "application/pdf".to_string(),
                 filename: Some("vendor-report.pdf".to_string()),
                 bytes: b"data".to_vec(),
-            },
-        });
+            });
         admission
     }
 
@@ -1320,7 +1263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_attachment_admission_uses_the_inline_entrypoint_with_exact_bytes() {
+    async fn complete_attachment_admission_uses_the_single_surface_door_with_exact_bytes() {
         let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
 
         let ack = sink
@@ -1330,36 +1273,8 @@ mod tests {
 
         assert_eq!(ack, InboundAdmissionAck::Accepted);
         sink.drain().await;
-        assert_eq!(workflow.inline_submit_count(), 1);
+        assert_eq!(workflow.submit_count(), 1);
         assert_eq!(workflow.inline_attachments(), vec![b"data".to_vec()]);
-    }
-
-    /// A surface that does not implement inline attachment landing will not
-    /// implement it for a redelivery of the same message, so the inherited
-    /// default settles permanently. A retryable outcome here left the vendor
-    /// redelivering forever while the user received nothing at all — not even
-    /// the message text — and it disagreed with the equivalent default on the
-    /// inbound turn service, which was already permanent for this condition.
-    #[tokio::test]
-    async fn inherited_inline_attachment_failure_settles_permanently() {
-        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
-            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
-            evidence: VerifiedEvidenceMint::SharedSecretHeader {
-                header: "X-Vendor-Secret".to_string(),
-            },
-            surface: Arc::new(DefaultingAttachmentSurface),
-            observer: None,
-        });
-
-        let error = sink
-            .admit(admission_with_attachment())
-            .await
-            .expect_err("an inherited unsupported inline landing must not be admitted");
-
-        assert!(
-            !error.retryable,
-            "a structural landing gap must not ask the vendor to redeliver"
-        );
     }
 
     #[tokio::test]

@@ -13,7 +13,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
-use ironclaw_extension_contracts::external::ExternalConversationRef;
+use ironclaw_extension_contracts::external::{
+    ExternalConversationRef, ProductAttachmentDescriptor, ProductAttachmentKind,
+};
 use ironclaw_host_api::product_adapter::{
     ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
 };
@@ -27,7 +29,7 @@ use ironclaw_host_api::{
 use ironclaw_product_contracts::inbound::{
     ApprovalDecision, ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    TrustedInboundContext, UserMessagePayload,
+    UserMessagePayload,
 };
 use ironclaw_product_contracts::projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
@@ -77,9 +79,8 @@ use ironclaw_product_contracts::binding::{
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 
 use crate::reborn_services::{
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceBinding, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
-    ChannelInboundSurfaceTrust,
 };
 
 /// Host-side [`ProductSurface`] implementation that dispatches inbound
@@ -222,23 +223,8 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
         &self,
         request: ChannelInboundSurfaceRequest,
     ) -> ChannelInboundSurfaceOutcome {
-        let envelope = match build_channel_envelope(request) {
-            Ok(envelope) => envelope,
-            Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
-        };
-        admission_outcome(
-            envelope.clone(),
-            Box::pin(self.submit_inbound(envelope)).await,
-        )
-    }
-
-    async fn admit_channel_inbound_with_inline_attachments(
-        &self,
-        request: ChannelInboundSurfaceRequest,
-        attachments: Vec<InboundAttachment>,
-    ) -> ChannelInboundSurfaceOutcome {
-        let envelope = match build_channel_envelope(request) {
-            Ok(envelope) => envelope,
+        let (envelope, attachments) = match build_channel_envelope(request) {
+            Ok(admission) => admission,
             Err(error) => return ChannelInboundSurfaceOutcome::Invalid(error),
         };
         admission_outcome(
@@ -251,53 +237,11 @@ impl ChannelInboundProductSurface for DefaultProductSurface {
 /// Build the canonical channel inbound envelope from one verified, normalized
 /// surface request — shared by every admission door.
 ///
-/// The trust and binding arms must pair: webhook evidence binds through
-/// external refs, an authenticated session binds through its owned thread.
-/// A mixed pairing means a routing bug upstream and fails closed so the
-/// webhook trust/pairing machinery can never run for a session caller (and
-/// vice versa).
 fn build_channel_envelope(
-    request: ChannelInboundSurfaceRequest,
-) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-    let context = match (request.trust, request.binding) {
-        (
-            ChannelInboundSurfaceTrust::VerifiedInbound { evidence },
-            ChannelInboundSurfaceBinding::ExternalRef,
-        ) => TrustedInboundContext::from_verified_evidence_with_source_channel(
-            request.adapter_id,
-            request.source_channel,
-            request.installation_id,
-            request.received_at,
-            &evidence,
-        )?,
-        (
-            ChannelInboundSurfaceTrust::SessionCaller { caller },
-            ChannelInboundSurfaceBinding::OwnedThread { thread_id },
-        ) => TrustedInboundContext::from_session_caller(
-            request.adapter_id,
-            request.source_channel,
-            request.installation_id,
-            request.received_at,
-            caller,
-            thread_id,
-        ),
-        (ChannelInboundSurfaceTrust::VerifiedInbound { .. }, _) => {
-            return Err(ProductAdapterError::SurfaceRejected {
-                kind: ProductSurfaceRejectionKind::InvalidRequest,
-                status_code: 400,
-                retryable: false,
-                reason: RedactedString::new("verified-inbound trust requires external-ref binding"),
-            });
-        }
-        (ChannelInboundSurfaceTrust::SessionCaller { .. }, _) => {
-            return Err(ProductAdapterError::SurfaceRejected {
-                kind: ProductSurfaceRejectionKind::InvalidRequest,
-                status_code: 400,
-                retryable: false,
-                reason: RedactedString::new("session-caller trust requires owned-thread binding"),
-            });
-        }
-    };
+    mut request: ChannelInboundSurfaceRequest,
+) -> Result<(ProductInboundEnvelope, Vec<InboundAttachment>), ProductAdapterError> {
+    let attachments = std::mem::take(&mut request.message.attachments);
+    let context = request.context;
     let payload = match request.classification {
         Some(classification) => ProductInboundPayload::from(classification),
         // A shared-channel run is invoked ONLY by an explicit @mention, which
@@ -312,12 +256,10 @@ fn build_channel_envelope(
         None => ProductInboundPayload::UserMessage(
             UserMessagePayload::new(
                 request.message.text.clone(),
-                request
-                    .message
-                    .attachments
+                attachments
                     .iter()
-                    .map(|attachment| attachment.descriptor.clone())
-                    .collect(),
+                    .map(product_attachment_descriptor)
+                    .collect::<Result<Vec<_>, _>>()?,
                 request.message.trigger,
             )?
             .with_requested_model(request.requested_model)
@@ -337,6 +279,27 @@ fn build_channel_envelope(
         payload,
     )?;
     ProductInboundEnvelope::from_trusted_parse(context, parsed)
+        .map(|envelope| (envelope, attachments))
+}
+
+/// Project complete canonical attachment bytes into the byte-free product
+/// envelope. Kind is derived once from MIME; no provider metadata survives.
+fn product_attachment_descriptor(
+    attachment: &InboundAttachment,
+) -> Result<ProductAttachmentDescriptor, ProductAdapterError> {
+    let kind = match attachment.mime_type.split('/').next().unwrap_or_default() {
+        "image" => ProductAttachmentKind::Image,
+        "audio" => ProductAttachmentKind::Audio,
+        "video" => ProductAttachmentKind::Video,
+        _ => ProductAttachmentKind::Document,
+    };
+    ProductAttachmentDescriptor::new(
+        attachment.id.clone(),
+        attachment.mime_type.clone(),
+        attachment.filename.clone(),
+        Some(attachment.bytes.len() as u64),
+        kind,
+    )
 }
 
 fn admission_outcome(
@@ -2078,8 +2041,7 @@ mod tests {
     use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
     use ironclaw_product_contracts::inbound::{
         ChannelInboundClassification, InboundCommandPayload, ParsedProductInbound,
-        ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductSourceChannel,
-        TrustedInboundContext,
+        ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     };
     use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
 
@@ -2187,12 +2149,13 @@ mod tests {
             installation_id.as_str(),
         );
         ChannelInboundSurfaceRequest {
-            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
-            source_channel: ProductSourceChannel::new("test_adapter").expect("source channel"),
-            installation_id,
-            trust: ChannelInboundSurfaceTrust::VerifiedInbound { evidence },
-            binding: ChannelInboundSurfaceBinding::ExternalRef,
-            received_at: Utc::now(),
+            context: TrustedInboundContext::from_verified_evidence(
+                ProductAdapterId::new("test_adapter").expect("adapter"),
+                installation_id,
+                Utc::now(),
+                &evidence,
+            )
+            .expect("trusted context"),
             message: NormalizedInboundMessage {
                 actor: ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                 conversation: ExternalConversationRef::new(None, "conv1", None, None)
@@ -2217,15 +2180,16 @@ mod tests {
     /// (approve/deny, commands) are unaffected.
     #[test]
     fn shared_channel_plain_thread_reply_is_dropped_but_mentions_dms_and_gates_run() {
-        let reply = build_channel_envelope(channel_request(ProductTriggerReason::ReplyToBot, None))
-            .expect("envelope");
+        let (reply, _) =
+            build_channel_envelope(channel_request(ProductTriggerReason::ReplyToBot, None))
+                .expect("envelope");
         assert!(
             matches!(reply.payload(), ProductInboundPayload::NoOp),
             "a non-mention thread reply must be a NoOp (no run), got {:?}",
             reply.payload()
         );
 
-        let mention =
+        let (mention, _) =
             build_channel_envelope(channel_request(ProductTriggerReason::BotMention, None))
                 .expect("envelope");
         assert!(
@@ -2234,8 +2198,9 @@ mod tests {
             mention.payload()
         );
 
-        let dm = build_channel_envelope(channel_request(ProductTriggerReason::DirectChat, None))
-            .expect("envelope");
+        let (dm, _) =
+            build_channel_envelope(channel_request(ProductTriggerReason::DirectChat, None))
+                .expect("envelope");
         assert!(
             matches!(dm.payload(), ProductInboundPayload::UserMessage(_)),
             "a direct message must spawn a run without a mention, got {:?}",
@@ -2245,7 +2210,7 @@ mod tests {
         // A classified reply (here a command; approvals take the same `Some(_)`
         // arm) is preserved — the mention-only drop applies only to unclassified
         // ordinary messages, so approve/deny replies keep resolving gates.
-        let command = build_channel_envelope(channel_request(
+        let (command, _) = build_channel_envelope(channel_request(
             ProductTriggerReason::ReplyToBot,
             Some(ChannelInboundClassification::Command(
                 InboundCommandPayload::new(

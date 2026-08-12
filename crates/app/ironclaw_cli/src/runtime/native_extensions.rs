@@ -6,7 +6,11 @@
 
 use std::sync::Arc;
 
-use ironclaw_composition::ChannelExtensionBinding;
+use async_trait::async_trait;
+use ironclaw_composition::{
+    ChannelExtensionBinding, FirstPartyChannelInitializationContext,
+    FirstPartyChannelInitializationError, FirstPartyChannelInitializer,
+};
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_host::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, LoadContext,
@@ -14,6 +18,7 @@ use ironclaw_extension_host::{
 };
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_telegram_extension::{TelegramChannelAdapter, TelegramPreferenceTargetCodec};
+use secrecy::ExposeSecret as _;
 
 /// Every native factory the binary assembles (`first_party`-runtime
 /// extensions bind their adapters through these).
@@ -21,19 +26,18 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
     vec![Arc::new(TelegramExtensionFactory)]
 }
 
-/// The binary-assembled channel extension set: the deployment bindings plus
-/// the web-app runtime slot composition later fills with storage.
+/// The binary-assembled channel extension set.
 pub(crate) struct BundledChannelExtensions {
     pub(crate) bindings: Vec<ChannelExtensionBinding>,
-    pub(crate) web_app_runtime: ironclaw_web_app::WebAppRuntimeSlot,
 }
 
 /// Deployment channel-adapter bindings. These are independent of native tool
 /// loading: the host mounts manifest-declared ingress before any user
 /// installation exists, so every deployment channel adapter is linked here.
 /// Composition never names a concrete extension crate.
-pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
-    let web_app_runtime = ironclaw_web_app::WebAppRuntimeSlot::new();
+pub(crate) fn bundled_channel_extensions(
+    web_app_vapid_subject: Option<String>,
+) -> BundledChannelExtensions {
     let bindings = vec![
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
@@ -51,6 +55,8 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
                 ironclaw_slack_extension::SlackPreferenceTargetCodec,
             )),
             outbound_target_provider: None,
+            first_party_initializer: None,
+            registration_document_path: None,
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("telegram".to_string()),
@@ -63,6 +69,8 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
             },
             preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
             outbound_target_provider: None,
+            first_party_initializer: None,
+            registration_document_path: None,
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
@@ -80,18 +88,83 @@ pub(crate) fn bundled_channel_extensions() -> BundledChannelExtensions {
             outbound_target_provider: Some(Arc::new(
                 ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
             )),
+            first_party_initializer: Some(Arc::new(WebAppChannelInitializer::new(
+                web_app_vapid_subject,
+            ))),
+            registration_document_path: Some("/web-push/subscriptions.json".to_string()),
         },
     ];
-    BundledChannelExtensions {
-        bindings,
-        web_app_runtime,
-    }
+    BundledChannelExtensions { bindings }
 }
 
 /// Bindings-only view (tests and callers that do not wire composition).
 #[cfg(test)]
 pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBinding> {
-    bundled_channel_extensions().bindings
+    bundled_channel_extensions(None).bindings
+}
+
+/// Web App's concrete startup behavior lives at the binary edge that links
+/// the package. Generic composition invokes this through the binding and sees
+/// only an opaque bootstrap document.
+struct WebAppChannelInitializer {
+    vapid_subject: String,
+}
+
+impl WebAppChannelInitializer {
+    fn new(vapid_subject: Option<String>) -> Self {
+        Self {
+            vapid_subject: vapid_subject
+                .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string()),
+        }
+    }
+}
+
+#[async_trait]
+impl FirstPartyChannelInitializer for WebAppChannelInitializer {
+    async fn initialize(
+        &self,
+        context: &FirstPartyChannelInitializationContext,
+    ) -> Result<Option<serde_json::Value>, FirstPartyChannelInitializationError> {
+        let handle = ironclaw_host_api::ids::SecretHandle::new(
+            ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE,
+        )
+        .map_err(|error| {
+            FirstPartyChannelInitializationError::failed(format!(
+                "web push credential handle is invalid: {error}"
+            ))
+        })?;
+
+        let generated = ironclaw_web_app::generate_vapid_key_material(&self.vapid_subject)
+            .map_err(|error| {
+                FirstPartyChannelInitializationError::failed(format!(
+                    "web push key generation failed: {error}"
+                ))
+            })?;
+        context
+            .store_credential_if_absent(handle.clone(), generated.material_json)
+            .await?;
+
+        let material = context.read_credential_once(&handle).await?;
+        let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 =
+            serde_json::from_str(material.expose_secret()).map_err(|error| {
+                tracing::warn!(
+                    target: "ironclaw::web_app",
+                    error = %error,
+                    "stored web push credential material failed to parse"
+                );
+                FirstPartyChannelInitializationError::failed(
+                    "stored web push credential material is malformed",
+                )
+            })?;
+        parsed.validate_shape().map_err(|error| {
+            FirstPartyChannelInitializationError::failed(format!(
+                "stored web push credential material is invalid: {error}"
+            ))
+        })?;
+        Ok(Some(serde_json::json!({
+            "vapid_public_key": parsed.public_key_b64url,
+        })))
+    }
 }
 
 /// `runtime.service = "telegram.extension/v1"` — the Telegram channel

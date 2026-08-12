@@ -1970,7 +1970,7 @@ async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/channels/webui/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(payload))
@@ -3049,7 +3049,7 @@ async fn js_client_send_message_path_shape_reaches_service() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/channels/webui/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))

@@ -2319,7 +2319,7 @@ async fn session_channel_message_rejected_busy_wire_shape() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/channels/webui/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"thread_id":"thread-alpha","content":"hello"}"#,
@@ -2410,7 +2410,7 @@ async fn session_channel_message_rejected_busy_replay_wire_shape_omits_run_field
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/channels/webui/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"thread_id":"thread-alpha","content":"hello"}"#,

@@ -341,15 +341,15 @@ impl ExtensionHost {
         let Some(recipe) = recipe else {
             return Ok(());
         };
-        // The call is pinned to the channel's own declared egress target —
-        // the same one its sends use. A recipe with no declared target has
-        // nowhere legitimate to go, so it fails closed rather than reaching
-        // an unpinned host.
-        let Some(target) = channel.egress.first() else {
-            return Err(ChannelWiringError::Failed {
-                reason: "channel declares an ingress recipe but no egress target".to_string(),
-            });
-        };
+        // Resolve by method + path, never list order. A recipe with zero or
+        // multiple matching targets is ambiguous authority and fails closed.
+        let target = crate::channel_vendor_calls::resolve_vendor_call_target(
+            recipe,
+            channel.egress.as_slice(),
+        )
+        .map_err(|error| ChannelWiringError::Failed {
+            reason: error.to_string(),
+        })?;
         let egress = self.deps.egress.egress_for_channel(
             &record.extension_id,
             &record.installation_id,

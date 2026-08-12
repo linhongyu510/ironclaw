@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
-use ironclaw_extension_contracts::channel_adapter::{ChannelSurfaces, DeliveryRegistration};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelDelivery, ChannelReply, DeliveryRegistration,
+};
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::ids::{TenantId, UserId};
@@ -37,10 +39,11 @@ use ironclaw_host_api::product_adapter::AdapterInstallationId;
 pub struct ResolvedChannelDelivery {
     pub extension_id: ExtensionId,
     pub installation_id: AdapterInstallationId,
-    /// The halves this channel implements. The coordinator picks one by the
-    /// [`OutboundRoute`] it already decided; it never picks by content.
-    /// A `None` half is the same fact as a missing manifest section.
-    pub surfaces: ChannelSurfaces,
+    /// The outbound halves this channel implements. Ingress is deliberately
+    /// absent from this product-side resolver: outbound orchestration has no
+    /// reason to hold or inspect an inbound adapter.
+    pub reply: Option<Arc<dyn ChannelReply>>,
+    pub delivery: Option<Arc<dyn ChannelDelivery>>,
     /// Policy-enforced egress built from the same snapshot read.
     pub egress: Arc<dyn RestrictedEgress>,
     /// The channel's declared reply transport (`[channel.reply]`). `None`
@@ -53,6 +56,12 @@ pub struct ResolvedChannelDelivery {
     /// regardless, which is why the gate keys on `OutboundRoute` rather than
     /// on what is being said.
     pub reply_transport: Option<ReplyTransport>,
+    /// The delivery enrollment requirement from the same resolved manifest
+    /// generation as the surfaces and egress authority above.
+    pub requires_enrollment: bool,
+    /// Exact hosts admitted for enrollment endpoints, resolved from the same
+    /// manifest generation as the enrollment requirement and egress authority.
+    pub declared_egress_hosts: Vec<String>,
 }
 
 /// Resolver port: the coordinator's view of the active extension set.
@@ -60,40 +69,6 @@ pub struct ResolvedChannelDelivery {
 /// extension host's snapshot.
 pub trait ChannelDeliveryResolver: Send + Sync {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery>;
-
-    /// The channel's declared reply transport, when known — a lightweight
-    /// lookup the coordinator's stream gate consults BEFORE persisting an
-    /// attempt, so it cannot count as (or race with) the single
-    /// generation-pinned resolution `resolve_channel_delivery` performs.
-    ///
-    /// `None` covers both "unknown extension" and "known, but declares no
-    /// reply half". The gate acts only on `Some(Stream)` and stays out of the
-    /// way otherwise, leaving the delivery path's own resolution-failure
-    /// handling authoritative — the two `None` cases need no distinction
-    /// here because neither is a stream.
-    fn channel_reply_transport(&self, _extension_id: &str) -> Option<ReplyTransport> {
-        None
-    }
-
-    /// Whether the channel's `[channel.delivery]` declares
-    /// `requires_enrollment`, when the extension is known. `None` = unknown
-    /// extension — enrollment surfaces fail closed as not-found on it.
-    fn requires_enrollment(&self, _extension_id: &str) -> Option<bool> {
-        None
-    }
-
-    /// The hosts this channel declares in `[[channel.egress]]`. The
-    /// enrollment path checks a submitted endpoint against them **before
-    /// storage** (design §8): without that check, enrollment is an SSRF
-    /// primitive that makes the host POST to an attacker's URL. `None` =
-    /// unknown extension, which fails enrollment closed.
-    ///
-    /// It lives on this resolver rather than beside the store because the
-    /// allowlist is manifest data the host already resolved here, and reading
-    /// it twice from two places is how the two copies drift apart.
-    fn declared_egress_hosts(&self, _extension_id: &str) -> Option<Vec<String>> {
-        None
-    }
 }
 
 /// The user one delivery registration belongs to. Both halves come from the
@@ -126,19 +101,21 @@ pub trait DeliveryRegistrationService: Send + Sync {
     ) -> Result<Vec<DeliveryRegistration>, DeliveryRegistrationError>;
 
     /// Store one registration, replacing any earlier one for the same
-    /// endpoint. `endpoint` is checked against `declared_egress_hosts`
-    /// **before** anything is written; `document` is opaque and only bounded.
+    /// endpoint while retaining its opaque host-minted registration id.
+    /// `endpoint` is checked against `declared_egress_hosts` **before**
+    /// anything is written; `document` is opaque and only bounded.
     async fn enroll(
         &self,
         scope: &DeliveryRegistrationScope,
         request: DeliveryRegistrationRequest,
     ) -> Result<DeliveryRegistration, DeliveryRegistrationError>;
 
-    /// Drop the registration for one endpoint. `false` = there was none.
+    /// Drop one registration by its opaque host-minted id. `false` = there
+    /// was none. Provider/channel addressing never becomes record identity.
     async fn remove(
         &self,
         scope: &DeliveryRegistrationScope,
-        endpoint: &str,
+        registration_id: &str,
     ) -> Result<bool, DeliveryRegistrationError>;
 
     /// Drop registrations the vendor reported gone, by host-minted id.
@@ -177,6 +154,11 @@ pub enum DeliveryRegistrationError {
     Unavailable { reason: String },
 }
 
+/// Sanitized failure to read a stored opaque reply anchor.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("reply context storage is unavailable")]
+pub struct DeliveryReplyContextError;
+
 /// Read half of the host-side `reply_context` storage (ING-11): the opaque
 /// vendor context an adapter attached to the originating inbound message,
 /// handed back at delivery time.
@@ -194,7 +176,7 @@ pub trait DeliveryReplyContextSource: Send + Sync {
         extension_id: &ExtensionId,
         installation_id: &AdapterInstallationId,
         conversation_fingerprint: &str,
-    ) -> Option<Vec<u8>>;
+    ) -> Result<Option<Vec<u8>>, DeliveryReplyContextError>;
 }
 
 #[cfg(test)]
@@ -246,13 +228,13 @@ mod tests {
             extension_id: &ExtensionId,
             installation_id: &AdapterInstallationId,
             conversation_fingerprint: &str,
-        ) -> Option<Vec<u8>> {
+        ) -> Result<Option<Vec<u8>>, DeliveryReplyContextError> {
             self.contexts.lock().expect("lock").push((
                 extension_id.as_str().to_string(),
                 installation_id.as_str().to_string(),
                 conversation_fingerprint.to_string(),
             ));
-            None
+            Ok(None)
         }
     }
 
@@ -287,7 +269,7 @@ mod tests {
             source
                 .reply_context(&extension_id, &installation_id, "fp-9")
                 .await,
-            None
+            Ok(None)
         );
 
         assert_eq!(

@@ -42,7 +42,6 @@ use ironclaw_product_contracts::delivery::{
     DeliveryRegistrationService,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const DOCUMENT_SCHEMA_VERSION: u32 = 2;
 
@@ -95,64 +94,147 @@ where
 /// The persisted document.
 ///
 /// `records` decode tolerantly: the pre-§8 shape stored channel-specific
-/// fields at the top level, so [`StoredRegistration`] keeps them as optional
-/// and folds them into the opaque `document` on read. That is the forward
-/// migration — performed on the read path and re-written by the next CAS
-/// update — rather than a rename that would orphan live enrollments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// fields at the top level under `subscriptions`, so the private wire reader
+/// folds every extra field into the opaque `document` without interpreting
+/// it. The writer emits both the canonical `records` projection and that
+/// flattened rollback projection; neither changes the stable host id.
+#[derive(Debug, Clone, PartialEq)]
 struct RegistrationDocument {
     schema_version: u32,
     tenant_id: String,
     user_id: String,
-    #[serde(default, alias = "subscriptions")]
-    records: Vec<StoredRegistration>,
+    records: Vec<DeliveryRegistration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct StoredRegistration {
-    #[serde(alias = "subscription_id")]
-    registration_id: String,
+#[derive(Deserialize)]
+struct RegistrationDocumentWire {
+    schema_version: u32,
+    tenant_id: String,
+    user_id: String,
+    #[serde(default)]
+    records: Option<Vec<StoredRegistrationWire>>,
+    #[serde(default)]
+    subscriptions: Option<Vec<StoredRegistrationWire>>,
+}
+
+impl<'de> Deserialize<'de> for RegistrationDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RegistrationDocumentWire::deserialize(deserializer)?;
+        Ok(Self {
+            schema_version: wire.schema_version,
+            tenant_id: wire.tenant_id,
+            user_id: wire.user_id,
+            // A current writer emits both keys. `records` is canonical when
+            // both are present; a rolled-back previous writer drops unknown
+            // `records` and leaves only `subscriptions`, which remains
+            // readable on the next rollout.
+            records: wire
+                .records
+                .or(wire.subscriptions)
+                .unwrap_or_default()
+                .into_iter()
+                .map(StoredRegistrationWire::into_registration)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct StoredRegistrationWire {
+    #[serde(default)]
+    registration_id: Option<String>,
+    #[serde(default)]
+    subscription_id: Option<String>,
     endpoint: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     document: Option<String>,
     created_at: String,
-    /// Legacy top-level fields, kept only so a pre-§8 document decodes. They
-    /// are folded into `document` on read and never re-serialized.
-    #[serde(default, skip_serializing)]
-    keys: Option<serde_json::Value>,
-    #[serde(default, skip_serializing)]
-    user_agent: Option<String>,
+    #[serde(flatten)]
+    legacy_document: serde_json::Map<String, serde_json::Value>,
 }
 
-impl StoredRegistration {
-    fn migrate_legacy_fields(&mut self) {
-        if self.document.is_some() {
-            return;
-        }
-        self.document = Some({
-            // Forward migration: fold the legacy top-level fields into the
-            // opaque document under the same names the adapter reads.
-            let mut folded = serde_json::Map::new();
-            if let Some(keys) = self.keys.take() {
-                folded.insert("keys".to_string(), keys);
+impl StoredRegistrationWire {
+    fn into_registration<E>(self) -> Result<DeliveryRegistration, E>
+    where
+        E: serde::de::Error,
+    {
+        let wire = self;
+        let registration_id = match (wire.registration_id, wire.subscription_id) {
+            (Some(current), Some(previous)) if current != previous => {
+                return Err(E::custom("registration_id and subscription_id disagree"));
             }
-            if let Some(user_agent) = self.user_agent.take() {
-                folded.insert("user_agent".to_string(), serde_json::json!(user_agent));
+            (Some(current), _) => current,
+            (_, Some(previous)) => previous,
+            (None, None) => {
+                return Err(E::missing_field("registration_id"));
             }
-            serde_json::Value::Object(folded).to_string()
-        });
-    }
-
-    fn into_view(mut self) -> DeliveryRegistration {
-        self.migrate_legacy_fields();
-        let document = self.document.unwrap_or_else(|| "{}".to_string());
-        DeliveryRegistration {
-            registration_id: self.registration_id,
-            endpoint: self.endpoint,
+        };
+        let document = wire
+            .document
+            .unwrap_or_else(|| serde_json::Value::Object(wire.legacy_document).to_string());
+        Ok(DeliveryRegistration {
+            registration_id,
+            endpoint: wire.endpoint,
             document,
-            created_at: self.created_at,
-        }
+            created_at: wire.created_at,
+        })
     }
+}
+
+impl Serialize for RegistrationDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let subscriptions = self
+            .records
+            .iter()
+            .map(legacy_subscription_value)
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema_version": self.schema_version,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "records": self.records,
+            "subscriptions": subscriptions,
+        })
+        .serialize(serializer)
+    }
+}
+
+/// Rollback projection for the immediately preceding Web Push reader. The
+/// opaque document is flattened without interpreting any protocol field; a
+/// non-object document simply contributes no legacy-only fields.
+fn legacy_subscription_value(registration: &DeliveryRegistration) -> serde_json::Value {
+    let mut fields = serde_json::from_str::<serde_json::Value>(&registration.document)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    for reserved in [
+        "registration_id",
+        "subscription_id",
+        "endpoint",
+        "document",
+        "created_at",
+    ] {
+        fields.remove(reserved);
+    }
+    fields.insert(
+        "subscription_id".to_string(),
+        serde_json::json!(registration.registration_id),
+    );
+    fields.insert(
+        "endpoint".to_string(),
+        serde_json::json!(registration.endpoint),
+    );
+    fields.insert(
+        "created_at".to_string(),
+        serde_json::json!(registration.created_at),
+    );
+    serde_json::Value::Object(fields)
 }
 
 impl RegistrationDocument {
@@ -182,18 +264,6 @@ impl RegistrationDocument {
         }
         Ok(())
     }
-}
-
-/// Host-minted, stable per endpoint, and content-free in logs: a digest, not
-/// the URL. Deduping on it is what makes a re-enroll a refresh rather than a
-/// duplicate, generically, without reading the opaque document.
-pub fn registration_id_for(endpoint: &str) -> String {
-    let digest = Sha256::digest(endpoint.as_bytes());
-    digest
-        .iter()
-        .take(16)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 /// The one security-critical, generic, pre-storage check (§8): the submitted
@@ -270,13 +340,10 @@ fn resource_scope(scope: &DeliveryRegistrationScope) -> ResourceScope {
 }
 
 fn decode_document(bytes: &[u8]) -> Result<RegistrationDocument, DeliveryRegistrationError> {
-    let mut document: RegistrationDocument =
+    let document: RegistrationDocument =
         serde_json::from_slice(bytes).map_err(|error| DeliveryRegistrationError::Unavailable {
             reason: format!("registration document decode failed: {error}"),
         })?;
-    for registration in &mut document.records {
-        registration.migrate_legacy_fields();
-    }
     Ok(document)
 }
 
@@ -320,11 +387,7 @@ where
         };
         let document = decode_document(&entry.entry.body)?;
         document.validate_owner(scope)?;
-        Ok(document
-            .records
-            .into_iter()
-            .map(StoredRegistration::into_view)
-            .collect())
+        Ok(document.records)
     }
 
     async fn enroll(
@@ -343,13 +406,11 @@ where
         let path = self.path_for(scope)?;
         let resource = resource_scope(scope);
         let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let stored = StoredRegistration {
-            registration_id: registration_id_for(&request.endpoint),
+        let stored = DeliveryRegistration {
+            registration_id: uuid::Uuid::new_v4().to_string(),
             endpoint: request.endpoint,
-            document: Some(request.document),
+            document: request.document,
             created_at,
-            keys: None,
-            user_agent: None,
         };
         cas_update(
             self.filesystem.as_ref(),
@@ -368,15 +429,14 @@ where
                     if let Some(existing) = document
                         .records
                         .iter_mut()
-                        .find(|existing| existing.registration_id == stored.registration_id)
+                        .find(|existing| existing.endpoint == stored.endpoint)
                     {
                         // Re-enrolling the same endpoint refreshes it (rotated
-                        // key material) and keeps the original created_at.
+                        // opaque material) while retaining the host id and
+                        // original creation time.
                         existing.endpoint = stored.endpoint.clone();
                         existing.document = stored.document.clone();
-                        existing.keys = None;
-                        existing.user_agent = None;
-                        let view = existing.clone().into_view();
+                        let view = existing.clone();
                         return Ok(CasApply::new(document, view));
                     }
                     if document.records.len() >= MAX_DELIVERY_REGISTRATIONS_PER_USER {
@@ -389,7 +449,7 @@ where
                     }
                     // Newest first so settings lists the most recent client on top.
                     document.records.insert(0, stored);
-                    let view = document.records[0].clone().into_view();
+                    let view = document.records[0].clone();
                     Ok(CasApply::new(document, view))
                 }
             },
@@ -401,9 +461,9 @@ where
     async fn remove(
         &self,
         scope: &DeliveryRegistrationScope,
-        endpoint: &str,
+        registration_id: &str,
     ) -> Result<bool, DeliveryRegistrationError> {
-        let removed = self.prune(scope, &[registration_id_for(endpoint)]).await?;
+        let removed = self.prune(scope, &[registration_id.to_string()]).await?;
         Ok(removed > 0)
     }
 
@@ -553,7 +613,10 @@ mod tests {
             .enroll(&scope, request("alpha"))
             .await
             .expect("enroll");
-        assert_eq!(first.registration_id.len(), 32);
+        assert!(
+            uuid::Uuid::parse_str(&first.registration_id).is_ok(),
+            "new records use opaque host-minted ids"
+        );
         store
             .enroll(&scope, request("beta"))
             .await
@@ -561,22 +624,26 @@ mod tests {
         assert_eq!(store.list(&scope).await.expect("list").len(), 2);
 
         // Same endpoint again is a refresh, not a duplicate.
-        store
+        let refreshed = store
             .enroll(&scope, request("alpha"))
             .await
             .expect("refresh");
+        assert_eq!(
+            refreshed.registration_id, first.registration_id,
+            "refresh keeps the host registration identity"
+        );
         assert_eq!(store.list(&scope).await.expect("list").len(), 2);
 
         assert!(
             store
-                .remove(&scope, "https://push.alpha.example/send/alpha")
+                .remove(&scope, &first.registration_id)
                 .await
                 .expect("remove")
         );
         assert_eq!(store.list(&scope).await.expect("list").len(), 1);
         assert!(
             !store
-                .remove(&scope, "https://push.alpha.example/send/alpha")
+                .remove(&scope, &first.registration_id)
                 .await
                 .expect("remove absent")
         );
@@ -661,7 +728,8 @@ mod tests {
 
         let listed = store.list(&scope).await.expect("list");
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].registration_id, "legacy-id");
+        let migrated_id = "legacy-id";
+        assert_eq!(listed[0].registration_id, migrated_id);
         assert_eq!(listed[0].endpoint, "https://push.alpha.example/send/legacy");
         let document: serde_json::Value =
             serde_json::from_str(&listed[0].document).expect("folded document is JSON");
@@ -677,9 +745,72 @@ mod tests {
         assert_eq!(listed.len(), 2);
         let migrated = listed
             .iter()
-            .find(|record| record.registration_id == "legacy-id")
+            .find(|record| record.registration_id == migrated_id)
             .expect("the legacy record survives the rewrite");
         assert!(migrated.document.contains("legacy-p256dh"));
+
+        // Refresh preserves the pre-existing host id rather than replacing it
+        // with endpoint-derived identity, and remove addresses that id.
+        let refreshed = store
+            .enroll(&scope, request("legacy"))
+            .await
+            .expect("refresh the migrated endpoint");
+        assert_eq!(refreshed.registration_id, migrated_id);
+        assert_eq!(store.list(&scope).await.expect("list").len(), 2);
+        assert!(store.remove(&scope, migrated_id).await.expect("remove"));
+        assert_eq!(store.list(&scope).await.expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn writer_keeps_generic_and_legacy_registration_documents_rollback_readable() {
+        #[derive(Deserialize)]
+        struct LegacyDocument {
+            subscriptions: Vec<LegacySubscription>,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacySubscription {
+            subscription_id: String,
+            endpoint: String,
+            keys: serde_json::Value,
+            user_agent: Option<String>,
+        }
+
+        let store = store();
+        let scope = scope("user1");
+        let enrolled = store
+            .enroll(&scope, request("rollback"))
+            .await
+            .expect("enroll");
+        let entry = store
+            .filesystem
+            .get(
+                &resource_scope(&scope),
+                &ScopedPath::new("/registrations/channel-one.json").expect("path"),
+            )
+            .await
+            .expect("read persisted document")
+            .expect("persisted document");
+        let value: serde_json::Value =
+            serde_json::from_slice(&entry.entry.body).expect("generic document json");
+        assert_eq!(
+            value["records"][0]["registration_id"],
+            enrolled.registration_id
+        );
+
+        let legacy: LegacyDocument =
+            serde_json::from_value(value).expect("previous Web Push reader can decode the write");
+        assert_eq!(legacy.subscriptions.len(), 1);
+        assert_eq!(
+            legacy.subscriptions[0].subscription_id,
+            enrolled.registration_id
+        );
+        assert_eq!(
+            legacy.subscriptions[0].endpoint,
+            "https://push.alpha.example/send/rollback"
+        );
+        assert_eq!(legacy.subscriptions[0].keys["p256dh"], "a");
+        assert_eq!(legacy.subscriptions[0].user_agent, None);
     }
 
     #[tokio::test]

@@ -51,6 +51,7 @@ struct FanOutTally {
     /// Registration ids the push service said are gone. Reported to the host,
     /// which owns the records; this half never writes.
     pruned: Vec<String>,
+    ambiguous: Option<String>,
     retryable: Option<String>,
     permanent: Option<String>,
     unauthorized: Option<String>,
@@ -281,7 +282,7 @@ impl WebAppChannelAdapter {
                     tally.unauthorized = Some("VAPID key material is not available".to_string());
                 }
                 Err(error @ RestrictedEgressError::Transport { .. }) => {
-                    tally.retryable = Some(error.to_string());
+                    tally.ambiguous = Some(error.to_string());
                 }
                 Err(error) => {
                     tally.permanent = Some(error.to_string());
@@ -293,7 +294,18 @@ impl WebAppChannelAdapter {
 }
 
 fn fold_tally(tally: &FanOutTally) -> PartDeliveryOutcome {
+    if let Some(reason) = &tally.ambiguous {
+        return PartDeliveryOutcome::Ambiguous {
+            reason: reason.clone(),
+        };
+    }
     if tally.accepted > 0 {
+        if tally.unauthorized.is_some() || tally.retryable.is_some() || tally.permanent.is_some() {
+            return PartDeliveryOutcome::Permanent {
+                reason: "browser push was accepted by only part of the enrolled client fanout"
+                    .to_string(),
+            };
+        }
         // Push services return 201/202 with no durable message reference the
         // adapter is allowed to read (response headers are host-withheld),
         // so the honest evidence is Sent-without-ref: acceptance by the push

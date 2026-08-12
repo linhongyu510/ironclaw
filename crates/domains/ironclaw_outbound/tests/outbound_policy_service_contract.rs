@@ -102,7 +102,7 @@ async fn subscription_access_policy_gates_cursor_checkpoint_creation() {
 }
 
 #[tokio::test]
-async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_identity() {
+async fn settled_delivery_replay_uses_the_authoritative_row_without_revalidation() {
     let store = in_memory_outbound_store();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -121,41 +121,28 @@ async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_iden
     assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &candidate.target);
 
-    let second = service
-        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
+    service
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: now(),
+            failure_kind: None,
+        })
         .await
-        .expect("second authorized delivery attempt");
-    assert!(matches!(
-        &second,
-        OutboundDeliveryDecision::Authorized { .. }
-    ));
-    let OutboundDeliveryDecision::Authorized {
-        attempt: second_attempt,
-        ..
-    } = second
-    else {
-        unreachable!("matched above")
-    };
-    assert_eq!(second_attempt.delivery_id, attempt.delivery_id);
-    assert_eq!(
-        validator.calls(),
-        2,
-        "binding is revalidated before every push"
-    );
-
+        .expect("settle delivery");
     validator.deny(candidate.target.clone());
-    let rejected = service
+    let replay = service
         .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
-        .expect("authorization failure is recorded, not surfaced as send target");
-    let OutboundDeliveryDecision::Rejected { attempt } = rejected else {
-        panic!("expected rejected delivery decision");
+        .expect("settled delivery replay is authoritative");
+    let replayed_attempt = match replay {
+        OutboundDeliveryDecision::AlreadyRecorded { attempt } => attempt,
+        other => panic!("expected authoritative replay, got {other:?}"),
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Failed);
-    assert_eq!(
-        attempt.failure_kind,
-        Some(DeliveryFailureKind::AuthorizationRevoked)
-    );
+    assert_eq!(replayed_attempt.delivery_id, attempt.delivery_id);
+    assert_eq!(replayed_attempt.status, OutboundDeliveryStatus::Delivered);
+    assert_eq!(validator.calls(), 1, "a replay performs no new push");
 
     let attempts = store
         .list_delivery_attempts(scope)
@@ -163,7 +150,7 @@ async fn delivery_preparation_revalidates_each_push_with_one_stable_attempt_iden
         .expect("list delivery attempts");
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].delivery_id, attempt.delivery_id);
-    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Delivered);
 }
 
 #[tokio::test]

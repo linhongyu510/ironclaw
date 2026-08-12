@@ -32,8 +32,8 @@ use crate::tool_adapter::{
 use async_trait::async_trait;
 
 use crate::channel_adapter::{
-    ChannelError, ChannelSurfaces, InboundOutcome, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, TargetQuery, VerifiedInbound,
+    ChannelSurfaces, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
+    VerifiedInbound,
 };
 
 /// One host-verified inbound request fixture.
@@ -67,10 +67,6 @@ pub struct ChannelAdapterConformance {
         Arc<dyn Fn(&RestrictedEgressRequest) -> RestrictedEgressResponse + Send + Sync>,
     /// Non-secret operator config supplied to the inbound context.
     pub config: Vec<(String, String)>,
-    /// Whether free target listing (no query) is expected to fail cleanly
-    /// with `Unsupported` (adapters with real listing set this false and
-    /// are covered by their own fixtures).
-    pub expects_unsupported_free_target_listing: bool,
 }
 
 fn conformance_value<T, E: std::fmt::Debug>(result: Result<T, E>, message: &'static str) -> T {
@@ -133,7 +129,6 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
         outbound_envelope,
         vendor_responses,
         config,
-        expects_unsupported_free_target_listing,
     } = conformance;
     let server = ScriptedVendorServer::new(Arc::clone(&vendor_responses));
 
@@ -245,8 +240,17 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
                 .validate()
                 .expect("conformance: the challenge response must stay within host bounds"); // safety: test-support conformance failure should fail the caller's test.
         }
-    } else if message_inbound.is_some() {
-        panic!("conformance: a message fixture was supplied but the channel has no ingress half");
+    } else {
+        if message_inbound.is_some() {
+            panic!(
+                "conformance: a message fixture was supplied but the channel has no ingress half"
+            );
+        }
+        if challenge_inbound.is_some() {
+            panic!(
+                "conformance: a challenge fixture was supplied but the channel has no ingress half"
+            );
+        }
     }
 
     // ── Outbound: every implemented half fully delivers the envelope with
@@ -271,27 +275,6 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
             .await
             .expect("conformance: deliver must drive the scripted vendor server"); // safety: test-support conformance failure should fail the caller's test.
         assert_delivery_report(&report.parts, text_parts, "deliver");
-
-        // ── Unsupported surfaces fail cleanly (no panic, typed error).
-        if expects_unsupported_free_target_listing {
-            let error = delivery
-                .list_targets(
-                    TargetQuery {
-                        extension_id: extension_id.clone(),
-                        installation_id: installation_id.clone(),
-                        query: None,
-                        limit: 10,
-                    },
-                    &server,
-                )
-                .await
-                .expect_err("conformance: unsupported free target listing must error cleanly");
-            if !matches!(error, ChannelError::Unsupported) {
-                panic!(
-                    "conformance: unsupported listing must be ChannelError::Unsupported, got {error:?}"
-                );
-            }
-        }
     }
 }
 

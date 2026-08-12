@@ -60,7 +60,9 @@
 1. Construct manifest-restricted egress before `receive` and pass it by reference; preserve retryable/permanent transfer error status mapping.
 2. Remove adapter/egress from `InboundAdmission`, batch scheduling, and product calls once parsing completes.
 3. Sanitize `message.conversation_context` in the host, preserving newline normalization, control stripping, and oldest-line byte clamping.
-4. Route complete channel attachments through `admit_channel_inbound_with_inline_attachments`.
+4. Route complete channel attachments through the single consuming
+   `admit_channel_inbound` door; it separates transient bytes from byte-free
+   product metadata internally.
 5. Delete `admit_channel_inbound_with_attachment_transfer`, `InboundAttachmentAdmission::Channel`, pinned adapter/egress turn parameters, `ProductInboundEnvelope.channel_attachment_refs`, and every host callback/fork used only by late fetch.
 6. Validate attachments in the inbound turn path against `DEFAULT_ATTACHMENT_BUDGETS`, normalized/supported MIME, declared metadata, and policy-rewritten descriptors; descriptor filenames win.
 

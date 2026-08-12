@@ -7,6 +7,7 @@
 //! 2xx. Checklist: ING-1/2/5/6/7/8-unit/9/11-storage; the recipe byte
 //! semantics themselves are pinned by the verifier unit tests (ING-3/4).
 
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,15 +19,14 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome, NormalizedAttachment,
-    ProductTriggerReason, VerifiedInbound,
+    ChannelError, ImmediateResponse, InboundBatchFragment, InboundOutcome, ProductTriggerReason,
+    VerifiedInbound,
 };
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelIngress, ChannelSurfaces, NormalizedInboundMessage,
 };
 use ironclaw_extension_contracts::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
-    ProductAttachmentKind,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_extension_host::inbound_batches::{
     InboundBatchKey, InboundBatchStageOutcome, InboundBatchStageRequest, InboundBatchStore,
@@ -184,21 +184,15 @@ impl ChannelIngress for ScriptedChannelAdapter {
                 let conversation = value["conversation"].as_str().unwrap_or("conv-1");
                 let attachments = if self.mode == AdapterMode::BatchFragment {
                     let id = value["fragment"].as_str().unwrap_or("fragment");
-                    vec![NormalizedAttachment {
-                        descriptor: ProductAttachmentDescriptor::new(
-                            id,
-                            "text/plain",
-                            value["filename"].as_str().map(str::to_string),
-                            Some(1),
-                            ProductAttachmentKind::Document,
-                        )
-                        .expect("attachment descriptor"),
-                        fetched: InboundAttachment {
-                            id: id.to_string(),
-                            mime_type: "text/plain".to_string(),
-                            filename: value["filename"].as_str().map(str::to_string),
-                            bytes: vec![1],
-                        },
+                    let attachment_bytes = value["attachment_bytes"]
+                        .as_u64()
+                        .and_then(|size| usize::try_from(size).ok())
+                        .unwrap_or(1);
+                    vec![InboundAttachment {
+                        id: id.to_string(),
+                        mime_type: "text/plain".to_string(),
+                        filename: value["filename"].as_str().map(str::to_string),
+                        bytes: vec![1; attachment_bytes],
                     }]
                 } else {
                     Vec::new()
@@ -619,21 +613,11 @@ fn batch_fragment(
             event_id: ExternalEventId::new("recovery-event").expect("event"),
             text: text.to_string(),
             trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![NormalizedAttachment {
-                descriptor: ProductAttachmentDescriptor::new(
-                    fragment_id,
-                    "text/plain",
-                    Some(format!("{fragment_id}.txt")),
-                    Some(1),
-                    ProductAttachmentKind::Document,
-                )
-                .expect("descriptor"),
-                fetched: InboundAttachment {
-                    id: fragment_id.to_string(),
-                    mime_type: "text/plain".to_string(),
-                    filename: Some(format!("{fragment_id}.txt")),
-                    bytes: vec![order as u8],
-                },
+            attachments: vec![InboundAttachment {
+                id: fragment_id.to_string(),
+                mime_type: "text/plain".to_string(),
+                filename: Some(format!("{fragment_id}.txt")),
+                bytes: vec![order as u8],
             }],
             conversation_context: None,
             reply_context: None,
@@ -702,9 +686,51 @@ async fn concurrent_provider_batch_fragments_admit_one_ordered_atomic_message() 
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
+    );
+}
+
+#[tokio::test]
+async fn provider_batch_rejects_aggregate_attachment_bytes_before_staging() {
+    let harness = harness(HarnessOptions {
+        adapter_mode: AdapterMode::BatchFragment,
+        ..HarnessOptions::default()
+    })
+    .await;
+    activate(&harness).await;
+
+    let fragment_bytes = DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes / 2 + 1;
+    let first_body = format!(
+        r#"{{"batch":"oversized-album","fragment":"file-1","order":1,"event":"oversized-event","conversation":"conv-1","text":"","settle_millis":250,"attachment_bytes":{fragment_bytes}}}"#
+    );
+    let second_body = format!(
+        r#"{{"batch":"oversized-album","fragment":"file-2","order":2,"event":"oversized-event","conversation":"conv-1","text":"read both","settle_millis":250,"attachment_bytes":{fragment_bytes}}}"#
+    );
+
+    let first = harness
+        .router
+        .handle(signed_request(first_body.as_bytes()))
+        .await;
+    assert_eq!(first.status, 200, "the first bounded fragment stages");
+    let second = harness
+        .router
+        .handle(signed_request(second_body.as_bytes()))
+        .await;
+    assert_eq!(
+        second.status, 400,
+        "the fragment that exceeds the batch-wide budget is a permanent rejection"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness
+            .admitted_messages
+            .lock()
+            .expect("admitted messages")
+            .is_empty(),
+        "an over-budget batch must never admit a partial message"
     );
 }
 
@@ -756,7 +782,7 @@ async fn sequential_provider_batch_fragments_ack_before_settle_and_admit_once() 
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
     );
@@ -837,7 +863,7 @@ async fn durably_staged_provider_batch_is_recovered_after_store_and_router_recre
         admitted[0]
             .attachments
             .iter()
-            .map(|attachment| attachment.descriptor.filename.as_deref())
+            .map(|attachment| attachment.filename.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("first.txt"), Some("second.txt")]
     );
@@ -989,8 +1015,8 @@ async fn activation_rejects_collision_with_fixed_host_routes() {
     ));
 }
 
-/// ING-2: method, body limit, and rate limit are enforced BEFORE any
-/// verification (secrets untouched) or adapter work.
+/// ING-2: method/body limits run before verification, while the installation
+/// rate limit charges only authenticated vendor traffic before adapter work.
 #[tokio::test]
 async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
     let mut options = HarnessOptions::default();
@@ -1015,8 +1041,15 @@ async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
     assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 0);
 
-    // Rate limit (2 per window): the third POST is rejected before
-    // verification — secrets consulted exactly twice.
+    // Forged traffic must not spend the verified installation's bucket.
+    let mut forged = signed_request(body);
+    forged
+        .headers
+        .retain(|(name, _)| name != "X-Acme-Signature");
+    assert_eq!(harness.router.handle(forged).await.status, 401);
+
+    // Rate limit (2 per window): the third authenticated POST is rejected
+    // after verification but before adapter work.
     let body = br#"{"text":"hi","event":"ev-rate","conversation":"C-1"}"#;
     assert_eq!(
         harness.router.handle(signed_request(body)).await.status,
@@ -1030,7 +1063,7 @@ async fn method_body_and_rate_limits_run_before_verification_and_adapter() {
         harness.router.handle(signed_request(body)).await.status,
         429
     );
-    assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.secrets_calls.load(Ordering::SeqCst), 4);
     assert_eq!(harness.adapter_calls.load(Ordering::SeqCst), 2);
 }
 
@@ -1457,14 +1490,6 @@ impl ChannelIngress for GenerationChannelAdapter {
                 reason: error.to_string(),
             })?;
         }
-        let descriptor = ProductAttachmentDescriptor::new(
-            format!("{}-attachment", self.generation),
-            "image/png",
-            Some(format!("{}.png", self.generation)),
-            Some(1),
-            ProductAttachmentKind::Image,
-        )
-        .expect("generation descriptor");
         egress
             .send(
                 ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest {
@@ -1488,14 +1513,11 @@ impl ChannelIngress for GenerationChannelAdapter {
             event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
             text: "attachment".to_string(),
             trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![NormalizedAttachment {
-                fetched: InboundAttachment {
-                    id: descriptor.external_file_id.clone(),
-                    mime_type: descriptor.mime_type.clone(),
-                    filename: descriptor.filename.clone(),
-                    bytes: vec![self.generation.as_bytes()[0]],
-                },
-                descriptor,
+            attachments: vec![InboundAttachment {
+                id: format!("{}-attachment", self.generation),
+                mime_type: "image/png".to_string(),
+                filename: Some(format!("{}.png", self.generation)),
+                bytes: vec![self.generation.as_bytes()[0]],
             }],
             conversation_context: None,
             reply_context: None,
@@ -1585,11 +1607,11 @@ impl InboundSink for CompleteAttachmentAdmissionSink {
         self.fetched_ids
             .lock()
             .expect("fetched ids lock")
-            .push(attachment.fetched.id.clone());
+            .push(attachment.id.clone());
         self.fetched_bytes
             .lock()
             .expect("fetched bytes lock")
-            .push(attachment.fetched.bytes.clone());
+            .push(attachment.bytes.clone());
         Ok(InboundAdmissionAck::Accepted)
     }
 }

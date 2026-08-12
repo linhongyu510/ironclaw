@@ -191,7 +191,6 @@ commands = ["model", "status", "new", "stop", "interrupt"]
 # not one concept.
 [channel.reply]
 transport = "message"
-max_message_chars = 40000
 
 [channel.delivery]
 transport = "message"
@@ -295,8 +294,6 @@ response_body_limit_bytes = 262144
 supports_markdown = true
 supports_threads = true
 can_reply_in_threads = true
-# max_message_chars moved to [channel.reply] — it is a property of the reply
-# transport, not of presentation.
 command_prefix = "/ironclaw "
 
 # ---- auth surface: recipe data, zero extension code ------------------------

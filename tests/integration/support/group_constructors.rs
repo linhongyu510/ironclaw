@@ -125,11 +125,10 @@ impl RebornIntegrationGroup {
 
     /// [`Self::extension_delivery_with_gated_write`] PLUS the complete
     /// web-app channel: deployment binding (adapter + codec + catalog
-    /// provider) around one late-bound runtime slot, the slot on the
-    /// composition input (so `assemble_web_app` installs the subscription
-    /// store and seeds the VAPID credential), the bundled manifest, and a
-    /// vendor router answering push-service POSTs with `201` (`410` for the
-    /// reserved dead-subscription token).
+    /// provider), its generic first-party initializer (which seeds VAPID
+    /// material and publishes the public bootstrap), the bundled manifest,
+    /// and a vendor router answering push-service POSTs with `201` (`410` for
+    /// the reserved dead-subscription token).
     pub async fn extension_delivery_with_web_app() -> HarnessResult<Self> {
         Self::builder().extension_delivery_with_web_app().await
     }
@@ -604,7 +603,7 @@ impl RebornIntegrationGroupBuilder {
         mut self,
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        let (web_app_profile, _web_app_slot) = super::super::harness::profiles::extension::extension_delivery_with_web_app_tools_profile()?;
+        let web_app_profile = super::super::harness::profiles::extension::extension_delivery_with_web_app_tools_profile()?;
         let host_runtime = build_group_capability_with_base(web_app_profile, &base)
             .await?
             .with_run_owner_scoped_capability_dispatch();

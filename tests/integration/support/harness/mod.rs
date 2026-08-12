@@ -735,7 +735,6 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
-            web_app_runtime_slot,
             extra_first_party_bundles,
             recording_network_egress,
             google_oauth_backend_for_test,
@@ -829,9 +828,6 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
             bundles.extend(extra_first_party_bundles);
             input = input.with_first_party_bundles(bundles);
-        }
-        if let Some(slot) = web_app_runtime_slot {
-            input = input.with_web_app_runtime_slot(slot);
         }
         if !native_extension_factories.is_empty() {
             input = input.with_native_extension_factories(native_extension_factories);

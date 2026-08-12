@@ -51,8 +51,7 @@ pub use credential::{
     binding_scope_owns_account,
 };
 pub use delivery_registrations::{
-    DeliveryRegistrationPaths, FilesystemDeliveryRegistrationStore, registration_id_for,
-    validate_registration_endpoint,
+    DeliveryRegistrationPaths, FilesystemDeliveryRegistrationStore, validate_registration_endpoint,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use engine::admission::{
@@ -100,8 +99,8 @@ pub use oauth::{
     opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 pub use product_auth::api::auth::{
-    OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
-    OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
+    OAuthProviderIdentityBindingAction, OAuthProviderIdentityBindingTransaction,
+    OAuthProviderIdentityCheck, OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,

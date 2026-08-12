@@ -203,16 +203,46 @@ impl From<AuthProductError> for RebornAuthProductError {
 /// Stable sanitized callback failure safe for route rendering.
 pub type RebornOAuthCallbackError = RebornAuthProductError;
 
-/// Compensating action returned by a provider-identity hook that committed
-/// durable state (e.g. the Slack identity binding) before the flow completes.
-/// Awaited only when `complete_oauth_callback` fails after the hook
-/// succeeded; dropped unpolled on the success path. Infallible by contract —
-/// implementations log their own failures.
-pub type OAuthProviderIdentityBindingRollback = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// One infallible action attached to a provider-identity binding transaction.
+/// Implementations report best-effort failures through their own telemetry.
+pub type OAuthProviderIdentityBindingAction = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Commit/rollback work for durable state written by a provider-identity hook.
+///
+/// The auth engine rolls the binding back if OAuth completion fails. Once the
+/// callback is durably complete, it awaits the post-commit work instead. This
+/// prevents channel provisioning from escaping into an untracked task or
+/// running for a binding the callback later rolls back.
+pub struct OAuthProviderIdentityBindingTransaction {
+    after_commit: OAuthProviderIdentityBindingAction,
+    rollback: OAuthProviderIdentityBindingAction,
+}
+
+impl OAuthProviderIdentityBindingTransaction {
+    pub fn new(
+        after_commit: OAuthProviderIdentityBindingAction,
+        rollback: OAuthProviderIdentityBindingAction,
+    ) -> Self {
+        Self {
+            after_commit,
+            rollback,
+        }
+    }
+
+    pub async fn commit(self) {
+        self.after_commit.await;
+    }
+
+    pub async fn rollback(self) {
+        self.rollback.await;
+    }
+}
+
 pub type OAuthProviderIdentityCheckFuture = Pin<
     Box<
-        dyn Future<Output = Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError>>
-            + Send,
+        dyn Future<
+                Output = Result<Option<OAuthProviderIdentityBindingTransaction>, AuthProductError>,
+            > + Send,
     >,
 >;
 pub type OAuthProviderIdentityCheck =
@@ -1102,6 +1132,8 @@ impl RebornProductAuthServices {
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let mut provider_identity = None;
+        let mut identity_binding_transaction: Option<OAuthProviderIdentityBindingTransaction> =
+            None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1159,12 +1191,9 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    let mut identity_binding_rollback: Option<
-                        OAuthProviderIdentityBindingRollback,
-                    > = None;
                     if let Some(check) = provider_identity_check.take() {
                         match check(exchange.provider_identity.clone()).await {
-                            Ok(rollback) => identity_binding_rollback = rollback,
+                            Ok(transaction) => identity_binding_transaction = transaction,
                             Err(error) => {
                                 let error_code = error.code();
                                 if let Err(cleanup_error) = self
@@ -1250,8 +1279,8 @@ impl RebornProductAuthServices {
                             // completed-flow replay path never re-runs the
                             // hook — undo it so a failed completion cannot
                             // leave "connected with no usable credential".
-                            if let Some(rollback) = identity_binding_rollback.take() {
-                                rollback.await;
+                            if let Some(transaction) = identity_binding_transaction.take() {
+                                transaction.rollback().await;
                             }
                             return Err(error.into());
                         }
@@ -1277,12 +1306,15 @@ impl RebornProductAuthServices {
             }
         };
 
-        if should_dispatch_continuation {
-            completed = self
-                .dispatch_completed_continuation(completed)
-                .await
-                .map_err(RebornOAuthCallbackError::from)?;
+        let completion = if should_dispatch_continuation {
+            self.dispatch_completed_continuation(completed).await
+        } else {
+            Ok(completed)
+        };
+        if let Some(transaction) = identity_binding_transaction {
+            transaction.commit().await;
         }
+        completed = completion.map_err(RebornOAuthCallbackError::from)?;
 
         Ok(RebornOAuthCallbackResponse {
             flow_id: completed.id,

@@ -21,7 +21,8 @@ use ironclaw_host_api::attachment::{InboundAttachment, WorkspaceFile};
 use serde::{Deserialize, Serialize};
 
 use crate::external::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ExternalActorId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    ProductAttachmentDescriptor,
 };
 use crate::tool_adapter::RestrictedEgress;
 
@@ -73,8 +74,8 @@ pub trait ChannelIngress: Send + Sync {
 #[async_trait]
 pub trait ChannelReply: Send + Sync {
     /// Render and send one run answer back to where its input came from.
-    /// Owns vendor formatting, splitting to the declared
-    /// `max_message_chars`, target syntax, and safe error mapping. Never
+    /// Owns vendor formatting, provider-specific message splitting, target
+    /// syntax, and safe error mapping. Never
     /// touches the delivery store.
     async fn send_reply(
         &self,
@@ -100,20 +101,23 @@ pub trait ChannelDelivery: Send + Sync {
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
 
-    /// Optional: list/search delivery targets for pickers.
-    async fn list_targets(
+    /// Optional: provision the direct conversation for one proven external
+    /// actor. This is deliberately not target search; the host supplies the
+    /// typed actor and the adapter returns at most that actor's conversation.
+    async fn provision_direct_target(
         &self,
-        _query: TargetQuery,
+        _request: DirectTargetProvisionRequest,
         _egress: &dyn RestrictedEgress,
-    ) -> Result<Vec<TargetCandidate>, ChannelError> {
+    ) -> Result<Option<ExternalConversationRef>, ChannelError> {
         Err(ChannelError::Unsupported)
     }
 }
 
 /// The halves one extension's channel surface actually implements.
 ///
-/// Eleven methods on one trait became three methods across three traits, and this is
-/// what the host holds instead of a single `Arc<dyn ChannelAdapter>` whose
+/// Eleven methods on one trait became three core translation methods across
+/// three traits plus one optional, typed direct-target provisioning hook. This
+/// is what the host holds instead of a single `Arc<dyn ChannelAdapter>` whose
 /// unsupported methods were discovered at call time. A `None` here is the
 /// required fact for host-owned modes (`authenticated_session` ingress and
 /// `stream` reply); `check_binding` proves every manifest axis agrees with its
@@ -123,7 +127,7 @@ pub trait ChannelDelivery: Send + Sync {
 /// - `activate`/`cleanup` → `[channel.ingress.registration]` /
 ///   `[channel.ingress.deregistration]` recipes the host runs through
 ///   existing restricted egress with existing credential injection.
-/// - `deliver_notification` → [`ChannelDelivery`]. One run can stream an answer
+/// - notification delivery → [`ChannelDelivery::deliver`]. One run can stream an answer
 ///   into an open tab *and* fire a push; those are two axes, not two intents.
 /// - the three notification-setup methods → host-owned per-user delivery
 ///   registrations, so the host can answer "is this user set up?" before a
@@ -189,8 +193,10 @@ impl std::fmt::Debug for ChannelSurfaces {
 /// that already prunes an expired endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryRegistration {
-    /// Host-minted, stable for one endpoint. Adapters echo it back in
-    /// [`DeliveryReport::prune_registrations`]; they never mint one.
+    /// Host-minted opaque record identity. Stable across a refresh of the
+    /// same registration; never derived from provider addressing. Adapters
+    /// echo it back in [`DeliveryReport::prune_registrations`]; they never
+    /// mint one.
     pub registration_id: String,
     /// The absolute URL this registration delivers to. Host-checked against
     /// the channel's declared egress hosts before it is ever stored.
@@ -315,7 +321,10 @@ pub struct NormalizedInboundMessage {
     /// thread reply, …). The workflow's user-message payload requires it, so
     /// any host sink mapping normalized messages into the workflow needs it.
     pub trigger: ProductTriggerReason,
-    pub attachments: Vec<NormalizedAttachment>,
+    /// Complete, channel-neutral attachment bytes. Provider descriptors and
+    /// download handles are edge-only parse state; the adapter must reconcile
+    /// them before returning this canonical host attachment.
+    pub attachments: Vec<InboundAttachment>,
     /// Recent vendor-side history when the adapter knows this message came
     /// from a shared conversation and the vendor exposes a history API.
     /// Untrusted content: the host sanitizes and frames it before model use.
@@ -329,43 +338,6 @@ pub struct NormalizedInboundMessage {
 /// Maximum size of an inbound message's opaque `reply_context`.
 pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 
-/// One complete inbound attachment returned by an adapter.
-///
-/// `descriptor` is what the vendor payload declared; `fetched` is what the
-/// adapter actually recovered through restricted egress. Keeping both lets
-/// the host reject disagreement instead of silently reconciling two claims
-/// from the same untrusted vendor.
-#[derive(Clone)]
-pub struct NormalizedAttachment {
-    pub descriptor: ProductAttachmentDescriptor,
-    pub fetched: InboundAttachment,
-}
-
-impl std::fmt::Debug for NormalizedAttachment {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NormalizedAttachment")
-            .field("descriptor", &self.descriptor)
-            .field("fetched_id", &self.fetched.id)
-            .field("fetched_mime_type", &self.fetched.mime_type)
-            .field("fetched_filename", &self.fetched.filename)
-            .field("size_bytes", &self.fetched.bytes.len())
-            .finish()
-    }
-}
-
-impl PartialEq for NormalizedAttachment {
-    fn eq(&self, other: &Self) -> bool {
-        self.descriptor == other.descriptor
-            && self.fetched.id == other.fetched.id
-            && self.fetched.mime_type == other.fetched.mime_type
-            && self.fetched.filename == other.fetched.filename
-            && self.fetched.bytes == other.fetched.bytes
-    }
-}
-
-impl Eq for NormalizedAttachment {}
-
 /// Package-internal parse/fetch state: the descriptor a vendor payload
 /// declares plus the opaque provider handle the adapter uses while completing
 /// [`ChannelIngress::receive`]. This is not part of the host inbound contract
@@ -378,6 +350,34 @@ impl Eq for NormalizedAttachment {}
 pub struct ChannelAttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
+}
+
+impl ChannelAttachmentRef {
+    /// Reconcile provider-declared metadata with the fetched bytes at the
+    /// adapter edge, then discard the provider handle and descriptor. The
+    /// internal host receives exactly one canonical attachment shape.
+    pub fn complete(self, fetched: InboundAttachment) -> Result<InboundAttachment, ChannelError> {
+        if fetched.id != self.descriptor.external_file_id {
+            return Err(ChannelError::Parse {
+                reason: format!(
+                    "fetched attachment id `{}` does not match descriptor `{}`",
+                    fetched.id, self.descriptor.external_file_id
+                ),
+            });
+        }
+        if let Some(declared_size) = self.descriptor.size_bytes
+            && declared_size != fetched.bytes.len() as u64
+        {
+            return Err(ChannelError::Parse {
+                reason: format!(
+                    "attachment `{}` declared {declared_size} bytes but fetched {} bytes",
+                    fetched.id,
+                    fetched.bytes.len()
+                ),
+            });
+        }
+        Ok(fetched)
+    }
 }
 
 impl std::fmt::Debug for ChannelAttachmentRef {
@@ -408,12 +408,21 @@ impl ChannelConversationContext {
     /// Validate adapter-supplied context text (the adapter is untrusted for
     /// size): non-empty and within the host byte bound.
     pub fn new(text: String) -> Result<Self, ChannelError> {
-        if text.trim().is_empty() {
+        let context = Self { text };
+        context.validate()?;
+        Ok(context)
+    }
+
+    /// Reapply the context invariant at a host boundary. The field remains
+    /// public for adapter construction, so callers must not assume `new` was
+    /// used by an untrusted implementation.
+    pub fn validate(&self) -> Result<(), ChannelError> {
+        if self.text.trim().is_empty() {
             return Err(ChannelError::Parse {
                 reason: "conversation context text must not be empty".to_string(),
             });
         }
-        if text.len() > MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES {
+        if self.text.len() > MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES {
             return Err(ChannelError::Parse {
                 reason: format!(
                     "conversation context exceeds the \
@@ -421,7 +430,7 @@ impl ChannelConversationContext {
                 ),
             });
         }
-        Ok(Self { text })
+        Ok(())
     }
 }
 
@@ -440,9 +449,6 @@ pub const MAX_IMMEDIATE_RESPONSE_BYTES: usize = 64 * 1024;
 /// One outbound envelope the delivery coordinator hands the adapter.
 #[derive(Debug, Clone)]
 pub struct OutboundEnvelope {
-    pub extension_id: String,
-    pub installation_id: String,
-    pub delivery_attempt_id: String,
     /// Resolved target (source-route reply or preference target).
     pub target: OutboundTarget,
     /// The rendered message parts, already reduced from the semantic intent by
@@ -559,27 +565,21 @@ pub enum PartDeliveryOutcome {
     Sent { vendor_message_ref: Option<String> },
     /// Transient failure; the coordinator may retry.
     Retryable { reason: String },
+    /// The request crossed into transport, but the adapter cannot prove
+    /// whether the vendor accepted it. The coordinator must persist an
+    /// `Unknown` attempt and never retry blindly because doing so can
+    /// duplicate a user-visible message.
+    Ambiguous { reason: String },
     /// Permanent failure; the coordinator will not retry.
     Permanent { reason: String },
     /// The vendor rejected authorization; the coordinator raises re-auth.
     Unauthorized { reason: String },
 }
 
-/// A target-listing/search query for pickers.
+/// Request to provision one proven actor's direct conversation.
 #[derive(Debug, Clone)]
-pub struct TargetQuery {
-    pub extension_id: String,
-    pub installation_id: String,
-    /// Optional free-text filter.
-    pub query: Option<String>,
-    pub limit: u32,
-}
-
-/// One candidate delivery target.
-#[derive(Debug, Clone)]
-pub struct TargetCandidate {
-    pub conversation: ExternalConversationRef,
-    pub display_name: String,
+pub struct DirectTargetProvisionRequest {
+    pub actor_id: ExternalActorId,
 }
 
 /// Typed channel-adapter failures.
@@ -608,23 +608,9 @@ impl NormalizedInboundMessage {
     pub fn validate(&self) -> Result<(), ChannelError> {
         let mut attachment_ids = std::collections::HashSet::new();
         for attachment in &self.attachments {
-            if !attachment_ids.insert(attachment.descriptor.external_file_id.as_str()) {
+            if !attachment_ids.insert(attachment.id.as_str()) {
                 return Err(ChannelError::Parse {
-                    reason: format!(
-                        "duplicate attachment external_file_id `{}`",
-                        attachment.descriptor.external_file_id
-                    ),
-                });
-            }
-            if let Some(declared_size) = attachment.descriptor.size_bytes
-                && declared_size != attachment.fetched.bytes.len() as u64
-            {
-                return Err(ChannelError::Parse {
-                    reason: format!(
-                        "attachment `{}` declared {declared_size} bytes but fetched {} bytes",
-                        attachment.descriptor.external_file_id,
-                        attachment.fetched.bytes.len()
-                    ),
+                    reason: format!("duplicate attachment external_file_id `{}`", attachment.id),
                 });
             }
         }
@@ -634,6 +620,9 @@ impl NormalizedInboundMessage {
             return Err(ChannelError::Parse {
                 reason: "reply_context exceeds the 4 KiB bound".to_string(),
             });
+        }
+        if let Some(context) = &self.conversation_context {
+            context.validate()?;
         }
         Ok(())
     }
@@ -657,26 +646,26 @@ mod tests {
     use crate::external::ProductAttachmentKind;
     use ironclaw_host_api::attachment::InboundAttachment;
 
-    fn normalized_attachment(
-        id: &str,
-        declared_size: Option<u64>,
-        bytes: &[u8],
-    ) -> NormalizedAttachment {
-        NormalizedAttachment {
+    fn normalized_attachment(id: &str, bytes: &[u8]) -> InboundAttachment {
+        InboundAttachment {
+            id: id.to_string(),
+            mime_type: "application/pdf".to_string(),
+            filename: Some("vendor-name.pdf".to_string()),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    fn pending_attachment(id: &str, size: u64) -> ChannelAttachmentRef {
+        ChannelAttachmentRef {
             descriptor: ProductAttachmentDescriptor::new(
                 id,
                 "application/pdf",
                 Some(format!("{id}.pdf")),
-                declared_size,
+                Some(size),
                 ProductAttachmentKind::Document,
             )
             .expect("descriptor"),
-            fetched: InboundAttachment {
-                id: id.to_string(),
-                mime_type: "application/pdf".to_string(),
-                filename: Some("vendor-name.pdf".to_string()),
-                bytes: bytes.to_vec(),
-            },
+            vendor_ref: "provider-handle".to_string(),
         }
     }
 
@@ -701,8 +690,7 @@ mod tests {
 
     #[test]
     fn normalized_attachment_debug_redacts_fetched_bytes() {
-        let attachment =
-            normalized_attachment("file-1", Some(29), b"complete-byte-sentinel-secret");
+        let attachment = normalized_attachment("file-1", b"complete-byte-sentinel-secret");
 
         let debug = format!("{attachment:?}");
         assert!(debug.contains("file-1"));
@@ -721,7 +709,7 @@ mod tests {
             event_id: ExternalEventId::new("e-1").expect("event"),
             text: "hi".to_string(),
             trigger: ProductTriggerReason::DirectChat,
-            attachments: vec![normalized_attachment("file-1", Some(4), b"data")],
+            attachments: vec![normalized_attachment("file-1", b"data")],
             conversation_context: None,
             reply_context: None,
         };
@@ -731,17 +719,24 @@ mod tests {
         let mut duplicate = valid();
         duplicate
             .attachments
-            .push(normalized_attachment("file-1", Some(4), b"data"));
+            .push(normalized_attachment("file-1", b"data"));
         assert!(matches!(
             duplicate.validate(),
             Err(ChannelError::Parse { reason }) if reason.contains("duplicate")
         ));
 
-        let mut wrong_size = valid();
-        wrong_size.attachments[0].descriptor.size_bytes = Some(5);
+        let wrong_size =
+            pending_attachment("file-1", 5).complete(normalized_attachment("file-1", b"data"));
         assert!(matches!(
-            wrong_size.validate(),
+            wrong_size,
             Err(ChannelError::Parse { reason }) if reason.contains("declared")
+        ));
+
+        let wrong_id = pending_attachment("file-1", 4)
+            .complete(normalized_attachment("different-file", b"data"));
+        assert!(matches!(
+            wrong_id,
+            Err(ChannelError::Parse { reason }) if reason.contains("does not match")
         ));
     }
 
@@ -790,6 +785,26 @@ mod tests {
         let context = ChannelConversationContext::new("<@U1>: hello".to_string())
             .expect("bounded context text is accepted");
         assert_eq!(context.text, "<@U1>: hello");
+
+        let message = NormalizedInboundMessage {
+            actor: ExternalActorRef::new("user", "u-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "c-1", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new("e-1").expect("event"),
+            text: "hi".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: Vec::new(),
+            // Bypass `new` the same way an untrusted adapter can today: the
+            // host must reapply the invariant at message validation.
+            conversation_context: Some(ChannelConversationContext {
+                text: "x".repeat(MAX_CHANNEL_CONVERSATION_CONTEXT_BYTES + 1),
+            }),
+            reply_context: None,
+        };
+        assert!(matches!(
+            message.validate(),
+            Err(ChannelError::Parse { reason }) if reason.contains("conversation context")
+        ));
     }
 
     fn valid_batch_fragment() -> InboundBatchFragment {

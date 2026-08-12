@@ -659,13 +659,10 @@ fn with_binary_host_extension_bindings_from_bundles(
     first_party_bundles: Vec<FirstPartyPackageBundle>,
 ) -> anyhow::Result<RebornHostBindings> {
     crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
-    let channel_extensions = native_extensions::bundled_channel_extensions();
-    let mut services_input = services_input
-        .with_channel_extension_bindings(channel_extensions.bindings)
-        .with_web_app_runtime_slot(channel_extensions.web_app_runtime);
-    if let Some(subject) = web_app_vapid_subject_from_env() {
-        services_input = services_input.with_web_app_vapid_subject(subject);
-    }
+    let channel_extensions =
+        native_extensions::bundled_channel_extensions(web_app_vapid_subject_from_env());
+    let services_input =
+        services_input.with_channel_extension_bindings(channel_extensions.bindings);
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_first_party_bundles(first_party_bundles)

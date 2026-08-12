@@ -87,9 +87,6 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             headers: Vec::new(),
         }),
         outbound_envelope: OutboundEnvelope {
-            extension_id: "acme-messenger".to_string(),
-            installation_id: "acme-install-1".to_string(),
-            delivery_attempt_id: "attempt-acme-conformance".to_string(),
             target: OutboundTarget {
                 conversation: ExternalConversationRef::new(None, "C-ACME-CONF", None, None)
                     .expect("conversation"),
@@ -106,7 +103,6 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             }
         }),
         config: Vec::new(),
-        expects_unsupported_free_target_listing: true,
     })
     .await;
 }

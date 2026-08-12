@@ -19,9 +19,9 @@ use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifes
 #[derive(Clone, Default)]
 pub struct ExtensionBindings {
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    /// The channel halves this extension implements. An all-`None` value is
-    /// the same fact as a missing `[channel]` section, and [`check_binding`]
-    /// proves the two agree axis by axis.
+    /// The channel halves this extension implements. An all-`None` value can
+    /// be valid when every declared axis is host-owned (authenticated-session
+    /// ingress plus stream reply); [`check_binding`] proves agreement per axis.
     pub channel: ChannelSurfaces,
 }
 
@@ -95,10 +95,8 @@ pub fn check_binding(
     }
     let binds_any_channel_half =
         bindings.channel.ingress.is_some() || bindings.channel.has_outbound();
-    match (declares_channel, binds_any_channel_half) {
-        (true, false) => return Err(BindError::MissingChannelAdapter),
-        (false, true) => return Err(BindError::UndeclaredChannelAdapter),
-        _ => {}
+    if !declares_channel && binds_any_channel_half {
+        return Err(BindError::UndeclaredChannelAdapter);
     }
     if let Some(channel) = &resolved.channel {
         check_channel_halves(channel, &bindings.channel)?;
@@ -133,26 +131,22 @@ pub fn check_binding(
 /// - `authenticated_session` ingress is normalized at the host session door,
 ///   whose actor authority an adapter may never mint. There is no vendor
 ///   payload to parse, so there is nothing for an ingress half to do.
-fn check_channel_halves(
+pub(crate) fn check_channel_halves(
     channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
     bound: &ChannelSurfaces,
 ) -> Result<(), BindError> {
-    let expects_ingress_half = channel
-        .ingress
-        .as_ref()
-        .is_some_and(|ingress| !ingress.verification.is_authenticated_session());
+    let expected = channel_half_expectations(channel);
     check_half(
         "ingress",
-        expects_ingress_half,
+        expected.ingress,
         bound.ingress.is_some(),
         "webhook ingress needs an adapter to parse the vendor payload",
         "authenticated_session ingress is normalized at the host session door",
     )?;
 
-    let expects_reply_half = channel.reply_transport() == Some(ReplyTransport::Message);
     check_half(
         "reply",
-        expects_reply_half,
+        expected.reply,
         bound.reply.is_some(),
         "a message reply transport needs an adapter to render and send it",
         "a stream reply (or no reply section) is published by the host",
@@ -160,12 +154,34 @@ fn check_channel_halves(
 
     check_half(
         "delivery",
-        channel.supports_delivery(),
+        expected.delivery,
         bound.delivery.is_some(),
         "[channel.delivery] needs an adapter half to send out of band",
         "no [channel.delivery] section declares this channel a delivery target",
     )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChannelHalfExpectations {
+    pub ingress: bool,
+    pub reply: bool,
+    pub delivery: bool,
+}
+
+/// The one declaration-to-half projection used by activation, deployment
+/// bindings, and the temporary host-served bridge.
+pub(crate) fn channel_half_expectations(
+    channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
+) -> ChannelHalfExpectations {
+    ChannelHalfExpectations {
+        ingress: channel
+            .ingress
+            .as_ref()
+            .is_some_and(|ingress| !ingress.verification.is_authenticated_session()),
+        reply: channel.reply_transport() == Some(ReplyTransport::Message),
+        delivery: channel.supports_delivery(),
+    }
 }
 
 fn check_half(
@@ -218,7 +234,13 @@ mod tests {
     fn declared_channel_without_adapter_fails() {
         let resolved = channel_only_manifest();
         let error = check_binding(&resolved, &tools_only(false, false)).unwrap_err();
-        assert_eq!(error, BindError::MissingChannelAdapter);
+        assert!(matches!(
+            error,
+            BindError::ChannelHalfMismatch {
+                axis: "ingress",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -351,6 +373,21 @@ mod tests {
                 "expected a {axis} mismatch, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_fully_host_owned_session_stream_channel_needs_no_adapter_half() {
+        let mut resolved = session_channel_manifest();
+        resolved.channel.as_mut().expect("session channel").delivery = None;
+
+        check_binding(
+            &resolved,
+            &ExtensionBindings {
+                tools: None,
+                channel: ChannelSurfaces::default(),
+            },
+        )
+        .expect("host-owned ingress and reply are a complete operational channel");
     }
 
     #[test]

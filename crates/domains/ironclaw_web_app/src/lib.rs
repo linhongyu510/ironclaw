@@ -17,7 +17,6 @@ pub mod crypto;
 pub mod error;
 pub mod grammar;
 pub mod message;
-pub mod runtime;
 pub mod store;
 pub mod subscription;
 pub mod vapid;
@@ -32,7 +31,6 @@ pub use message::{
     DEFAULT_TTL_SECONDS, PushUrgency, WebAppNotificationPayload, WebAppRequestPlan,
     build_push_request,
 };
-pub use runtime::{WebAppRuntime, WebAppRuntimeSlot};
 pub use store::{
     FilesystemWebAppSubscriptionStore, PushSubscriptionUpsertOutcome, WebAppSubscriptionStore,
 };

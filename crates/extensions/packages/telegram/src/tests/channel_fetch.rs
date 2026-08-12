@@ -108,11 +108,10 @@ async fn fetch_attachment_looks_up_then_downloads_through_restricted_egress() {
     };
     let fetched = &messages[0].attachments[0];
 
-    assert_eq!(fetched.descriptor.external_file_id, "vendor-file-id");
-    assert_eq!(fetched.fetched.id, "vendor-file-id");
-    assert_eq!(fetched.fetched.mime_type, "text/plain");
-    assert_eq!(fetched.fetched.filename.as_deref(), Some("original.txt"));
-    assert_eq!(fetched.fetched.bytes, b"hello");
+    assert_eq!(fetched.id, "vendor-file-id");
+    assert_eq!(fetched.mime_type, "text/plain");
+    assert_eq!(fetched.filename.as_deref(), Some("original.txt"));
+    assert_eq!(fetched.bytes, b"hello");
     assert!(messages[0].conversation_context.is_none());
 
     let requests = egress.requests.lock().expect("requests lock");

@@ -24,8 +24,9 @@ mechanics behind the web app's browser-notification channel.
 - The channel identity grammar (`web-app` extension id, the constant
   owner-scoped `web-app` target id, and the `web-app/v1/<tenant>/<user>`
   reply-target binding-ref format).
-- `WebAppRuntimeSlot` — the late-bound handle the binary's adapter binding
-  holds until composition installs storage at assembly.
+- VAPID material stays a protocol document here; the binary-owned channel
+  initializer stores it through composition's neutral credential context and
+  publishes only its public key as an opaque bootstrap document.
 
 ## When you want a different crate
 

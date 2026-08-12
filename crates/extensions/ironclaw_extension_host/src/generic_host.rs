@@ -685,20 +685,16 @@ struct HostServedChannelBridge;
 fn host_served_bridge(
     channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
 ) -> ChannelSurfaces {
-    use ironclaw_extension_contracts::channel::ReplyTransport;
     let bridge = Arc::new(HostServedChannelBridge);
     let mut surfaces = ChannelSurfaces::default();
-    if channel
-        .ingress
-        .as_ref()
-        .is_some_and(|ingress| !ingress.verification.is_authenticated_session())
-    {
+    let expected = crate::entrypoint::channel_half_expectations(channel);
+    if expected.ingress {
         surfaces = surfaces.with_ingress(bridge.clone());
     }
-    if channel.reply_transport() == Some(ReplyTransport::Message) {
+    if expected.reply {
         surfaces = surfaces.with_reply(bridge.clone());
     }
-    if channel.supports_delivery() {
+    if expected.delivery {
         surfaces = surfaces.with_delivery(bridge);
     }
     surfaces

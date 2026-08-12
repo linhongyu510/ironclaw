@@ -115,7 +115,6 @@ verification = { kind = "hmac_sha256", … }
 
 [channel.reply]                    # how a run's answer gets back
 transport = "stream"               # | "message"
-max_message_chars = 4096           # only meaningful for transport = "message"
 
 [channel.delivery]                 # how we reach the user outside a run
 transport = "push"                 # | "message"
@@ -128,7 +127,6 @@ Concretely, the entire web-app/Slack difference becomes two words of data:
 # web-app                          # slack / telegram
 [channel.reply]                    [channel.reply]
 transport = "stream"               transport = "message"
-                                   max_message_chars = 40000
 [channel.delivery]                 [channel.delivery]
 transport = "push"                 transport = "message"
 requires_enrollment = true
@@ -137,6 +135,24 @@ requires_enrollment = true
 This retires the `inbound` / `outbound` / `notifications` booleans, which say
 *that* a channel does something without saying *how*.
 
+Provider message limits are deliberately not manifest policy. Slack and
+Telegram measure different units, so each adapter renders and chunks against
+its protocol's authoritative limit before egress.
+
+**Rolling compatibility keeps v3.** The public/current writer emits only the
+three section-based axes above. The `ChannelDescriptor` serde boundary alone
+retains private read fields for the immediately preceding v3 booleans and the
+old presentation-level `max_message_chars`: conversational `outbound = true`
+normalizes to message reply + message delivery, while the one deployed
+`notifications = true` shape normalizes to enrollment-backed push delivery.
+This is an inventory-bounded bridge, not a v4 or a general migration layer;
+persisted resolved rows therefore remain active during an upgrade.
+Security-sensitive nested recipes keep strict unknown-field rejection. This
+bridge is intentionally forward-read only: the current writer does not
+re-emit retired booleans, so rolling an already-rewritten manifest row back to
+a binary that predates the split requires restoring the prior manifest row (or
+reinstalling its prior package), not another permanent dual taxonomy.
+
 ---
 
 ## 3. Core types
@@ -144,18 +160,12 @@ This retires the `inbound` / `outbound` / `notifications` booleans, which say
 ```rust
 /// Where an outbound thing is going — the axis, decided once, by the router.
 enum OutboundRoute {
-    /// Back to the conversation/session the run came from.
-    Reply { run_id: TurnRunId, kind: ReplyKind },
-    /// To a resolved target, with no assumption that a run exists.
-    Delivery { target: ValidatedTarget, origin: DeliveryOrigin },
-}
-
-enum ReplyKind { Answer, Prompt, Indicator, Reaction, Retraction }
-
-/// Who chose the target (§1.3) — the authorization distinction, explicit.
-enum DeliveryOrigin {
-    UserConfigured,   // host resolved the user's channels
-    ModelRequested,   // builtin.outbound_deliver — must be authorized
+    /// Back to the conversation/session the run came from. The request
+    /// already carries its run and source binding.
+    Reply,
+    /// To a resolved target, with no assumption that a run exists. The
+    /// delivery resolution already carries its target and authorization.
+    Delivery,
 }
 
 enum ReplyTransport    { Stream, Message }
@@ -190,10 +200,13 @@ skip.**
 | `Message` / `Push` (vendor) | vendor message id |
 | `Stream` | projection cursor at which the reply is visible |
 
-Both are durable proof the user can see it, satisfying the repo's evidence
-rule. This closes a real hole: today a browser reply produces **no delivery
-record at all**, so "was the user's answer delivered?" has no uniform answer
-and web-app is invisible in delivery audits.
+Both provide durable transport evidence: a vendor acceptance identifier for a
+message/push, or a projection cursor proving the stream-visible reply was
+committed. Neither is proof that a human client actually rendered the result;
+that would require a separate client-acknowledgement contract. This closes a
+real hole: today a browser reply produces **no delivery record at all**, so the
+durable availability of the user's answer has no uniform audit trail and
+web-app is invisible in delivery audits.
 
 ### 4.2 The asymmetry that is real, and where it lives
 
@@ -219,8 +232,11 @@ the WebUI frontend.
 
 > **Amended 2026-08-11 — settled as verify.** `StreamDelivered` records the
 > projection cursor the turn pipeline already wrote. The delivery coordinator
-> verifies and reports that durable evidence; it does not take ownership of
-> transcript/projection persistence or disturb replay.
+> verifies and reports that durable **projection-commit** evidence; it does not
+> take ownership of transcript/projection persistence or disturb replay. The
+> historical variant name does **not** assert that a subscribed browser
+> received a frame: there is no client acknowledgement contract, and callers
+> must not present the cursor as proof of client receipt.
 
 Should `Stream` **verify** the append (read the cursor the turn already wrote)
 or **own** it (move the assistant-message append out of the turn pipeline)?
@@ -245,7 +261,7 @@ interface does not change if the write moves later.
 > `a_stream_reply_and_session_ingress_must_bind_no_half`).
 
 ```rust
-trait ChannelIngress  { async fn receive(&self, verified) -> InboundOutcome; }
+trait ChannelIngress  { async fn receive(&self, verified, restricted_egress) -> InboundOutcome; }
 trait ChannelReply    { async fn send_reply(&self, envelope, egress) -> Report; }
 trait ChannelDelivery { async fn deliver(&self, envelope, egress) -> Report; }
 ```
@@ -295,8 +311,8 @@ implementor.
 > **Amended 2026-08-11 — complete messages won.** The owner declined the
 > refs/post-ack design after measuring the live path. Both old adapter
 > callbacks already ran before the durable acceptance commit, so resolving
-> attachments inside `receive` does **not** move or lengthen the pre-ack window
-> relative to the code it replaces. The actual order is:
+> attachments inside `receive` does **not** introduce provider I/O into a
+> pre-ack window that was previously post-commit. The actual order is:
 >
 > 1. verify/bound the request and construct manifest-restricted egress;
 > 2. `ChannelIngress::receive` parses and resolves attachment bytes and any
@@ -310,6 +326,18 @@ implementor.
 > The prior `fetch_attachment`/`fetch_conversation_context` callbacks occupied
 > step 2 as well, between parse and `accept_prepared_user_message`. Ack-after-
 > commit and retry semantics are unchanged.
+>
+> **Second amendment, found during review:** the commit boundary is unchanged,
+> but the ordering relative to the product ledger's replay preflight is not.
+> The retired path parsed the event id, checked for a settled replay, and only
+> then fetched attachment bytes. A complete-message `receive` must fetch before
+> the product sees that id, so an exact vendor redelivery can repeat
+> credentialed reads and can return 503 if that repeat fetch fails even though
+> the original event settled. Restoring that optimization needs a separate
+> host-owned durable verified-request replay guard. It must not be implemented
+> as another adapter parse/fetch callback, which would recreate the partial
+> contract this decision removes. This is a follow-up risk, not a claim that
+> the current ordering is unchanged in every respect.
 >
 > `[channel.attachments]` was deleted because neither shipped transfer is a
 > generic request template. Telegram performs `getFile` and then downloads a
@@ -423,6 +451,15 @@ A push subscription (endpoint + keys, per user, revocable, listed in settings)
   malformed record fails that delivery and is pruned, on the same path that
   already prunes 404/410.
 
+Each stored row has an opaque host-minted registration id; provider addressing
+(including a push endpoint) is never its identity. Existing Web Push documents
+remain readable with their original `subscription_id`, and the writer carries
+both canonical `records` and a private, structurally flattened
+`subscriptions` rollback projection. The generic store does not interpret the
+opaque document while producing that projection. A rolled-back writer drops
+the unknown canonical projection; the next rollout reads the legacy projection
+again without re-keying records.
+
 So there is **no `validate_enrollment`**, and no setup methods at all.
 
 **Client bootstrap data** (the VAPID public key the browser needs to
@@ -449,7 +486,7 @@ path.
 | `reply_mode = streaming\|batched` | `[channel.reply].transport = stream\|message` |
 | `deliver()` | `send_reply()` **or** `deliver()`, by axis |
 | `deliver_notification()` | `deliver()` |
-| `DeliveryIntent` (11 variants) | `OutboundRoute` + `ReplyKind` |
+| routing inferred from `DeliveryIntent` | two-arm `OutboundRoute`; content and authorization remain in their owning request types |
 | `NoDelivery` for streaming | `Delivered { via: Projection, cursor }` |
 | `activate` / `cleanup` | `[channel.ingress.registration]` recipe |
 | `fetch_attachment` / `fetch_conversation_context` callbacks | one complete async `ChannelIngress::receive`, pre-commit through restricted egress |
@@ -466,8 +503,9 @@ path.
    `PushStreaming`. Not built now; the enums are shaped so adding it is not a
    rewrite.
 
-**Settled** (2026-08-11): `ReplyKind::Prompt` stays content with the router
-deciding its axis (§1.1); two transport enums rather than one (§3); stream
+**Settled** (2026-08-11, updated 2026-08-12): prompt/reaction/retraction remain
+content rather than routing taxonomy, and the router stores only the two-arm
+reply/delivery axis (§1.1); two transport enums rather than one (§3); stream
 evidence verifies the existing projection cursor (§4.4); complete inbound
 attachments/context stay pre-commit (§7); and delivery registrations live in
 `ironclaw_auth`, not `ironclaw_outbound`. Both candidate owners were already

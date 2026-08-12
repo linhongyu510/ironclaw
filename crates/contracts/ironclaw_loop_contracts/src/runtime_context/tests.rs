@@ -295,28 +295,22 @@ fn renders_channel_presentation_hint() {
                     name: "Acme".to_string(),
                     authenticated: true,
                     active: true,
-                    presentation: Some(ChannelOutputFacts {
-                        presentation: ChannelPresentation {
-                            supports_markdown: false,
-                            supports_threads: false,
-                            can_reply_in_threads: false,
-                            command_prefix: None,
-                        },
-                        max_message_chars: Some(4000),
+                    presentation: Some(ChannelPresentation {
+                        supports_markdown: false,
+                        supports_threads: false,
+                        can_reply_in_threads: false,
+                        command_prefix: None,
                     }),
                 },
                 ConnectedChannelSummary {
                     name: "Rich".to_string(),
                     authenticated: true,
                     active: true,
-                    presentation: Some(ChannelOutputFacts {
-                        presentation: ChannelPresentation {
-                            supports_markdown: true,
-                            supports_threads: true,
-                            can_reply_in_threads: false,
-                            command_prefix: None,
-                        },
-                        max_message_chars: None,
+                    presentation: Some(ChannelPresentation {
+                        supports_markdown: true,
+                        supports_threads: true,
+                        can_reply_in_threads: false,
+                        command_prefix: None,
                     }),
                 },
             ]),
@@ -328,8 +322,8 @@ fn renders_channel_presentation_hint() {
     };
     let text = ctx.render_model_content();
     assert!(
-        text.contains("Acme (authenticated, active, plain text only, \u{2264}4000 chars/message)"),
-        "no-markdown + capped presentation hint: {text}"
+        text.contains("Acme (authenticated, active, plain text only)"),
+        "plain-text presentation hint: {text}"
     );
     assert!(
         text.contains("Rich (authenticated, active, markdown)"),
@@ -1046,12 +1040,9 @@ fn worst_case_runtime_context_stays_within_the_prompt_surface_cap() {
             name: format!("{i:02}-{}", "c".repeat(61)),
             authenticated: true,
             active: true,
-            presentation: Some(ChannelOutputFacts {
-                presentation: ChannelPresentation {
-                    supports_markdown: false,
-                    ..Default::default()
-                },
-                max_message_chars: Some(4000),
+            presentation: Some(ChannelPresentation {
+                supports_markdown: false,
+                ..Default::default()
             }),
         })
         .collect();

@@ -7,7 +7,7 @@
 use super::*;
 use crate::{DeliveryRetryPolicy, NoReplyContext};
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelReply, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
+    ChannelDelivery, ChannelError, ChannelReply, DeliveryReport, OutboundEnvelope,
     PartDeliveryOutcome,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
@@ -329,11 +329,12 @@ impl ChannelDeliveryResolver for StaticResolver {
                 "install-alpha",
             )
             .expect("installation id"),
-            surfaces: ChannelSurfaces::default()
-                .with_reply(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>)
-                .with_delivery(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
+            reply: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelReply>),
+            delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
+            requires_enrollment: false,
+            declared_egress_hosts: Vec::new(),
         })
     }
 }
@@ -722,7 +723,6 @@ async fn deliver_for_model_returns_provider_evidence() {
 
     let envelopes = harness.adapter.envelopes();
     assert_eq!(envelopes.len(), 1);
-    assert_eq!(envelopes[0].extension_id, "acme-chat");
     match &envelopes[0].parts[0] {
         OutboundPart::Text(text) => assert_eq!(text, "hello there"),
         other => panic!("expected text part, got {other:?}"),
@@ -813,6 +813,33 @@ async fn deliver_for_model_maps_terminal_failure_kinds() {
         }),
         "provider evidence must survive while the failed terminal write stays explicit"
     );
+
+    for (outcome, durably_recorded) in [
+        (
+            CoordinatedDeliveryOutcome::StreamDelivered {
+                attempt: sample_attempt(),
+                cursor: "cursor-1".to_string(),
+            },
+            true,
+        ),
+        (
+            CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed {
+                attempt: sample_attempt(),
+                cursor: "cursor-2".to_string(),
+            },
+            false,
+        ),
+    ] {
+        assert_eq!(
+            classify_delivery_outcome(target.clone(), outcome),
+            Ok(ModelChannelDeliveryEvidence {
+                target: target.clone(),
+                provider_message_refs: Vec::new(),
+                durably_recorded,
+                already_delivered: false,
+            })
+        );
+    }
 
     // A replay of a durably confirmed delivery. The ledger row does not retain
     // provider refs, so the empty list is honest — but it must be flagged, or

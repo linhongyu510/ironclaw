@@ -27,7 +27,8 @@
 //!   credential-handle value;
 //! - its store keeps the `/web-push/subscriptions.json` document path;
 //! - composition keeps the `/web-push` per-user mount alias those documents
-//!   physically live under;
+//!   physically live under, while binary/test bindings carry that opaque
+//!   pre-generic document address into composition;
 //! - the web-app manifest names the same persisted credential handle;
 //! - the specificity gate's carve-out doc records the rename;
 //! - this gate names every term on purpose.
@@ -69,7 +70,11 @@ const SANCTIONED_PATHS: &[(&str, &[&str])] = &[
     // under — it resolves to a physical subpath, so it keeps its spelling.
     ("crates/app/ironclaw_composition/src/lib.rs", &["web-push"]),
     (
-        "crates/app/ironclaw_composition/src/factory/production_backend_assembly.rs",
+        "crates/app/ironclaw_cli/src/runtime/native_extensions.rs",
+        &["web-push"],
+    ),
+    (
+        "tests/integration/support/harness/options.rs",
         &["web-push"],
     ),
     // The persisted credential handle in the channel's own manifest, and the

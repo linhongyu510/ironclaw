@@ -1967,6 +1967,8 @@ fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBi
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }
 }
 
@@ -1991,6 +1993,8 @@ fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensio
             ironclaw_telegram_extension::TelegramPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }
 }
 
@@ -2006,24 +2010,20 @@ const WEB_APP_GONE_ENDPOINT_TOKEN: &str = "gone-subscription-token";
 
 /// [`extension_delivery_with_gated_write_tools_profile`] PLUS the complete
 /// web-app channel: the deployment binding (adapter + codec + catalog
-/// provider) around one late-bound runtime slot, the slot on the composition
-/// input, the package manifest bundled, and the vendor router extended so
-/// push-service POSTs answer `201 Created` (`410 Gone` for the reserved
-/// endpoint token above). Returns the slot so a scenario can reach the
-/// composed subscription store if it needs read-back.
-pub(crate) fn extension_delivery_with_web_app_tools_profile()
--> HarnessResult<(ToolsProfile, ironclaw_web_app::WebAppRuntimeSlot)> {
+/// provider), its generic first-party initializer, the bundled package
+/// manifest, and the vendor router extended so push-service POSTs answer `201
+/// Created` (`410 Gone` for the reserved endpoint token above).
+pub(crate) fn extension_delivery_with_web_app_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = extension_delivery_with_gated_write_tools_profile()?;
-    let slot = ironclaw_web_app::WebAppRuntimeSlot::new();
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
             .with_vendor_router(web_app_delivery_vendor_router()),
     );
     profile.options = profile
         .options
-        .with_web_app_channel_extension(slot.clone())
+        .with_web_app_channel_extension()
         .with_recording_network_egress(network_egress);
-    Ok((profile, slot))
+    Ok(profile)
 }
 
 /// The delivery vendor router extended for push services: any POST to an

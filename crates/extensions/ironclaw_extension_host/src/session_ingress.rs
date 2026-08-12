@@ -52,7 +52,7 @@ mod tests {
             DeploymentChannelRegistry::try_new([
                 DeploymentChannelBinding::new(
                     Arc::clone(&session_manifest),
-                    crate::test_support::FakeChannelAdapter::all_halves(),
+                    crate::test_support::FakeChannelAdapter::delivery_only(),
                 )
                 .expect("session channel binding validates"),
                 DeploymentChannelBinding::new(

@@ -84,9 +84,9 @@ fn substitute_json(value: &serde_json::Value, config: &[(String, String)]) -> se
 /// Render one recipe into an egress request against the channel's declared
 /// host.
 ///
-/// `host` is the manifest's first declared `[[channel.egress]]` host — the
-/// same target the adapter's own sends are pinned to. Egress policy re-checks
-/// it, so this is composition of a URL, not a grant.
+/// `host` is the uniquely matching declared `[[channel.egress]]` host selected
+/// by [`resolve_vendor_call_target`]. Egress policy re-checks it, so this is
+/// composition of a URL, not a grant.
 pub fn render_vendor_call(
     recipe: &ChannelVendorCallRecipe,
     host: &str,
@@ -130,6 +130,35 @@ pub fn render_vendor_call(
     })
 }
 
+/// Resolve the one declaration that authorizes a vendor-call recipe. Matching
+/// by method and template path makes manifest ordering irrelevant; zero or
+/// multiple matches fail closed instead of silently choosing the first host.
+pub(crate) fn resolve_vendor_call_target<'a>(
+    recipe: &ChannelVendorCallRecipe,
+    declared: &'a [ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
+) -> Result<&'a ironclaw_extension_contracts::channel::ChannelEgressDescriptor, ChannelError> {
+    let method = match recipe.method {
+        ChannelVendorCallMethod::Post => NetworkMethod::Post,
+        ChannelVendorCallMethod::Get => NetworkMethod::Get,
+    };
+    let mut matches = declared.iter().filter(|target| {
+        target.methods.contains(&method)
+            && crate::egress::DeclaredChannelEgress::from_descriptor(target)
+                .matches_recipe_path(&recipe.path)
+    });
+    let Some(target) = matches.next() else {
+        return Err(ChannelError::VendorWiring {
+            reason: "vendor call matches no declared egress target".to_string(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(ChannelError::VendorWiring {
+            reason: "vendor call matches more than one declared egress target".to_string(),
+        });
+    }
+    Ok(target)
+}
+
 /// Run one recipe and classify the outcome. A non-2xx is vendor wiring
 /// failure, never a partial success.
 pub async fn run_vendor_call(
@@ -158,7 +187,22 @@ pub async fn run_vendor_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgressError, RestrictedEgressResponse,
+    };
     use ironclaw_host_api::ids::SecretHandle;
+
+    struct ScriptedEgress(Result<RestrictedEgressResponse, RestrictedEgressError>);
+
+    #[async_trait::async_trait]
+    impl RestrictedEgress for ScriptedEgress {
+        async fn send(
+            &self,
+            _request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            self.0.clone()
+        }
+    }
 
     fn config() -> Vec<(String, String)> {
         vec![
@@ -284,5 +328,55 @@ mod tests {
         assert!(request.body.is_none());
         assert!(request.headers.is_empty());
         assert!(request.url.ends_with("/deleteWebhook"));
+    }
+
+    #[tokio::test]
+    async fn a_non_success_vendor_status_is_a_labeled_wiring_failure() {
+        let egress = ScriptedEgress(Ok(RestrictedEgressResponse {
+            status: 503,
+            body: Vec::new(),
+        }));
+
+        let error = run_vendor_call(
+            &registration_recipe(),
+            "api.telegram.org",
+            None,
+            &config(),
+            &egress,
+            "registration",
+        )
+        .await
+        .expect_err("non-2xx must fail the lifecycle transition");
+
+        assert!(matches!(
+            error,
+            ChannelError::VendorWiring { reason }
+                if reason == "registration returned status 503"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_a_labeled_wiring_failure() {
+        let egress = ScriptedEgress(Err(RestrictedEgressError::Transport {
+            reason: "scripted timeout".to_string(),
+        }));
+
+        let error = run_vendor_call(
+            &registration_recipe(),
+            "api.telegram.org",
+            None,
+            &config(),
+            &egress,
+            "deregistration",
+        )
+        .await
+        .expect_err("transport failure must fail the vendor call");
+
+        assert!(matches!(
+            error,
+            ChannelError::VendorWiring { reason }
+                if reason.contains("deregistration egress failed")
+                    && reason.contains("scripted timeout")
+        ));
     }
 }

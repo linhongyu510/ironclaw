@@ -32,6 +32,16 @@ impl SecretStorePort for StaticSecretStore {
         })
     }
 
+    async fn put_if_absent(
+        &self,
+        _scope: ResourceScope,
+        handle: SecretHandle,
+        _material: SecretMaterial,
+        _expires_at: Option<ironclaw_host_api::Timestamp>,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(handle != self.handle)
+    }
+
     async fn metadata(
         &self,
         scope: &ResourceScope,

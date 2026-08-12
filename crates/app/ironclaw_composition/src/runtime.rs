@@ -3366,7 +3366,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let mut projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
-    );
+    )
+    .with_thread_service(Arc::clone(&thread_service));
     if let Some(local_runtime) = local_runtime {
         let approval_requests = &local_runtime.approval_requests;
         projection_services = projection_services
@@ -3996,6 +3997,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
     } else {
         projection_services
     };
+    if let Some(coordinator) = services.delivery_coordinator.as_ref() {
+        let bound = coordinator.bind_projection_stream(projection_services.product_event_stream());
+        if !bound {
+            tracing::debug!(
+                "delivery coordinator projection stream was already bound; keeping the first source"
+            );
+        }
+    }
 
     // Durable idempotency ledger for the authenticated-session inbound lane
     // (browser + API transports riding `submit_turn`): the session half of the
@@ -4034,15 +4043,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .collect();
         match session_ids.as_slice() {
             [only] => Some(only.clone()),
-            // No installed channel claims the session surface — advertise the
-            // product's built-in one. A deployment may legitimately ship
-            // without any channel extension (`assemble_web_app` treats its
-            // slot as optional), and browser chat must not depend on one:
-            // without this the SPA has no id to build its send URL with and
-            // the deployment loses chat entirely.
-            [] => Some(
-                ironclaw_product_contracts::session_ingress::BUILTIN_SESSION_SURFACE_ID.to_string(),
-            ),
+            [] => None,
             // Ambiguous: fail closed rather than pick one. The built-in
             // surface is not a safe answer here either, because a channel
             // that believes it owns the session would silently stop

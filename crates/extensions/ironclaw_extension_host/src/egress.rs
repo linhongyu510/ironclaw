@@ -269,7 +269,7 @@ impl RestrictedEgress for PolicyEnforcedChannelEgress {
 }
 
 impl DeclaredChannelEgress {
-    fn matches_path(&self, request_path: &str) -> bool {
+    pub(crate) fn matches_path(&self, request_path: &str) -> bool {
         if self.paths.is_empty() && self.path_prefixes.is_empty() {
             return true;
         }
@@ -288,6 +288,15 @@ impl DeclaredChannelEgress {
                     .strip_prefix(declared)
                     .is_some_and(|rest| rest.starts_with('/'))
             })
+    }
+
+    /// Match one manifest recipe path against this manifest declaration.
+    /// Both sides still contain credential placeholders, so normalize both;
+    /// [`Self::matches_path`] instead receives an already URL-normalized wire
+    /// request path from `url::Url`.
+    pub(crate) fn matches_recipe_path(&self, recipe_path: &str) -> bool {
+        let normalized = normalized_declared_path(recipe_path);
+        self.matches_path(&normalized)
     }
 
     /// Lift one resolved `[[channel.egress]]` declaration into policy form.

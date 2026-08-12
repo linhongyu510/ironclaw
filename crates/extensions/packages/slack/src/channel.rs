@@ -13,10 +13,10 @@
 use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, ImmediateResponse,
-    InboundOutcome, NormalizedAttachment, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, ProductTriggerReason, ReactionAction, RunReaction, TargetCandidate,
-    TargetQuery, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport,
+    DirectTargetProvisionRequest, ImmediateResponse, InboundOutcome, NormalizedInboundMessage,
+    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ProductTriggerReason, ReactionAction,
+    RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -82,15 +82,15 @@ impl ChannelIngress for SlackChannelAdapter {
                 for pending in pending_attachments {
                     let fetched =
                         crate::attachment_transfer::fetch_attachment(&pending, egress).await?;
-                    message.attachments.push(NormalizedAttachment {
-                        descriptor: pending.descriptor,
-                        fetched,
-                    });
+                    message.attachments.push(pending.complete(fetched)?);
                 }
                 if matches!(
                     message.trigger,
                     ProductTriggerReason::BotMention | ProductTriggerReason::ReplyToBot
                 ) {
+                    // silent-ok: vendor conversation history is advisory
+                    // context; the verified inbound message remains complete
+                    // and usable when its restricted-egress read fails.
                     message.conversation_context =
                         crate::conversation_context::fetch_conversation_context(
                             &message.conversation,
@@ -273,22 +273,13 @@ impl ChannelDelivery for SlackChannelAdapter {
         self.send(envelope, egress).await
     }
 
-    /// Target listing. The `im:<slack_user_id>` query provisions (or reuses)
-    /// the 1:1 DM conversation with that user via `conversations.open` — the
-    /// vendor mechanics half of personal-DM target provisioning.
-    async fn list_targets(
+    /// Provision (or reuse) the 1:1 DM conversation for a proven Slack actor.
+    async fn provision_direct_target(
         &self,
-        query: TargetQuery,
+        request: DirectTargetProvisionRequest,
         egress: &dyn RestrictedEgress,
-    ) -> Result<Vec<TargetCandidate>, ChannelError> {
-        let Some(slack_user_id) = query
-            .query
-            .as_deref()
-            .and_then(|value| value.strip_prefix("im:"))
-            .filter(|value| !value.is_empty())
-        else {
-            return Err(ChannelError::Unsupported);
-        };
+    ) -> Result<Option<ExternalConversationRef>, ChannelError> {
+        let slack_user_id = request.actor_id.as_str();
         let credential = SecretHandle::new(SLACK_BOT_TOKEN_HANDLE).map_err(|error| {
             ChannelError::VendorWiring {
                 reason: format!("invalid bot token handle: {error}"),
@@ -345,10 +336,7 @@ impl ChannelDelivery for SlackChannelAdapter {
                     reason: format!("conversations.open returned an invalid channel id: {error}"),
                 }
             })?;
-        Ok(vec![TargetCandidate {
-            conversation,
-            display_name: "Direct message".to_string(),
-        }])
+        Ok(Some(conversation))
     }
 }
 
@@ -415,16 +403,22 @@ async fn post_slack_chunk(
     }
     let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
-        // A truncated body from a proxy/LB timeout is transient infra.
+        // Slack may have accepted the message even when an intermediary
+        // truncated the response. Retrying would risk a duplicate.
         Err(error) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("chat.postMessage response was not valid JSON: {error}"),
             };
         }
     };
     if parsed.ok {
-        return PartDeliveryOutcome::Sent {
-            vendor_message_ref: parsed.ts,
+        return match parsed.ts.filter(|ts| !ts.trim().is_empty()) {
+            Some(ts) => PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some(ts),
+            },
+            None => PartDeliveryOutcome::Ambiguous {
+                reason: "chat.postMessage response omitted message timestamp evidence".to_string(),
+            },
         };
     }
     let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
@@ -477,7 +471,7 @@ async fn delete_slack_message(
     let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("chat.delete response was not valid JSON: {error}"),
             };
         }
@@ -555,7 +549,7 @@ async fn react_slack_message(
     let parsed: SlackChatPostMessageResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("{path} response was not valid JSON: {error}"),
             };
         }
@@ -579,7 +573,7 @@ async fn react_slack_message(
 
 pub(crate) fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
     match error {
-        RestrictedEgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
+        RestrictedEgressError::Transport { .. } => PartDeliveryOutcome::Ambiguous {
             reason: error.to_string(),
         },
         RestrictedEgressError::AuthRequired { .. }
@@ -1166,9 +1160,6 @@ mod tests {
 
     fn envelope(parts: Vec<OutboundPart>, thread_anchor: Option<&str>) -> OutboundEnvelope {
         OutboundEnvelope {
-            extension_id: "slack".to_string(),
-            installation_id: "install_alpha".to_string(),
-            delivery_attempt_id: "attempt-1".to_string(),
             target: ironclaw_extension_contracts::channel_adapter::OutboundTarget {
                 conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
                     Some("T-A"),
@@ -1275,11 +1266,10 @@ mod tests {
         };
         let fetched = &messages[0].attachments[0];
 
-        assert_eq!(fetched.descriptor.external_file_id, "F123");
-        assert_eq!(fetched.fetched.id, "F123");
-        assert_eq!(fetched.fetched.filename.as_deref(), Some("notes.txt"));
-        assert_eq!(fetched.fetched.mime_type, "text/plain");
-        assert_eq!(fetched.fetched.bytes, b"hello");
+        assert_eq!(fetched.id, "F123");
+        assert_eq!(fetched.filename.as_deref(), Some("notes.txt"));
+        assert_eq!(fetched.mime_type, "text/plain");
+        assert_eq!(fetched.bytes, b"hello");
         assert!(messages[0].conversation_context.is_none());
         let requests = egress.requests();
         assert_eq!(requests.len(), 2);
@@ -1359,6 +1349,31 @@ mod tests {
         };
         assert!(messages[0].conversation_context.is_none());
         assert!(direct.requests().is_empty());
+
+        let denied = ScriptedEgress::new(vec![Err(RestrictedEgressError::PolicyDenied)]);
+        let outcome = SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config: &[],
+                    body: br#"{
+                        "type":"event_callback","event_id":"EvContextDenied","team_id":"T-A",
+                        "event":{"type":"app_mention","user":"U1","channel":"C1",
+                        "text":"<@UBOT> check this","ts":"1710000000.000300"}
+                    }"#,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &denied,
+            )
+            .await
+            .expect("advisory context failure does not discard the message");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected shared message without advisory context");
+        };
+        assert!(messages[0].conversation_context.is_none());
+        assert_eq!(denied.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -1951,6 +1966,7 @@ mod tests {
                 report.parts.as_slice(),
                 [PartDeliveryOutcome::Permanent { reason }
                     | PartDeliveryOutcome::Retryable { reason }
+                    | PartDeliveryOutcome::Ambiguous { reason }
                     | PartDeliveryOutcome::Unauthorized { reason }]
                     if reason.contains(expected_reason)
             ));
@@ -2129,24 +2145,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_targets_im_query_opens_the_dm_conversation() {
+    async fn provision_direct_target_opens_the_dm_conversation_for_the_typed_actor() {
         let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(
             r#"{"ok":true,"channel":{"id":"D777"}}"#,
         )]);
-        let candidates = SlackChannelAdapter
-            .list_targets(
-                ironclaw_extension_contracts::channel_adapter::TargetQuery {
-                    extension_id: "slack".to_string(),
-                    installation_id: "install_alpha".to_string(),
-                    query: Some("im:U123".to_string()),
-                    limit: 1,
+        let conversation = SlackChannelAdapter
+            .provision_direct_target(
+                ironclaw_extension_contracts::channel_adapter::DirectTargetProvisionRequest {
+                    actor_id: ironclaw_extension_contracts::external::ExternalActorId::new("U123")
+                        .expect("actor id"),
                 },
                 &egress,
             )
             .await
-            .expect("list_targets drives");
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].conversation.conversation_id(), "D777");
+            .expect("direct target provisioning drives")
+            .expect("Slack returns the direct conversation");
+        assert_eq!(conversation.conversation_id(), "D777");
         let requests = egress.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url, "https://slack.com/api/conversations.open");
@@ -2156,25 +2170,6 @@ mod tests {
         );
         let body = body_json(&requests[0]);
         assert_eq!(body["users"], "U123");
-    }
-
-    #[tokio::test]
-    async fn list_targets_rejects_non_im_queries_without_egress() {
-        let egress = ScriptedEgress::new(Vec::new());
-        let error = SlackChannelAdapter
-            .list_targets(
-                ironclaw_extension_contracts::channel_adapter::TargetQuery {
-                    extension_id: "slack".to_string(),
-                    installation_id: "install_alpha".to_string(),
-                    query: None,
-                    limit: 10,
-                },
-                &egress,
-            )
-            .await
-            .expect_err("free listing is not supported yet");
-        assert!(matches!(error, ChannelError::Unsupported));
-        assert!(egress.requests().is_empty());
     }
 
     #[tokio::test]
@@ -2435,7 +2430,7 @@ mod tests {
             .expect("deliver drives");
         assert!(matches!(
             &report.parts[0],
-            PartDeliveryOutcome::Retryable { .. }
+            PartDeliveryOutcome::Ambiguous { .. }
         ));
 
         let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::AuthRequired {

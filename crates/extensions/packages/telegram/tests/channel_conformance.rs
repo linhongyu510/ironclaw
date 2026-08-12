@@ -78,9 +78,6 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
         // shared secret header the host verifies.
         challenge_inbound: None,
         outbound_envelope: OutboundEnvelope {
-            extension_id: "telegram".to_string(),
-            installation_id: "install_alpha".to_string(),
-            delivery_attempt_id: "attempt-conformance".to_string(),
             target: OutboundTarget {
                 conversation: ExternalConversationRef::new(None, "8675309", None, None)
                     .expect("conversation"),
@@ -106,7 +103,6 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
                 "conformance_bot".to_string(),
             ),
         ],
-        expects_unsupported_free_target_listing: true,
     })
     .await;
 }

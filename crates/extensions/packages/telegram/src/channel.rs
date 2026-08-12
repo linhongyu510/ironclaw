@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, DeliveryReport, InboundOutcome,
-    NormalizedAttachment, NormalizedInboundMessage, OutboundEnvelope, OutboundPart,
-    PartDeliveryOutcome, ReactionAction, RunReaction, VerifiedInbound,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, ReactionAction,
+    RunReaction, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
@@ -51,9 +51,6 @@ pub const TELEGRAM_BOT_TOKEN_HANDLE: &str = "telegram_bot_token";
 /// Path placeholder the manifest's `[[channel.egress]] injection` declares;
 /// the host substitutes the token host-side (`/bot{telegram_bot_token}/…`).
 pub const TELEGRAM_TOKEN_PLACEHOLDER: &str = "telegram_bot_token";
-
-/// Telegram sendMessage hard limit (characters).
-const TELEGRAM_TEXT_LIMIT_CHARS: usize = 4096;
 
 /// The Telegram channel adapter. The constructor policy remains available for
 /// compatibility and tests; shipping ingress overlays the receiving bot
@@ -151,10 +148,7 @@ async fn complete_message(
 ) -> Result<NormalizedInboundMessage, ChannelError> {
     for pending in pending_attachments {
         let fetched = crate::attachment_transfer::fetch_attachment(&pending, egress).await?;
-        message.attachments.push(NormalizedAttachment {
-            descriptor: pending.descriptor,
-            fetched,
-        });
+        message.attachments.push(pending.complete(fetched)?);
     }
     Ok(message)
 }
@@ -403,7 +397,7 @@ async fn set_telegram_reaction(
     let parsed: TelegramDeleteMessageResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("setMessageReaction response was not valid JSON: {error}"),
             };
         }
@@ -436,7 +430,7 @@ pub(super) fn telegram_message_response_outcome(
     let parsed: TelegramSendMessageResponse = match serde_json::from_slice(body) {
         Ok(parsed) => parsed,
         Err(_) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("{method} response was not valid JSON"),
             };
         }
@@ -446,7 +440,7 @@ pub(super) fn telegram_message_response_outcome(
             Some(message) => PartDeliveryOutcome::Sent {
                 vendor_message_ref: Some(message.message_id.to_string()),
             },
-            None => PartDeliveryOutcome::Retryable {
+            None => PartDeliveryOutcome::Ambiguous {
                 reason: format!("{method} response omitted result.message_id evidence"),
             },
         };
@@ -486,7 +480,7 @@ async fn delete_telegram_message(
     let parsed: TelegramDeleteMessageResponse = match serde_json::from_slice(&response.body) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return PartDeliveryOutcome::Retryable {
+            return PartDeliveryOutcome::Ambiguous {
                 reason: format!("deleteMessage response was not valid JSON: {error}"),
             };
         }
@@ -499,7 +493,7 @@ async fn delete_telegram_message(
             Some(false) => PartDeliveryOutcome::Permanent {
                 reason: "deleteMessage response reported result:false".to_string(),
             },
-            None => PartDeliveryOutcome::Retryable {
+            None => PartDeliveryOutcome::Ambiguous {
                 reason: "deleteMessage response omitted result evidence".to_string(),
             },
         };
@@ -528,7 +522,7 @@ pub(super) fn telegram_outcome_for_egress_error(
 ) -> PartDeliveryOutcome {
     use ironclaw_extension_contracts::tool_adapter::RestrictedEgressError as EgressError;
     match error {
-        EgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
+        EgressError::Transport { .. } => PartDeliveryOutcome::Ambiguous {
             reason: error.to_string(),
         },
         EgressError::AuthRequired { .. } | EgressError::UndeclaredCredential { .. } => {
@@ -546,39 +540,13 @@ pub(super) fn telegram_outcome_for_egress_error(
     }
 }
 
-/// Split text at the vendor's 4096-char message limit, preferring newline
-/// boundaries within each window.
+/// Split text at Telegram's 4096-UTF-16-unit limit without breaking scalar
+/// values. The protocol engine owns the one authoritative splitter.
 fn telegram_text_chunks(text: &str) -> Vec<String> {
-    if text.chars().count() <= TELEGRAM_TEXT_LIMIT_CHARS {
-        return vec![text.to_string()];
-    }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_chars = 0usize;
-    for segment in text.split_inclusive('\n') {
-        let segment_chars = segment.chars().count();
-        if current_chars + segment_chars > TELEGRAM_TEXT_LIMIT_CHARS && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
-            current_chars = 0;
-        }
-        if segment_chars > TELEGRAM_TEXT_LIMIT_CHARS {
-            for ch in segment.chars() {
-                if current_chars == TELEGRAM_TEXT_LIMIT_CHARS {
-                    chunks.push(std::mem::take(&mut current));
-                    current_chars = 0;
-                }
-                current.push(ch);
-                current_chars += 1;
-            }
-        } else {
-            current.push_str(segment);
-            current_chars += segment_chars;
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+    crate::render::chunk_text_utf16(text, crate::render::TELEGRAM_MESSAGE_MAX_UTF16_UNITS)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// A Bot API request against the declared vendor host, naming the bot-token

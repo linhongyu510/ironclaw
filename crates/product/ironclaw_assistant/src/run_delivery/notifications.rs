@@ -11,7 +11,7 @@
 //!   [`resolve_user_notification_targets`] and fans the notification out.
 //!
 //! Callers own WHEN and WHAT; the coordinator and the channel's
-//! [`ChannelAdapter::deliver_notification`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver_notification)
+//! [`ChannelDelivery::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelDelivery::deliver)
 //! own HOW. No caller names a channel — the extension id always comes from a
 //! resolved catalog entry, never from a call-site literal. The routine
 //! driver (`triggered.rs`) is one caller among any number.
@@ -106,7 +106,7 @@ pub struct ResolvedUserNotificationTargets {
 
 /// `notify(target, content)`: deliver one notification to one explicit
 /// channel target through the coordinator (the single send path). The
-/// adapter receives it through `ChannelAdapter::deliver_notification`.
+/// adapter receives it through `ChannelDelivery::deliver`.
 pub async fn notify(
     services: &RunDeliveryServices,
     context: &ChannelNotificationContext<'_>,
@@ -231,8 +231,8 @@ pub async fn resolve_user_notification_targets(
         {
             Ok(resolution) => resolution,
             Err(error) => {
-                // silent-ok: a preference read failure means we cannot know the
-                // notification channels; the caller decides how to surface it.
+                // A preference read failure means we cannot know the
+                // notification channels; propagate it after recording the cause.
                 tracing::warn!(
                     target: TRACE_TARGET,
                     notification_ref,

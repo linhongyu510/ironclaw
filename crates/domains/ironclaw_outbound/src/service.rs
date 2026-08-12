@@ -5,11 +5,10 @@ use crate::validation::validate_delivery_scope_candidate;
 use crate::{
     CommunicationDeliveryResolution, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
-    OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
-    PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
-    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
-    ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
-    ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
+    OutboundPushCandidate, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
+    PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
+    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessGrant, ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
 };
 
 #[async_trait]
@@ -94,6 +93,18 @@ impl<'a> OutboundPolicyService<'a> {
         }
         validate_delivery_scope_candidate(&request.scope, &request.candidate)?;
         let delivery_id = OutboundDeliveryId::for_policy_request(&request)?;
+        if let Some(attempt) = self
+            .store
+            .load_delivery_attempt(request.scope.clone(), delivery_id)
+            .await?
+        {
+            if attempt.scope != request.scope || attempt.candidate != request.candidate {
+                return Err(OutboundError::InvalidRequest {
+                    reason: "stored delivery identity does not match replay request",
+                });
+            }
+            return Ok(OutboundDeliveryDecision::AlreadyRecorded { attempt });
+        }
 
         let validation = self
             .reply_target_validator
@@ -200,7 +211,7 @@ fn lower_communication_delivery_resolution(
     let CommunicationDeliveryResolution::Candidate { candidate } = resolution else {
         return None;
     };
-    let kind = OutboundPushKind::from(candidate.kind);
+    let kind = candidate.kind;
 
     let scope = resolution_request.scope;
     let actor = resolution_request.actor;

@@ -1,4 +1,4 @@
-//! Web Push channel package: the `ChannelDelivery` implementation that fans
+//! Web App channel package: the `ChannelDelivery` implementation that fans
 //! one host-owned registration set out to a user's enrolled browsers, the preference-target codec for the
 //! `web-app/v1/<tenant>/<user>` binding grammar, and the owner-scoped
 //! outbound target provider that puts "Web app" in the delivery-target

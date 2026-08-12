@@ -657,13 +657,26 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 8_157 -> 8_594 (2026-08-11, channel capability contract): the
         // ingress/reply/delivery descriptor axes and transport vocabulary,
         // three optional capability traits, complete inbound
-        // `NormalizedAttachment`/conversation-context DTOs, declarative
+        // canonical complete-attachment/conversation-context DTOs, declarative
         // ingress registration recipes, and host-owned delivery-registration
         // view replace booleans, one eleven-method trait, and post-parse
         // callbacks. Declarations and shape validation only; vendor I/O stays
         // in packages and routing/persistence in extension_host/assistant.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 8_594),
+        // 8_594 -> 8_605 (2026-08-11, channel contract review): conformance
+        // now fails when fixtures claim an ingress challenge or delivery
+        // target-listing expectation without the corresponding capability
+        // half, and the live delivery boundary docs name
+        // `ChannelDelivery::deliver`. Test-contract validation and neutral
+        // API documentation only; execution remains outside contracts.
+        // 8_605 -> 8_771 (2026-08-11, channel boundary simplification): the
+        // canonical complete inbound attachment/context vocabulary, the
+        // narrower reply/delivery traits, and one private decoder for the
+        // immediately preceding v3 channel descriptor shape. Provider parsing,
+        // attachment fetch, persistence, and delivery behavior remain in their
+        // owning package/host/domain crates. Count read from this test's own
+        // failure message.
+        ("ironclaw_extension_contracts", 8_771),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -755,12 +768,6 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_307 (2026-08-11, channel output facts): one net line
-        // documents `ConnectedChannelSummary` carrying the single derived
-        // `ChannelOutputFacts` projection (presentation + reply split bound)
-        // instead of a loose duplicated scalar. Contract field/docs only;
-        // rendering behavior is unchanged. Count read from this test's own
-        // failure message.
         // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
         // truncation-watermark DTO carried across the existing context and
         // prompt contracts. Window selection and task-pinning behavior remain
@@ -794,19 +801,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // remodel that DELETED `ResolvedBinding.owner_user_id` (owner-vs-actor
         // retired). Declaration only. Count read from failure.
         // 15_909 -> 16_119 (2026-08-11, unified channel model): the inbound
-        // trust/binding enums (`ChannelInboundSurfaceTrust`/`Binding` +
-        // `requested_model`), the `SessionChannelDirectory` port
+        // trusted-context request (`requested_model` included), the
+        // `SessionChannelDirectory` port
         // (session_ingress), the reply-mode + notifications-require-setup
         // delivery-port defaults, and the generic notification-setup
         // descriptors + `RebornNotificationSetup*` wire family that replaced
         // the retired per-channel enrollment module. Declarations only — admission, dispatch, and
         // storage stay in their owning crates. Count read from this test's
         // failure on the merged branch.
-        // 16_119 -> 16_132 (2026-08-11): +13 lines for
-        // `session_ingress::BUILTIN_SESSION_SURFACE_ID` and its doc — the
-        // built-in session surface a deployment always has, so the generic
-        // session route never depends on an installed extension. A constant
-        // and its rationale; the fallback logic lives in composition.
         ("ironclaw_product_contracts", 16_132),
         ("ironclaw_prompt_envelope", 832),
     ];
@@ -1574,13 +1576,13 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
             // The web-app channel package (adapter/codec/target provider) and
-            // its domain crate: the binary constructs the adapter around the
-            // late-bound `WebAppRuntimeSlot` (a domain type) and hands the
-            // slot to composition, which installs storage at assembly.
+            // its protocol domain crate: the binary constructs the adapter
+            // and package-owned initializer, while composition consumes only
+            // their neutral binding contracts.
             "ironclaw_web_app",
             "ironclaw_web_app_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the domain type behind the web-app binding's late-bound runtime slot). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_config (boot-config contract), ironclaw_trace_commons (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract), ironclaw_extension_manager (the extension/ironhub command surface, since WS2.4), concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates), and ironclaw_web_app (the protocol domain behind the binary-linked web-app adapter and initializer). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,

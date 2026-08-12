@@ -1176,8 +1176,15 @@ async fn deliver_to_origin_conversation_is_denied_and_model_replies() {
 /// provider refs; the failing call surfaces as a Failed tool error naming
 /// the sanitized kind — never silently merged, dropped, or mistaken for the
 /// other call's outcome.
-#[tokio::test(flavor = "multi_thread")]
-async fn partial_failure_reports_per_call_honestly() {
+#[test]
+fn partial_failure_reports_per_call_honestly() {
+    run_async_test_with_stack(
+        "partial-failure-reports-per-call-honestly",
+        partial_failure_reports_per_call_honestly_async,
+    );
+}
+
+async fn partial_failure_reports_per_call_honestly_async() {
     let group = RebornIntegrationGroup::extension_delivery()
         .await
         .expect("delivery group builds");
@@ -1295,6 +1302,31 @@ async fn partial_failure_reports_per_call_honestly() {
         .assert_reply_contains(PARTIAL_FAILURE_ACK)
         .await
         .expect("the run's own final reply lands and acknowledges the failed leg");
+}
+
+/// Run the deep parallel-delivery harness on a larger-than-default OS stack.
+/// The production decorator chain exercised here can exceed Rust's 2 MiB test
+/// thread stack before reaching the assertions; sibling integration suites use
+/// this same current-thread runtime wrapper for those deep production paths.
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 /// Spec §13.8 — an undeliverable destination is refused without any tool

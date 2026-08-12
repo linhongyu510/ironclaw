@@ -341,8 +341,6 @@ pub(super) async fn build_backend_production(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
-        web_app_runtime_slot,
-        web_app_vapid_subject,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -1018,28 +1016,31 @@ pub(super) async fn build_backend_production(
     );
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
-    assemble_web_app(
-        web_app_runtime_slot.as_ref(),
-        web_app_vapid_subject.as_deref(),
-        &secret_store,
-        &channel_egress_scope,
-    )
-    .await?;
+    let initialized_channel_bootstraps =
+        crate::channel_initialization::initialize_first_party_channels(
+            &channel_extension_bindings,
+            Arc::clone(&secret_store),
+            channel_egress_scope.clone(),
+        )
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
     // Host-owned per-user delivery registrations (design §8). The document
     // path is deployment data supplied here rather than derived generically,
     // for one reason worth stating: one channel's document predates this
     // store, and a generic default would have renamed it and orphaned every
     // persisted enrollment. See `DeploymentRegistrationPaths`.
+    let registration_paths =
+        DeploymentRegistrationPaths::from_bindings(&channel_extension_bindings)?;
     let delivery_registrations: Arc<
         dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService,
     > = Arc::new(ironclaw_auth::FilesystemDeliveryRegistrationStore::new(
         crate::wrap_scoped(Arc::clone(&stores.filesystem)),
-        Arc::new(DeploymentRegistrationPaths),
+        Arc::new(registration_paths),
     ));
     let delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap> =
-        Arc::new(SlotBackedClientBootstrap {
-            web_app: web_app_runtime_slot.clone(),
-        });
+        Arc::new(initialized_channel_bootstraps);
     let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
         ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
@@ -1406,161 +1407,56 @@ pub(super) async fn build_backend_production(
     })
 }
 
-/// Install the web-app runtime (subscription store) into the binary's slot
-/// and ensure the deployment VAPID credential exists. Installs the complete
-/// runtime into the slot; a no-op when the binary supplied no slot
-/// (compositions without the web-app channel).
-/// Where each channel's registration document lives.
-///
-/// Composition owns this because the path is deployment data, and because the
-/// web-app channel's document predates the generic store: the `/web-push`
-/// alias resolves to a PHYSICAL per-user subpath and the document name is the
-/// one persisted enrollments already carry, so both keep their exact bytes.
-/// Renaming either would orphan every browser that ever subscribed — the
-/// forward migration in `ironclaw_auth::delivery_registrations` handles the
-/// document's *shape*, not its address.
-struct DeploymentRegistrationPaths;
+/// Where each channel's registration document lives. Concrete legacy
+/// addresses arrive as opaque binary-owned binding data; composition only
+/// validates and indexes them, then supplies the generic default otherwise.
+struct DeploymentRegistrationPaths {
+    overrides: std::collections::BTreeMap<String, ironclaw_host_api::path::ScopedPath>,
+}
+
+impl DeploymentRegistrationPaths {
+    fn from_bindings(
+        bindings: &[crate::input::ChannelExtensionBinding],
+    ) -> Result<Self, RebornBuildError> {
+        let mut overrides = std::collections::BTreeMap::new();
+        for binding in bindings {
+            let Some(raw_path) = &binding.registration_document_path else {
+                continue;
+            };
+            let path =
+                ironclaw_host_api::path::ScopedPath::new(raw_path.clone()).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "channel registration document path is invalid for {}: {error}",
+                            binding.extension_id
+                        ),
+                    }
+                })?;
+            if overrides
+                .insert(binding.extension_id.as_str().to_string(), path)
+                .is_some()
+            {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "channel registration document path is duplicated for {}",
+                        binding.extension_id
+                    ),
+                });
+            }
+        }
+        Ok(Self { overrides })
+    }
+}
 
 impl ironclaw_auth::DeliveryRegistrationPaths for DeploymentRegistrationPaths {
     fn document_path(&self, extension_id: &str) -> Option<ironclaw_host_api::path::ScopedPath> {
-        let path = if extension_id == ironclaw_web_app::WEB_APP_EXTENSION_ID {
-            crate::WEB_APP_SUBSCRIPTIONS_DOCUMENT.to_string()
-        } else {
-            format!("/delivery-registrations/{extension_id}.json")
-        };
-        ironclaw_host_api::path::ScopedPath::new(path).ok()
+        self.overrides.get(extension_id).cloned().or_else(|| {
+            ironclaw_host_api::path::ScopedPath::new(format!(
+                "/delivery-registrations/{extension_id}.json"
+            ))
+            .ok()
+        })
     }
-}
-
-/// Publishes each channel's non-secret client-bootstrap document from the
-/// late-bound material composition installed at assembly.
-struct SlotBackedClientBootstrap {
-    web_app: Option<ironclaw_web_app::WebAppRuntimeSlot>,
-}
-
-impl ironclaw_assistant::DeliveryClientBootstrap for SlotBackedClientBootstrap {
-    fn bootstrap(&self, extension_id: &str) -> Option<serde_json::Value> {
-        if extension_id != ironclaw_web_app::WEB_APP_EXTENSION_ID {
-            return None;
-        }
-        let runtime = self.web_app.as_ref()?.get().ok()?;
-        // The PUBLIC half only. The signing half stays in the secret store and
-        // is injected at the egress boundary.
-        Some(serde_json::json!({
-            "vapid_public_key": runtime.vapid_public_key,
-        }))
-    }
-}
-
-async fn assemble_web_app<S>(
-    slot: Option<&ironclaw_web_app::WebAppRuntimeSlot>,
-    vapid_subject: Option<&str>,
-    secret_store: &Arc<S>,
-    channel_egress_scope: &ironclaw_host_api::resource::ResourceScope,
-) -> Result<(), RebornBuildError>
-where
-    S: ironclaw_secrets::SecretStorePort + ?Sized,
-{
-    let Some(slot) = slot else {
-        return Ok(());
-    };
-    // The push-service host allowlist that used to be derived here is now
-    // read generically, at enrollment, from the same resolved manifest egress
-    // policy enforces with (`ChannelDeliveryResolver::declared_egress_hosts`).
-    // Deriving it a second time here would be the copy that drifts.
-    let vapid_handle = ironclaw_host_api::ids::SecretHandle::new(
-        ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("web push VAPID handle is invalid: {error}"),
-    })?;
-    // Ensure the deployment VAPID keypair exists, then advertise the public
-    // key from the CANONICAL stored material — not from a locally-generated
-    // copy. The store has no create-if-absent primitive and permits
-    // replacement, so two replicas cold-starting against a shared empty store
-    // can each generate and `put` a distinct keypair (last write wins). By
-    // always reading back after ensuring presence, every replica converges on
-    // whichever keypair won the race and hands browsers the matching
-    // `applicationServerKey`; the only residual is a sub-second window on the
-    // losing replica between its own `put` and this read-back. A true
-    // single-writer election would need a create-if-absent secret-store
-    // primitive (follow-up).
-    let existing = secret_store
-        .metadata(channel_egress_scope, &vapid_handle)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("web push VAPID credential lookup failed: {error}"),
-        })?;
-    if existing.is_none() {
-        let subject = vapid_subject
-            .map(str::to_string)
-            .unwrap_or_else(|| "mailto:webpush@ironclaw.invalid".to_string());
-        let generated =
-            ironclaw_web_app::generate_vapid_key_material(&subject).map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!("web push VAPID key generation failed: {error}"),
-                }
-            })?;
-        secret_store
-            .put(
-                channel_egress_scope.clone(),
-                vapid_handle.clone(),
-                ironclaw_secrets::SecretMaterial::from(generated.material_json),
-                None,
-            )
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("web push VAPID credential seeding failed: {error}"),
-            })?;
-    }
-    // Read back the canonical material and validate its shape before exposing
-    // the public key — a corrupt persisted blob fails composition here rather
-    // than surfacing later as a push-service rejection on every delivery.
-    let lease = secret_store
-        .lease_once(channel_egress_scope, &vapid_handle)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("web push VAPID credential lease failed: {error}"),
-        })?;
-    let material = secret_store
-        .consume(channel_egress_scope, lease.id)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("web push VAPID credential read failed: {error}"),
-        })?;
-    let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 =
-        serde_json::from_str(secrecy::ExposeSecret::expose_secret(&material)).map_err(|error| {
-            // Log the bound serde cause server-side (it names the malformed
-            // field/offset) before mapping to a sanitized boot error — the
-            // material carries the private key, so the cause must not ride the
-            // returned error's message.
-            tracing::warn!(
-                target: "ironclaw::web_app",
-                error = %error,
-                "stored web push VAPID credential material failed to parse"
-            );
-            RebornBuildError::InvalidConfig {
-                reason: "stored web push VAPID credential material is malformed".to_string(),
-            }
-        })?;
-    parsed
-        .validate_shape()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("stored web push VAPID credential material is invalid: {error}"),
-        })?;
-    let vapid_public_key = parsed.public_key_b64url;
-    // Install the complete runtime — store, advertised public key, and the
-    // enrollment host allowlist — so the channel adapter can serve both
-    // delivery and the generic notification-setup operations (§7b). Installed
-    // after the canonical key read-back so the adapter always advertises the
-    // key the deployment actually signs with.
-    slot.install(Arc::new(ironclaw_web_app::WebAppRuntime {
-        vapid_public_key,
-    }))
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("web push runtime slot could not be installed: {error}"),
-    })?;
-    Ok(())
 }
 
 async fn finish_production_backend(

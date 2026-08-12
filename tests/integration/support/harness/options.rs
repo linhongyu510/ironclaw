@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -89,10 +90,6 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings: Vec<ironclaw_composition::ChannelExtensionBinding>,
-    /// The web-app channel's late-bound runtime slot, mirrored onto the
-    /// composition input (`RebornHostBindings::with_web_app_runtime_slot`)
-    /// the way the binary's serve assembly passes it.
-    pub(crate) web_app_runtime_slot: Option<ironclaw_web_app::WebAppRuntimeSlot>,
     /// Extra first-party manifest bundles appended AFTER the
     /// `extension_support` inventory — the harness mirror of the bundles the
     /// BINARY adds in `ironclaw_cli::first_party::bundles` (web-app ships
@@ -171,7 +168,6 @@ impl HostRuntimeHarnessOptions {
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            web_app_runtime_slot: None,
             extra_first_party_bundles: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
@@ -332,14 +328,10 @@ impl HostRuntimeHarnessOptions {
 
     /// Wire the complete web-app channel the way the binary does: the
     /// deployment binding (adapter + codec + catalog target provider) around
-    /// one late-bound runtime slot, the slot handed to composition so
-    /// `assemble_web_app` installs storage + seeds the VAPID credential, and
-    /// the package manifest bundled so the deployment-channel registry
-    /// resolves the channel's egress declarations.
-    pub(crate) fn with_web_app_channel_extension(
-        mut self,
-        slot: ironclaw_web_app::WebAppRuntimeSlot,
-    ) -> Self {
+    /// the package-owned initializer that seeds VAPID material and publishes
+    /// its public bootstrap document, plus the manifest bundle the deployment
+    /// channel registry resolves.
+    pub(crate) fn with_web_app_channel_extension(mut self) -> Self {
         self.channel_extension_bindings
             .push(ironclaw_composition::ChannelExtensionBinding {
                 extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
@@ -355,6 +347,8 @@ impl HostRuntimeHarnessOptions {
                 outbound_target_provider: Some(std::sync::Arc::new(
                     ironclaw_web_app_extension::WebAppOutboundTargetProvider::new(),
                 )),
+                first_party_initializer: Some(test_web_app_channel_initializer()),
+                registration_document_path: Some("/web-push/subscriptions.json".to_string()),
             });
         self.extra_first_party_bundles
             .push(ironclaw_extension_host::FirstPartyPackageBundle {
@@ -370,7 +364,6 @@ impl HostRuntimeHarnessOptions {
                 trust_effects: None,
                 search_aliases: Vec::new(),
             });
-        self.web_app_runtime_slot = Some(slot);
         self
     }
 
@@ -418,6 +411,53 @@ impl HostRuntimeHarnessOptions {
         self.workspace_scoped_per_caller = true;
         self
     }
+}
+
+struct TestWebAppChannelInitializer {
+    material_json: String,
+}
+
+#[async_trait]
+impl ironclaw_composition::FirstPartyChannelInitializer for TestWebAppChannelInitializer {
+    async fn initialize(
+        &self,
+        context: &ironclaw_composition::FirstPartyChannelInitializationContext,
+    ) -> Result<Option<serde_json::Value>, ironclaw_composition::FirstPartyChannelInitializationError>
+    {
+        let handle = SecretHandle::new(ironclaw_web_app::WEB_APP_VAPID_CREDENTIAL_HANDLE).map_err(
+            |error| {
+                ironclaw_composition::FirstPartyChannelInitializationError::failed(
+                    error.to_string(),
+                )
+            },
+        )?;
+        context
+            .store_credential_if_absent(handle.clone(), self.material_json.clone())
+            .await?;
+        let material = context.read_credential_once(&handle).await?;
+        let parsed: ironclaw_host_api::http::VapidCredentialMaterialV1 = serde_json::from_str(
+            secrecy::ExposeSecret::expose_secret(&material),
+        )
+        .map_err(|error| {
+            ironclaw_composition::FirstPartyChannelInitializationError::failed(error.to_string())
+        })?;
+        parsed.validate_shape().map_err(|error| {
+            ironclaw_composition::FirstPartyChannelInitializationError::failed(error.to_string())
+        })?;
+        Ok(Some(serde_json::json!({
+            "vapid_public_key": parsed.public_key_b64url,
+        })))
+    }
+}
+
+pub(crate) fn test_web_app_channel_initializer()
+-> Arc<dyn ironclaw_composition::FirstPartyChannelInitializer> {
+    let generated =
+        ironclaw_web_app::generate_vapid_key_material("mailto:integration-tests@ironclaw.invalid")
+            .expect("integration Web App VAPID fixture generates");
+    Arc::new(TestWebAppChannelInitializer {
+        material_json: generated.material_json,
+    })
 }
 
 #[derive(Clone)]

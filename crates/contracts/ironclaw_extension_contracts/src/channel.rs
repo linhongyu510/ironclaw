@@ -113,8 +113,9 @@ pub enum ReplyTransport {
     /// pipeline. The host publishes; the channel's adapter is never called for
     /// a reply, which is why such a channel implements no reply half at all.
     Stream,
-    /// The answer is sent as one or more channel messages, split to fit
-    /// [`ChannelReplyDescriptor::max_message_chars`].
+    /// The answer is sent as one or more channel messages. The package owns
+    /// provider-specific rendering and splitting because limits may use
+    /// transport-specific units such as UTF-16 code units.
     Message,
 }
 
@@ -136,13 +137,8 @@ pub enum DeliveryTransport {
 /// input at all (a notification-only channel), or its replies are published by
 /// the host rather than sent by the adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChannelReplyDescriptor {
     pub transport: ReplyTransport,
-    /// Split bound for `transport = "message"`. Undeclared means unlimited.
-    /// Meaningless for `transport = "stream"`, which never batches or splits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_message_chars: Option<u32>,
 }
 
 /// The `[channel.delivery]` section: how we reach the user outside a run.
@@ -150,7 +146,6 @@ pub struct ChannelReplyDescriptor {
 /// **Absence means the channel cannot be an out-of-band delivery target** —
 /// it is reply-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChannelDeliveryDescriptor {
     pub transport: DeliveryTransport,
     /// Whether a per-user registration must exist before this channel can
@@ -161,8 +156,7 @@ pub struct ChannelDeliveryDescriptor {
 }
 
 /// The declared channel surface of one extension.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChannelDescriptor {
     /// Channel surface id within the extension (e.g. `messages`).
     pub id: String,
@@ -198,6 +192,114 @@ pub struct ChannelDescriptor {
     /// hosts must not infer a recipe from an extension id or display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ChannelConnectionDescriptor>,
+}
+
+/// Private read shape for the one in-place v3 channel evolution.
+///
+/// The public descriptor exposes only the current section-based axes. The
+/// immediately preceding v3 shape used `inbound` / `outbound` /
+/// `notifications` booleans and placed `max_message_chars` under
+/// presentation; persisted resolved manifests may still contain those bytes.
+/// Keeping the compatibility fields private prevents the retired vocabulary
+/// from becoming authoring API again while allowing a rolling deployment to
+/// read its own earlier records.
+#[derive(Deserialize)]
+struct ChannelDescriptorWire {
+    id: String,
+    display_name: String,
+    conversation_model: ConversationModel,
+    #[serde(default)]
+    commands: Vec<String>,
+    #[serde(default)]
+    ingress: Option<ChannelIngressDescriptor>,
+    #[serde(default)]
+    egress: Vec<ChannelEgressDescriptor>,
+    #[serde(default)]
+    presentation: ChannelPresentationWire,
+    #[serde(default)]
+    reply: Option<ChannelReplyDescriptor>,
+    #[serde(default)]
+    delivery: Option<ChannelDeliveryDescriptor>,
+    #[serde(default)]
+    connection: Option<ChannelConnectionDescriptor>,
+    #[serde(default)]
+    inbound: Option<bool>,
+    #[serde(default)]
+    outbound: Option<bool>,
+    #[serde(default)]
+    notifications: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelPresentationWire {
+    #[serde(default)]
+    supports_markdown: bool,
+    #[serde(default)]
+    supports_threads: bool,
+    #[serde(default)]
+    can_reply_in_threads: bool,
+    #[serde(default)]
+    command_prefix: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "max_message_chars")]
+    _max_message_chars: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for ChannelDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ChannelDescriptorWire::deserialize(deserializer)?;
+        if wire.inbound == Some(true) && wire.ingress.is_none() {
+            return Err(serde::de::Error::custom(
+                "legacy inbound = true requires [channel.ingress]",
+            ));
+        }
+
+        let legacy_outbound = wire.outbound == Some(true);
+        let legacy_notification = wire.notifications == Some(true);
+        let mut reply = wire.reply;
+        let mut delivery = wire.delivery;
+
+        // This is deliberately the exact immediately preceding mapping, not a
+        // general versioned migration engine. In that deployed shape,
+        // conversational outbound channels were message reply + message
+        // delivery, while the sole `notifications = true` shape was the
+        // enrollment-backed push channel and had no reply half.
+        if legacy_outbound && legacy_notification {
+            delivery.get_or_insert(ChannelDeliveryDescriptor {
+                transport: DeliveryTransport::Push,
+                requires_enrollment: true,
+            });
+        } else if legacy_outbound {
+            reply.get_or_insert(ChannelReplyDescriptor {
+                transport: ReplyTransport::Message,
+            });
+            delivery.get_or_insert(ChannelDeliveryDescriptor {
+                transport: DeliveryTransport::Message,
+                requires_enrollment: false,
+            });
+        }
+        Ok(Self {
+            id: wire.id,
+            display_name: wire.display_name,
+            conversation_model: wire.conversation_model,
+            commands: wire.commands,
+            ingress: wire.ingress,
+            egress: wire.egress,
+            presentation: ChannelPresentation {
+                supports_markdown: wire.presentation.supports_markdown,
+                supports_threads: wire.presentation.supports_threads,
+                can_reply_in_threads: wire.presentation.can_reply_in_threads,
+                command_prefix: wire.presentation.command_prefix,
+            },
+            reply,
+            delivery,
+            connection: wire.connection,
+        })
+    }
 }
 
 impl ChannelDescriptor {
@@ -240,25 +342,6 @@ impl ChannelDescriptor {
         self.delivery
             .as_ref()
             .is_some_and(|delivery| delivery.requires_enrollment)
-    }
-
-    /// The declared split bound for message-shaped output. `None` is
-    /// unlimited — a stream reply never splits, and an undeclared bound on a
-    /// message reply means the vendor imposes none the manifest knows about.
-    pub fn max_message_chars(&self) -> Option<u32> {
-        self.reply
-            .as_ref()
-            .and_then(|reply| reply.max_message_chars)
-    }
-
-    /// The one derived projection every output carrier threads. Built here so
-    /// the presentation facts and the reply bound are assembled in exactly one
-    /// place rather than re-declared per layer.
-    pub fn output_facts(&self) -> ChannelOutputFacts {
-        ChannelOutputFacts {
-            presentation: self.presentation.clone(),
-            max_message_chars: self.max_message_chars(),
-        }
     }
 
     /// Structural validation beyond field-level deserialization.
@@ -707,10 +790,6 @@ pub struct ChannelPresentation {
     /// root id vs. a reply-to-message id) live in each channel package.
     #[serde(default)]
     pub can_reply_in_threads: bool,
-    // `max_message_chars` moved to `[channel.reply]` (the two-axis contract,
-    // 2026-08-11): a split bound is a property of the reply transport, not of
-    // presentation, and it is meaningless for `transport = "stream"`. Read it
-    // through `ChannelDescriptor::max_message_chars()`.
     /// Optional per-command display prefix a channel adapter renders before
     /// each declared command name in user-visible help text (e.g. a channel
     /// whose native command namespace requires an app-scoped dispatcher
@@ -718,28 +797,6 @@ pub struct ChannelPresentation {
     /// renders the bare `/{name}` form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
-}
-
-/// Everything prompt construction needs to format output for one channel:
-/// the declared `[channel.presentation]` facts plus the `[channel.reply]`
-/// split bound they are rendered with.
-///
-/// **Derived, never deserialized from a manifest.** Each field keeps exactly
-/// one manifest home — `max_message_chars` belongs to the reply transport and
-/// is meaningless for `stream`, which is why it is not a presentation field —
-/// and this is the single projection the host builds once
-/// ([`ChannelDescriptor::output_facts`]) and every carrier threads. Carrying
-/// the two as separate fields through the host cache, the lifecycle summary,
-/// and the loop's channel summary would re-declare the bound at three layers
-/// with nothing keeping them in agreement.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelOutputFacts {
-    #[serde(flatten)]
-    pub presentation: ChannelPresentation,
-    /// `None` is unlimited: either no declared bound, or a `stream` reply,
-    /// which never splits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_message_chars: Option<u32>,
 }
 
 /// Structural channel-descriptor failures (path context added by the
@@ -865,7 +922,24 @@ conversation_model = "continuous"
         assert!(!channel.requires_enrollment());
         assert_eq!(channel.reply_transport(), None);
         assert_eq!(channel.delivery_transport(), None);
-        assert_eq!(channel.max_message_chars(), None);
+    }
+
+    #[test]
+    fn reply_axis_tolerates_retired_non_security_metadata() {
+        let channel: ChannelDescriptor = toml::from_str(
+            r#"
+id = "messages"
+display_name = "Vendor messages"
+conversation_model = "continuous"
+
+[reply]
+transport = "message"
+obsolete_split_hint = 4096
+"#,
+        )
+        .expect("non-security reply metadata evolves in place");
+
+        assert_eq!(channel.reply_transport(), Some(ReplyTransport::Message));
     }
 
     #[test]
@@ -879,10 +953,67 @@ conversation_model = "continuous"
         assert_eq!(channel.reply_transport(), Some(ReplyTransport::Stream));
         assert_eq!(channel.delivery_transport(), Some(DeliveryTransport::Push));
         assert!(channel.requires_enrollment());
-        assert!(
-            channel.max_message_chars().is_none(),
-            "a stream reply never splits, so it declares no bound"
+    }
+
+    #[test]
+    fn immediately_preceding_message_channel_shape_normalizes_to_both_message_axes() {
+        let channel: ChannelDescriptor = toml::from_str(
+            r#"
+id = "messages"
+display_name = "Legacy messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[ingress]
+route_suffix = "events"
+
+[ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "legacy_secret"
+header = "X-Legacy-Secret"
+
+[presentation]
+supports_markdown = true
+max_message_chars = 4096
+"#,
+        )
+        .expect("the immediately preceding v3 channel shape stays readable");
+
+        channel
+            .validate()
+            .expect("legacy channel normalizes validly");
+        assert_eq!(channel.reply_transport(), Some(ReplyTransport::Message));
+        assert_eq!(
+            channel.delivery_transport(),
+            Some(DeliveryTransport::Message)
         );
+    }
+
+    #[test]
+    fn immediately_preceding_notification_channel_shape_normalizes_to_push_delivery_only() {
+        let channel: ChannelDescriptor = toml::from_str(
+            r#"
+id = "notifications"
+display_name = "Legacy notifications"
+inbound = false
+outbound = true
+notifications = true
+conversation_model = "continuous"
+
+[presentation]
+supports_markdown = false
+max_message_chars = 1500
+"#,
+        )
+        .expect("the immediately preceding notification shape stays readable");
+
+        channel
+            .validate()
+            .expect("legacy notification normalizes validly");
+        assert_eq!(channel.reply_transport(), None);
+        assert_eq!(channel.delivery_transport(), Some(DeliveryTransport::Push));
+        assert!(channel.requires_enrollment());
     }
 
     fn documented_channel_toml() -> &'static str {
@@ -1392,10 +1523,21 @@ kind = "authenticated_session"
     }
 
     #[test]
-    fn unknown_channel_fields_fail_closed() {
-        let toml = format!("{}\nsurprise = 1\n", documented_channel_toml());
-        let error = toml::from_str::<ChannelDescriptor>(&toml).unwrap_err();
-        assert!(error.to_string().contains("surprise"), "{error}");
+    fn evolving_channel_section_tolerates_unknown_fields_without_weakening_nested_recipes() {
+        let toml = documented_channel_toml().replace(
+            "conversation_model = \"continuous\"\n",
+            "conversation_model = \"continuous\"\nsurprise = 1\n",
+        );
+        assert!(toml::from_str::<ChannelDescriptor>(&toml).is_ok());
+
+        let unknown_nested = documented_channel_toml().replace(
+            "secret_handle = \"vendor_signing_secret\"\n",
+            "secret_handle = \"vendor_signing_secret\"\nsurprise = 1\n",
+        );
+        assert!(
+            toml::from_str::<ChannelDescriptor>(&unknown_nested).is_err(),
+            "only the evolving channel subsection is tolerant; security-sensitive recipes stay strict"
+        );
     }
 
     #[test]

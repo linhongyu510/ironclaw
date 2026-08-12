@@ -853,14 +853,11 @@ mod tests {
         // The telegram summary also carries a declared presentation (OUT-11).
         let mut telegram = channel_extension("telegram");
         telegram.summary.channel_presentation =
-            Some(ironclaw_extension_contracts::channel::ChannelOutputFacts {
-                presentation: ironclaw_extension_contracts::channel::ChannelPresentation {
-                    supports_markdown: true,
-                    supports_threads: false,
-                    can_reply_in_threads: false,
-                    command_prefix: None,
-                },
-                max_message_chars: None,
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                can_reply_in_threads: false,
+                command_prefix: None,
             });
         let provider =
             RuntimeCommunicationContextProvider::new(Arc::new(EmptyNotificationChannelsService))
@@ -890,14 +887,11 @@ mod tests {
         // onto the connected-channel summary that prompt construction renders.
         assert_eq!(
             channels[0].presentation,
-            Some(ironclaw_extension_contracts::channel::ChannelOutputFacts {
-                presentation: ironclaw_extension_contracts::channel::ChannelPresentation {
-                    supports_markdown: true,
-                    supports_threads: false,
-                    can_reply_in_threads: false,
-                    command_prefix: None,
-                },
-                max_message_chars: None,
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                can_reply_in_threads: false,
+                command_prefix: None,
             }),
             "the channel's declared presentation reaches the connected-channel summary"
         );

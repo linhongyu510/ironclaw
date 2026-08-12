@@ -5,7 +5,7 @@
 //! feature-gated seam) so the acme fixture and the state-machine contract
 //! tests share one construction path.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -158,7 +158,10 @@ path = "/bot{acme_hook_token}/deleteWebhook"
 [admin_configuration]
 group_id = "acme.hook"
 display_name = "Acme Hook channel"
-fields = [ { handle = "acme_hook_secret", label = "Shared secret", secret = true } ]
+fields = [
+  { handle = "acme_hook_secret", label = "Shared secret", secret = true },
+  { handle = "acme_hook_token", label = "Bot token", secret = true },
+]
 
 [[channel.egress]]
 scheme = "https"
@@ -594,24 +597,23 @@ impl EgressFactory for FakeEgressFactory {
 /// Records every vendor call the host makes on a channel's behalf and answers
 /// with a scripted status, so a lifecycle test can assert the ingress-wiring
 /// recipes actually reached restricted egress in the right shape.
-#[derive(Default)]
 pub struct RecordingEgressFactory {
     pub requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
-    pub status: u16,
+    status: Arc<AtomicU16>,
 }
 
 impl RecordingEgressFactory {
     pub fn ok() -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
-            status: 200,
+            status: Arc::new(AtomicU16::new(200)),
         }
     }
 
     pub fn failing() -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
-            status: 500,
+            status: Arc::new(AtomicU16::new(500)),
         }
     }
 
@@ -620,6 +622,10 @@ impl RecordingEgressFactory {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub fn set_status(&self, status: u16) {
+        self.status.store(status, Ordering::SeqCst);
     }
 }
 
@@ -632,14 +638,14 @@ impl EgressFactory for RecordingEgressFactory {
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(RecordingEgress {
             requests: Arc::clone(&self.requests),
-            status: self.status,
+            status: Arc::clone(&self.status),
         })
     }
 }
 
 struct RecordingEgress {
     requests: Arc<Mutex<Vec<RestrictedEgressRequest>>>,
-    status: u16,
+    status: Arc<AtomicU16>,
 }
 
 #[async_trait]
@@ -653,7 +659,7 @@ impl RestrictedEgress for RecordingEgress {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
         Ok(RestrictedEgressResponse {
-            status: self.status,
+            status: self.status.load(Ordering::SeqCst),
             body: b"{\"ok\":true}".to_vec(),
         })
     }

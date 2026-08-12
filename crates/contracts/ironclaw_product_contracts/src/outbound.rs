@@ -1348,20 +1348,6 @@ impl ProductOutboundTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProductSynchronousResponse {
-    pub content_type: String,
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductRenderOutcome {
-    DeliveryRecorded,
-    SynchronousResponse(ProductSynchronousResponse),
-    Deferred,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductOutboundEnvelope {
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,

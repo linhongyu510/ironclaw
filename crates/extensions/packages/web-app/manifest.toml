@@ -33,7 +33,7 @@ group_id = "extension.web-app"
 display_name = "Web push deployment configuration"
 description = "Auto-generated VAPID application-server key material for browser push (host-managed; not operator-supplied)."
 fields = [
-  { handle = "web_push_vapid", label = "VAPID key material (auto-generated)", secret = true, required = false },
+  { handle = "web_push_vapid", label = "VAPID key material (auto-generated)", secret = true, required = false, host_managed = true },
 ]
 
 # ---- channel surface -------------------------------------------------------
@@ -49,9 +49,6 @@ conversation_model = "isolated"
 # the HOST publishes and this channel's adapter is never called for a reply,
 # which is why the package implements no reply half at all. That absence is
 # meaningful, not an omission.
-#
-# max_message_chars is deliberately undeclared: a stream reply never batches
-# or splits.
 [channel.reply]
 transport = "stream"
 

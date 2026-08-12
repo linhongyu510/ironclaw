@@ -599,7 +599,8 @@ fn classify_delivery_outcome(
 /// Pure coordinator-error classification (contract bullet 6).
 fn classify_coordinator_error(error: CoordinatedDeliveryError) -> ModelChannelDeliveryError {
     match error {
-        CoordinatedDeliveryError::ChannelUnavailable { .. } => ModelChannelDeliveryError::Failed {
+        CoordinatedDeliveryError::ChannelUnavailable { .. }
+        | CoordinatedDeliveryError::ReplyContextUnavailable => ModelChannelDeliveryError::Failed {
             kind: DeliveryFailureKind::TransportUnavailable,
         },
         // Model-correctable classes stay model-visible (rules/tools.md): a

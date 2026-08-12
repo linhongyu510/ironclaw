@@ -270,6 +270,35 @@ async fn ingress_registration_runs_at_activation_with_host_side_credentials() {
 }
 
 #[tokio::test]
+async fn ingress_registration_selects_its_declared_egress_independent_of_order() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    let mut manifest = registering_channel_manifest();
+    let channel = manifest.channel.as_mut().expect("channel");
+    let mut decoy = channel.egress[0].clone();
+    decoy.host = "decoy.example".to_string();
+    decoy.paths = vec!["/unrelated".to_string()];
+    channel.egress.insert(0, decoy);
+    let mut record = record("acme-hook", manifest);
+    record.config = webhook_config();
+    h.host.install(record).await.expect("install");
+
+    h.host.activate("acme-hook").await.expect("activate");
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].url.starts_with("https://api.acme.example/"),
+        "reordering unrelated egress entries must not retarget registration: {}",
+        requests[0].url
+    );
+}
+
+#[tokio::test]
 async fn a_failing_ingress_registration_aborts_activation() {
     let egress = Arc::new(RecordingEgressFactory::failing());
     let h = harness_with_egress(
@@ -312,23 +341,16 @@ async fn a_failing_deregistration_does_not_strand_deactivation() {
         .await
         .unwrap();
     h.host.activate("acme-hook").await.unwrap();
-
-    let failing = Arc::new(RecordingEgressFactory::failing());
-    let h2 = harness_with_egress(
-        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
-        Arc::clone(&failing),
-    )
-    .await;
-    h2.host
-        .install(registering_record(webhook_config()))
-        .await
-        .unwrap();
-    h2.host
+    egress.set_status(500);
+    h.host
         .deactivate("acme-hook")
         .await
         .expect("a vendor failure must not block deactivation");
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2, "deregistration must be attempted");
+    assert!(requests[1].url.ends_with("/deleteWebhook"));
     assert_eq!(
-        h2.store.get("acme-hook").await.unwrap().unwrap().state,
+        h.store.get("acme-hook").await.unwrap().unwrap().state,
         InstallationState::Installed
     );
 }

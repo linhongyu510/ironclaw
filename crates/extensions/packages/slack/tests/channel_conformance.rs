@@ -63,9 +63,6 @@ async fn slack_channel_adapter_satisfies_the_conformance_contract() {
             headers: Vec::new(),
         }),
         outbound_envelope: OutboundEnvelope {
-            extension_id: "slack".to_string(),
-            installation_id: "install_alpha".to_string(),
-            delivery_attempt_id: "attempt-conformance".to_string(),
             target: OutboundTarget {
                 conversation: ExternalConversationRef::new(Some("T-A"), "D123", None, None)
                     .expect("conversation"),
@@ -82,7 +79,6 @@ async fn slack_channel_adapter_satisfies_the_conformance_contract() {
         },
         vendor_responses: Arc::new(scripted_slack_api),
         config: Vec::new(),
-        expects_unsupported_free_target_listing: true,
     })
     .await;
 }
