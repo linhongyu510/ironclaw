@@ -75,13 +75,13 @@ pub(super) enum RebornCapabilityBackend {
     BuiltinHttpToolsConfirmedHostMount,
     /// `builtin.shell` through the production Docker sandbox composition.
     SandboxShellTools,
-    /// Issue #7392 slice 3 registration seam: the omp-extended first-party
+    /// Issue #7392 slice 3 registration seam: the pinned coding first-party
     /// surface (exact `read`/`write`/`edit`/`glob`/`grep` names, pinned
     /// schemas/descriptions) selected in the composed runtime via
-    /// `HostRuntimeHarnessOptions::with_omp_coding_tools`. Same real
+    /// `HostRuntimeHarnessOptions::with_coding_tools`. Same real
     /// capability path as `BuiltinHttpTools` — CapabilityHost, grants,
     /// approvals, RootFilesystem/MountView.
-    OmpCodingTools,
+    CodingTools,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -261,10 +261,10 @@ impl RebornCapabilityBackend {
                     super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::OmpCodingTools => {
+            RebornCapabilityBackend::CodingTools => {
                 if !matches!(shell_mode, ShellMode::Inert) {
                     return Err(
-                        "omp coding harness has no shell capability and does not support \
+                        "coding harness has no shell capability and does not support \
                          shell mode overrides"
                             .into(),
                     );
@@ -280,10 +280,10 @@ impl RebornCapabilityBackend {
                     || !real_egress_response_bodies.is_empty()
                 {
                     return Err(
-                        "omp coding harness does not support scripted network egress inputs".into(),
+                        "coding harness does not support scripted network egress inputs".into(),
                     );
                 }
-                let host_runtime = super::harness::profiles::omp_coding::omp_coding_tools().await?;
+                let host_runtime = super::harness::profiles::pinned_coding::coding_tools().await?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

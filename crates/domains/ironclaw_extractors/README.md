@@ -40,8 +40,8 @@ one).
   (inbound landing), `ironclaw_host_runtime` (capability download output). All
   call through the full path — no crate writes `use ironclaw_extractors::…`.
   (The third consumer, `ironclaw_extension_support`'s `read_file` coding tool,
-  was retired in the OMP cutover; the `read` tool that replaced it does not
-  use this crate.)
+  was retired in the coding-tool cutover; the `read` tool that replaced it
+  does not use this crate.)
 
 ## Invariants
 
@@ -50,8 +50,8 @@ one).
   both boundary functions across every private extractor; a new variant whose
   `#[error(…)]` interpolates a field fails it. The call-site regression test
   for the historical leak was removed with the retired `read_file` coding tool
-  in the OMP cutover (its `read` replacement does not use this crate), so this
-  test is the guard.
+  in the coding-tool cutover (its `read` replacement does not use this crate),
+  so this test is the guard.
 - **Bomb caps fail closed:** every ZIP-based format goes through
   `bounded_read_zip_entry` — per-entry (50 MB) and cumulative (100 MB)
   decompressed bounds, actual-bytes-read tracking because headers can lie.

@@ -193,12 +193,13 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Deferred tools can be found from argument-only vocabulary without adding that schema vocabulary to the model prompt | `tool_disclosure.rs::tool_search_discovers_authorized_tools_by_parameter_only_vocabulary` |
 | Bridged disclosure never reintroduces host-runtime capability metadata excluded by any resolved host-API surface-policy dimension (ID, runtime, effect, approval, or maximum count) | `tool_disclosure.rs` |
 | A capability whose lease expires mid-dispatch does not wedge the run | `lease_wedge.rs` |
+| A run whose lease expires while it is waiting on the model finishes normally instead of dying — it is resumed from its before-model checkpoint after a grace window, and the user never sees a failure | `lease_wedge.rs::run_parked_before_a_model_call_is_resumed_after_lease_expiry_not_failed` |
 | Attachments the user uploads are read back byte-for-byte by the model | `attach.rs` |
 | Skill activation injects skill context into a real turn | `skill_activate.rs` |
 | Creating a project through chat persists it | `project_create.rs` |
 | Profile writes reach the real profile source | `profile.rs` |
 | Delivery-target tools resolve through the real outbound service | `outbound_target.rs` |
-| The omp benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep` coding names with fixture-byte schemas/descriptions, flows read→edit→read through the real path, proves the derived spelling (`builtin__read`) is unresolvable, and gates omp writes | `reborn_omp_registration.rs` |
+| The pinned coding benchmark seam (issue #7392) advertises only the exact pinned `read`/`write`/`edit`/`glob`/`grep` coding names with fixture-byte schemas/descriptions, flows read→edit→read through the real path, proves the derived spelling (`builtin__read`) is unresolvable, and gates coding writes | `reborn_integration_coding_registration.rs` |
 
 **Auth** (`tests/integration/auth/`)
 | Behavior | Evidence |
@@ -311,8 +312,8 @@ ceiling × yolo narrowing), `e2e_trace_runtime_policy_serde.rs` (wire-stable pol
 enums), `trace_format.rs`, `trace_llm_tests.rs`,
 `reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom).
 
-**Pinned omp contract**: `reborn_omp_coding_contract_snapshot.rs` validates the
-checked-in snapshot of the seven pinned omp core coding tools
+**Pinned coding contract**: `reborn_coding_contract_snapshot.rs` validates the
+checked-in snapshot of the seven pinned core coding tools
 (`read`, `write`, `edit`, `glob`, `grep`, `ast_grep`, `ast_edit` at
 `can1357/oh-my-pi` commit `08819b2`) — exact commit/provenance/tool inventory
 integrity, offline SHA-256 verification of every vendored and derived asset
@@ -320,9 +321,9 @@ integrity, offline SHA-256 verification of every vendored and derived asset
 the vendored full MIT license text, the rendered read description for the
 issue-target context, exact selector/error/output case-ID inventories, and the
 reusable differential comparison factory — all offline from
-`tests/fixtures/omp_coding_contract/` (issue #7392, first delivery slice).
-`reborn_omp_coding_engines.rs` drives the unregistered omp-parity engines
-(`ironclaw_extension_support::coding::omp::*`, issue #7392 second delivery
+`tests/fixtures/pinned_coding_contract/` (issue #7392, first delivery slice).
+`reborn_coding_engines.rs` drives the unregistered pinned coding engines
+(`ironclaw_extension_support::coding::pinned::*`, issue #7392 second delivery
 slice) against the same snapshot over an in-memory backend: golden selector
 parity (all 29 cases), read output formats (hashline header/tag, numbered
 rows, elision footer, 3000-line/50KB truncation notices, directory listing),
@@ -330,13 +331,13 @@ write success shape + URI-like-target error, edit snapshot/CAS semantics
 (stale-anchor recognized/not-from-session, chained edits, block resolution,
 noop, line/range errors), glob/grep behavior and exact errors, and the
 `compare_cases` differential seam over the golden error templates.
-`reborn_omp_registration.rs` (issue #7392 third delivery slice) registers the
-five omp engines at the MODEL boundary through the existing first-party
-capability path under the exact pinned names (`read`/`write`/`edit`/`glob`/
-`grep`; schemas/descriptions byte-matched to the fixture snapshot), proves
-the read→edit→read chain and that the derived spelling (`builtin__read`)
-fails to resolve through a real turn, and gates omp writes through the real
-approval path.
+`reborn_integration_coding_registration.rs` (issue #7392 third delivery
+slice) registers the five pinned coding engines at the MODEL boundary
+through the existing first-party capability path under the exact pinned
+names (`read`/`write`/`edit`/`glob`/`grep`; schemas/descriptions byte-matched
+to the fixture snapshot), proves the read→edit→read chain and that the
+derived spelling (`builtin__read`) fails to resolve through a real turn, and
+gates coding writes through the real approval path.
 
 ---
 

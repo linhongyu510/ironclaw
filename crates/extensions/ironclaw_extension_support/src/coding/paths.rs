@@ -1,9 +1,9 @@
 use ironclaw_filesystem::FilesystemOperation;
 use ironclaw_host_api::mount::MountPermissions;
 
-/// Whether the caller's mount grant permits `operation`. Shared with the omp
-/// engines: their path resolution checks the grant before every filesystem
-/// access.
+/// Whether the caller's mount grant permits `operation`. Shared with the
+/// pinned coding engines: their path resolution checks the grant before every
+/// filesystem access.
 pub(super) fn operation_allowed(
     permissions: &MountPermissions,
     operation: FilesystemOperation,

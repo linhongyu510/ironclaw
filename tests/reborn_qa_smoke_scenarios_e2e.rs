@@ -17,8 +17,8 @@ use std::{future::Future, time::Duration};
 
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
-    GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-    OMP_WRITE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, TIME_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
@@ -74,13 +74,13 @@ fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
 #[tokio::test]
 async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
     let time = cap(TIME_CAPABILITY_ID);
-    let write = cap(OMP_WRITE_CAPABILITY_ID);
-    let read = cap(OMP_READ_CAPABILITY_ID);
-    let edit = cap(OMP_EDIT_CAPABILITY_ID);
+    let write = cap(CODING_WRITE_CAPABILITY_ID);
+    let read = cap(CODING_READ_CAPABILITY_ID);
+    let edit = cap(CODING_EDIT_CAPABILITY_ID);
     // The hashline edit anchors on the deterministic snapshot tag the write
     // leg recorded for the freshly-written content (the write engine records
     // the tag for subsequent edits; compute_file_hash is the engine's seam).
-    let continuity_tag = ironclaw_extension_support::coding::omp::harness::compute_file_hash(
+    let continuity_tag = ironclaw_extension_support::coding::pinned::harness::compute_file_hash(
         "session marker alpha\n",
     );
     let steps = [
@@ -170,12 +170,12 @@ async fn qa_three_step_time_write_read_and_session_continuity_workflows() {
         capability_order(&invocations),
         vec![
             TIME_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
-            OMP_READ_CAPABILITY_ID,
-            OMP_EDIT_CAPABILITY_ID,
-            OMP_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_EDIT_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
         ]
     );
     assert_eq!(
@@ -489,14 +489,15 @@ fn qa_error_process_repo_patch_and_cleanup_smokes() {
 async fn qa_error_process_repo_patch_and_cleanup_smokes_impl() {
     let json = cap(JSON_CAPABILITY_ID);
     let shell = cap(SHELL_CAPABILITY_ID);
-    let write = cap(OMP_WRITE_CAPABILITY_ID);
-    let read = cap(OMP_READ_CAPABILITY_ID);
+    let write = cap(CODING_WRITE_CAPABILITY_ID);
+    let read = cap(CODING_READ_CAPABILITY_ID);
     let glob = cap(GLOB_CAPABILITY_ID);
-    let edit = cap(OMP_EDIT_CAPABILITY_ID);
+    let edit = cap(CODING_EDIT_CAPABILITY_ID);
     // Anchored hashline edit on the snapshot tag the qa_patch_write leg
     // recorded for the freshly-written content.
-    let patch_tag =
-        ironclaw_extension_support::coding::omp::harness::compute_file_hash("alpha\nbeta\ngamma\n");
+    let patch_tag = ironclaw_extension_support::coding::pinned::harness::compute_file_hash(
+        "alpha\nbeta\ngamma\n",
+    );
     let steps = [
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![call(

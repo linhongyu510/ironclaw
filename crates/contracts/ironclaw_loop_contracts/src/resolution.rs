@@ -539,7 +539,7 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
 /// `summary` caption. It is carried as a [`ModelResultPreview`], preserving
 /// delimiters and newlines while applying credential redaction at a word
 /// boundary. New truncated results carry a canonical `artifact://` URI in
-/// [`ResultPreviewMeta`] for the omp `read` tool. Historical result-reference
+/// [`ResultPreviewMeta`] for the pinned coding `read` tool. Historical result-reference
 /// metadata remains replayable.
 ///
 /// `own_result_ref` is this outcome's own loop result ref. A differing

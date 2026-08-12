@@ -13,15 +13,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TOOL_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Provider-name overrides on the first-party surface (the omp coding
+/// Provider-name overrides on the first-party surface (the pinned coding
 /// package's `provider_tool_name` seam in
-/// `ironclaw_host_runtime::first_party_tools::omp`): these capability ids are
-/// advertised to the model under an EXACT name, not the derived
+/// `ironclaw_host_runtime::first_party_tools::coding`): these capability ids
+/// are advertised to the model under an EXACT name, not the derived
 /// `'.' → "__"` encoding. A scripted model call for one of them must emit the
 /// advertised name (what a real model would produce), so `tool_call` /
 /// `tool_calls` resolve the override here before falling back to the
 /// encoding.
-const OMP_PROVIDER_NAME_OVERRIDES: &[(&str, &str)] = &[
+const CODING_PROVIDER_NAME_OVERRIDES: &[(&str, &str)] = &[
     ("builtin.read", "read"),
     ("builtin.write", "write"),
     ("builtin.edit", "edit"),
@@ -33,7 +33,7 @@ const OMP_PROVIDER_NAME_OVERRIDES: &[(&str, &str)] = &[
 /// emits: the exact override name when the capability carries one, else the
 /// `'.' → "__"` encoding `ProviderToolName::new` requires (it rejects dots).
 fn provider_tool_name(capability_id: &str) -> String {
-    OMP_PROVIDER_NAME_OVERRIDES
+    CODING_PROVIDER_NAME_OVERRIDES
         .iter()
         .find(|(id, _)| *id == capability_id)
         .map_or_else(
@@ -65,9 +65,9 @@ impl RebornScriptedReply {
 
     /// Scripts one model tool-call turn (CapabilityId, e.g. `"builtin.http"`).
     /// The emitted provider name is the capability's exact
-    /// `provider_tool_name` override when it carries one (the omp coding
+    /// `provider_tool_name` override when it carries one (the pinned coding
     /// tools `read`/`write`/`edit`/`glob`/`grep` — see
-    /// [`OMP_PROVIDER_NAME_OVERRIDES`]), else the `'.' → "__"` encoding
+    /// [`CODING_PROVIDER_NAME_OVERRIDES`]), else the `'.' → "__"` encoding
     /// `ProviderToolName::new` requires (it rejects dots);
     /// `model_replay.rs`'s `trace_provider_tool_name` has an identical,
     /// independent encoder for the fixture-replay seam — keep both in sync

@@ -56,23 +56,23 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, CapabilitySurfaceVersion, ECHO_CAPABILITY_ID,
-    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-    OMP_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    ToolCallHttpEgress, TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, builtin_first_party_handlers,
-    builtin_first_party_handlers_for_process_backend,
+    ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CapabilitySurfaceVersion,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+    HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID,
+    PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, ToolCallHttpEgress,
+    TriggerCreateHook, UserSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    builtin_first_party_handlers, builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
@@ -336,7 +336,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
 
     // Concrete spot checks so a reader sees the intended posture, independent of
     // the allowlist derivation: the reviewed allowlist members — including the
-    // always-on omp `read`, which inherited the retired `read_file`/`list_dir`
+    // always-on pinned `read`, which inherited the retired `read_file`/`list_dir`
     // slot — are Ungated; any other cap is GatedUnlessGranted.
     let loop_run = |id: &str| {
         package
@@ -351,12 +351,12 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         ECHO_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
     ] {
         assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
     }
     for gated in [
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
@@ -528,15 +528,15 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
-/// The always-on first-party package exposes only the exact omp coding
+/// The always-on first-party package exposes only the exact coding
 /// surface. Every process-backend variant and trigger-aware handler builder
 /// must preserve the same cutover.
 #[tokio::test]
-async fn production_builders_advertise_only_omp_coding_surface() {
-    const OMP_IDS: [&str; 5] = [
-        OMP_READ_CAPABILITY_ID,
-        OMP_WRITE_CAPABILITY_ID,
-        OMP_EDIT_CAPABILITY_ID,
+async fn production_builders_advertise_only_coding_surface() {
+    const CODING_IDS: [&str; 5] = [
+        CODING_READ_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
     ];
@@ -549,7 +549,7 @@ async fn production_builders_advertise_only_omp_coding_surface() {
     let package = builtin_first_party_package().expect("builtin package");
     let handlers = builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default()))
         .expect("builtin handlers");
-    for id in OMP_IDS {
+    for id in CODING_IDS {
         assert!(
             package
                 .capabilities
@@ -578,13 +578,13 @@ async fn production_builders_advertise_only_omp_coding_surface() {
         ProcessBackendKind::Docker,
     ] {
         let package = builtin_first_party_package_for_process_backend(process_backend).unwrap();
-        for id in OMP_IDS {
+        for id in CODING_IDS {
             assert!(
                 package
                     .capabilities
                     .iter()
                     .any(|descriptor| descriptor.id.as_str() == id),
-                "omp capability {id} missing from {process_backend:?} package"
+                "coding capability {id} missing from {process_backend:?} package"
             );
             assert!(
                 package
@@ -592,7 +592,7 @@ async fn production_builders_advertise_only_omp_coding_surface() {
                     .capabilities
                     .iter()
                     .any(|capability| capability.id.as_str() == id),
-                "omp capability {id} missing from {process_backend:?} manifest"
+                "coding capability {id} missing from {process_backend:?} manifest"
             );
         }
         for id in RETIRED_IDS {
@@ -604,8 +604,8 @@ async fn production_builders_advertise_only_omp_coding_surface() {
                 "retired capability {id} remains in {process_backend:?} package"
             );
         }
-        // The omp engines REPLACE the v1 glob/grep manifests in the
-        // omp-extended package (one declaration per id, no duplicates).
+        // The pinned coding engines REPLACE the v1 glob/grep manifests in the
+        // coding-extended package (one declaration per id, no duplicates).
         assert_eq!(
             package
                 .manifest
@@ -632,10 +632,10 @@ async fn production_builders_advertise_only_omp_coding_surface() {
             process_backend,
         )
         .unwrap();
-        for id in OMP_IDS {
+        for id in CODING_IDS {
             assert!(
                 handlers.contains_handler(&capability_id(id)),
-                "omp handler for {id} missing from {process_backend:?} handlers"
+                "coding handler for {id} missing from {process_backend:?} handlers"
             );
         }
     }
@@ -648,15 +648,15 @@ async fn production_builders_advertise_only_omp_coding_surface() {
             ProcessBackendKind::Docker,
         )
         .unwrap();
-    for id in OMP_IDS {
+    for id in CODING_IDS {
         assert!(
             trigger_hook_handlers.contains_handler(&capability_id(id)),
-            "omp handler for {id} missing from trigger-create-hook handlers"
+            "coding handler for {id} missing from trigger-create-hook handlers"
         );
     }
 }
 
-/// No-op `TriggerCreateHook` for the omp-surface registration assertion.
+/// No-op `TriggerCreateHook` for the coding-surface registration assertion.
 #[derive(Debug)]
 struct NoopTriggerCreateHook;
 
@@ -669,8 +669,8 @@ impl TriggerCreateHook for NoopTriggerCreateHook {
 
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
     let expected_effects = match descriptor.id.as_str() {
-        OMP_WRITE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
-        OMP_EDIT_CAPABILITY_ID => vec![
+        CODING_WRITE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
+        CODING_EDIT_CAPABILITY_ID => vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
             EffectKind::DeleteFilesystem,
@@ -684,9 +684,9 @@ fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
 fn is_coding_capability_id(id: &str) -> bool {
     matches!(
         id,
-        OMP_READ_CAPABILITY_ID
-            | OMP_WRITE_CAPABILITY_ID
-            | OMP_EDIT_CAPABILITY_ID
+        CODING_READ_CAPABILITY_ID
+            | CODING_WRITE_CAPABILITY_ID
+            | CODING_EDIT_CAPABILITY_ID
             | GLOB_CAPABILITY_ID
             | GREP_CAPABILITY_ID
     )
@@ -4023,7 +4023,7 @@ async fn builtin_shell_saves_large_output_to_read_path() {
     let context = execution_context_with_mounts_and_network(
         [
             SHELL_CAPABILITY_ID,
-            OMP_READ_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
         ],
         mounts,
@@ -4045,7 +4045,7 @@ async fn builtin_shell_saves_large_output_to_read_path() {
 
     // The durable output is published under the workspace command-outputs
     // directory. Locate it through the coding surface and verify it is
-    // recoverable through an omp `read` of the saved file.
+    // recoverable through a pinned `read` of the saved file.
     let globbed = invoke_with_context(
         &runtime,
         GLOB_CAPABILITY_ID,
@@ -4065,7 +4065,7 @@ async fn builtin_shell_saves_large_output_to_read_path() {
 
     let read_output = invoke_with_context(
         &runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": format!("{saved_path}:1")}),
         context,
     )
@@ -7698,16 +7698,16 @@ async fn builtin_http_awaits_async_egress_without_blocking_tokio_worker() {
 }
 
 #[tokio::test]
-async fn omp_coding_tools_read_write_edit_glob_and_grep_through_host_runtime() {
+async fn coding_tools_read_write_edit_glob_and_grep_through_host_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) =
         mounted_filesystem(temp.path(), MountPermissions::read_write_list_delete());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(
         [
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
-            OMP_EDIT_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
+            CODING_EDIT_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
         ],
@@ -7716,7 +7716,7 @@ async fn omp_coding_tools_read_write_edit_glob_and_grep_through_host_runtime() {
 
     let written = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/notes.txt", "content": "alpha\nbeta\n"}),
         context.clone(),
     )
@@ -7730,29 +7730,29 @@ async fn omp_coding_tools_read_write_edit_glob_and_grep_through_host_runtime() {
 
     let read = invoke_with_context(
         &runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": "/workspace/notes.txt"}),
         context.clone(),
     )
     .await
     .unwrap();
-    let read = read["output"].as_str().expect("omp read returns text");
+    let read = read["output"].as_str().expect("coding read returns text");
     assert!(read.starts_with("[notes.txt#"));
     assert!(read.contains("1:alpha") && read.contains("2:beta"));
     let header = read
         .lines()
         .next()
-        .expect("omp read returns hashline header");
+        .expect("coding read returns hashline header");
 
     let edited = invoke_with_context(
         &runtime,
-        OMP_EDIT_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         json!({"input": format!("{header}\nPUT 2:\n+BETA\n")}),
         context.clone(),
     )
     .await
     .unwrap();
-    let edited = edited["output"].as_str().expect("omp edit returns text");
+    let edited = edited["output"].as_str().expect("coding edit returns text");
     assert!(edited.contains("2:BETA"));
 
     let globbed = invoke_with_context(
@@ -7785,7 +7785,7 @@ async fn omp_coding_tools_read_write_edit_glob_and_grep_through_host_runtime() {
 }
 
 #[tokio::test]
-async fn omp_write_is_denied_by_read_only_mount() {
+async fn coding_write_is_denied_by_read_only_mount() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("README.md"), "alpha\n").unwrap();
 
@@ -7793,9 +7793,9 @@ async fn omp_write_is_denied_by_read_only_mount() {
     let runtime = runtime_with_filesystem(filesystem);
     let error = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/blocked.txt", "content": "nope"}),
-        execution_context_with_mounts([OMP_WRITE_CAPABILITY_ID], mounts),
+        execution_context_with_mounts([CODING_WRITE_CAPABILITY_ID], mounts),
     )
     .await
     .unwrap_err();
@@ -8940,9 +8940,9 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         OUTBOUND_DELIVER_CAPABILITY_ID,
         ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
-        OMP_READ_CAPABILITY_ID,
-        OMP_WRITE_CAPABILITY_ID,
-        OMP_EDIT_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,

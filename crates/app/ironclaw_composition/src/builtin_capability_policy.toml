@@ -178,7 +178,7 @@ effects = [
 mounts = "ambient"
 network = "dev_wildcard"
 
-# Canonical omp coding surface.
+# Canonical pinned coding surface.
 [[grants]]
 capability = "builtin.read"
 effects = ["dispatch_capability", "read_filesystem"]

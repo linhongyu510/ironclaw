@@ -2951,7 +2951,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn build_runtime_with_resource_governor_and_omp_for_test(
+pub(crate) async fn build_runtime_with_resource_governor_and_coding_tools_for_test(
     input: RebornRuntimeInput,
 ) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     build_runtime_with_resource_governor_inner(input, true).await
@@ -2959,7 +2959,7 @@ pub(crate) async fn build_runtime_with_resource_governor_and_omp_for_test(
 
 async fn build_runtime_with_resource_governor_inner(
     input: RebornRuntimeInput,
-    omp_coding_tools_for_test: bool,
+    coding_tools_for_test: bool,
 ) -> Result<(RebornRuntime, Arc<dyn ironclaw_resources::ResourceGovernor>), RebornRuntimeError> {
     let RebornRuntimeInput {
         services: services_input,
@@ -3072,14 +3072,14 @@ async fn build_runtime_with_resource_governor_inner(
         invocation_id: InvocationId::new(),
     };
     #[cfg(any(test, feature = "test-support"))]
-    let mut services = if omp_coding_tools_for_test {
-        crate::factory::build_runtime_substrate_with_omp_for_test(services_input).await?
+    let mut services = if coding_tools_for_test {
+        crate::factory::build_runtime_substrate_with_coding_tools_for_test(services_input).await?
     } else {
         build_runtime_substrate(services_input).await?
     };
     #[cfg(not(any(test, feature = "test-support")))]
     let mut services = {
-        let _ = omp_coding_tools_for_test;
+        let _ = coding_tools_for_test;
         build_runtime_substrate(services_input).await?
     };
     // The stored key no longer feeds the model gateway here (see the

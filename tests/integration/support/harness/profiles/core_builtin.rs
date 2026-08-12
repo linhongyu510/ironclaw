@@ -28,11 +28,11 @@ use ironclaw_host_api::{
     runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
-    BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
-    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-    OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, TIME_CAPABILITY_ID,
 };
 
 /// How [`core_builtin_tools`] constructs HTTP egress. The three modes are
@@ -332,8 +332,8 @@ pub(crate) fn core_builtin_tools_capability_ids() -> HarnessResult<Vec<Capabilit
         CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
         CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
         CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
-        CapabilityId::new(OMP_READ_CAPABILITY_ID)?,
-        CapabilityId::new(OMP_EDIT_CAPABILITY_ID)?,
+        CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
+        CapabilityId::new(CODING_EDIT_CAPABILITY_ID)?,
         // `builtin.shell` on the surface so scripted shell calls route
         // through the process port (recording by default, live via
         // `.with_live_shell()`).

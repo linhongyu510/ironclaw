@@ -383,8 +383,8 @@ async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree
 }
 
 #[tokio::test]
-async fn capability_display_preview_store_summarizes_omp_read_write_edit_safely() {
-    // omp read → the path; non-path args are never summarized.
+async fn capability_display_preview_store_summarizes_coding_read_write_edit_safely() {
+    // pinned coding read → the path; non-path args are never summarized.
     let read = completed_preview_for_input(
         "read",
         "builtin.read",
@@ -395,7 +395,7 @@ async fn capability_display_preview_store_summarizes_omp_read_write_edit_safely(
     assert!(read_summary.contains("path: src/main.rs"));
     assert!(!read_summary.contains("sk-secret"));
 
-    // omp write → path + content byte count; the content itself never appears.
+    // pinned coding write → path + content byte count; the content itself never appears.
     let write = completed_preview_for_input(
         "write",
         "builtin.write",
@@ -412,7 +412,7 @@ async fn capability_display_preview_store_summarizes_omp_read_write_edit_safely(
     assert!(!write_summary.contains("body"));
     assert!(!write_summary.contains("sk-secret"));
 
-    // omp edit → only the hashline grammar byte count; the grammar (paths,
+    // pinned coding edit → only the hashline grammar byte count; the grammar (paths,
     // snapshot tags, verbatim replacement rows) is never embedded.
     let edit = completed_preview_for_input(
         "edit",
@@ -428,10 +428,10 @@ async fn capability_display_preview_store_summarizes_omp_read_write_edit_safely(
 }
 
 #[tokio::test]
-async fn capability_display_preview_extracts_omp_output_envelope_as_text() {
+async fn capability_display_preview_extracts_coding_output_envelope_as_text() {
     let run_id = TurnRunId::new();
     let capability = CapabilityId::new("builtin.read").unwrap();
-    let input_ref = preview_input_ref("omp-output-preview-input");
+    let input_ref = preview_input_ref("coding-output-preview-input");
     let store = CapabilityDisplayPreviewStore::default();
     store.record_input(
         &run_id.to_string(),
@@ -444,7 +444,7 @@ async fn capability_display_preview_extracts_omp_output_envelope_as_text() {
         input_ref: &input_ref,
         invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
         capability_id: &capability,
-        result_ref: "result:omp-output",
+        result_ref: "result:coding-output",
         output: &serde_json::json!({"output": "[main.rs#1A2B]\n1:fn main() {}"}),
         output_bytes: 32,
     });
@@ -453,7 +453,7 @@ async fn capability_display_preview_extracts_omp_output_envelope_as_text() {
             invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
             run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
             capability_id: capability,
-            thread_id: Some(ThreadId::new("webui-omp-output-preview-thread").unwrap()),
+            thread_id: Some(ThreadId::new("webui-coding-output-preview-thread").unwrap()),
             status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
             provider: None,
             runtime: None,
@@ -468,7 +468,7 @@ async fn capability_display_preview_extracts_omp_output_envelope_as_text() {
         .await
         .unwrap()
         .unwrap();
-    // The omp `{"output": "..."}` envelope renders as its extracted text, not
+    // The pinned coding `{"output": "..."}` envelope renders as its extracted text, not
     // as a generic JSON dump.
     assert_eq!(preview.output_kind.as_deref(), Some("text"));
     let output_preview = preview.output_preview.as_deref().unwrap();

@@ -223,7 +223,7 @@ Returns a `ToolCompletionResponse` with `FinishReason::ToolUse`. The agent loop 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique call ID. Convention: `call_{tool}_{n}`. |
-| `name` | string | Must match a registered tool name (e.g. `echo`, `write`, `read`, `memory_write`, `shell`). The OMP coding surface is `write` (input `{path, content}`), `read` (input `{path}`; also serves directory listings), `edit`, `glob`, `grep`. |
+| `name` | string | Must match a registered tool name (e.g. `echo`, `write`, `read`, `memory_write`, `shell`). The pinned coding surface is `write` (input `{path, content}`), `read` (input `{path}`; also serves directory listings), `edit`, `glob`, `grep`. |
 | `arguments` | object | Tool parameters as JSON. Must conform to the tool's `parameters_schema()`. |
 
 #### Binding a later call to an earlier tool result

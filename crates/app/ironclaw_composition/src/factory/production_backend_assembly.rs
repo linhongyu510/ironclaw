@@ -338,7 +338,7 @@ pub(super) async fn build_backend_production(
     stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
-    _omp_coding_tools_for_test: bool,
+    _coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
@@ -525,7 +525,7 @@ pub(super) async fn build_backend_production(
     } = build_budget_sinks();
     let process_journal_store = Arc::new(
         ProcessJournalStore::new(crate::wrap_process_journal_scoped(Arc::clone(
-            &stores.filesystem,
+            &stores.process_journal_filesystem,
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
@@ -1571,15 +1571,28 @@ where
     }))
 }
 
-async fn finish_production_backend(
-    context: RebornProductionBuildContext,
+struct ProductionBackendParts {
     filesystem: Arc<CompositeRootFilesystem>,
+    process_journal_filesystem: Option<Arc<CompositeRootFilesystem>>,
     trigger_repository: Arc<dyn TriggerRepository>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     event_store_config: ironclaw_event_store::RebornEventStoreConfig,
     leader_lock: ironclaw_auth::CredentialRefreshLeaderLock,
-    omp_coding_tools_for_test: bool,
+}
+
+async fn finish_production_backend(
+    context: RebornProductionBuildContext,
+    parts: ProductionBackendParts,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    let ProductionBackendParts {
+        filesystem,
+        process_journal_filesystem,
+        trigger_repository,
+        secret_master_key,
+        event_store_config,
+        leader_lock,
+    } = parts;
     let resource_governor = filesystem_resource_governor(&filesystem);
     let stores = ProductionStoreBundle::new(
         filesystem,
@@ -1587,13 +1600,14 @@ async fn finish_production_backend(
         secret_master_key,
         event_store_config,
     )
-    .await?;
+    .await?
+    .with_process_journal_filesystem(process_journal_filesystem);
     build_backend_production(
         context,
         stores,
         trigger_repository,
         leader_lock,
-        omp_coding_tools_for_test,
+        coding_tools_for_test,
     )
     .await
 }
@@ -1605,7 +1619,7 @@ pub(super) async fn build_libsql_production(
     path_or_url: String,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
-    omp_coding_tools_for_test: bool,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
@@ -1631,12 +1645,17 @@ pub(super) async fn build_libsql_production(
     };
     finish_production_backend(
         context,
-        filesystem,
-        trigger_repository,
-        secret_master_key,
-        event_store_config,
-        ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
-        omp_coding_tools_for_test,
+        ProductionBackendParts {
+            filesystem,
+            // libSQL is single-writer by design; a second handle buys nothing.
+            process_journal_filesystem: None,
+            trigger_repository,
+            secret_master_key,
+            event_store_config,
+            leader_lock:
+                ironclaw_auth::CredentialRefreshLeaderLock::always_leader_for_single_writer(),
+        },
+        coding_tools_for_test,
     )
     .await
 }
@@ -1644,9 +1663,10 @@ pub(super) async fn build_libsql_production(
 pub(super) async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
+    process_journal_pool: Option<deadpool_postgres::Pool>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
-    omp_coding_tools_for_test: bool,
+    coding_tools_for_test: bool,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
@@ -1681,16 +1701,28 @@ pub(super) async fn build_postgres_production(
         &ironclaw_host_api::path::VirtualPath::new("/system/skills")?,
     )
     .await?;
+    let process_journal_filesystem = process_journal_pool
+        .map(|pool| {
+            crate::filesystem_assembly::process_journal_root_filesystem(Arc::new(
+                PostgresRootFilesystem::new(pool),
+            ))
+        })
+        .transpose()?;
     finish_production_backend(
         context,
-        filesystem,
-        trigger_repository,
-        secret_master_key,
-        ironclaw_event_store::RebornEventStoreConfig::PostgresPool {
-            pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
+        ProductionBackendParts {
+            filesystem,
+            process_journal_filesystem,
+            trigger_repository,
+            secret_master_key,
+            event_store_config: ironclaw_event_store::RebornEventStoreConfig::PostgresPool {
+                pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
+            },
+            leader_lock: ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(
+                pool_for_refresh_lock,
+            ),
         },
-        ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
-        omp_coding_tools_for_test,
+        coding_tools_for_test,
     )
     .await
 }

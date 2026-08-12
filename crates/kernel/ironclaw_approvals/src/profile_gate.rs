@@ -1581,7 +1581,7 @@ mod tests {
         #[tokio::test]
         async fn matrix_fold_is_behavior_neutral_for_loop_run() {
             // (id, effects, matrix loop_run policy) — matrices are the S3 seed:
-            // the seed ungates the omp `read` id (the reviewed slot the retired
+            // the seed ungates the pinned coding `read` id (the reviewed slot the retired
             // read_file/list_dir entries transferred to); `write` is NOT on the
             // seed, so it is GatedUnlessGranted like http/gmail(read+write).
             let caps: Vec<(&str, Vec<EffectKind>)> = vec![

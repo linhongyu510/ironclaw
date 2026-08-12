@@ -440,7 +440,7 @@ pub struct OutcomeRefs {
     /// A [`ModelResultPreview`], NOT a [`SafeSummary`]: it carries the tool's own
     /// output (delimiters, JSON, newlines), credential-redacted at a word
     /// boundary, up to 24 KiB — so the model sees small results inline. Larger
-    /// results remain host-owned behind an `artifact://` URI that the omp
+    /// results remain host-owned behind an `artifact://` URI that the pinned coding
     /// `read` tool accepts; `None` when no preview is staged or the content
     /// failed the credential redaction contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -8,7 +8,7 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::{
-    GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID, OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -19,8 +19,8 @@ fn file_tools_with_runtime_policy(
 ) -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?,
-            CapabilityId::new(OMP_READ_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
             CapabilityId::new(GLOB_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
@@ -74,7 +74,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 
 /// Same capability set as [`file_tools`], but opts the harness into the real
 /// `StagedCapabilityIo` so large outputs are persisted as artifacts that the
-/// omp `read` tool can consume. Auto-approve on, like `file_tools`.
+/// pinned coding `read` tool can consume. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
         ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,
@@ -100,7 +100,7 @@ pub(crate) async fn file_tools_with_durable_capability_io()
 
 pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
-        capability_ids: vec![CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?],
+        capability_ids: vec![CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?],
         effect_kinds: vec![EffectKind::WriteFilesystem],
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,

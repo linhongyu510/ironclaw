@@ -38,7 +38,7 @@ CANNED_RESPONSES = [
     (re.compile(r"link test", re.IGNORECASE),
      "See [the pull request](https://example.com/pr/1) for details."),
     # Reborn v2 download chips: after the agent writes a CSV and a PDF (the
-    # omp `write` dispatch lives in TOOL_CALL_PATTERNS), it replies
+    # pinned coding `write` dispatch lives in TOOL_CALL_PATTERNS), it replies
     # referencing their /workspace paths so the WebUI renders downloadable file
     # chips. Fires after the tool calls run (match_tool_call dedups the
     # already-run writes).
@@ -249,9 +249,9 @@ TOOL_CALL_PATTERNS = [
         lambda _: {},
     ),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
-    # the project workspace. The omp coding tools are exposed with their exact
+    # the project workspace. The pinned coding tools are exposed with their exact
     # provider names (issue #7392), so the mock emits `write` with the pinned
-    # omp input shape (`path` + `content`). After both results land,
+    # coding input shape (`path` + `content`). After both results land,
     # match_tool_call dedups write and the conversation falls through to the
     # CANNED_RESPONSES reply that references the two paths.
     (

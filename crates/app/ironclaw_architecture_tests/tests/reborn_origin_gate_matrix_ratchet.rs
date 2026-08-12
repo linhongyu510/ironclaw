@@ -107,7 +107,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
     // Reviewed transfer, not an addition: the retired `read_file`/`list_dir`
-    // builtins migrated to the single omp `read` engine with the same read-only
+    // builtins migrated to the single pinned coding `read` engine with the same read-only
     // effect posture, and their reviewed Ungated slot moves to its id. The dead
     // ids hold no exemption.
     "builtin.read",

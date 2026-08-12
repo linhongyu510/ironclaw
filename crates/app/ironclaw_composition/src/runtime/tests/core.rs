@@ -1211,7 +1211,7 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 .map_err(model_capability_error)?
                 .into_iter()
                 .find(|definition| definition.capability_id == read_id)
-                .expect("omp read provider tool definition");
+                .expect("coding read provider tool definition");
             let candidate = capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                     ProviderToolCall {
@@ -1247,14 +1247,14 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                             .as_ref()
                             .is_some_and(|call| call.capability_id.as_str() == "builtin.read")
                 })
-                .expect("third model call should include omp read output");
+                .expect("third model call should include coding read output");
             assert!(
                 tool_result.content.contains(LARGE_ECHO_MESSAGE),
-                "omp read must expose the artifact-backed result to the model"
+                "coding read must expose the artifact-backed result to the model"
             );
             assert!(
                 !tool_result.content.contains(LARGE_ECHO_TAIL),
-                "omp read must retain its pinned bounded output shape"
+                "coding read must retain its pinned bounded output shape"
             );
             return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
         }
@@ -4575,7 +4575,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     let original_len = large_echo_message().len();
 
     let inputs = observer.inputs.lock().expect("inputs lock");
-    assert_eq!(inputs.len(), 2, "echo and omp read inputs observed");
+    assert_eq!(inputs.len(), 2, "echo and coding read inputs observed");
     let observed_message = inputs[0].2["message"].as_str().expect("message string");
     assert!(
         observed_message.len() < original_len && observed_message.contains("[truncated"),
@@ -4585,7 +4585,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
     assert_eq!(inputs[1].1, "builtin.read");
 
     let results = observer.results.lock().expect("results lock");
-    assert_eq!(results.len(), 2, "echo and omp read outputs observed");
+    assert_eq!(results.len(), 2, "echo and coding read outputs observed");
     assert!(
         results[0].2.to_string().contains("[truncated"),
         "observer should receive a truncated preview of the large result"

@@ -1,10 +1,10 @@
 // arch-exempt: large_file, caller-tier coding-tool suite shares one runtime/mount fixture set, plan #4539
 //
-// Host-runtime integration coverage for the omp coding tools (`read`,
+// Host-runtime integration coverage for the pinned coding tools (`read`,
 // `write`, `edit`, `glob`, `grep`). Engine-level behavior (hashline output
 // formats, selector grammar, stale-anchor rejection, glob/grep budgets) is
 // covered by the engine suites in `ironclaw_extension_support` and the
-// pinned contract snapshot under `tests/reborn_omp_coding_engines.rs`; this
+// pinned contract snapshot under `tests/reborn_coding_engines.rs`; this
 // file pins the HOST boundaries: mount authorization denials, workspace-root
 // resolution, relative-path round trips, read-before-edit snapshot seeding
 // through the public read path, post-edit-check wiring, and the failure-kind
@@ -48,10 +48,10 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
     CapabilitySurfaceVersion, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID,
-    PostEditCheckConfig, RuntimeCapabilityOutcome, RuntimeProcessPort, UserSandboxProcessPort,
-    builtin_first_party_handlers, builtin_first_party_package,
+    HostRuntimeServices, PostEditCheckConfig, RuntimeCapabilityOutcome, RuntimeProcessPort,
+    UserSandboxProcessPort, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -59,10 +59,10 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn omp_write_to_read_only_mount_reports_an_actionable_denial() {
+async fn coding_write_to_read_only_mount_reports_an_actionable_denial() {
     // A write through a read-only scoped mount must fail as a filesystem
     // denial AND tell the model which path hit the permission wall (the
-    // exact omp resolution text rides the untrusted diagnostic channel).
+    // exact pinned resolution text rides the untrusted diagnostic channel).
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem(filesystem);
@@ -70,7 +70,7 @@ async fn omp_write_to_read_only_mount_reports_an_actionable_denial() {
 
     let failure = invoke_failure_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/notes.txt", "content": "hello"}),
         context,
     )
@@ -80,7 +80,7 @@ async fn omp_write_to_read_only_mount_reports_an_actionable_denial() {
     assert_eq!(failure.kind, FailureKind::FilesystemDenied);
     let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
         panic!(
-            "expected a diagnostic carrying the omp denial, got {:?}",
+            "expected a diagnostic carrying the coding denial, got {:?}",
             failure.detail
         );
     };
@@ -99,7 +99,7 @@ async fn omp_write_to_read_only_mount_reports_an_actionable_denial() {
 }
 
 #[tokio::test]
-async fn omp_read_out_of_scope_rejection_carries_the_path_and_available_roots() {
+async fn coding_read_out_of_scope_rejection_carries_the_path_and_available_roots() {
     // Loop-boundary pin: an out-of-scope absolute path (copied verbatim from
     // a task description) must produce a FilesystemDenied failure whose
     // diagnostic names the path and the available scoped roots so the model
@@ -111,7 +111,7 @@ async fn omp_read_out_of_scope_rejection_carries_the_path_and_available_roots() 
 
     let failure = invoke_failure_with_context(
         &runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": "/testbed/replacer.go"}),
         context,
     )
@@ -120,7 +120,7 @@ async fn omp_read_out_of_scope_rejection_carries_the_path_and_available_roots() 
     assert_eq!(failure.kind, FailureKind::FilesystemDenied);
     let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
         panic!(
-            "expected a diagnostic carrying the omp resolution error, got {:?}",
+            "expected a diagnostic carrying the coding resolution error, got {:?}",
             failure.detail
         );
     };
@@ -135,7 +135,7 @@ async fn omp_read_out_of_scope_rejection_carries_the_path_and_available_roots() 
 }
 
 #[tokio::test]
-async fn omp_read_failure_reports_missing_path() {
+async fn coding_read_failure_reports_missing_path() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem(filesystem);
@@ -143,7 +143,7 @@ async fn omp_read_failure_reports_missing_path() {
 
     let failure = invoke_failure_with_context(
         &runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": "/workspace/missing.py"}),
         context,
     )
@@ -152,7 +152,7 @@ async fn omp_read_failure_reports_missing_path() {
     assert_eq!(failure.kind, FailureKind::OperationFailed);
     let Some(DispatchFailureDetail::Diagnostic { text }) = failure.detail.as_ref() else {
         panic!(
-            "expected a diagnostic carrying the omp not-found text, got {:?}",
+            "expected a diagnostic carrying the coding not-found text, got {:?}",
             failure.detail
         );
     };
@@ -160,7 +160,7 @@ async fn omp_read_failure_reports_missing_path() {
 }
 
 #[tokio::test]
-async fn omp_write_maps_filesystem_provider_write_failure_to_operation_failed() {
+async fn coding_write_maps_filesystem_provider_write_failure_to_operation_failed() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("main.rs"), "old\n").unwrap();
 
@@ -176,7 +176,7 @@ async fn omp_write_maps_filesystem_provider_write_failure_to_operation_failed() 
 
     let error = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/main.rs", "content": "new\n"}),
         context,
     )
@@ -220,7 +220,7 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
 
     let first_completed = invoke_completed_with_context(
         &runtime,
-        OMP_EDIT_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         json!({"input": format!("{header}\nPUT 1:\n+gamma beta\n")}),
         context.clone(),
     )
@@ -271,7 +271,7 @@ async fn builtin_edit_tools_append_new_post_edit_check_findings_only() {
     );
     let second = invoke_with_context(
         &runtime,
-        OMP_EDIT_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         json!({"input": format!("{refreshed_header}\nPUT 1:\n+gamma delta\n")}),
         context,
     )
@@ -299,7 +299,7 @@ async fn builtin_edit_tools_skip_post_edit_check_when_unconfigured() {
 
     let written = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -339,7 +339,7 @@ async fn builtin_edit_tools_report_post_edit_check_timeout_without_failing_the_e
 
     let written = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -375,7 +375,7 @@ async fn builtin_edit_tools_omit_new_output_when_check_passes_clean() {
 
     let written = invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -408,7 +408,7 @@ async fn builtin_edit_tools_disable_post_edit_check_when_process_backend_is_none
 
     let completed = invoke_completed_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -462,7 +462,7 @@ async fn builtin_edit_tools_run_post_edit_check_in_user_sandbox_not_on_local_hos
 
     let completed = invoke_completed_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "/workspace/new.rs", "content": "fn hello() {}\n"}),
         context,
     )
@@ -509,7 +509,7 @@ async fn seed_read_tag<R: HostRuntime + ?Sized>(
 ) -> String {
     let read = invoke_with_context(
         runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": path}),
         context,
     )
@@ -517,10 +517,10 @@ async fn seed_read_tag<R: HostRuntime + ?Sized>(
     .expect("read seeds the hashline snapshot");
     read["output"]
         .as_str()
-        .expect("omp read returns text")
+        .expect("coding read returns text")
         .lines()
         .next()
-        .expect("omp read starts with the hashline header")
+        .expect("coding read starts with the hashline header")
         .to_string()
 }
 
@@ -848,9 +848,9 @@ fn registry() -> ExtensionRegistry {
 
 fn coding_capability_ids() -> [&'static str; 5] {
     [
-        OMP_READ_CAPABILITY_ID,
-        OMP_WRITE_CAPABILITY_ID,
-        OMP_EDIT_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
+        CODING_EDIT_CAPABILITY_ID,
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
     ]
@@ -926,7 +926,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
-        // The omp edit descriptor declares delete authority (REM/MV file ops),
+        // The coding edit descriptor declares delete authority (REM/MV file ops),
         // so the coding grants must honestly carry it or every edit that the
         // authorization fold plans with delete authority is policy-denied.
         EffectKind::DeleteFilesystem,
@@ -956,7 +956,7 @@ async fn a_relative_path_written_by_write_is_readable_by_read() {
 
     invoke_with_context(
         &runtime,
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         json!({"path": "scripts/egfr.py", "content": "print('staged')\n"}),
         context(),
     )
@@ -965,7 +965,7 @@ async fn a_relative_path_written_by_write_is_readable_by_read() {
 
     let read = invoke_with_context(
         &runtime,
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         json!({"path": "scripts/egfr.py"}),
         context(),
     )
@@ -975,7 +975,7 @@ async fn a_relative_path_written_by_write_is_readable_by_read() {
     assert!(
         read["output"]
             .as_str()
-            .expect("omp read returns text")
+            .expect("coding read returns text")
             .contains("staged"),
         "write and read must resolve one relative path to one place; got {read:?}"
     );

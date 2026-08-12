@@ -333,7 +333,8 @@ async fn per_caller_workspace_policy_leases_only_the_gates_own_subtree() {
         MountView::default(),
         ExtensionCapabilitySurfaceSource::default(),
     );
-    let capability = CapabilityId::new(ironclaw_host_runtime::OMP_WRITE_CAPABILITY_ID).expect("id");
+    let capability =
+        CapabilityId::new(ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID).expect("id");
 
     let mut targets = Vec::new();
     for user in ["alice", "bob"] {

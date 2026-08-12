@@ -685,7 +685,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // artifact DTOs let first-party tools cross the host boundary without
         // importing a store. Authorization/binding remains in host_runtime and
         // persistence/read implementation remains in ironclaw_threads.
-        // 19_375 -> 19_404 (#7491 OMP cutover): origin-gate contract tests pin
+        // 19_375 -> 19_404 (#7491 coding-tool cutover): origin-gate contract tests pin
         // the transferred read-only `builtin.read` exemption and the absence of
         // the retired ids. Runtime authorization remains in host_runtime.
         ("ironclaw_host_api", 19_404),
@@ -749,7 +749,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // vocabulary gains an `ArtifactReference` detail. Artifact creation,
         // authorization, persistence, and rendering remain in host_runtime,
         // ironclaw_threads, and loop_host.
-        ("ironclaw_loop_contracts", 13_521),
+        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
+        // truncation-watermark DTO carried across the existing context and
+        // prompt contracts. Window selection and task-pinning behavior remain
+        // in ironclaw_threads and ironclaw_loop_host.
+        // Merged ceiling re-captured at 13_531 (13_306 + both deltas): the
+        // main merge lands both vocabularies in the crate. Count read from
+        // this test's own failure message.
+        ("ironclaw_loop_contracts", 13_531),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -1905,9 +1912,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_extension_manager/src/ironhub/capabilities.rs",
         "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
         // TEMPORARY production benchmark seam (issue #7392): builds the
-        // omp-only coding surface with exact provider-name overrides. Revert
+        // pinned coding surface with exact provider-name overrides. Revert
         // this unconditional seam when the benchmark arm reaches cutover.
-        "crates/ironclaw_host_runtime/src/first_party_tools/omp.rs",
+        "crates/ironclaw_host_runtime/src/first_party_tools/coding.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
         // The provider-tool-call DTOs live in the `capability` submodule of the

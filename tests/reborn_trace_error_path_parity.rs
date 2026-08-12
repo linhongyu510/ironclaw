@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::OMP_READ_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_READ_CAPABILITY_ID;
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -23,7 +23,7 @@ use reborn_support::doubles::RecordingTestCapabilityPort;
 /// built-in tool input is returned to the model and the turn can recover.
 #[tokio::test]
 async fn reborn_trace_error_path_parity() {
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
@@ -172,7 +172,7 @@ async fn reborn_trace_invalid_input_recovers_with_changed_action() {
 /// the model output before registration and retry with corrective context.
 #[tokio::test]
 async fn reborn_trace_unadvertised_capability_is_rejected() {
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(

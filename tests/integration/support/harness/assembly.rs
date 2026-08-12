@@ -75,8 +75,8 @@ pub(crate) fn default_capability_io_pair() -> (
 /// persistence is wired). This double mirrors the production persister's
 /// observable contract without any backing store: unique monotonically
 /// increasing `ArtifactId`s, checked byte length, digest over the persisted
-/// bytes, and the metadata content type — everything the OMP artifact-backed
-/// output path asserts.
+/// bytes, and the metadata content type — everything the pinned coding
+/// artifact-backed output path asserts.
 #[derive(Default)]
 pub(crate) struct TestArtifactPersister {
     next_id: AtomicU64,

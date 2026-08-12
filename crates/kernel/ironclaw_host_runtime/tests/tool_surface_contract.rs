@@ -700,9 +700,9 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     // prose half of a skill.
     assert_schema_has_property(&surface, "builtin.skill_install", "files");
 
-    // The edit capability is the omp hashline `builtin.edit`: input is the
+    // The edit capability is the pinned hashline `builtin.edit`: input is the
     // anchored hashline script, exactly the schema pinned at
-    // `schemas/builtin/omp.edit.input.v1.json` (OMP_EDIT_SCHEMA). The retired
+    // `schemas/builtin/coding.edit.input.v1.json` (CODING_EDIT_SCHEMA). The retired
     // apply_patch shape (`path`/`old_string`/`new_string`/`edits`/`replace_all`)
     // must not resurface: `additionalProperties: false` rejects each of those
     // fields outright.

@@ -6,9 +6,9 @@ Turn a file's bytes into plain text by format. One `src/lib.rs`, no I/O, no
 async, no knowledge of where the bytes came from — the same three functions
 serve chat attachments (`ironclaw_attachments`) and capability download output
 (`ironclaw_host_runtime`). A third consumer, the `read_file` coding tool in
-`ironclaw_extension_support`, was retired in the OMP cutover; its replacement,
-the `read` tool (`ironclaw_extension_support::coding::omp`), does not use this
-crate.
+`ironclaw_extension_support`, was retired in the coding-tool cutover; its
+replacement, the `read` tool (`ironclaw_extension_support::coding::pinned`),
+does not use this crate.
 
 ## The public surface, and why it is this small
 
@@ -54,7 +54,8 @@ This was a doc comment before it was a type, and the doc comment only sat on
 one of the two boundary sites — the other one leaked the raw string into a
 model-facing safe summary in `ironclaw_extension_support`'s `read_file` coding
 tool. The call-site regression test for that leak was removed with the tool in
-the OMP cutover (the `read` tool that replaced it does not use this crate), so
+the coding-tool cutover (the `read` tool that replaced it — the pinned engine
+in `ironclaw_extension_support::coding::pinned` — does not use this crate), so
 `every_extraction_failure_display_is_content_free` is now the sole guard:
 `Display` is the helper, and the wrapper that composes the summary is what
 would leak.

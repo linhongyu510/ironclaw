@@ -17,7 +17,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::OMP_WRITE_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID;
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
@@ -35,7 +35,7 @@ struct ConnectFlowCase {
 }
 
 async fn run_connect_flow(case: ConnectFlowCase) {
-    let write = CapabilityId::new(OMP_WRITE_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
     let credential_path = format!("/workspace/connections/{}.json", case.service_slug);
     let credential_content = format!(
         r#"{{"service":"{}","credential":"qa-test-credential"}}"#,

@@ -19,7 +19,7 @@ use axum::{
 use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
-    HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
@@ -39,12 +39,12 @@ async fn reborn_trace_core_builtin_tools_parity() {
     let time = CapabilityId::new(TIME_CAPABILITY_ID).expect("valid capability id");
     let json = CapabilityId::new(JSON_CAPABILITY_ID).expect("valid capability id");
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
-    let edit = CapabilityId::new(OMP_EDIT_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
+    let edit = CapabilityId::new(CODING_EDIT_CAPABILITY_ID).expect("valid capability id");
     // The hashline edit anchors on the deterministic snapshot tag of the
     // seeded file: `[path#TAG]` must match the tag the read engine records
     // for the same run (compute_file_hash is the engine's own seam).
-    let patch_tag = ironclaw_extension_support::coding::omp::harness::compute_file_hash(
+    let patch_tag = ironclaw_extension_support::coding::pinned::harness::compute_file_hash(
         "alpha\nneeds-patch\nomega\n",
     );
     let live_http = LiveHttpServer::start().await;

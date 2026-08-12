@@ -467,7 +467,7 @@ pub struct PutToolResultRecordRequest {
 
 /// Maximum byte window used by the private historical tool-result adapter.
 ///
-/// New model-visible results use immutable artifacts and omp `read`; this
+/// New model-visible results use immutable artifacts and pinned coding `read`; this
 /// bound remains only to prevent unbounded reads while projecting legacy
 /// result records into that artifact store.
 ///
@@ -676,6 +676,32 @@ impl ContextMessage {
 pub struct ContextWindow {
     pub thread_id: ThreadId,
     pub messages: Vec<ContextMessage>,
+    /// Exact boundary of the recent model-visible suffix omitted by
+    /// `max_messages`. Callers may retain explicitly pinned messages older
+    /// than this boundary in addition to the suffix.
+    pub recent_window_truncation: Option<ContextWindowTruncation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextWindowTruncation {
+    pub omitted_through_sequence: u64,
+    pub omitted_through_kind: MessageKind,
+}
+
+pub(crate) fn truncate_context_window(
+    mut messages: Vec<ContextMessage>,
+    max_messages: usize,
+) -> (Vec<ContextMessage>, Option<ContextWindowTruncation>) {
+    if max_messages >= messages.len() {
+        return (messages, None);
+    }
+    let start = messages.len() - max_messages;
+    let boundary = &messages[start - 1];
+    let truncation = ContextWindowTruncation {
+        omitted_through_sequence: boundary.sequence,
+        omitted_through_kind: boundary.kind,
+    };
+    (messages.split_off(start), Some(truncation))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

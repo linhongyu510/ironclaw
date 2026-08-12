@@ -191,8 +191,8 @@ async fn golden_image_attachment_turn() {
 }
 
 /// (h) Gated turn (approve arm): a real `BlockedApproval` gate raised by a
-/// scripted `builtin.write` call (emitting the exact omp provider name
-/// `write`, as advertised), approved, and resumed. Snapshots both
+/// scripted `builtin.write` call (emitting the exact pinned coding provider
+/// name `write`, as advertised), approved, and resumed. Snapshots both
 /// captured inference calls around the gate, pinning that a resume doesn't
 /// silently drop, duplicate, or reorder history. Distinct from (b): this one
 /// actually parks on `TurnStatus::BlockedApproval` between the two calls.

@@ -149,7 +149,7 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
-    // The retired `read_file`/`list_dir` builtins migrated to the single omp
+    // The retired `read_file`/`list_dir` builtins migrated to the single pinned coding
     // `read` engine; the reviewed read-only Ungated posture transfers to its
     // id (`builtin.read`). The dead ids hold no exemption.
     "builtin.read",
@@ -503,7 +503,7 @@ mod origin_gate_wire_tests {
             assert_eq!(matrix.product, OriginGatePolicy::Forbidden, "{id}");
             assert_eq!(matrix.automation, OriginGatePolicy::Forbidden, "{id}");
         }
-        // The omp `read` id inherits the reviewed read-only Ungated posture of
+        // The pinned coding `read` id inherits the reviewed read-only Ungated posture of
         // the retired `read_file`/`list_dir` builtins it replaced.
         assert!(
             UNGATED_LOOP_RUN_CAPABILITIES.contains(&"builtin.read"),

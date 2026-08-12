@@ -28,7 +28,7 @@ impl SubagentFlavorId {
 }
 
 /// Tool identities available to subagent flavors, mapped 1:1 onto the current
-/// OMP first-party surface. Directory listing is served by `builtin.read`
+/// pinned coding first-party surface. Directory listing is served by `builtin.read`
 /// (there is no separate `list_dir` identity), so no two variants share a
 /// capability id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -316,10 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn flavor_allowlists_emit_only_current_omp_surface() {
+    fn flavor_allowlists_emit_only_current_coding_surface() {
         // Cutover invariant: no flavor may emit a retired coding-tool identity
         // (read_file/write_file/list_dir/apply_patch), and the deduped union of
-        // all allowlists must be exactly the current OMP surface — two variants
+        // all allowlists must be exactly the current pinned coding surface — two variants
         // must never share a capability id.
         let retired = [
             "builtin.read_file",

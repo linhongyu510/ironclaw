@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_host_runtime::{
-    OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-    OMP_WRITE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID, CODING_GREP_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, LoopCapabilityPort,
@@ -149,11 +149,11 @@ const LOCAL_HOST_SHELL_NOTE: &str = "Runs on the local host with configured host
 fn scoped_path_capability(capability_id: &str) -> bool {
     matches!(
         capability_id,
-        OMP_READ_CAPABILITY_ID
-            | OMP_WRITE_CAPABILITY_ID
-            | OMP_EDIT_CAPABILITY_ID
-            | OMP_GLOB_CAPABILITY_ID
-            | OMP_GREP_CAPABILITY_ID
+        CODING_READ_CAPABILITY_ID
+            | CODING_WRITE_CAPABILITY_ID
+            | CODING_EDIT_CAPABILITY_ID
+            | CODING_GLOB_CAPABILITY_ID
+            | CODING_GREP_CAPABILITY_ID
     )
 }
 

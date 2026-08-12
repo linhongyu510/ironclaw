@@ -1511,7 +1511,7 @@ fn result_text(op: &ScriptedOp, verdict: Verdict) -> String {
     format!("{RESULT_PREFIX} {} {}", op.identity(), verdict.as_str())
 }
 
-/// Resolve the advertised wire name for a capability id. OMP coding tools
+/// Resolve the advertised wire name for a capability id. Pinned coding tools
 /// override the derived provider spelling, so their canonical ids map only to
 /// the exact bare names advertised by the live manifest. Other capabilities
 /// retain the derived encoded/dotted resolution used by the stress harness.
@@ -2077,20 +2077,20 @@ mod tests {
     }
 
     #[test]
-    fn wire_name_resolution_honors_omp_overrides_and_derived_names() {
-        let omp = tools(&["write", "read"]);
+    fn wire_name_resolution_honors_coding_overrides_and_derived_names() {
+        let coding = tools(&["write", "read"]);
         assert_eq!(
-            resolve_wire_name(&omp, "builtin.write").as_deref(),
+            resolve_wire_name(&coding, "builtin.write").as_deref(),
             Some("write")
         );
         assert_eq!(
-            resolve_wire_name(&omp, "builtin.read").as_deref(),
+            resolve_wire_name(&coding, "builtin.read").as_deref(),
             Some("read")
         );
         assert_eq!(
             resolve_wire_name(&tools(&["builtin__write"]), "builtin.write"),
             None,
-            "retired derived spelling must not alias the OMP provider override"
+            "retired derived spelling must not alias the pinned coding provider override"
         );
         let encoded = tools(&["ironclaw__memory__write"]);
         assert_eq!(

@@ -732,7 +732,7 @@ impl HostRuntimeCapabilityHarness {
             recording_network_egress,
             google_oauth_backend_for_test,
             sandboxed_shell,
-            omp_coding_tools,
+            coding_tools,
             workspace_scoped_per_caller,
         } = options;
         let root = Arc::new(if sandboxed_shell {
@@ -873,8 +873,8 @@ impl HostRuntimeCapabilityHarness {
                     reply_target_binding_id: service_label.to_string(),
                 });
         }
-        let (services, resource_governor) = if omp_coding_tools {
-            ironclaw_composition::test_support::build_runtime_with_resource_governor_and_omp_for_test(
+        let (services, resource_governor) = if coding_tools {
+            ironclaw_composition::test_support::build_runtime_with_resource_governor_and_coding_tools_for_test(
                 runtime_input,
             )
             .await?

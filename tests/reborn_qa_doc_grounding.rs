@@ -27,7 +27,7 @@ use axum::{
     routing::get,
 };
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{HTTP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, HTTP_CAPABILITY_ID};
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
@@ -45,7 +45,7 @@ const COMPANY_DOC_CONTENT: &str = "PepsiCo brief: meeting about agent-assisted s
 async fn reborn_qa_strategy_doc_becomes_knowledge_base_for_answers() {
     const REPLY: &str = "I read the NEAR AI Strategy doc: user-owned agents are the core pillar. I can answer strategy questions from it.";
 
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
@@ -105,7 +105,7 @@ async fn reborn_qa_strategy_doc_becomes_knowledge_base_for_answers() {
 async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
     const REPLY: &str = "Your next meeting is with PepsiCo: the PepsiCo brief covers supply chain pilots, and the latest news is 'PepsiCo expands AI logistics program'.";
 
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let http = CapabilityId::new(HTTP_CAPABILITY_ID).expect("valid capability id");
     let server =
         LiveLoopbackHttpServer::start(Router::new().route("/news/pepsico", get(company_news)))

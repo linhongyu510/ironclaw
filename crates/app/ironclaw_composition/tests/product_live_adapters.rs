@@ -28,8 +28,9 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    ECHO_CAPABILITY_ID, OMP_READ_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CODING_READ_CAPABILITY_ID, ECHO_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
@@ -1032,7 +1033,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
     .await;
     let run_context = loop_run_context("read-effect").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
-    let capability_id = capability_id(OMP_READ_CAPABILITY_ID);
+    let capability_id = capability_id(CODING_READ_CAPABILITY_ID);
     let adapters = adapters_from_runtime(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
@@ -1048,7 +1049,7 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
                 )
                 .with_grants(grants_for_principal_with_effects(
                     Principal::User(UserId::new("user-read-effect").unwrap()),
-                    [OMP_READ_CAPABILITY_ID],
+                    [CODING_READ_CAPABILITY_ID],
                     vec![EffectKind::ReadFilesystem],
                 ))
                 .with_provider_trust_for_effects(
@@ -1108,7 +1109,7 @@ async fn standalone_adapter_invokes_read_with_configured_mounts() {
             serde_json::json!({ "path": "/workspace/readme.md:1" }),
         )
         .unwrap();
-    let capability_id = capability_id(OMP_READ_CAPABILITY_ID);
+    let capability_id = capability_id(CODING_READ_CAPABILITY_ID);
     let mounts = read_only_workspace_mounts();
     let adapters = adapters_from_runtime(
         &services,
@@ -1126,7 +1127,7 @@ async fn standalone_adapter_invokes_read_with_configured_mounts() {
                 .with_mounts(mounts.clone())
                 .with_grants(grants_for_principal_with_effects_and_mounts(
                     Principal::User(UserId::new("user-read-file").unwrap()),
-                    [OMP_READ_CAPABILITY_ID],
+                    [CODING_READ_CAPABILITY_ID],
                     vec![EffectKind::ReadFilesystem],
                     mounts,
                 ))
@@ -1182,7 +1183,7 @@ async fn standalone_adapter_invokes_read_with_configured_mounts() {
     assert!(
         output["output"]
             .as_str()
-            .expect("omp read returns text")
+            .expect("coding read returns text")
             .contains("1:alpha"),
         "the read output must render the file rows, got {output}"
     );

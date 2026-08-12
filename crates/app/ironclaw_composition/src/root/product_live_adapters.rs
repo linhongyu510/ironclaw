@@ -992,7 +992,7 @@ mod tests {
                 .input_summary
                 .as_deref()
                 .is_some_and(|summary| summary.contains("path: src/main.rs")),
-            "the omp read input summary must surface the path, got {:?}",
+            "the coding read input summary must surface the path, got {:?}",
             record.input_summary
         );
         assert!(
@@ -1001,20 +1001,20 @@ mod tests {
                 .as_deref()
                 .is_some_and(|preview| preview.contains("[main.rs#1A2B]")
                     && preview.contains("fn main() {}")),
-            "the omp read output envelope must render as its extracted output string, got {:?}",
+            "the coding read output envelope must render as its extracted output string, got {:?}",
             record.output_preview
         );
         assert_eq!(
             record.output_kind.as_deref(),
             Some("text"),
-            "the omp read output envelope must render as text, not a generic JSON dump"
+            "the coding read output envelope must render as text, not a generic JSON dump"
         );
         assert!(
             !record
                 .output_preview
                 .as_deref()
                 .is_some_and(|preview| preview.starts_with('{')),
-            "the omp read preview must not be a JSON dump, got {:?}",
+            "the coding read preview must not be a JSON dump, got {:?}",
             record.output_preview
         );
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
@@ -1071,11 +1071,11 @@ mod tests {
         assert!(
             input_summary.contains("path: src/main.rs")
                 && input_summary.contains("content_bytes: 31"),
-            "the omp write input summary must surface path and byte count, got {input_summary}"
+            "the coding write input summary must surface path and byte count, got {input_summary}"
         );
         assert!(
             !input_summary.contains("fn main()") && !input_summary.contains("top-secret"),
-            "the omp write input summary must never embed the written content, got {input_summary}"
+            "the coding write input summary must never embed the written content, got {input_summary}"
         );
         assert_eq!(record.output_kind.as_deref(), Some("text"));
         assert!(
@@ -1083,7 +1083,7 @@ mod tests {
                 .output_preview
                 .as_deref()
                 .is_some_and(|preview| preview.contains("Successfully wrote 31 bytes")),
-            "the omp write output must render as its extracted output string, got {:?}",
+            "the coding write output must render as its extracted output string, got {:?}",
             record.output_preview
         );
     }
@@ -1134,13 +1134,13 @@ mod tests {
         let input_summary = record.input_summary.as_deref().unwrap();
         assert!(
             input_summary.contains("input_bytes: 39"),
-            "the omp edit input summary must surface only the grammar byte count, got {input_summary}"
+            "the coding edit input summary must surface only the grammar byte count, got {input_summary}"
         );
         assert!(
             !input_summary.contains("main.rs")
                 && !input_summary.contains("#1A2B")
                 && !input_summary.contains("fn main()"),
-            "the omp edit input summary must never embed the hashline grammar payload, got \
+            "the coding edit input summary must never embed the hashline grammar payload, got \
              {input_summary}"
         );
         assert_eq!(record.output_kind.as_deref(), Some("text"));
@@ -1149,7 +1149,7 @@ mod tests {
                 .output_preview
                 .as_deref()
                 .is_some_and(|preview| preview.contains("Edit applied")),
-            "the omp edit output must render as its extracted output string, got {:?}",
+            "the coding edit output must render as its extracted output string, got {:?}",
             record.output_preview
         );
     }

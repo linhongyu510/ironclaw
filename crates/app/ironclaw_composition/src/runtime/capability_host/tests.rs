@@ -34,9 +34,9 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_host_runtime::{
+        CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
         GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID, OMP_EDIT_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-        OMP_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, SHELL_CAPABILITY_ID,
         SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
@@ -1842,8 +1842,8 @@ mod tests {
             .map(|capability| capability.as_str())
             .collect::<Vec<_>>();
 
-        assert!(capability_ids.contains(&OMP_WRITE_CAPABILITY_ID));
-        assert!(capability_ids.contains(&OMP_EDIT_CAPABILITY_ID));
+        assert!(capability_ids.contains(&CODING_WRITE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&CODING_EDIT_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
         // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
         // wrap_synthetic_capabilities, not a policy capability.
@@ -2087,7 +2087,7 @@ mod tests {
                 .deny_private_ip_ranges
         );
 
-        let read_grant = grant_for(OMP_READ_CAPABILITY_ID);
+        let read_grant = grant_for(CODING_READ_CAPABILITY_ID);
         assert_eq!(
             read_grant.constraints.allowed_effects,
             local_host_allowed_effects
@@ -3641,9 +3641,9 @@ mod tests {
             .await
             .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
         for capability_id in [
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
-            OMP_EDIT_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
+            CODING_EDIT_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
         ] {
@@ -3662,15 +3662,15 @@ mod tests {
                 "model-visible description must not disclose raw host home path"
             );
         }
-        // The omp `read`/`write`/`glob`/`grep` engines pin a `path` parameter,
+        // The coding `read`/`write`/`glob`/`grep` engines pin a `path` parameter,
         // so the confirmed host mount is re-disclosed inside its schema
-        // description. The omp hashline `edit` engine pins the exact `input`
+        // description. The coding hashline `edit` engine pins the exact `input`
         // schema — a single hashline-grammar string property with NO `path`
         // parameter — so its schema carries no path description and is asserted
         // by its real shape instead.
         for capability_id in [
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
         ] {
@@ -3695,25 +3695,25 @@ mod tests {
         let edit_descriptor = surface
             .descriptors
             .iter()
-            .find(|descriptor| descriptor.capability_id.as_str() == OMP_EDIT_CAPABILITY_ID)
-            .expect("omp edit descriptor visible");
+            .find(|descriptor| descriptor.capability_id.as_str() == CODING_EDIT_CAPABILITY_ID)
+            .expect("coding edit descriptor visible");
         assert_eq!(
             edit_descriptor.parameters_schema["properties"]["input"]["type"].as_str(),
             Some("string"),
-            "omp edit schema must pin the single hashline `input` property: {}",
+            "coding edit schema must pin the single hashline `input` property: {}",
             edit_descriptor.parameters_schema
         );
         assert_eq!(
             edit_descriptor.parameters_schema["required"],
             serde_json::json!(["input"]),
-            "omp edit schema must require the hashline `input` property: {}",
+            "coding edit schema must require the hashline `input` property: {}",
             edit_descriptor.parameters_schema
         );
         assert!(
             edit_descriptor.parameters_schema["properties"]
                 .get("path")
                 .is_none(),
-            "omp edit schema must not advertise a retired `path` property: {}",
+            "coding edit schema must not advertise a retired `path` property: {}",
             edit_descriptor.parameters_schema
         );
         let shell_descriptor = surface
@@ -3740,9 +3740,9 @@ mod tests {
         );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         for capability_id in [
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
-            OMP_EDIT_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
+            CODING_EDIT_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
         ] {
@@ -3760,13 +3760,13 @@ mod tests {
                 "provider-visible tool surface must not disclose raw host home path"
             );
         }
-        // Mirrors the capability-descriptor loop above: path-bearing omp tools
+        // Mirrors the capability-descriptor loop above: path-bearing coding tools
         // disclose the confirmed host mount inside their `path` schema
         // description; the hashline `edit` tool pins the exact `input` schema
         // with no `path` property.
         for capability_id in [
-            OMP_READ_CAPABILITY_ID,
-            OMP_WRITE_CAPABILITY_ID,
+            CODING_READ_CAPABILITY_ID,
+            CODING_WRITE_CAPABILITY_ID,
             GLOB_CAPABILITY_ID,
             GREP_CAPABILITY_ID,
         ] {
@@ -3788,23 +3788,23 @@ mod tests {
         }
         let edit_tool = tool_definitions
             .iter()
-            .find(|definition| definition.capability_id.as_str() == OMP_EDIT_CAPABILITY_ID)
-            .expect("omp edit tool definition visible");
+            .find(|definition| definition.capability_id.as_str() == CODING_EDIT_CAPABILITY_ID)
+            .expect("coding edit tool definition visible");
         assert_eq!(
             edit_tool.parameters["properties"]["input"]["type"].as_str(),
             Some("string"),
-            "omp edit tool schema must pin the single hashline `input` property: {}",
+            "coding edit tool schema must pin the single hashline `input` property: {}",
             edit_tool.parameters
         );
         assert_eq!(
             edit_tool.parameters["required"],
             serde_json::json!(["input"]),
-            "omp edit tool schema must require the hashline `input` property: {}",
+            "coding edit tool schema must require the hashline `input` property: {}",
             edit_tool.parameters
         );
         assert!(
             edit_tool.parameters["properties"].get("path").is_none(),
-            "omp edit tool schema must not advertise a retired `path` property: {}",
+            "coding edit tool schema must not advertise a retired `path` property: {}",
             edit_tool.parameters
         );
         let shell_tool = tool_definitions
@@ -3840,16 +3840,16 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
-                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
-                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(CODING_READ_CAPABILITY_ID)
+                    .expect("coding read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("coding read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         let Resolution::Done(completed) = outcome else {
-            panic!("expected completed omp read invocation");
+            panic!("expected completed coding read invocation");
         };
         let output = capability_io
             .result_output(&completed_loop_result_ref(&completed))
@@ -3874,16 +3874,16 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
-                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
-                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(CODING_READ_CAPABILITY_ID)
+                    .expect("coding read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("workspace omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("workspace coding read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         let Resolution::Done(completed) = outcome else {
-            panic!("expected completed omp read invocation");
+            panic!("expected completed coding read invocation");
         };
         let output = capability_io
             .result_output(&completed_loop_result_ref(&completed))
@@ -4104,7 +4104,7 @@ mod tests {
         let read_descriptor = surface
             .descriptors
             .iter()
-            .find(|descriptor| descriptor.capability_id.as_str() == OMP_READ_CAPABILITY_ID)
+            .find(|descriptor| descriptor.capability_id.as_str() == CODING_READ_CAPABILITY_ID)
             .expect("read descriptor visible");
         assert!(
             !read_descriptor.safe_description.contains("/host")
@@ -4129,7 +4129,7 @@ mod tests {
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let read_tool = tool_definitions
             .iter()
-            .find(|definition| definition.capability_id.as_str() == OMP_READ_CAPABILITY_ID)
+            .find(|definition| definition.capability_id.as_str() == CODING_READ_CAPABILITY_ID)
             .expect("read tool definition visible");
         assert!(
             !read_tool.description.contains("/host")
@@ -4162,14 +4162,14 @@ mod tests {
             .invoke_capability(LoopRequest {
                 activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
-                capability_id: CapabilityId::new(OMP_READ_CAPABILITY_ID)
-                    .expect("omp read capability id"), // safety: built-in capability id is a valid literal.
+                capability_id: CapabilityId::new(CODING_READ_CAPABILITY_ID)
+                    .expect("coding read capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
                 approval_resume: None,
                 auth_resume: None,
             })
             .await
-            .expect("raw workspace omp read invocation"); // safety: test-only assertion in #[cfg(test)] module.
+            .expect("raw workspace coding read invocation"); // safety: test-only assertion in #[cfg(test)] module.
         match outcome {
             Resolution::Done(failure) => {
                 assert_eq!(

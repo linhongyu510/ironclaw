@@ -78,10 +78,11 @@ pub async fn build_runtime_with_resource_governor_for_test(
     crate::runtime::build_runtime_with_resource_governor(input).await
 }
 
-/// Build the production runtime through the OMP first-party registration
-/// seam without carrying test-only state on production binding structs.
+/// Build the production runtime through the coding-tools first-party
+/// registration seam without carrying test-only state on production binding
+/// structs.
 #[cfg(feature = "test-support")]
-pub async fn build_runtime_with_resource_governor_and_omp_for_test(
+pub async fn build_runtime_with_resource_governor_and_coding_tools_for_test(
     input: crate::RebornRuntimeInput,
 ) -> Result<
     (
@@ -90,7 +91,7 @@ pub async fn build_runtime_with_resource_governor_and_omp_for_test(
     ),
     crate::RebornRuntimeError,
 > {
-    crate::runtime::build_runtime_with_resource_governor_and_omp_for_test(input).await
+    crate::runtime::build_runtime_with_resource_governor_and_coding_tools_for_test(input).await
 }
 
 mod automation;

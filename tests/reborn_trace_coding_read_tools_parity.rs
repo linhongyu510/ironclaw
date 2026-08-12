@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID};
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -23,7 +23,7 @@ const BETA_CONTENT: &str = "Project Beta has no marker.";
 
 #[tokio::test]
 async fn reborn_trace_coding_read_tools_parity() {
-    let read_dir = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let read_dir = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let glob = CapabilityId::new(GLOB_CAPABILITY_ID).expect("valid capability id");
     let grep = CapabilityId::new(GREP_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([

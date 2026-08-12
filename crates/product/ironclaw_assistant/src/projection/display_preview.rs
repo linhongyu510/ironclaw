@@ -619,7 +619,7 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    // The omp `read` engine is the single live filesystem-read surface; the
+    // The pinned coding `read` engine is the single live filesystem-read surface; the
     // retired `read_file` builtin no longer exists. `memory_read` and
     // `memory_tree` share the same path/offset/limit summary shape.
     if capability_matches(capability_id, "read")
@@ -643,7 +643,7 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    // The omp `write` engine carries `path` + `content`; summarize the path
+    // The pinned coding `write` engine carries `path` + `content`; summarize the path
     // and the content byte count only — never the content itself. The retired
     // `write_file` builtin no longer exists. `memory_write` keeps its dedicated
     // branch below, so it is excluded here.
@@ -662,7 +662,7 @@ fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<Capab
         }
     }
 
-    // The omp hashline `edit` engine takes a single `input` grammar string
+    // The pinned coding hashline `edit` engine takes a single `input` grammar string
     // that embeds target paths, snapshot tags, and verbatim replacement rows
     // (file contents). Only the grammar byte count is display-safe; the
     // retired `list_dir`/`apply_patch` builtins no longer exist.
@@ -912,7 +912,7 @@ fn primary_arg_subtitle(capability_id: &str, value: &serde_json::Value) -> Optio
     }
 
     // Everything else (read, write, edit, glob, grep, memory_*) → the
-    // path/target. omp `edit` carries no path key (only the hashline `input`
+    // path/target. pinned coding `edit` carries no path key (only the hashline `input`
     // grammar, which is never shown), so its row stays title-only.
     safe_path_subtitle(value)
 }

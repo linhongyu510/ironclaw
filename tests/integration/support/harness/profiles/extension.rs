@@ -1890,7 +1890,7 @@ pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResu
     profile
         .capability_ids
         .push(ironclaw_host_api::ids::CapabilityId::new(
-            ironclaw_host_runtime::OMP_WRITE_CAPABILITY_ID,
+            ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID,
         )?);
     // The lifecycle chain this profile inherits from mounts nothing;
     // `write` needs a workspace to write into.

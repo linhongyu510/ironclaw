@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resolution::Resolution,
 };
-use ironclaw_host_runtime::{OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
     ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
@@ -46,7 +46,7 @@ async fn write_workspace_file_as(
         services,
         user_id,
         "builtin_write",
-        OMP_WRITE_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID,
         serde_json::json!({
             "path": format!("/workspace/{file_name}"),
             "content": body,
@@ -170,7 +170,7 @@ fn assert_tool_succeeded(outcome: &ToolOutcome, label: &str) {
 }
 
 /// Assert the tool completed with a recoverable failure whose model-visible
-/// diagnostic contains `needle`. The omp coding engines error with the
+/// diagnostic contains `needle`. The coding engines error with the
 /// pinned `not found` text when the caller's workspace root does not exist
 /// yet — the v1 tools returned empty results for the same input.
 fn assert_tool_failed_containing(outcome: &ToolOutcome, label: &str, needle: &str) {
@@ -346,7 +346,7 @@ fn provider_tool_call(name: &str, arguments: serde_json::Value) -> ProviderToolC
     }
 }
 
-/// A brand-new caller has no workspace subtree on disk yet. The omp engines
+/// A brand-new caller has no workspace subtree on disk yet. The coding engines
 /// fail with the pinned `not found` text until some path creates the
 /// directory; the caller's FIRST write must succeed, create missing parents,
 /// and make the workspace visible to the very next read/glob.
@@ -372,7 +372,7 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
         &services,
         "newcomer",
         "builtin_read",
-        OMP_READ_CAPABILITY_ID,
+        CODING_READ_CAPABILITY_ID,
         serde_json::json!({ "path": "/workspace" }),
     )
     .await;

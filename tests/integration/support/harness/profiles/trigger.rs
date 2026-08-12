@@ -6,7 +6,7 @@ use ironclaw_host_api::{
     mount::{MountPermissions, MountView},
 };
 use ironclaw_host_runtime::{
-    OMP_WRITE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    CODING_WRITE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 
@@ -46,7 +46,7 @@ pub(crate) fn trigger_management_with_gated_write_profile() -> HarnessResult<Too
     let mut profile = trigger_management_tools_profile()?;
     profile
         .capability_ids
-        .push(CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?);
+        .push(CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?);
     profile.effect_kinds.push(EffectKind::WriteFilesystem);
     profile.options = HostRuntimeHarnessOptions::new(
         workspace_mounts(MountPermissions::read_write_list_delete())?,

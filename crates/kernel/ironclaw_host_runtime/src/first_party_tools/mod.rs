@@ -5,13 +5,13 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
+mod coding;
 mod echo;
 mod http;
 mod http_output;
 mod json;
 mod memory;
 mod model_visible_output;
-mod omp;
 mod outbound_deliver;
 mod reply_attachment;
 mod schemas;
@@ -54,6 +54,12 @@ pub(crate) use self::schemas::{
     resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
 };
 
+use coding::coding_manifests;
+pub use coding::{
+    CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID, CODING_GREP_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools, coding_package,
+    insert_coding_handlers,
+};
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use ironclaw_memory::{
@@ -66,11 +72,6 @@ pub use memory::{
     invocation_for_request as memory_invocation_for_request, map_memory_service_error,
     memory_tool_profiles, normalize_memory_tool_input, register_memory_tool_handler,
     register_native_memory_tools,
-};
-use omp::omp_coding_manifests;
-pub use omp::{
-    OMP_EDIT_CAPABILITY_ID, OMP_GLOB_CAPABILITY_ID, OMP_GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID,
-    OMP_WRITE_CAPABILITY_ID, OmpCodingTools, insert_omp_coding_handlers, omp_coding_package,
 };
 pub use outbound_deliver::OUTBOUND_DELIVER_CAPABILITY_ID;
 pub use reply_attachment::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID;
@@ -128,8 +129,9 @@ pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<Extensi
     }
     allowlist
 }
-// Canonical capability ids of the omp `glob` and `grep` engines (`omp.rs`
-// aliases these as `OMP_GLOB_CAPABILITY_ID` / `OMP_GREP_CAPABILITY_ID`). The
+// Canonical capability ids of the pinned `glob` and `grep` engines
+// (`coding.rs` aliases these as `CODING_GLOB_CAPABILITY_ID` /
+// `CODING_GREP_CAPABILITY_ID`). The
 // v1 coding ids they replaced (`builtin.read_file`, `builtin.write_file`,
 // `builtin.list_dir`, `builtin.apply_patch`) are retired.
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
@@ -186,7 +188,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     outbound_deliver::manifest()?,
                     reply_attachment::manifest()?,
                 ];
-                capabilities.extend(omp_coding_manifests()?);
+                capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities.extend(trigger_management::manifests()?);
                 capabilities
@@ -204,8 +206,8 @@ pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
     // Process restrictions are applied after assembling the canonical
-    // omp-first builtin package.
-    omp_coding_package(process_backend)
+    // coding-first builtin package.
+    coding_package(process_backend)
 }
 
 fn restrict_package_for_process_backend(
@@ -471,7 +473,7 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
-    insert_omp_coding_handlers(&mut registry)?;
+    insert_coding_handlers(&mut registry)?;
     registry.insert_handler(
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
         handler.clone(),
@@ -638,9 +640,9 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 trace_commons::dispatch_account_login_link(&request).await?,
                 None,
             ),
-            // The omp coding surface (`builtin.read`/`write`/`edit`/`glob`/
-            // `grep`) is dispatched by `OmpCodingTools`, registered through
-            // `insert_omp_coding_handlers`; this handler owns no coding ids.
+            // The pinned coding surface (`builtin.read`/`write`/`edit`/`glob`/
+            // `grep`) is dispatched by `CodingTools`, registered through
+            // `insert_coding_handlers`; this handler owns no coding ids.
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -682,8 +684,8 @@ pub(super) fn bounded_input_size(
     bounded_input_size_with_max(input, MAX_FIRST_PARTY_INPUT_BYTES)
 }
 
-/// Bounded-input check with an explicit byte cap. The omp adapter uses this
-/// with its own metadata table (`first_party_tools::omp`).
+/// Bounded-input check with an explicit byte cap. The coding adapter uses this
+/// with its own metadata table (`first_party_tools::coding`).
 pub(super) fn bounded_input_size_with_max(
     input: &serde_json::Value,
     max_bytes: usize,
@@ -827,7 +829,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_builtin_package_exposes_only_omp_coding_and_no_result_reader() {
+    fn canonical_builtin_package_exposes_only_coding_and_no_result_reader() {
         let package = builtin_first_party_package().expect("canonical built-in package");
         let provider_names = package
             .capabilities
@@ -842,7 +844,7 @@ mod tests {
         for name in ["read", "write", "edit", "glob", "grep"] {
             assert!(
                 provider_names.contains(name),
-                "canonical package must expose omp tool {name}"
+                "canonical package must expose coding tool {name}"
             );
         }
         let capability_ids = package

@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     mount::MountPermissions,
     runtime::RuntimeKind,
 };
-use ironclaw_host_runtime::{OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -65,8 +65,8 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
     ));
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(OMP_WRITE_CAPABILITY_ID)?,
-            CapabilityId::new(OMP_READ_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
             CapabilityId::new("github.get_repo")?,
         ],
         effect_kinds: standalone_all_effects(),

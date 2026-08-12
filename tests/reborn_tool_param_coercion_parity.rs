@@ -128,7 +128,7 @@ async fn reborn_provider_tool_scalar_arguments_are_schema_coerced_before_file_di
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![
                 // `hidden` is a boolean schema field: the stringified "true"
-                // must be coerced before the omp glob engine reads it,
+                // must be coerced before the pinned coding glob engine reads it,
                 // otherwise the dotfile is filtered out (as_bool("true") is
                 // None -> default false) and the observation below fails.
                 RebornScriptedProviderToolCall::new(
@@ -245,7 +245,8 @@ fn tool_result_count(request: &ironclaw_loop_host::HostManagedModelRequest) -> u
 }
 
 /// Runs the async test body on a dedicated 16 MiB-stack thread, mirroring
-/// `tests/integration/reborn_omp_registration.rs`'s `run_async_test_with_stack`
+/// `tests/integration/reborn_integration_coding_registration.rs`'s
+/// `run_async_test_with_stack`
 /// (and the QA smoke suite): the file-profile harness build's async
 /// state-machine chain exceeds the default 2 MiB libtest thread stack.
 fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)

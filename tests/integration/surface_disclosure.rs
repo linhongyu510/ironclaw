@@ -35,8 +35,8 @@ use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
-/// Model-visible tool name for `builtin.read` (the omp provider name is the
-/// bare `read`).
+/// Model-visible tool name for `builtin.read` (the pinned coding provider
+/// name is the bare `read`).
 const FLAT_READ_TOOL_NAME: &str = "read";
 
 /// Flat wire name for `builtin.shell` (same `.` -> `__` encoding).

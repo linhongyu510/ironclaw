@@ -2,7 +2,7 @@
 //! of the `ToolsProfile` pattern (see `harness/options.rs`).
 
 use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountPermissions};
-use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, OMP_READ_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts};
@@ -13,7 +13,7 @@ use super::super::{HarnessResult, HostRuntimeCapabilityHarness, workspace_mounts
 pub(crate) fn coding_read_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![
-            CapabilityId::new(OMP_READ_CAPABILITY_ID)?,
+            CapabilityId::new(CODING_READ_CAPABILITY_ID)?,
             CapabilityId::new(GLOB_CAPABILITY_ID)?,
             CapabilityId::new(GREP_CAPABILITY_ID)?,
         ],

@@ -7,7 +7,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_host_runtime::{OMP_READ_CAPABILITY_ID, OMP_WRITE_CAPABILITY_ID};
+use ironclaw_host_runtime::{CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID};
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
@@ -22,8 +22,8 @@ const EXPECTED_CONTENT: &str = "Hello, E2E test!";
 
 #[tokio::test]
 async fn reborn_trace_file_tools_parity() {
-    let write = CapabilityId::new(OMP_WRITE_CAPABILITY_ID).expect("valid capability id");
-    let read = CapabilityId::new(OMP_READ_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
+    let read = CapabilityId::new(CODING_READ_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(
@@ -103,7 +103,7 @@ async fn reborn_trace_file_tools_parity() {
 
 #[tokio::test]
 async fn reborn_trace_file_write_standalone_approval_gate_bubbles() {
-    let write = CapabilityId::new(OMP_WRITE_CAPABILITY_ID).expect("valid capability id");
+    let write = CapabilityId::new(CODING_WRITE_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
             calls: vec![RebornScriptedProviderToolCall::new(

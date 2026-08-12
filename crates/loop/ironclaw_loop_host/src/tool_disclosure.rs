@@ -1046,8 +1046,19 @@ fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescripto
         safe_name: definition.name.to_string(),
         safe_description: definition.description.clone(),
         description_trust: Default::default(),
-        concurrency_hint: ConcurrencyHint::Exclusive,
+        concurrency_hint: bridge_concurrency_hint(definition.name.as_str()),
         parameters_schema: definition.parameters.clone(),
+    }
+}
+
+/// Search and describe only inspect the per-turn disclosure catalog. An
+/// unresolved `tool_call` can target any capability, so its bridge fallback
+/// remains conservative; resolved calls carry the target capability id and
+/// therefore use that target's own descriptor hint.
+fn bridge_concurrency_hint(name: &str) -> ConcurrencyHint {
+    match name {
+        TOOL_SEARCH_NAME | TOOL_DESCRIBE_NAME => ConcurrencyHint::SafeForParallel,
+        _ => ConcurrencyHint::Exclusive,
     }
 }
 
@@ -1065,7 +1076,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
 }
 
 fn estimate_definition_tokens(definition: &ProviderToolDefinition) -> u32 {
-    crate::context_shadow::estimate_tokens(&canonical_tool_schema_json(definition))
+    crate::estimate_tokens_from_chars(&canonical_tool_schema_json(definition)).saturating_as_u32()
 }
 
 fn canonical_tool_schema_json(definition: &ProviderToolDefinition) -> String {
@@ -1138,11 +1149,11 @@ mod tests {
                 "skill_list",
                 ironclaw_host_runtime::SKILL_LIST_CAPABILITY_ID,
             ),
-            ("read", ironclaw_host_runtime::OMP_READ_CAPABILITY_ID),
-            ("write", ironclaw_host_runtime::OMP_WRITE_CAPABILITY_ID),
-            ("edit", ironclaw_host_runtime::OMP_EDIT_CAPABILITY_ID),
-            ("glob", ironclaw_host_runtime::OMP_GLOB_CAPABILITY_ID),
-            ("grep", ironclaw_host_runtime::OMP_GREP_CAPABILITY_ID),
+            ("read", ironclaw_host_runtime::CODING_READ_CAPABILITY_ID),
+            ("write", ironclaw_host_runtime::CODING_WRITE_CAPABILITY_ID),
+            ("edit", ironclaw_host_runtime::CODING_EDIT_CAPABILITY_ID),
+            ("glob", ironclaw_host_runtime::CODING_GLOB_CAPABILITY_ID),
+            ("grep", ironclaw_host_runtime::CODING_GREP_CAPABILITY_ID),
             ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
@@ -1217,7 +1228,7 @@ mod tests {
     #[test]
     fn catalog_marks_provider_encoded_builtin_names_core_by_capability_id() {
         let definitions = vec![ProviderToolDefinition {
-            capability_id: CapabilityId::new(ironclaw_host_runtime::OMP_READ_CAPABILITY_ID)
+            capability_id: CapabilityId::new(ironclaw_host_runtime::CODING_READ_CAPABILITY_ID)
                 .expect("valid capability id"),
             name: ProviderToolName::new("builtin__read").expect("valid provider tool name"),
             description: "Read files or stored artifacts from the workspace.".to_string(),

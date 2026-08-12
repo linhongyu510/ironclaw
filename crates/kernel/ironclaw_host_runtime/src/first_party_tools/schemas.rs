@@ -832,38 +832,38 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
-        _ => return resolve_omp_input_schema_ref(reference),
+        _ => return resolve_coding_input_schema_ref(reference),
     })
 }
 
-/// Resolve the input schema refs of the omp coding capabilities
-/// (`schemas/builtin/omp.*.input.v1.json`, issue #7392 slice 3) from the
+/// Resolve the input schema refs of the pinned coding capabilities
+/// (`schemas/builtin/coding.*.input.v1.json`, issue #7392 slice 3) from the
 /// pinned crate assets byte-identical to
-/// `tests/fixtures/omp_coding_contract/schemas/` (verified by the
-/// `omp_registration_assets_byte_match_pinned_fixtures` crate test in
+/// `tests/fixtures/pinned_coding_contract/schemas/` (verified by the
+/// pinned-fixtures byte-match crate test in
 /// `ironclaw_extension_support`).
 ///
 /// ⚠️ TEMPORARY benchmark override (revert at cutover): production packages
-/// now declare these refs (the omp surface ships in every build for the
+/// now declare these refs (the coding surface ships in every build for the
 /// /benchmark panel, issue #7392), so this arm compiles unconditionally.
-/// After the atomic cutover the omp schemas become the stock schemas and
+/// After the atomic cutover the pinned coding schemas become the stock schemas and
 /// this separate arm goes away.
-fn resolve_omp_input_schema_ref(reference: &str) -> Option<Value> {
+fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
     let raw = match reference {
-        "schemas/builtin/omp.read.input.v1.json" => {
-            ironclaw_extension_support::coding::omp::omp_assets::OMP_READ_SCHEMA
+        "schemas/builtin/coding.read.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_SCHEMA
         }
-        "schemas/builtin/omp.write.input.v1.json" => {
-            ironclaw_extension_support::coding::omp::omp_assets::OMP_WRITE_SCHEMA
+        "schemas/builtin/coding.write.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_WRITE_SCHEMA
         }
-        "schemas/builtin/omp.edit.input.v1.json" => {
-            ironclaw_extension_support::coding::omp::omp_assets::OMP_EDIT_SCHEMA
+        "schemas/builtin/coding.edit.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_EDIT_SCHEMA
         }
-        "schemas/builtin/omp.glob.input.v1.json" => {
-            ironclaw_extension_support::coding::omp::omp_assets::OMP_GLOB_SCHEMA
+        "schemas/builtin/coding.glob.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GLOB_SCHEMA
         }
-        "schemas/builtin/omp.grep.input.v1.json" => {
-            ironclaw_extension_support::coding::omp::omp_assets::OMP_GREP_SCHEMA
+        "schemas/builtin/coding.grep.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_SCHEMA
         }
         _ => return None,
     };

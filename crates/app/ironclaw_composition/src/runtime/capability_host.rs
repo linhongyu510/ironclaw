@@ -1292,7 +1292,7 @@ struct FirstLookResultPreview {
 
 /// Builds the inline first-look preview from the same serialized bytes the
 /// durable artifact stores, so a truncated preview's `next_offset` matches
-/// the selector offset used when the omp `read` tool reads the artifact URI.
+/// the selector offset used when the coding `read` tool reads the artifact URI.
 fn first_look_result_preview(serialized: &[u8]) -> Option<FirstLookResultPreview> {
     let Ok(full_text) = std::str::from_utf8(serialized) else {
         return None;
