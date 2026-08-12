@@ -14,7 +14,10 @@ use ironclaw_turns::TurnStatus;
 
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
-use super::{RebornRuntimeError, build_default_identity_context_source, build_reborn_runtime};
+use super::{
+    RebornRuntimeError, SystemPromptProtocols,
+    build_default_identity_context_source_with_protocols, build_reborn_runtime,
+};
 
 #[derive(Debug)]
 struct RecordingGateway {
@@ -50,11 +53,13 @@ fn runtime_prompt_caller_accepts_seeded_default_prompt_under_system_prompts() {
     )
     .expect("prompt seeds");
 
-    let _source = build_default_identity_context_source(
+    let _source = build_default_identity_context_source_with_protocols(
         Some(system_content_root),
         Some(prompt_path),
-        true,
-        false,
+        SystemPromptProtocols {
+            disclosure: true,
+            ..SystemPromptProtocols::default()
+        },
     )
     .expect("runtime prompt caller should accept a default prompt under system/prompts");
 }
@@ -112,6 +117,20 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
                     .contains("`extension_register_hosted_mcp` is also visible")
         }),
         "bridged disclosure should inject a visibility-conditional discovery protocol"
+    );
+    // The standalone runtime binds the native memory provider, so the model's
+    // surface carries `ironclaw.memory.*`. Pinned at the caller because the
+    // gate is composed here (`memory_protocol_active` in `runtime.rs`) from
+    // whether a provider actually resolved — the unit tests below only prove
+    // the flag is honored once someone sets it, not that it tracks the real
+    // binding. A protocol naming concrete tools must not outlive those tools.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("Persistent Memory")
+                && message.content.contains("ironclaw.memory.write")
+        }),
+        "a runtime with a bound memory provider should inject the persistent-memory protocol"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
