@@ -94,9 +94,10 @@ pub fn render_vendor_call(
     config: &[(String, String)],
 ) -> Result<RestrictedEgressRequest, ChannelError> {
     let path = substitute(&recipe.path, config);
-    if !path.starts_with('/') {
+    if !path.starts_with('/') || !crate::egress::channel_path_shape_is_safe(&path) {
         return Err(ChannelError::VendorWiring {
-            reason: "vendor call path must be rooted".to_string(),
+            reason: "vendor call path must be rooted and contain only declared path structure"
+                .to_string(),
         });
     }
     let body = match &recipe.body {
@@ -316,6 +317,25 @@ mod tests {
     }
 
     #[test]
+    fn rendered_vendor_paths_cannot_add_query_fragment_or_traversal() {
+        for path in [
+            "/setWebhook?override=1",
+            "/setWebhook#fragment",
+            "/files/%2e%2e%2fsecret",
+        ] {
+            let mut recipe = registration_recipe();
+            recipe.path = path.to_string();
+            assert!(
+                matches!(
+                    render_vendor_call(&recipe, "api.telegram.org", None, &config()),
+                    Err(ChannelError::VendorWiring { .. })
+                ),
+                "rendered path must be rejected: {path}"
+            );
+        }
+    }
+
+    #[test]
     fn a_bodyless_recipe_sends_no_body_and_no_content_type() {
         let recipe = ChannelVendorCallRecipe {
             method: ChannelVendorCallMethod::Post,
@@ -353,6 +373,25 @@ mod tests {
             ChannelError::VendorWiring { reason }
                 if reason == "registration returned status 503"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_success_vendor_status_completes_the_vendor_call() {
+        let egress = ScriptedEgress(Ok(RestrictedEgressResponse {
+            status: 204,
+            body: Vec::new(),
+        }));
+
+        run_vendor_call(
+            &registration_recipe(),
+            "api.telegram.org",
+            None,
+            &config(),
+            &egress,
+            "registration",
+        )
+        .await
+        .expect("2xx completes the lifecycle vendor call");
     }
 
     #[tokio::test]

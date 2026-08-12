@@ -95,7 +95,13 @@ export function useDevicePush({ extensionId } = {}) {
 
   const enrollMutation = useMutation({
     mutationFn: () => {
+      if (!extensionId) {
+        throw new Error("session channel extension is unavailable");
+      }
       const vapidPublicKey = statusQuery.data?.detail?.vapid_public_key;
+      if (!vapidPublicKey) {
+        throw new Error("notification setup key is unavailable");
+      }
       return enrollThisBrowser({ vapidPublicKey });
     },
     onSuccess: (nextState) => refreshAfterAction(nextState),

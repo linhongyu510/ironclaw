@@ -184,6 +184,7 @@ function renderChannelRowLabel({
  */
 function SessionChannelRow({ row, isSelected, isEditingLocked, onToggle, t }) {
   const device = useDevicePush({ extensionId: row.channel });
+  const isPending = device.isStatusLoading;
   const enrolled = device.subscriptionCount > 0;
   return (
     <div className="flex flex-col gap-2">
@@ -192,12 +193,14 @@ function SessionChannelRow({ row, isSelected, isEditingLocked, onToggle, t }) {
         displayName: row.display_name,
         description: row.description,
         isSelected,
-        disabled: isEditingLocked || (!enrolled && !isSelected),
-        muted: !enrolled,
-        badgeTone: enrolled ? "success" : "warning",
-        badgeLabel: enrolled
-          ? t("automations.notificationChannels.pill.ready")
-          : t("automations.notificationChannels.pill.unavailable"),
+        disabled: isEditingLocked || (!isSelected && (isPending || !enrolled)),
+        muted: !isPending && !enrolled,
+        badgeTone: isPending ? "neutral" : enrolled ? "success" : "warning",
+        badgeLabel: isPending
+          ? t("automations.notificationChannels.devicePush.checking")
+          : enrolled
+            ? t("automations.notificationChannels.pill.ready")
+            : t("automations.notificationChannels.pill.unavailable"),
         onToggle,
       })}
       <DevicePushBlock device={device} t={t} />

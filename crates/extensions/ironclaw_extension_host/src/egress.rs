@@ -140,6 +140,9 @@ impl PolicyEnforcedChannelEgress {
         request: RestrictedEgressRequest,
     ) -> Result<ApprovedChannelEgress, RestrictedEgressError> {
         let url = url::Url::parse(&request.url).map_err(|_| RestrictedEgressError::PolicyDenied)?;
+        if !channel_url_shape_is_safe(&url) {
+            return Err(RestrictedEgressError::PolicyDenied);
+        }
         let scheme = match url.scheme() {
             "https" => NetworkScheme::Https,
             _ => return Err(RestrictedEgressError::PolicyDenied),
@@ -248,6 +251,32 @@ impl PolicyEnforcedChannelEgress {
             timeout_ms: CHANNEL_EGRESS_TIMEOUT_MS,
         })
     }
+}
+
+/// URL structure authorized by a channel egress declaration.
+///
+/// Declarations grant a scheme, host, method, and path/path-prefix only. Query,
+/// fragment, userinfo, and explicit-port components are therefore never
+/// implicitly authorized. Percent-decoded path segments must also remain one
+/// segment and cannot become traversal instructions at a downstream parser.
+fn channel_url_shape_is_safe(url: &url::Url) -> bool {
+    url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && channel_path_shape_is_safe(url.path())
+}
+
+pub(crate) fn channel_path_shape_is_safe(path: &str) -> bool {
+    !path.contains(['?', '#'])
+        && path.split('/').all(|segment| {
+            let decoded = ironclaw_network::percent_decode_url_component_lossy(segment);
+            decoded != "."
+                && decoded != ".."
+                && !decoded.as_bytes().contains(&b'/')
+                && !decoded.as_bytes().contains(&b'\\')
+        })
 }
 
 #[async_trait]
@@ -667,6 +696,33 @@ mod tests {
             .expect_err("oversized body must be denied");
         assert!(matches!(error, RestrictedEgressError::PolicyDenied));
         assert_eq!(transport.approved.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn url_components_outside_the_declared_path_are_rejected_before_transport() {
+        let mut declared = declared_vendor();
+        declared[0].path_prefixes = vec!["/files/".to_string()];
+        let (egress, transport) = egress_over(declared);
+
+        for url in [
+            "https://vendor.example/files/report.pdf?download=1",
+            "https://vendor.example/files/report.pdf#fragment",
+            "https://user@vendor.example/files/report.pdf",
+            "https://vendor.example:8443/files/report.pdf",
+            "https://vendor.example/files/%2e%2e%2fsecret",
+            "https://vendor.example/files/%2e%2e%5csecret",
+        ] {
+            let error = egress
+                .send(post(url))
+                .await
+                .expect_err("undeclared URL structure must fail closed");
+            assert!(
+                matches!(error, RestrictedEgressError::PolicyDenied),
+                "unexpected error for {url}: {error:?}"
+            );
+        }
+
+        assert!(transport.approved.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

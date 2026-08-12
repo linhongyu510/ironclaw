@@ -639,7 +639,7 @@ test("NotificationChannelsPanel does not hardcode a catalog row's badge to Ready
 function sessionChannelTarget() {
   return {
     target: {
-      target_id: "session-channel",
+      target_id: "web-push",
       display_name: "Web app",
       description: "Browser push notifications to your enrolled devices",
       channel: "session-channel",
@@ -739,9 +739,31 @@ test("NotificationChannelsPanel toggles the session-channel target into the full
   assert.equal(saved.length, 1);
   assert.deepEqual(
     [...saved[0]],
-    ["session-channel"],
-    "Save posts the session channel's id in target_ids",
+    ["web-push"],
+    "Save posts the persisted catalog target id, not the session extension id",
   );
+});
+
+test("SessionChannelRow stays pending while account enrollment status loads", () => {
+  const harness = createHarness({
+    devicePush: fakeDevice({ isStatusLoading: true, subscriptionCount: 0 }),
+  });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  const scalars = collectScalars(rendered);
+
+  assert.equal(checkbox.disabled, true, "pending setup evidence cannot be selected yet");
+  assert.ok(
+    scalars.includes("Checking this browser's notification support…"),
+    "the row must present pending evidence while setup status loads",
+  );
+  assert.ok(!scalars.includes("Unavailable"), "loading is not evidence of unavailability");
 });
 
 test("SessionChannelRow cannot be selected when no browser is enrolled", () => {
