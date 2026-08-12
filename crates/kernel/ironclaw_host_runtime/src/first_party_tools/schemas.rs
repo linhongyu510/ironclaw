@@ -899,7 +899,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
-            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
+            "description": "Create a scheduled trigger. Use either a legacy `prompt` or a structured `execution_contract`, never both.",
             "properties": {
                 "name": {
                     "type": "string",
@@ -908,6 +908,36 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "prompt": {
                     "type": "string",
                     "description": "Prompt submitted when the trigger fires, written for a future run with no memory of this conversation. Write the whole task, including any delivery the user wants: name the destination in an explicit step by pinned target id from builtin__outbound_delivery_targets_list, picked while the user is present (for example \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description a fire would have to look up). A bare \"send me\" means the surface the user is asking from — never ask which channel: from a channel conversation, default to the channel this conversation is on and pin its target id; from the web app with no external destination named there is no delivery step: the fire's final reply IS the delivery (the run thread records it), so end the prompt with the reply itself and write no delivery step; only an explicit ask to be notified in the browser makes the catalog's browser-push target a destination to pin. When the user names an external destination (\"send me this in my messaging app\"), that IS a delivery step even from the web app: pin its target id and write the builtin__outbound_deliver step — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver, never through integration messaging tools, which act as the user. Each fire's final reply is recorded in the routine's own run thread automatically, so a fire that makes no delivery call delivers nothing externally. Do not describe creating, scheduling, or configuring the trigger. Runtime validation caps UTF-8 content at 32768 bytes."
+                },
+                "execution_contract": {
+                    "type": "object",
+                    "description": "Versioned execution contract rendered into a frozen future-run prompt. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "properties": {
+                        "version": { "const": 1 },
+                        "goal": { "type": "string", "minLength": 1 },
+                        "success_criteria": {
+                            "type": "array", "minItems": 1, "maxItems": 32,
+                            "items": { "type": "string", "minLength": 1 }
+                        },
+                        "output_instructions": { "type": "string", "minLength": 1 },
+                        "no_result_text": { "type": "string", "minLength": 1 },
+                        "policy": {
+                            "type": "object",
+                            "properties": {
+                                "allowed_capability_ids": {
+                                    "type": ["array", "null"], "maxItems": 64,
+                                    "items": { "type": "string" }
+                                },
+                                "required_skills": {
+                                    "type": "array", "maxItems": 8,
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text"],
+                    "additionalProperties": false
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -935,7 +965,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     ]
                 }
             },
-            "required": ["name", "prompt", "schedule"],
+            "required": ["name", "schedule"],
+            "oneOf": [
+                { "required": ["prompt"], "not": { "required": ["execution_contract"] } },
+                { "required": ["execution_contract"], "not": { "required": ["prompt"] } }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_list.input.v1.json" => json!({

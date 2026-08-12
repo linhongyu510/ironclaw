@@ -1,7 +1,67 @@
 use chrono::{Datelike, TimeZone};
 use serde_json::{from_value, json, to_value};
 
+use ironclaw_host_api::{
+    execution_policy::{RequiredSkill, TurnExecutionPolicy},
+    ids::CapabilityId,
+};
+
 use super::*;
+
+#[test]
+fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec![
+            "Include every failed payment exactly once.".to_string(),
+            "Include customer, amount, currency, and failure reason.".to_string(),
+        ],
+        output_instructions: "Return a Markdown table and total.".to_string(),
+        no_result_text: "No failed payments were found yesterday.".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![
+                CapabilityId::new("stripe.list_payments").expect("capability id"),
+            ]),
+            required_skills: vec![
+                RequiredSkill::new("payment-operations").expect("required skill"),
+            ],
+        },
+    };
+
+    spec.validate().expect("valid execution spec");
+
+    assert_eq!(
+        spec.render_prompt(),
+        "## Goal\n\nIdentify yesterday's failed payments.\n\n## Success criteria\n\n- Include every failed payment exactly once.\n- Include customer, amount, currency, and failure reason.\n\n## Output requirements\n\nReturn a Markdown table and total.\n\n## When there is nothing to report\n\nNo failed payments were found yesterday.\n"
+    );
+}
+
+#[test]
+fn structured_execution_spec_rejects_duplicate_policy_references() {
+    let capability = CapabilityId::new("stripe.list_payments").expect("capability id");
+    let skill = RequiredSkill::new("payment-operations").expect("required skill");
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Inspect payments".to_string(),
+        success_criteria: vec!["Report every failure".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "No failures".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![capability.clone(), capability]),
+            required_skills: vec![skill.clone(), skill],
+        },
+    };
+
+    let error = spec.validate().expect_err("duplicates must be rejected");
+    assert!(matches!(
+        error,
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
+            ..
+        }
+    ));
+}
 
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0)
@@ -52,6 +112,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,

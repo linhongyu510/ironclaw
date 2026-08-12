@@ -228,6 +228,9 @@ fn skill_activation_host_error(error: SkillActivationSelectionError) -> AgentLoo
         SkillActivationSelectionError::ContextBudgetExceeded => {
             AgentLoopHostErrorKind::BudgetExceeded
         }
+        SkillActivationSelectionError::RequiredSkillUnavailable { .. } => {
+            AgentLoopHostErrorKind::InvalidInvocation
+        }
         SkillActivationSelectionError::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
         SkillActivationSelectionError::Internal => AgentLoopHostErrorKind::Internal,
     };

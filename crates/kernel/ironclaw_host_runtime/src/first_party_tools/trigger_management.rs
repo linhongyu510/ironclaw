@@ -7,15 +7,17 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
     error::HostApiError,
+    execution_policy::TurnExecutionPolicy,
     ids::CapabilityId,
     invocation::InvocationOrigin,
     resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
-    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
-    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
+    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerExecutionSpec,
+    TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord,
+    TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind, TriggerState,
+    active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,6 +27,7 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
+use super::trigger_creation::{TriggerCreateInput, TriggerDefinitionInput};
 use super::{
     FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_input_size, bounded_output_bytes,
     first_party_capability_manifest, input_error, resource_profile,
@@ -177,6 +180,14 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -333,7 +344,7 @@ fn origin_forbids_routine_mutation(origin: Option<&InvocationOrigin>) -> bool {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum TriggerScheduleInput {
+pub(super) enum TriggerScheduleInput {
     Cron {
         expression: String,
         timezone: String,
@@ -345,20 +356,20 @@ enum TriggerScheduleInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TriggerScheduleInputKind {
+pub(super) enum TriggerScheduleInputKind {
     Cron,
     Once,
 }
 
 impl TriggerScheduleInput {
-    fn kind(&self) -> TriggerScheduleInputKind {
+    pub(super) fn kind(&self) -> TriggerScheduleInputKind {
         match self {
             Self::Cron { .. } => TriggerScheduleInputKind::Cron,
             Self::Once { .. } => TriggerScheduleInputKind::Once,
         }
     }
 
-    fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
+    pub(super) fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
         match self {
             Self::Cron {
                 expression,
@@ -367,14 +378,6 @@ impl TriggerScheduleInput {
             Self::Once { at, timezone } => TriggerSchedule::once_from_local(&at, &timezone),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TriggerCreateInput {
-    name: String,
-    prompt: String,
-    schedule: TriggerScheduleInput,
 }
 
 #[derive(Deserialize)]
@@ -409,6 +412,21 @@ async fn create_trigger(
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
+    let (prompt, execution_spec) = match input.definition {
+        TriggerDefinitionInput::Legacy { prompt } => (prompt, None),
+        TriggerDefinitionInput::Structured { execution_contract } => {
+            execution_contract
+                .validate()
+                .map_err(trigger_record_error)?;
+            reject_forbidden_scheduled_capabilities(&execution_contract)?;
+            create_hook
+                .validate_execution_policy(scope, &execution_contract.policy)
+                .await
+                .map_err(trigger_record_error)?;
+            let prompt = execution_contract.render_prompt();
+            (prompt, Some(execution_contract))
+        }
+    };
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -418,7 +436,8 @@ async fn create_trigger(
         name: input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        prompt: input.prompt,
+        prompt,
+        execution_spec,
         // Retired stored routing (spec §8): a routine delivers externally only
         // by calling `builtin.outbound_deliver` from its own prompt, so nothing
         // here ever seals a delivery route again. The field survives only to
@@ -454,6 +473,33 @@ async fn create_trigger(
     Ok(json!({
         "trigger": trigger_output(&record, &[], None),
     }))
+}
+
+fn reject_forbidden_scheduled_capabilities(
+    spec: &TriggerExecutionSpec,
+) -> Result<(), FirstPartyCapabilityError> {
+    const FORBIDDEN: &[&str] = &[
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+    ];
+    let forbidden = spec
+        .policy
+        .allowed_capability_ids
+        .iter()
+        .flatten()
+        .find(|capability| FORBIDDEN.contains(&capability.as_str()));
+    if let Some(capability) = forbidden {
+        return Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::InputEncode,
+            format!(
+                "scheduled routines cannot use capability {}",
+                capability.as_str()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 async fn list_triggers(
@@ -603,6 +649,7 @@ fn trigger_output(
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
+        "execution_contract": record.execution_spec,
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -668,13 +715,22 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
 
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
-    required_string(root, "prompt", "prompt", "string", &mut issues);
     unexpected_fields(
         root,
-        &["name", "prompt", "schedule"],
+        &["name", "prompt", "execution_contract", "schedule"],
         "unexpected_field",
         &mut issues,
     );
+    match (root.get("prompt"), root.get("execution_contract")) {
+        (Some(_), Some(_)) => issues
+            .push(invalid_value("input").expected("exactly one of prompt or execution_contract")),
+        (None, None) => {
+            issues.push(missing_required("prompt").expected("prompt or execution_contract"))
+        }
+        (Some(_), None) => required_string(root, "prompt", "prompt", "string", &mut issues),
+        (None, Some(Value::Object(_))) => {}
+        (None, Some(_)) => issues.push(type_mismatch("execution_contract", "object")),
+    }
 
     let Some(schedule) = root.get("schedule") else {
         issues.push(missing_required("schedule").expected("object with kind"));

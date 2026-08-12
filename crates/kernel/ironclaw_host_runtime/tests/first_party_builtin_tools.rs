@@ -686,7 +686,8 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         .and_then(Value::as_str)
         .expect("trigger_create schema must describe the top-level input shape");
     assert!(
-        root_description.contains("top-level fields `name`, `prompt`, and `schedule`"),
+        root_description.contains("legacy `prompt` or a structured `execution_contract`")
+            && root_description.contains("never both"),
         "trigger_create schema should steer models to the top-level trigger shape; got {root_description:?}"
     );
 

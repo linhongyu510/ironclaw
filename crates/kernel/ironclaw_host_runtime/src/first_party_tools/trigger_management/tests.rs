@@ -174,6 +174,96 @@ fn trigger_create_input_accepts_cron_schedule() {
 }
 
 #[test]
+fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "required_skills": ["payment-operations"]
+            }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
+    assert!(matches!(
+        parsed.definition,
+        TriggerDefinitionInput::Structured { .. }
+    ));
+}
+
+#[test]
+fn trigger_create_input_rejects_both_or_neither_definition() {
+    let both = serde_json::json!({
+        "name": "invalid",
+        "prompt": "legacy",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failures",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failures"
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+    let neither = serde_json::json!({
+        "name": "invalid",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    assert!(serde_json::from_value::<TriggerCreateInput>(both).is_err());
+    assert!(serde_json::from_value::<TriggerCreateInput>(neither).is_err());
+}
+
+#[tokio::test]
+async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("structured-trigger-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "allowed_capability_ids": ["stripe.list_payments"] }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    let output = create_trigger(
+        &repository,
+        &NoopTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect("structured trigger created");
+    assert_eq!(output["trigger"]["execution_contract"]["version"], 1);
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    let record = records.first().expect("created record");
+    let spec = record.execution_spec.as_ref().expect("stored contract");
+    assert_eq!(record.prompt, spec.render_prompt());
+    assert!(record.prompt.contains("## Success criteria"));
+}
+
+#[test]
 fn trigger_create_input_rejects_missing_schedule() {
     let input = serde_json::json!({
         "name": "daily",
@@ -281,6 +371,7 @@ fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
             timezone: "UTC".to_string(),
         },
         prompt: "check mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: now,

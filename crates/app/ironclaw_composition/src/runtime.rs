@@ -751,6 +751,9 @@ pub(crate) type ComposedSelectableSkillContextSource =
 type ComposedSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 
+mod trigger_execution_preflight;
+use trigger_execution_preflight::StructuredTriggerExecutionPreflight;
+
 #[cfg(any(test, feature = "test-support"))]
 #[allow(
     dead_code,
@@ -3922,6 +3925,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .await
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("could not resolve default run profile: {error}"),
+        })?;
+    services
+        .trigger_create_hook
+        .bind_execution_preflight(Arc::new(StructuredTriggerExecutionPreflight::new(
+            Arc::clone(&services.shared_extension_registry),
+            skill_activation_source.clone(),
+            default_resolved_run_profile.clone(),
+        )))
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("structured trigger preflight could not be bound: {error}"),
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let failure_explanation_thread_id =
