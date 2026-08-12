@@ -618,6 +618,14 @@ impl FakeTurnCoordinator {
             .map(|request| request.scope.clone())
     }
 
+    fn last_requested_model(&self) -> Option<String> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .and_then(|request| request.requested_model.clone())
+    }
+
     fn last_submission_origin_kind(&self) -> Option<TurnOriginKind> {
         self.submissions
             .lock()
@@ -3729,6 +3737,111 @@ async fn submit_turn_uses_service_and_thread_history_without_route_store_access(
         Some(TurnOriginKind::WebUi),
         "WebUI submit must produce WebUi origin"
     );
+}
+
+#[tokio::test]
+async fn submit_turn_resolves_model_policy_before_persisting_or_submitting() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Ok(Some("model-approved".to_string())));
+    let services = session_services(threads, coordinator.clone()).with_llm_config_service(policy);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    services
+        .submit_turn(
+            caller(),
+            session_submit_request(json!({
+                "client_action_id": "send-model-approved",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui",
+                "model": "model-user-requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    assert_eq!(
+        coordinator.last_requested_model().as_deref(),
+        Some("model-approved"),
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_disallowed_model_before_message_side_effects() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::InvalidRequest {
+        field: Some("model".to_string()),
+        reason: "model is not allowed".to_string(),
+    }));
+    let services = session_services(threads, coordinator.clone()).with_llm_config_service(policy);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let error = services
+        .submit_turn(
+            caller(),
+            session_submit_request(json!({
+                "client_action_id": "send-model-denied",
+                "thread_id": "thread-alpha",
+                "content": "must not persist",
+                "model": "model-denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("model must be denied");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(coordinator.submission_count(), 0);
+    let timeline = services
+        .get_timeline(caller(), RebornTimelineRequest::new("thread-alpha"))
+        .await
+        .expect("timeline");
+    assert!(timeline.messages.is_empty());
+}
+
+#[tokio::test]
+async fn submit_turn_replays_an_accepted_message_before_rechecking_model_policy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let policy = Arc::new(SetupRecordingLlmConfigService::default());
+    policy.resolve_next_model_as(Ok(Some("model-approved".to_string())));
+    let first = session_services(Arc::clone(&threads), coordinator.clone())
+        .with_llm_config_service(policy.clone());
+    create_thread_for(&first, caller(), "thread-alpha").await;
+
+    let request = || {
+        session_submit_request(json!({
+            "client_action_id": "send-model-replay",
+            "thread_id": "thread-alpha",
+            "content": "hello from webui",
+            "model": "model-user-requested"
+        }))
+        .expect("request")
+    };
+    first
+        .submit_turn(caller(), request())
+        .await
+        .expect("first submit succeeds");
+
+    policy.resolve_next_model_as(Err(LlmConfigServiceError::InvalidRequest {
+        field: Some("model".to_string()),
+        reason: "model is no longer allowed".to_string(),
+    }));
+    let replay = session_services(threads, coordinator.clone())
+        .with_llm_config_service(policy)
+        .submit_turn(caller(), request())
+        .await
+        .expect("accepted replay remains authoritative");
+
+    assert!(matches!(
+        replay,
+        RebornSubmitTurnResponse::AlreadySubmitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
 }
 
 #[tokio::test]
@@ -10408,6 +10521,7 @@ struct SetupRecordingLlmConfigService {
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
     next_login_error: Mutex<Option<LlmConfigServiceError>>,
+    next_model_resolution: Mutex<Option<Result<Option<String>, LlmConfigServiceError>>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10425,6 +10539,7 @@ impl Default for SetupRecordingLlmConfigService {
             next_upsert_error: Mutex::new(None),
             next_set_active_error: Mutex::new(None),
             next_login_error: Mutex::new(None),
+            next_model_resolution: Mutex::new(None),
         }
     }
 }
@@ -10486,10 +10601,15 @@ impl SetupRecordingLlmConfigService {
         *self.next_set_active_error.lock().expect("lock") = Some(error);
     }
 
+    fn resolve_next_model_as(&self, result: Result<Option<String>, LlmConfigServiceError>) {
+        *self.next_model_resolution.lock().expect("lock") = Some(result);
+    }
+
     fn empty_snapshot() -> LlmConfigSnapshot {
         LlmConfigSnapshot {
             providers: Vec::new(),
             active: None,
+            user_model_policy: None,
         }
     }
 
@@ -10513,6 +10633,7 @@ impl SetupRecordingLlmConfigService {
                 provider_id: provider_id.to_string(),
                 model: Some(model.to_string()),
             }),
+            user_model_policy: None,
         }
     }
 }
@@ -10607,6 +10728,18 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
             models: vec!["model-a".to_string()],
             message: String::new(),
         })
+    }
+
+    async fn resolve_user_model(
+        &self,
+        _caller: ProductSurfaceCaller,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        self.next_model_resolution
+            .lock()
+            .expect("lock")
+            .take()
+            .unwrap_or(Ok(requested_model))
     }
 
     // The three vendor logins answer with `next_login_error` when one is armed.

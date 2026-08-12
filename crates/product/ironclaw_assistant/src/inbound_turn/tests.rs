@@ -581,6 +581,7 @@ fn policy_request() -> BeforeInboundPolicyRequest {
             .expect("source binding key"),
         rate_limit_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
             .expect("rate limit key"),
+        session_caller: None,
         user_message: UserMessagePayload::new("hello", vec![], ProductTriggerReason::DirectChat)
             .expect("message"),
     }

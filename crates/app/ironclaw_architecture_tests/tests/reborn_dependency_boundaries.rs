@@ -676,7 +676,7 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // attachment fetch, persistence, and delivery behavior remain in their
         // owning package/host/domain crates. Count read from this test's own
         // failure message.
-        ("ironclaw_extension_contracts", 8_771),
+        ("ironclaw_extension_contracts", 8_772),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -768,13 +768,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_316 (2026-08-11, #7484 context eviction): one bounded
-        // truncation-watermark DTO carried across the existing context and
-        // prompt contracts. Window selection and task-pinning behavior remain
-        // in ironclaw_threads and ironclaw_loop_host.
-        // The merged tree carries both disjoint declaration changes; 13_317 is
-        // their provisional union, re-measured by this gate after resolution.
-        ("ironclaw_loop_contracts", 13_317),
+        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // one defaulted port capability declares when ordered batch middleware
+        // must retain batch entry. Scheduling and hook behavior remain in their
+        // owning loop crates. Count read from this test's own failure message.
+        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // one bounded truncation-watermark DTO carried across the existing
+        // context and prompt contracts. Window selection and task-pinning
+        // behavior remain in ironclaw_threads and ironclaw_loop_host.
+        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
+        // tool-result compaction metadata plus window-eviction initiator/mode
+        // variants. Cut-point policy and execution remain in agent_loop and
+        // loop_host. Count read from this test's own failure message.
+        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // the batch-ordering port contract now defaults to ordered entry and
+        // documents the explicit opt-in required for concurrent singles.
+        // Scheduling and wrapper behavior remain in their owning loop crates.
+        ("ironclaw_loop_contracts", 13_345),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -806,10 +816,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // (session_ingress), the reply-mode + notifications-require-setup
         // delivery-port defaults, and the generic notification-setup
         // descriptors + `RebornNotificationSetup*` wire family that replaced
-        // the retired per-channel enrollment module. Declarations only — admission, dispatch, and
-        // storage stay in their owning crates. Count read from this test's
-        // failure on the merged branch.
-        ("ironclaw_product_contracts", 16_132),
+        // the retired per-channel enrollment module. Declarations only —
+        // admission, dispatch, and storage stay in their owning crates.
+        // Raised by #7419 (tenant model allowlist): the additional growth is
+        // limited to the policy persistence port, user-safe DTOs, and
+        // transport-consumed descriptors; validation, storage, and request
+        // enforcement stay in owning crates. The merged count was measured by
+        // this gate after resolving the two disjoint contract changes.
+        ("ironclaw_product_contracts", 16_135),
         ("ironclaw_prompt_envelope", 832),
     ];
 

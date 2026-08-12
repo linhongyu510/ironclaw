@@ -22,9 +22,10 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    USER_MODEL_CATALOG_VIEW, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
@@ -107,10 +108,13 @@ use crate::{
         bounded_source_binding_ref,
     },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
+    policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest},
     product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
 };
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
-use ironclaw_product_contracts::inbound::{ProductRejectionKind, parse_product_slash_command};
+use ironclaw_product_contracts::inbound::{
+    ProductRejection, ProductRejectionKind, parse_product_slash_command,
+};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
@@ -2222,6 +2226,68 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
     }
 }
 
+/// Session-only projection of tenant model selection onto the existing
+/// before-inbound policy seam. The workflow invokes this after both replay
+/// checks and before attachment landing or message acceptance.
+struct SessionModelSelectionPolicy {
+    llm_config: Option<Arc<dyn LlmConfigService>>,
+}
+
+#[async_trait]
+impl BeforeInboundPolicy for SessionModelSelectionPolicy {
+    async fn check_user_message(
+        &self,
+        request: BeforeInboundPolicyRequest,
+    ) -> Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure> {
+        let Some(llm_config) = self.llm_config.as_ref() else {
+            return Ok(BeforeInboundPolicyOutcome::Allow);
+        };
+        let Some(caller) = request.session_caller else {
+            return Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                reason: "session model policy received a webhook message".to_string(),
+                permanent: true,
+            });
+        };
+        let requested_model = request.user_message.requested_model.clone();
+        match llm_config
+            .resolve_user_model(caller, requested_model.clone())
+            .await
+        {
+            Ok(resolved_model) if resolved_model == requested_model => {
+                Ok(BeforeInboundPolicyOutcome::Allow)
+            }
+            Ok(resolved_model) => {
+                let mut user_message = request.user_message;
+                user_message.requested_model = resolved_model;
+                Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(user_message))
+            }
+            Err(LlmConfigServiceError::InvalidRequest { reason, .. }) => {
+                Ok(BeforeInboundPolicyOutcome::Reject(
+                    ProductRejection::permanent(ProductRejectionKind::InvalidRequest, reason),
+                ))
+            }
+            Err(LlmConfigServiceError::NotFound) => Ok(BeforeInboundPolicyOutcome::Reject(
+                ProductRejection::permanent(
+                    ProductRejectionKind::InvalidRequest,
+                    "requested model is unavailable",
+                ),
+            )),
+            Err(LlmConfigServiceError::Unavailable) => {
+                Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                    reason: "model selection policy is unavailable".to_string(),
+                    permanent: false,
+                })
+            }
+            Err(LlmConfigServiceError::Internal) => {
+                Err(ProductSurfaceFailure::BeforeInboundPolicyFailed {
+                    reason: "model selection policy failed".to_string(),
+                    permanent: true,
+                })
+            }
+        }
+    }
+}
+
 /// Default service implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices<
@@ -3677,7 +3743,7 @@ where
         let caller = self
             .authorize_create_thread_project(caller, request.project_id.clone())
             .await?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::CreateThread {
             caller,
             client_action_id,
@@ -3731,7 +3797,7 @@ where
         // Decode + budget inline attachment bytes before the request is
         // consumed into the (bytes-free, serializable) command.
         let attachments = request.decode_attachments()?;
-        let command = request.into_command(caller)?;
+        let command = request.into_command(caller.clone())?;
         let ProductInboundCommand::SendMessage {
             scope,
             actor,
@@ -3784,8 +3850,8 @@ where
 
     /// The session-lane inbound core: the same `DefaultProductSurface`
     /// implementation webhook channels run, constructed over this service's
-    /// own ports plus the durable session idempotency ledger. Built per call
-    /// from `Arc` handles (cheap), so builder-wired ports are always current.
+    /// own ports plus the durable session idempotency ledger. The surface is
+    /// memoized once after all builder-wired ports have been attached.
     fn session_inbound_core(&self) -> Arc<DefaultProductSurface> {
         Arc::clone(
             self.session_inbound_surface
@@ -3820,6 +3886,9 @@ where
             Arc::clone(&self.session_inbound_ledger),
             Arc::new(SessionLaneRejectingBindingResolver),
         )
+        .with_before_inbound_policy(Arc::new(SessionModelSelectionPolicy {
+            llm_config: self.llm_config.clone(),
+        }))
     }
 
     async fn session_submit_response(
@@ -4056,6 +4125,11 @@ where
             id if id == LLM_CONFIG_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_llm_config_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == USER_MODEL_CATALOG_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_user_model_catalog_view(caller).await?;
                 views::view_page(response)
             }
             id if id == THREADS_VIEW.id => {
