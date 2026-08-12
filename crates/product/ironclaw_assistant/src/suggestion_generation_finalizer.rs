@@ -56,7 +56,10 @@ impl TurnEventSink for SuggestionGenerationFinalizerSink {
         // adds synchronous latency to an unrelated turn's completion path.
         if !matches!(
             event.kind,
-            TurnEventKind::Completed | TurnEventKind::Failed | TurnEventKind::Cancelled
+            TurnEventKind::Completed
+                | TurnEventKind::Failed
+                | TurnEventKind::Cancelled
+                | TurnEventKind::RecoveryRequired
         ) {
             return Ok(());
         }
@@ -178,6 +181,9 @@ mod tests {
             status: match kind {
                 TurnEventKind::Failed => ironclaw_host_api::turn::TurnStatus::Failed,
                 TurnEventKind::Cancelled => ironclaw_host_api::turn::TurnStatus::Cancelled,
+                TurnEventKind::RecoveryRequired => {
+                    ironclaw_host_api::turn::TurnStatus::RecoveryRequired
+                }
                 _ => ironclaw_host_api::turn::TurnStatus::Completed,
             },
             kind,
@@ -307,6 +313,52 @@ mod tests {
         assert!(doc.active_job.is_none());
         assert!(doc.last_error.is_none());
         assert_eq!(doc.last_result.unwrap().cards.len(), 1);
+    }
+
+    /// PR review (ironloopai): `RecoveryRequired` is a terminal `TurnStatus`
+    /// (`TurnStatus::is_terminal`) but was missing from this sink's event
+    /// filter, so a generation run ending in that state left `active_job`
+    /// persisted — not recorded as a failure — until
+    /// `MIN_CLAIM_AGE_BEFORE_RECLAIM` eventually let a later request treat it
+    /// as dead.
+    #[tokio::test]
+    async fn finalizer_clears_active_job_on_recovery_required() {
+        let store = SuggestionsStore::new(Arc::new(InMemoryBackend::default()));
+        let run_id = TurnRunId::new();
+        store
+            .claim_active_job(
+                &TenantId::new("t").unwrap(),
+                &UserId::new("u").unwrap(),
+                ThreadId::new("t1").unwrap(),
+                run_id,
+            )
+            .await
+            .unwrap();
+
+        let sink = SuggestionGenerationFinalizerSink::new(store.clone());
+        sink.publish(terminal_event(
+            TurnEventKind::RecoveryRequired,
+            "t",
+            "u",
+            run_id,
+        ))
+        .await
+        .unwrap();
+
+        let mut doc = None;
+        for _ in 0..100 {
+            let current = store
+                .read_doc(&TenantId::new("t").unwrap(), &UserId::new("u").unwrap())
+                .await
+                .unwrap();
+            if current.as_ref().is_some_and(|doc| doc.active_job.is_none()) {
+                doc = current;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let doc = doc.expect("RecoveryRequired must clear active_job within the poll window");
+        assert!(doc.last_error.unwrap().message.contains("recovery_required"));
     }
 
     #[tokio::test]
