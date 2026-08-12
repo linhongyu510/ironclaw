@@ -110,6 +110,7 @@ async fn write_capability_result_for_test(
             output,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
+            canonical_item_count: None,
         })
         .await?;
     Ok(result_ref)
@@ -198,6 +199,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             output: output.clone(),
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
+            canonical_item_count: None,
         })
         .await
         .unwrap();

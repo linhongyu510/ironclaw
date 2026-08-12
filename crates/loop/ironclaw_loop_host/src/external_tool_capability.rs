@@ -218,6 +218,7 @@ impl ExternalToolCapabilityPort {
                     output,
                     display_preview: None,
                     durable_persistence: DurablePersistence::Persist,
+                    canonical_item_count: None,
                 })
                 .await?;
             // The parked call is resolved: drop its pending-call record so a run

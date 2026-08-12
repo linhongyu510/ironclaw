@@ -189,6 +189,7 @@ pub(super) async fn write_completed_result(
             output,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
+            canonical_item_count: None,
         })
         .await?;
     Ok(resolution::completed(

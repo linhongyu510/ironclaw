@@ -336,6 +336,7 @@ mod tests {
                 estimate: ResourceEstimate::default(),
                 actual: Some(ResourceUsage::default()),
             },
+            canonical_item_count: None,
         }
     }
 

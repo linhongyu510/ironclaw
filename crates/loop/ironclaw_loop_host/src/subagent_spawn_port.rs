@@ -943,6 +943,7 @@ impl SubagentSpawnCapabilityPort {
                 output: payload,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         let result_ref = write_result.result_ref;

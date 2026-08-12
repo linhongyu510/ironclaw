@@ -906,6 +906,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let result = handler

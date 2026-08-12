@@ -832,6 +832,7 @@ async fn resumed_pending_claim_dispatch_seals_witness_deadline_from_lease_expiry
                     estimate: request.invocation.estimate.clone(),
                     actual: Some(ironclaw_host_api::resource::ResourceUsage::default()),
                 },
+                canonical_item_count: None,
             })
         });
     let authorizer = AllowAuthorizer;

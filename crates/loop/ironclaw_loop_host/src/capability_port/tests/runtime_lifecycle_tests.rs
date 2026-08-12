@@ -160,6 +160,7 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
                         truncated: false,
                     }),
                     usage: ResourceUsage::default(),
+                    canonical_item_count: None,
                 },
             )))],
         )),
@@ -322,6 +323,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                         output: serde_json::json!({"ok": true}),
                         display_preview: None,
                         usage: ResourceUsage::default(),
+                        canonical_item_count: None,
                     },
                 ))),
             ],
@@ -500,6 +502,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
                     usage: ResourceUsage::default(),
+                    canonical_item_count: None,
                 },
             )))],
         )),
@@ -673,6 +676,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
                 output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             }),
         ))]),
     );
@@ -1682,6 +1686,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
                 output: serde_json::json!({"resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }
@@ -1703,6 +1708,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
                 output: serde_json::json!({"auth_resumed": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }

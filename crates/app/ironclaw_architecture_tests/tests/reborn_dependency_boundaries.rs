@@ -688,7 +688,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // 19_375 -> 19_404 (#7491 coding-tool cutover): origin-gate contract tests pin
         // the transferred read-only `builtin.read` exemption and the absence of
         // the retired ids. Runtime authorization remains in host_runtime.
-        ("ironclaw_host_api", 19_404),
+        // 19_404 -> 19_407 (#7491 durable-result repair): one optional count on
+        // the dispatch-result DTO preserves top-level array cardinality when
+        // transport output is bounded. Counting remains in capabilities;
+        // persistence and model rendering remain in composition/loop_host.
+        ("ironclaw_host_api", 19_407),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

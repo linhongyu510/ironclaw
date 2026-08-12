@@ -15,6 +15,7 @@ use ironclaw_host_api::{
     capability::EffectKind,
     capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, InvocationId, ResourceReservationId, UserId},
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resolution::Resolution,
     resource::{
@@ -839,6 +840,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
             completed_artifact,
             durable_persistence,
             canonical_output_digest,
+            canonical_item_count,
         } = write;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
@@ -890,7 +892,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                 (
                     content,
                     artifact.byte_len,
-                    None,
+                    canonical_item_count,
                     Some(FirstLookResultPreview {
                         text,
                         next_offset: Some(preview_len),
@@ -905,7 +907,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                         "inline capability result does not match artifact evidence",
                     ));
                 }
-                let item_count = output.as_array().map(|items| items.len() as u64);
+                let item_count = canonical_item_count
+                    .or_else(|| output.as_array().map(|items| items.len() as u64));
                 let preview = first_look_result_preview(&content);
                 (
                     content,
@@ -929,7 +932,8 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
                     "capability result byte length is outside the supported range",
                 )
             })?;
-            let item_count = output.as_array().map(|items| items.len() as u64);
+            let item_count =
+                canonical_item_count.or_else(|| output.as_array().map(|items| items.len() as u64));
             let preview = first_look_result_preview(&content);
             let artifact = if matches!(durable_persistence, DurablePersistence::InlineOnly) {
                 None
@@ -1321,14 +1325,21 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
     index
 }
 
-fn truncated_artifact_summary(
-    artifact_ref: &ironclaw_host_api::artifact::ArtifactRef,
-    item_count: Option<u64>,
-) -> String {
-    let base = format!("Tool completed; full output: {artifact_ref}");
-    item_count
-        .map(|count| format!("{base}. Full result is a JSON array of {count} items."))
-        .unwrap_or(base)
+/// Truncated-artifact observation caption; names the full array's element
+/// count when known so the model does not misread a truncated array preview
+/// as the whole result.
+///
+/// The caption must survive the strict `SafeSummary` collapse in
+/// `result_preview_parts` (path/payload delimiters and credential markers are
+/// rejected), so the `artifact://` reference itself is deliberately NOT
+/// interpolated here — it rides the observation's `detail.artifact_ref` and
+/// `artifacts` list, which the transcript carries verbatim.
+fn truncated_artifact_summary(item_count: Option<u64>) -> String {
+    let base = "Tool completed; full output is stored in a durable artifact.";
+    match item_count {
+        Some(count) => format!("{base} Full result is a JSON array of {count} items."),
+        None => base.to_string(),
+    }
 }
 
 fn inline_result_observation(
@@ -1360,11 +1371,18 @@ fn artifact_reference_observation(
     ModelVisibleToolObservation {
         schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
-        summary: truncated_artifact_summary(&artifact.artifact_ref, item_count),
+        summary: truncated_artifact_summary(item_count),
         detail: ToolObservationDetail::ArtifactReference {
             artifact_ref: artifact_ref.clone(),
             total_bytes: artifact.byte_len,
-            preview: preview.map(|preview| preview.text.clone()),
+            // Credential-bearing preview text is SUPPRESSED (not masked): the
+            // model-visible observation must never carry raw capability
+            // output that fails the preview content contract, and the durable
+            // artifact reference plus `item_count` remain the continuation
+            // authority. Benign previews pass through unchanged.
+            preview: preview
+                .filter(|preview| ModelResultPreview::new(preview.text.clone()).is_ok())
+                .map(|preview| preview.text.clone()),
             item_count,
         },
         artifacts: vec![ModelVisibleArtifact {

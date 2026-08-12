@@ -70,7 +70,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
         }),
-        durable_persistence: DurablePersistence::Persist, })
+        durable_persistence: DurablePersistence::Persist, canonical_item_count: None })
         .await
         .map(|_| ())
         .expect("result stages");

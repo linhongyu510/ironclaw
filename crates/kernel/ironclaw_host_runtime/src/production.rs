@@ -32,14 +32,15 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
+    artifact::ArtifactNamespaceId,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
     dispatch::CapabilityDispatcher,
-    ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
+    ids::{ApprovalRequestId, CapabilityId, InvocationId, RunId, SecretHandle},
     resource::ResourceScope,
     result_meta::FailureKind,
     runtime::RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
-    scope::Principal,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_observability::live_latency_started_at;
@@ -379,6 +380,30 @@ impl DefaultHostRuntime {
     }
 }
 
+/// Agent-scoped dispatch requires a durable artifact namespace (the kernel's
+/// agent-scoped guard in `RuntimeDispatcher` fails closed with a storage error
+/// when the invocation carries neither a namespace nor artifact persistence).
+/// The loop ingress and the WebUI product adapter stamp their own namespace;
+/// direct `HostRuntime` callers (product surfaces, harnesses) may omit it.
+/// Derive one for them — run-anchored when the invocation carries a run (the
+/// loop's namespace shape), otherwise invocation-anchored (the WebUI product
+/// adapter's `ArtifactNamespaceId::from_root_run` derivation) — so agent-scoped
+/// direct invokes reach the same durable artifact accounting as loop-driven
+/// ones. Callers that already stamp a namespace (loop, product adapter) are
+/// untouched.
+fn agent_artifact_namespace(mut context: ExecutionContext) -> ExecutionContext {
+    if context.agent_id.is_some() && context.artifact_namespace.is_none() {
+        // Prefer the run identity (the loop's run-anchored namespace shape);
+        // fall back to an invocation-anchored namespace for direct invokes
+        // that carry no run (the WebUI product adapter's derivation).
+        let anchor = context
+            .run_id
+            .unwrap_or_else(|| RunId::from_uuid(context.invocation_id.as_uuid()));
+        context.artifact_namespace = Some(ArtifactNamespaceId::from_root_run(anchor));
+    }
+    context
+}
+
 #[async_trait]
 impl HostRuntime for DefaultHostRuntime {
     async fn invoke_capability(
@@ -386,6 +411,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let (context, capability_id, estimate, input) = request;
+        let context = agent_artifact_namespace(context);
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
@@ -484,6 +510,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let (context, capability_id, estimate, input) = request;
+        let context = agent_artifact_namespace(context);
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
             SpawnInputPreparation::ModelInputRejected(failure) => {
@@ -551,6 +578,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let (context, approval_request_id, capability_id, estimate, input) = request;
+        let context = agent_artifact_namespace(context);
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -615,6 +643,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let (context, capability_id, estimate, input, approval_request_id) = request;
+        let context = agent_artifact_namespace(context);
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -714,6 +743,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let (context, approval_request_id, capability_id, estimate, input) = request;
+        let context = agent_artifact_namespace(context);
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -1385,6 +1415,7 @@ fn completed_outcome_from(
         receipt: Some(result.dispatch.receipt),
         completed_artifact: result.dispatch.completed_artifact,
         canonical_output_digest: result.dispatch.canonical_output_digest,
+        canonical_item_count: result.dispatch.canonical_item_count,
     }
 }
 

@@ -1154,6 +1154,7 @@ fn dispatch_result() -> CapabilityDispatchResult {
             estimate: ResourceEstimate::default(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 
@@ -1178,6 +1179,7 @@ fn sample_dispatch(
             estimate: ResourceEstimate::default(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 

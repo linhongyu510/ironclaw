@@ -406,6 +406,9 @@ pub struct RuntimeCapabilityCompleted {
     pub completed_artifact: Option<ironclaw_host_api::artifact::CompletedArtifact>,
     /// Stable digest of the full canonical output before bounded transport.
     pub canonical_output_digest: Option<ironclaw_host_api::result_meta::OutputDigest>,
+    /// Number of elements in the full top-level JSON array before bounded
+    /// transport, when the canonical output is an array.
+    pub canonical_item_count: Option<u64>,
 }
 
 /// Approval suspension state.

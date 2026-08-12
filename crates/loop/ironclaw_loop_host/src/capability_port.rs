@@ -511,6 +511,9 @@ pub struct CapabilityResultWrite<'a> {
     /// Stable digest of the full canonical output when `output` is only a
     /// bounded transport preview.
     pub canonical_output_digest: Option<ContentDigest>,
+    /// Number of elements in the full top-level JSON array when `output` is
+    /// only a bounded transport preview.
+    pub canonical_item_count: Option<u64>,
     pub durable_persistence: DurablePersistence,
 }
 
@@ -1690,6 +1693,7 @@ impl HostRuntimeLoopCapabilityPort {
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await?;
         Ok(GatedResolution::bare(resolution::completed(
@@ -3602,6 +3606,7 @@ async fn runtime_outcome_to_loop(
                 receipt,
                 completed_artifact,
                 canonical_output_digest,
+                canonical_item_count,
             } = *completed;
             let write_result = result_writer
                 .write_capability_result(CapabilityResultWrite {
@@ -3609,6 +3614,7 @@ async fn runtime_outcome_to_loop(
                     completed_artifact: completed_artifact.as_ref(),
                     canonical_output_digest: canonical_output_digest
                         .map(|digest| ContentDigest(digest.value())),
+                    canonical_item_count,
                     run_context,
                     input_ref: conversion.input_ref,
                     invocation_id: conversion.invocation_id,
@@ -10743,6 +10749,7 @@ mod tests {
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
+                    canonical_item_count: None,
                 },
             )))
         }
@@ -10898,6 +10905,7 @@ mod tests {
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
+                    canonical_item_count: None,
                 },
             )))
         }

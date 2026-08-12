@@ -98,6 +98,52 @@ async fn coding_write_to_read_only_mount_reports_an_actionable_denial() {
     );
 }
 
+/// Agent-scoped dispatch without a caller-stamped artifact namespace must not
+/// fail closed: the host runtime derives an invocation-anchored namespace (the
+/// same `ArtifactNamespaceId::from_root_run` derivation the WebUI product
+/// adapter uses), so the kernel's agent-scoped artifact-persistence guard
+/// passes and the completed result carries the durable artifact. Regression
+/// for the cutover guard that failed every agent-scoped direct `HostRuntime`
+/// invoke with `ResourceError::Storage` surfaced as "the tool ran out of
+/// resources" (`standalone_extension_activate_accepts_manual_token_from_webui_gate_scope`
+/// and the admin-configuration/trigger-create harnesses).
+#[tokio::test]
+async fn agent_scoped_dispatch_without_stamped_namespace_derives_one_and_persists() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let mut context = execution_context_with_mounts([CODING_WRITE_CAPABILITY_ID], mounts);
+    assert!(
+        context.agent_id.is_some(),
+        "fixture must be agent-scoped to exercise the agent-scoped guard"
+    );
+    context.artifact_namespace = None;
+    assert!(
+        context.run_id.is_some(),
+        "fixture context carries a run identity like the production loop"
+    );
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        CODING_WRITE_CAPABILITY_ID,
+        json!({"path": "/workspace/notes.txt", "content": "hello"}),
+        context,
+    )
+    .await;
+
+    let artifact = completed
+        .completed_artifact
+        .expect("agent-scoped dispatch must persist canonical output as a durable artifact");
+    assert!(
+        artifact.byte_len > 0,
+        "the persisted artifact must account the written output bytes"
+    );
+    assert!(
+        completed.canonical_output_digest.is_some(),
+        "the completed result must carry the canonical output digest"
+    );
+}
+
 #[tokio::test]
 async fn coding_read_out_of_scope_rejection_carries_the_path_and_available_roots() {
     // Loop-boundary pin: an out-of-scope absolute path (copied verbatim from

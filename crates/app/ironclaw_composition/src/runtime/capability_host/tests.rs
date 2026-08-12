@@ -939,6 +939,7 @@ mod tests {
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("result stages");
@@ -1038,6 +1039,7 @@ mod tests {
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("result stages");
@@ -1123,6 +1125,7 @@ mod tests {
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("result stages");
@@ -1187,6 +1190,7 @@ mod tests {
                 output: serde_json::json!({"content": "hello"}),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect_err("missing thread must reject an unreadable result reference");
@@ -1250,6 +1254,7 @@ mod tests {
                 output: serde_json::Value::String("x".repeat(4 * 1024 * 1024)),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("artifact-backed result writes");
@@ -1318,6 +1323,7 @@ mod tests {
                 output: original_output.clone(),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("initial artifact write succeeds");
@@ -1478,6 +1484,7 @@ mod tests {
                 output: output.clone(),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("small result stages");
@@ -1580,6 +1587,7 @@ mod tests {
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("large array result stages");
@@ -1644,6 +1652,7 @@ mod tests {
                 output: singleton_output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("singleton array result stages");
@@ -1802,6 +1811,7 @@ mod tests {
                 output,
                 display_preview: None,
                 durable_persistence: DurablePersistence::InlineOnly,
+                canonical_item_count: None,
             })
             .await
             .expect("result writes");
@@ -4784,6 +4794,7 @@ mod tests {
                 output: serde_json::Value::String(bounded_preview),
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("large result writes");
@@ -4834,6 +4845,7 @@ mod tests {
                 output: structured_preview,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
+                canonical_item_count: None,
             })
             .await
             .expect("structured artifact preview writes");

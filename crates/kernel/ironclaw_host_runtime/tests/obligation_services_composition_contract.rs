@@ -317,6 +317,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             display_preview: None,
             usage: ResourceUsage::default(),
             receipt,
+            canonical_item_count: None,
         })
     }
 }

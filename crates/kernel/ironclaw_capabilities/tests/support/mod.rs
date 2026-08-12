@@ -345,6 +345,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
                 estimate: request.invocation.estimate,
                 actual: Some(ResourceUsage::default()),
             },
+            canonical_item_count: None,
         })
     }
 }
@@ -384,6 +385,7 @@ pub fn dispatch_result_with_output(
             estimate: request.invocation.estimate.clone(),
             actual: Some(ResourceUsage::default()),
         },
+        canonical_item_count: None,
     }
 }
 

@@ -348,6 +348,7 @@ where
         };
 
         let mut canonical_output_digest = execution.canonical_output_digest;
+        let canonical_item_count = execution.output.as_array().map(|items| items.len() as u64);
         let finalize_result: Result<(), DispatchError> = async {
             let canonical_bytes = serde_json::to_vec(&execution.output).map_err(|_| {
                 dispatch_resource_error(
@@ -485,6 +486,7 @@ where
             receipt: execution.receipt,
             completed_artifact: execution.completed_artifact,
             canonical_output_digest,
+            canonical_item_count,
         })
     }
 

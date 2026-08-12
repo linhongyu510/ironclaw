@@ -113,6 +113,7 @@ impl HostRuntime for StubHostRuntime {
             ironclaw_host_runtime::RuntimeCapabilityCompleted {
                 completed_artifact: None,
                 canonical_output_digest: None,
+                canonical_item_count: None,
                 receipt: None,
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),

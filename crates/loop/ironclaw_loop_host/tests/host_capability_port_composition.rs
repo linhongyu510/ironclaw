@@ -355,6 +355,7 @@ impl HostRuntime for SingleToolHostRuntime {
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
                 usage: ResourceUsage::default(),
+                canonical_item_count: None,
             },
         )))
     }

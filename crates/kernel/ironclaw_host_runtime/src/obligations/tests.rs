@@ -326,6 +326,7 @@ async fn redact_output_clears_display_preview_side_channel() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let completed = handler
@@ -392,6 +393,7 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let completed = handler
@@ -476,6 +478,7 @@ async fn leak_detector_block_records_security_audit_event_through_complete_dispa
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let request = CapabilityObligationCompletionRequest {
@@ -567,6 +570,7 @@ async fn leak_detector_block_without_security_sink_does_not_panic() {
             estimate: ResourceEstimate::default(),
             actual: None,
         },
+        canonical_item_count: None,
     };
 
     let result = handler
