@@ -160,13 +160,25 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// ✎ Re-recorded 41_533 → 41_821 on 2026-08-12 merging #7038 (PR #7498):
 /// measured on the merged tree, not either side's pre-merge number. Moves
 /// with `[gate].loc_ceiling`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_821;
+/// ✎ Re-recorded 41_821 → 41_830 on 2026-08-12 (#7498, `SuggestionsStore`
+/// `ScopedFilesystem` migration): the store now takes a pre-scoped handle
+/// instead of a raw `Arc<dyn RootFilesystem>`, matching the
+/// `ironclaw_web_push`/`ironclaw_threads` convention; a few lines of generic
+/// bounds/`wrap_scoped` calls at each construction site. Measured with
+/// `bash scripts/ci/check-composition-budget.sh --print`. Moves with
+/// `[gate].loc_ceiling`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 41_830;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
 /// ✎ Re-recorded 827 → 835 on 2026-08-12 (#7038, PR #7498): the 4 new
 /// construction-site casts described in `[gate].arc_dyn_ceiling`.
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 835;
+/// ✎ Re-recorded 835 → 832 on 2026-08-12 (#7498, `SuggestionsStore`
+/// `ScopedFilesystem` migration): the 3 `Arc::clone(...) as Arc<dyn
+/// RootFilesystem>` casts at `SuggestionsStore::new` call sites are replaced
+/// by `crate::wrap_scoped(...)`, a concrete `Arc<ScopedFilesystem<F>>` — no
+/// `dyn` dispatch at those sites anymore. Moves with `[gate].arc_dyn_ceiling`.
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 832;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

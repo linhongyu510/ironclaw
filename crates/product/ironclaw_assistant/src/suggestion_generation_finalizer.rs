@@ -282,7 +282,11 @@ mod tests {
         let claimed_run_id = TurnRunId::new();
         let unrelated_run_id = TurnRunId::new();
         store
-            .claim_active_job(&scope("t", "u"), ThreadId::new("t1").unwrap(), claimed_run_id)
+            .claim_active_job(
+                &scope("t", "u"),
+                ThreadId::new("t1").unwrap(),
+                claimed_run_id,
+            )
             .await
             .unwrap();
 

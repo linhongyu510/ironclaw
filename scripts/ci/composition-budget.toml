@@ -200,7 +200,13 @@ observed_date = "2026-08-08"
 # composition-resident share is assembly only (`StoreBackedRenderSuggestionsHook`
 # plus construction sites); its turn-finalizer behavior lives in
 # `ironclaw_assistant`.
-loc_ceiling = 41821
+# 2026-08-12 (#7498 SuggestionsStore ScopedFilesystem migration): 41821 ->
+# 41830 — the store now takes a pre-scoped handle (`ScopedFilesystem<F>` +
+# `&ResourceScope`) instead of a raw `Arc<dyn RootFilesystem>`, matching the
+# convention `ironclaw_web_push`/`ironclaw_threads` already use; the
+# migration adds a few lines of generic bounds/`wrap_scoped` calls at each
+# construction site. Re-measured with `bash scripts/ci/check-composition-budget.sh --print`.
+loc_ceiling = 41830
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -211,7 +217,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41821
+loc_observed = 41830
 loc_observed_date = "2026-08-12"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -266,6 +272,12 @@ loc_observed_date = "2026-08-12"
 # new dispatch — 2x `Arc<dyn RootFilesystem>` (multi-backend by design, the
 # cast every `SuggestionsStore::new` site uses) and 2x for the `TurnEventSink`
 # fan-out the suggestion finalizer joins beside `TraceCaptureTurnEventSink`.
-arc_dyn_ceiling = 835
+# 2026-08-12 (#7498 SuggestionsStore ScopedFilesystem migration): 835 -> 832
+# — the 3 `Arc::clone(...) as Arc<dyn RootFilesystem>` casts at
+# `SuggestionsStore::new` call sites (runtime.rs, product_surface.rs,
+# production_backend_assembly.rs) are replaced by `crate::wrap_scoped(...)`,
+# which returns a concrete `Arc<ScopedFilesystem<F>>` — no `dyn` dispatch at
+# those sites anymore. Re-measured with `bash scripts/ci/check-composition-budget.sh --print`.
+arc_dyn_ceiling = 832
 arc_dyn_tolerance = 15
-arc_dyn_observed = 835
+arc_dyn_observed = 832

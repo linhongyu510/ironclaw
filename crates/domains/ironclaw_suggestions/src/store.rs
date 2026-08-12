@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, Entry, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::resource::ResourceScope;
 use thiserror::Error;

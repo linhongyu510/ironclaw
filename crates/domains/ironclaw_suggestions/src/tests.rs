@@ -110,7 +110,9 @@ fn scope_for(tenant_id: &str, user_id: &str) -> ResourceScope {
 /// Grants the `/suggestions` alias to the caller's tenant/user cell, the
 /// same shape production wiring grants via `PER_USER_ALIASES` in
 /// `ironclaw_composition`.
-fn suggestions_mount_view(scope: &ResourceScope) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+fn suggestions_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     MountView::new(vec![MountGrant::new(
         MountAlias::new("/suggestions")?,
         VirtualPath::new(format!(
@@ -502,11 +504,7 @@ async fn late_outcome_after_active_job_already_cleared_is_a_noop() {
     // goes", only "the still-claimed job matches".
     let never_claimed_job = Uuid::new_v4();
     store
-        .record_failure(
-            &scope(),
-            never_claimed_job,
-            "late duplicate".to_string(),
-        )
+        .record_failure(&scope(), never_claimed_job, "late duplicate".to_string())
         .await
         .expect("stale outcome for an already-cleared slot is a no-op, not an error");
 
