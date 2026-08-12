@@ -3,9 +3,11 @@
 //! real production turns:
 //!
 //! 1. A fresh caller whose `tenants/{tenant}/users/{user}` subtree has never
-//!    been written reads an EMPTY workspace — `glob` and `grep` complete with
-//!    empty result sets instead of erroring (the never-written mount-root
-//!    rule, the production bug this branch fixes).
+//!    been written errors with the pinned coding engines' `Path not found`
+//!    text on read/glob/grep — the pinned surface does NOT invent an empty
+//!    workspace for a caller nothing has ever written for (see
+//!    `crates/app/ironclaw_composition/src/runtime/capability_host/workspace_scoping_tests.rs`
+//!    `fresh_caller_reads_an_empty_workspace_then_writes_into_it`).
 //! 2. A GATED `write` is approved and lands on disk under the caller's
 //!    OWN subtree — the approval lease minted for the gate confines to the
 //!    gate's own caller (per-caller `PolicyApprovalLeaseTermsProvider` over
@@ -48,39 +50,38 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let owner = h.binding.actor_user_id.clone();
     let scoped = |name: &str| format!("tenants/{tenant}/users/{}/{name}", owner.as_str());
 
-    // ── Fresh caller: a never-written subtree reads as EMPTY, not an error ──
+    // ── Fresh caller: a never-written subtree errors with the pinned
+    // `Path not found` text (the pinned engines do not fabricate an empty
+    // workspace for a caller nothing has written for) ──
     h.submit_turn("list my fresh workspace")
         .await
-        .map_err(|e| format!("[fresh glob must succeed, not error] {e}"))?;
-    let listed = h.tool_result_output("builtin.glob").await?;
-    let listed_text = listed["output"]
-        .as_str()
-        .ok_or("glob output must be an output text string")?;
-    if listed_text.contains("scoped.txt") {
-        return Err(format!("fresh caller's glob must list nothing, got {listed}").into());
-    }
+        .map_err(|e| format!("[fresh glob must fail recoverably, not error the run] {e}"))?;
+    h.assert_tool_error(
+        super::reborn_support::assertions::ToolErrorClass::Failed,
+        "operation_failed",
+    )
+    .await
+    .map_err(|e| format!("[fresh glob must fail recoverably with the pinned diagnostic] {e}"))?;
 
     h.submit_turn("glob my fresh workspace")
         .await
-        .map_err(|e| format!("[fresh glob must succeed, not error] {e}"))?;
-    let globbed = h.tool_result_output("builtin.glob").await?;
-    let globbed_text = globbed["output"]
-        .as_str()
-        .ok_or("glob output must be an output text string")?;
-    if globbed_text.contains("scoped.txt") {
-        return Err(format!("fresh caller's glob must match nothing, got {globbed}").into());
-    }
+        .map_err(|e| format!("[fresh glob must fail recoverably] {e}"))?;
+    h.assert_tool_error(
+        super::reborn_support::assertions::ToolErrorClass::Failed,
+        "operation_failed",
+    )
+    .await
+    .map_err(|e| format!("[fresh glob must fail recoverably with the pinned diagnostic] {e}"))?;
 
     h.submit_turn("grep my fresh workspace")
         .await
-        .map_err(|e| format!("[fresh grep must succeed, not error] {e}"))?;
-    let grepped = h.tool_result_output("builtin.grep").await?;
-    let grepped_text = grepped["output"]
-        .as_str()
-        .ok_or("grep output must be an output text string")?;
-    if grepped_text.contains("scoped-body") {
-        return Err(format!("fresh caller's grep must match nothing, got {grepped}").into());
-    }
+        .map_err(|e| format!("[fresh grep must fail recoverably] {e}"))?;
+    h.assert_tool_error(
+        super::reborn_support::assertions::ToolErrorClass::Failed,
+        "operation_failed",
+    )
+    .await
+    .map_err(|e| format!("[fresh grep must fail recoverably with the pinned diagnostic] {e}"))?;
 
     // ── Gated write approved → per-caller lease → lands in the OWN subtree ──
     // Global auto-approve defaults ON; force it OFF for this owner so the

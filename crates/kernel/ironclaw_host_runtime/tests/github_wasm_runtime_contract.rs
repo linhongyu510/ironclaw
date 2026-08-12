@@ -1,4 +1,7 @@
 // arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+mod support;
+use support::host_runtime_harness::WithTestArtifactPersistence;
+
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
@@ -85,6 +88,7 @@ macro_rules! github_wasm_services_for_test {
         .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
         .unwrap()
+        .with_test_artifact_persistence()
     }};
 }
 
@@ -134,6 +138,7 @@ macro_rules! google_wasm_services_for_test {
         .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
         .unwrap()
+        .with_test_artifact_persistence()
     }};
 }
 
@@ -208,7 +213,9 @@ async fn host_runtime_services_compact_github_search_preserves_pagination_and_eg
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
+
     secret_store
         .put(
             scope.clone(),
@@ -398,7 +405,9 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
+
     secret_store
         .put(
             scope.clone(),
@@ -497,7 +506,9 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
+
     secret_store
         .put(
             scope.clone(),
@@ -1101,7 +1112,8 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -1184,7 +1196,9 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
+
     secret_store
         .put(
             scope.clone(),
@@ -1298,7 +1312,8 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-    .unwrap();
+    .unwrap()
+    .with_test_artifact_persistence();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -2853,6 +2868,7 @@ macro_rules! slack_enrichment_services_for_test {
         .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
         .unwrap()
+        .with_test_artifact_persistence()
     }};
 }
 
