@@ -34,7 +34,7 @@ never delivers anything. Nothing else in the system runs the agent.
 |---|---|---|---|
 | **Surface** (ingress + rendering) | Slack/Telegram adapters, WebUI routes, trigger worker, suggestions UI, OpenAI-compat HTTP | Protocol translation, verification hand-off, rendering output for its vendor/client | Create threads, build prompts, call the engine, touch policy or delivery stores |
 | **Workflow** (product logic) | Conversation workflow, suggestions workflow, OpenAI-compat workflow | Request assembly (the *what*), output handling, its own state (threads/bindings, suggestion store) and reply-route associations | Run the loop, authorize capabilities, invent events, bypass the coordinator to mutate run state |
-| **Engine** (`TurnCoordinator` + shared runtime) | The expanded coordinator; process journal, scheduler, leases, canonical loop, capability host, gates, events | Admission, scheduling, execution, action-time authorization, gates, checkpoints, durable events and live hints, cancellation | Know about surfaces, hold reply targets or vendor IDs, deliver output, parse external identifiers |
+| **Engine** (`TurnCoordinator` + shared runtime) | The coordinator (one `submit_turn`, optional bindings); process journal, scheduler, leases, canonical loop, capability host, gates, events | Admission, scheduling, execution, action-time authorization, gates, checkpoints, durable events and live hints, cancellation | Know about surfaces, hold reply targets or vendor IDs, deliver output, parse external identifiers |
 
 Two admission doors already exist on `main` and stay exactly where they are:
 verified vendor messages enter through
