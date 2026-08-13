@@ -4824,6 +4824,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "uuid",
  "x509-parser",

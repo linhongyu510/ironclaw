@@ -589,9 +589,23 @@ impl RailwayPreviewSandboxTransport {
         invocation: RailwayCliInvocation,
         deadline: Instant,
     ) -> Result<RailwayCliOutput, RuntimeProcessError> {
-        self.cli
+        let operation = invocation.operation;
+        let result = self
+            .cli
             .execute(invocation, deadline_remaining(deadline)?)
-            .await
+            .await;
+        if let Err(error) = &result {
+            // SystemRailwayCli constructs this error only after redacting CLI
+            // stderr and configured credentials. Keep the operation alongside
+            // that sanitized cause so provider, preflight, and remote-command
+            // failures remain distinguishable in deployment logs.
+            tracing::error!(
+                operation = operation.label(),
+                ?error,
+                "Railway preview CLI operation failed"
+            );
+        }
+        result
     }
 
     async fn live_sandbox_for_file_operation(
@@ -811,7 +825,17 @@ impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
                 return Err(SandboxWorkspaceFileError::TransportFailed);
             }
         };
-        parse_workspace_file_read_output(&output.stdout, request.max_bytes)
+        match parse_workspace_file_read_output(&output.stdout, request.max_bytes) {
+            Err(error @ SandboxWorkspaceFileError::InvalidResponse) => {
+                log_workspace_file_response_rejection(
+                    RailwayCliOperation::ReadWorkspaceFile,
+                    &output,
+                    &error,
+                );
+                Err(error)
+            }
+            result => result,
+        }
     }
 
     async fn write_file(
@@ -876,6 +900,11 @@ impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
                     "Railway workspace write returned an ambiguous verification response"
                         .to_string(),
                 );
+                log_workspace_file_response_rejection(
+                    RailwayCliOperation::WriteWorkspaceFile,
+                    &output,
+                    &SandboxWorkspaceFileError::InvalidResponse,
+                );
                 self.cleanup_after_file_transport_failure(
                     &mut state,
                     &sandbox_id,
@@ -897,6 +926,23 @@ impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
         state.checkpoint_current = true;
         Ok(output)
     }
+}
+
+fn log_workspace_file_response_rejection(
+    operation: RailwayCliOperation,
+    output: &RailwayCliOutput,
+    error: &SandboxWorkspaceFileError,
+) {
+    // Do not log response content: the file bridge can carry arbitrary user
+    // data. Byte counts plus the typed parse failure are enough to distinguish
+    // a malformed helper response from a provider or remote-command failure.
+    tracing::error!(
+        operation = operation.label(),
+        stdout_bytes = output.stdout.len(),
+        stderr_bytes = output.stderr.len(),
+        ?error,
+        "Railway workspace file response was rejected"
+    );
 }
 
 #[cfg(test)]

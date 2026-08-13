@@ -661,6 +661,53 @@ async fn workspace_download_stdout_ceiling_covers_ten_mib_base64_expansion() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
+async fn workspace_file_transport_failure_logs_operation_and_sanitized_cause() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_file_exec();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"content",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::TransportFailed)
+    );
+    assert!(logs_contain("write sandbox workspace file"));
+    assert!(logs_contain("Timeout"));
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn malformed_workspace_file_response_logs_bounded_metadata() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.malform_next_file_output();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    assert_eq!(
+        transport
+            .write_file(write_request(
+                "tenant",
+                "user",
+                "/workspace/data.bin",
+                b"content",
+                false,
+            ))
+            .await,
+        Err(SandboxWorkspaceFileError::InvalidResponse)
+    );
+    assert!(logs_contain("Railway workspace file response was rejected"));
+    assert!(logs_contain("write sandbox workspace file"));
+    assert!(logs_contain("stdout_bytes=34"));
+}
+
+#[tokio::test]
 async fn workspace_file_transport_failure_destroys_before_reprovisioning() {
     let cli = Arc::new(FakeRailwayCli::new());
     cli.fail_next_file_exec();
