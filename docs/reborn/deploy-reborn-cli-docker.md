@@ -4,12 +4,13 @@
 WebUI v2 and Slack host-beta features enabled. The image defaults to:
 
 ```text
-ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
+ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-0.0.0.0} --port ${PORT:-3000}
 ```
 
-Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
-Railway/public deployments. Local Docker runs can keep the loopback default and
-set `IRONCLAW_REBORN_SERVE_PORT=3000`.
+The entrypoint binds `0.0.0.0` inside the container so Docker-published ports and
+Railway ingress can reach it; bind the published host port to `127.0.0.1` for
+local-only access. Railway's `PORT` is used automatically. An explicit
+`IRONCLAW_REBORN_SERVE_HOST` overrides the container default.
 
 ## Build
 
@@ -31,7 +32,7 @@ docker run --rm \
 Minimum local env shape:
 
 ```bash
-IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+IRONCLAW_REBORN_SERVE_HOST=0.0.0.0
 IRONCLAW_REBORN_SERVE_PORT=3000
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
@@ -101,9 +102,10 @@ https://<public-host>/auth/callback/google
 
 ## Railway
 
-Set the service Dockerfile path to `Dockerfile`. Railway sets `PORT`;
-keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
-`/api/health` for Railway's healthcheck.
+Set the service Dockerfile path to `Dockerfile`. The entrypoint binds `0.0.0.0`
+inside the container and uses Railway's `PORT`. The Reborn WebUI service serves
+`/api/health` for Railway's healthcheck. An explicit
+`IRONCLAW_REBORN_SERVE_HOST` still overrides this derived default.
 
 Leave Railway's Start Command empty for the Docker image. The image entrypoint
 builds the `ironclaw serve` arguments from `PORT` and
