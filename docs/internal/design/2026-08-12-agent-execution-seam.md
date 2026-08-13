@@ -222,6 +222,17 @@ decision for channels, are specified in the companion architecture document.
 
 ## 4. Proposed design
 
+**Interface inventory — read every type below with its class in mind.** The
+sections that follow define what looks like a lot of surface; classified
+honestly, the genuinely new API is one trait and a handful of DTOs:
+
+| Class | Types | What they are |
+|---|---|---|
+| **New API** (the door) | `AgentExecution`, `SubmitAgentExecutionRequest`, `AgentExecutionRequest`, `ExecutionContext`, `OutputContract`, `AgentExecutionResult`, `AgentOutput`, `ExecutionSubmitted`, `ExecutionSnapshot`, `ExecutionId`, `ExecutionCaller` | The port and its request/response DTOs — the only truly new contract surface |
+| **Extension of an existing family** | `AgentMessage`, `AgentMessageRole`, `ContentPart`, `ToolCallContent`, `ToolResultContent`, `ArtifactRef` (§4.4) | The canonical cleanup of `ironclaw_llm`'s existing `ChatMessage` vocabulary, defined in that crate — not a new message family |
+| **Read-side views over existing machinery** | `ExecutionEvent`, `ExecutionLiveHint`, `ExecutionStreamItem`, `ExecutionCursor` (§4.7) | Per-execution projections of the *existing* durable vocabularies (turn lifecycle + runtime events) and the *existing* live-hint plane; `ExecutionStreamItem` mirrors `ironclaw_event_streams`' stream-item vocabulary. No new durable event language exists |
+| **Referenced, unchanged** | `CapabilityActivityView`, gate refs, run profiles, `ThreadId`/`AcceptedMessageRef`, everything in the runtime | Existing types the seam consumes as-is |
+
 ### 4.1 The seam
 
 One product-facing port for submitting and observing executions:
@@ -664,7 +675,9 @@ log is coarse, redacted metadata; the only durable text is the finalized
 output. This design keeps that split and re-keys both planes by execution:
 
 ```rust
-/// Durable, replayable, redacted — the execution's journal.
+/// A read-side VIEW, per execution, over the EXISTING durable vocabularies
+/// (turn lifecycle + runtime events) — not a new durable event language.
+/// Nothing new is persisted; this is what a subscriber sees.
 pub enum ExecutionEvent {
     Accepted,
     Running,
@@ -677,14 +690,18 @@ pub enum ExecutionEvent {
     Cancelled,
 }
 
-/// Ephemeral, process-local, epoch-guarded — live hints, never replayed
-/// losslessly across restarts.
+/// A view over the EXISTING ephemeral live-hint plane (the coalesced
+/// cumulative-text machinery) — process-local, epoch-guarded, never
+/// replayed losslessly across restarts.
 pub enum ExecutionLiveHint {
     Text     { cumulative: SanitizedText },   // coalesced, replaceable body
     Thinking { cumulative: SanitizedText },
     ToolProgress { activity_id: CapabilityActivityId, progress: SafeToolProgress },
 }
 
+/// Mirrors the stream-item vocabulary `ironclaw_event_streams` already
+/// ships (Snapshot / update / RebaseRequired / Lagged / KeepAlive), with
+/// the durable-vs-live split made explicit.
 pub enum ExecutionStreamItem {
     Snapshot(ExecutionSnapshot),
     Event(ExecutionEvent),          // durable plane, cursor-advancing
