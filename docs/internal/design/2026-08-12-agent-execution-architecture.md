@@ -112,8 +112,11 @@ distinction is *reference vs. copy*:
   at run time through the existing thread-backed context port, so steering,
   compaction, and rebuild-on-resume keep working by construction. This is how
   conversations share the seam without freezing what must stay alive.
-- **`Snapshot`** — a caller-supplied, point-in-time input, frozen at
-  submission (content landed as refs at admission).
+- **`Snapshot`** — a caller-supplied, point-in-time input. The seam mints an
+  **unbound, ownerless thread** from it at admission (content landed as
+  refs, messages seeded as rows, thread id internal) and runs the same
+  thread-backed path — a conversation is a thread *with a binding*, and
+  these deliberately have none.
 
 Everything else that differs between workflows differs **by value**, and the
 engine behaves accordingly through profiles:
@@ -122,11 +125,11 @@ engine behaves accordingly through profiles:
 |---|---|---|
 | Submitted by | conversation workflow only | detached workflows |
 | Admission | one active run per thread; busy input settles as steering (`DeferredBusy`) or `RejectedBusy` | concurrent; idempotency only |
-| Context at run time | materialized from the thread, fresh each iteration | materialized from the stored snapshot refs |
+| Context at run time | materialized from the thread, fresh each iteration | materialized from its own seeded, unbound thread — the *same* path |
 | Steering mid-run | yes (profile-gated), drained by the running loop | no (profile-disabled) |
 | Gates | allowed — approval/auth surfaces exist (WebUI `gate.resolve`, channel approval replies) | not supported — non-gating surface; a gate is a typed `GateNotSupported` failure |
 | Run profile | conversation profiles (interactive, scheduled trigger, …) | `detached_default` / `detached_structured` (derived from `output`) |
-| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | none — the execution journal is the only record |
+| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread — same machinery; internal, never listed |
 | Subagents | per profile | denied |
 | Typical `output` | `AssistantMessage` | either; suggestions use `JsonSchema` |
 
@@ -388,18 +391,22 @@ no vendor anything.
    every call is authorized at action time by the capability host, under the
    execution's acting identity — identically for both context kinds.
 8. **Thread transcripts are written by the run, not by output handlers.**
-   The engine's thread-backed machinery persists conversation messages
-   lease-fenced during the run (exactly as today); output handling is about
-   reply, never persistence. Snapshot executions have no transcript beyond
-   the execution journal.
+   The engine's thread-backed machinery persists messages lease-fenced
+   during the run (exactly as today) — for every run: a snapshot execution's
+   transcript is its own unbound, ownerless thread, seeded at admission and
+   written by the same machinery, internal to the seam and never enumerated
+   by conversation surfaces (those query by owner and binding). Output
+   handling is about reply, never persistence.
 
 ## 7. Sequencing
 
 **Phase 1 — the seam and the detached class** (the companion proposal).
-`AgentExecution` port; `Snapshot` context; detached profiles;
-`OutputContract` (schema in-request) + reply-admission enforcement; the
-observation façade. Conversations untouched; suggestions and OpenAI-compat
-can adopt as soon as this lands.
+`AgentExecution` port; `Snapshot` context via mint-seed-submit (unbound,
+ownerless threads, ids internal — no new materialization path); detached
+profiles; `OutputContract` (schema in-request) + reply-admission
+enforcement; the observation façade; taxonomy tests (unbound threads never
+surface in conversation listings). Conversations untouched; suggestions and
+OpenAI-compat can adopt as soon as this lands.
 
 **Phase 2 — conversations behind the seam.** `ExecutionContext::Thread` maps
 1:1 onto today's `SubmitTurnRequest` core (scope + actor → caller; thread +

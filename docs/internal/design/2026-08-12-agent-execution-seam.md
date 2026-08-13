@@ -8,38 +8,94 @@ suggestions, OpenAI-compat) reaches this one seam and handles its output.
 
 ## Summary
 
-IronClaw's durable agent runtime — admission, scheduling, leases, the
-model/tool loop, gates, checkpoints, events, cancellation — can currently be
-entered only through a conversation turn. This proposes `AgentExecution`: the
-one product-neutral port for submitting and observing agent executions. An
-execution's context is either a **thread reference** (conversations — the
-host materializes history at run time, exactly as today) or a caller-supplied
-**snapshot** (**detached executions**: durable, possibly tool-using,
-schema-validated invocations with no conversational state — suggestions,
-OpenAI-compat, background analyses). Detached executions are a new *run
-class* on the existing runtime, not a new runtime: the same process journal,
-scheduler, canonical loop, capability authorization, and event machinery
-execute both kinds.
+Main already has an agent-execution service: `TurnCoordinator` — durable
+admission, scheduling, leases, the model/tool loop, gates, checkpoints,
+events, cancellation. **Threads are already its unit of work** (every run is
+thread-backed), **a conversation is already "a thread plus a binding"** (the
+conversations crate's charter, policed by an architecture test), and
+**unbound work-threads already exist** (every subagent child run gets one).
+What main is missing is not a runtime — it is a door, a contract, and a name
+for its own taxonomy:
 
-The contract line that makes this safe: **the caller owns the what** (acting
-identity, scope, context, tool selection, output contract, limits, model
-preference); **the host owns the how** (action-time authorization, run
-profiles, context materialization, compaction and recovery, model validation
-and fallback, loop strategy). Conversation behavior does not change —
-thread-backed materialization, steering, and gates work exactly as today,
-because the conversation context crosses the seam as a *reference, not a
-copy*. The companion document specifies every surface's path end to end.
+- a typed way to request work over caller-supplied content (today:
+  hand-rolled create-thread → accept-message → submit-turn, which
+  OpenAI-compat does and then flattens the messages into one string);
+- a structured-output contract (`response_format` is parsed and dropped);
+- per-run caller knobs (task instructions, tool selection, limits);
+- a per-run subscription (delivery polls `get_run_state` every 250 ms);
+- the rule "an unbound thread is not a conversation" stated and tested
+  rather than true by accident.
 
-## 1. Problem
+This proposes `AgentExecution`: **`TurnCoordinator`'s front, matured** — one
+submission port with two admission idioms. Bring a **bound thread**
+(conversations: exactly today's submission), or bring **content** (a
+snapshot: system prompt + messages + knobs), for which the seam mints an
+**unbound, ownerless thread** internally, seeds the messages as its rows,
+and runs the one existing thread-backed materialization path. No second
+context machinery, no kernel type changes, no new event vocabulary: the same
+runtime executes everything, and a *detached execution* is simply a run
+whose thread has no binding and no owner — structurally invisible to every
+conversation surface, because those query by owner and binding.
 
-Every entry into the runtime today is shaped like a conversation turn.
-`SubmitTurnRequest` requires a `TurnScope` (which embeds a `ThreadId`), an
-`AcceptedMessageRef`, and source/reply binding refs. That is right for Slack
-and the WebUI: their input belongs to a conversation, so the system resolves a
-thread, stores the message, and runs the agent against the thread's history.
+The contract line: **the caller owns the what** (acting identity, scope,
+context, tool selection, output contract, limits, model preference); **the
+host owns the how** (action-time authorization, run profiles, context
+materialization, compaction and recovery, model validation and fallback,
+loop strategy). Conversation behavior does not change — the conversation
+context crosses the seam as a *reference, not a copy*. The companion
+document specifies every surface's path end to end.
 
-A feature that is *not* a conversation must either manufacture a hidden thread
-or build a parallel stack. This is not hypothetical — it is already shipping:
+## 1. What main has, and the problem
+
+### 1.1 The runtime that already exists
+
+"Request work on a thread" is `TurnCoordinator`, and the execution chain
+behind it:
+
+```text
+TurnCoordinator::submit_turn(SubmitTurnRequest)   kernel/ironclaw_turns
+  → AgentTurnProcessRuntime                       admission: run profile resolved once and
+                                                  persisted; one-active-run-per-thread;
+                                                  idempotency via ProcessOperationId
+  → ProcessSupervisor                             kernel/ironclaw_processes
+                                                  wake+poll claims · 90s leases · heartbeats ·
+                                                  bounded crash reclaims
+  → RebornTurnRunExecutor                         loop/ironclaw_turn_runner
+                                                  builds the host (thread-backed ports);
+                                                  run-vs-resume by checkpoint
+  → CanonicalAgentLoopExecutor                    loop/ironclaw_agent_loop
+                                                  the loop: drain steering → build prompt
+                                                  (compaction) → checkpoint → model → reply
+                                                  admission → tool batch (action-time auth)
+  → LoopExit — evidence-validated → terminal state
+```
+
+Control operations live beside `submit_turn` on the same trait:
+`get_run_state`, `cancel_run`, `resume_turn` (gates), `retry_turn`, and
+`submit_child_run` (subagents).
+
+Three facts about this runtime are the foundation of the proposal:
+
+1. **Threads are already the universal unit of work.** Every run is
+   thread-backed (`TurnScope` requires a `ThreadId`); the only
+   materialization path is the thread-backed one.
+2. **A conversation is already "a thread plus a binding".** The conversations
+   crate owns bindings and says so in its charter ("it is not the
+   transcript"); an architecture test polices the separation. A thread with
+   no binding has no external route, no reply target, and no channel — it is
+   an *unbound transcript*, not a conversation.
+3. **Unbound work-threads already exist.** Every subagent child run gets a
+   fresh, seeded, unbound thread — kept out of conversation listings by
+   owner scoping (`TurnThreadOwner::Ownerless` exists; listings query
+   `owner_user_id`). OpenAI-compat manufactures a thread per call today.
+
+### 1.2 What is missing
+
+`SubmitTurnRequest` requires conversation vocabulary — a `TurnScope`, an
+`AcceptedMessageRef`, source/reply binding refs. That is right for Slack and
+the WebUI. A caller that has *content* rather than a conversation must
+hand-roll the unit-of-work pattern itself, and there is no contract for what
+it needs. This is not hypothetical — it is already shipping:
 
 - **OpenAI-compat is the live workaround.** It accepts a caller-assembled
   request (messages + tools + `response_format`) and, because no neutral entry
@@ -211,6 +267,19 @@ pub trait AgentExecution: Send + Sync {
   implements it, composition wires it — the same pattern as
   `CapabilityDispatcher`.
 
+**The seam is `TurnCoordinator`'s front, matured — not a sibling service.**
+The method mapping is nearly 1:1; the deltas are the door, the knobs, the
+contract, and the subscription:
+
+| `AgentExecution` | `TurnCoordinator` on main |
+|---|---|
+| `submit(context: Thread { .. })` | `submit_turn(SubmitTurnRequest)` — near 1:1; routing refs move workflow-side (phase 2, companion doc) |
+| `submit(context: Snapshot { .. })` | **no equivalent** — hand-rolled create-thread → accept-message → submit-turn; the seam packages it as mint-seed-submit (§4.2) |
+| `get` | `get_run_state` |
+| `subscribe` | **no equivalent** — 250 ms polling + product projections |
+| `cancel` | `cancel_run` |
+| `output` / `tools` / `system_prompt` / `limits` | none / the `ExternalToolCatalog` side channel / host-only / profile-only |
+
 ### 4.2 The request
 
 ```rust
@@ -262,7 +331,10 @@ pub enum ExecutionContext {
     },
 
     /// Detached surfaces (suggestions, OpenAI-compat, background work): a
-    /// caller-supplied point-in-time snapshot, frozen at submission.
+    /// caller-supplied point-in-time snapshot. The seam mints an unbound,
+    /// ownerless thread, seeds these messages as its rows, and pins the
+    /// last one; the thread id stays internal — the ExecutionId is the
+    /// caller's only handle.
     Snapshot {
         /// The caller's task prompt. The resolved profile may prepend host
         /// protocol assets (tool disclosure, safety framing); callers own
@@ -282,7 +354,9 @@ submission moves behind the same seam (phased in the companion document —
 distinction is *reference vs. copy*: a caller-materialized copy of thread
 history would freeze what must stay alive (steering, compaction,
 rebuild-on-resume — I1, I2), so conversations cross the seam as a reference
-and the host keeps materializing. A third variant needs its own proposal.
+and the host keeps materializing. Beneath the door, **both variants are
+threads** — the enum encodes *who supplies the content and whether a binding
+exists*, never two runtimes. A third variant needs its own proposal.
 Everything else in the request varies by value, not by shape. (Continuation-
 style snapshot callers need no third variant: because content lands as refs
 at admission, a workflow composes a follow-on snapshot by reusing the prior
@@ -320,11 +394,17 @@ tenant scope and acting user; duplicating them inside the request would only
 create a second copy to keep consistent. The request is pure *what*; the
 caller is pure *who*.
 
-**Refs are a journal rule, not an API shape.** Callers pass ordinary messages
-— inline text, attachments as `ArtifactRef` parts. At durable admission the
-host lands inline content in the artifact/content store once and journals
-refs, so the journal never stores a second copy of transcript-scale content
-(I5), and the API stays as simple as the call it describes.
+**Snapshot admission is mint-seed-submit.** Callers pass ordinary messages —
+inline text, attachments as `ArtifactRef` parts. Admission mints an
+**unbound, ownerless thread**, lands content exactly the way accepted
+conversation messages land today (content refs into the transcript/content
+store — I5), seeds the messages as the thread's rows, pins the last one, and
+submits through the same turn admission as every run. The detached run's
+transcript *is* its thread, written by the same lease-fenced machinery as
+every other run. Unbound + ownerless makes it structurally invisible:
+conversation listings query by owner scope, a follow-up has no binding to
+route through, and the thread id is never exposed. This is the pattern
+subagent child runs already use — codified instead of accidental.
 
 **Profiles are derived, not requested.** Every execution resolves a
 `ResolvedRunProfile` at submit (I4), but the seam derives it rather than
@@ -364,12 +444,13 @@ kinds:
     injection; steering disabled; subagent spawn denied; non-gating surface.
   - `detached_structured` — `detached_default` plus structured-output reply
     admission (§4.5).
-- **Materialization** (I1). A new snapshot-backed context source implements
-  the existing `LoopContextPort` against the stored refs, so the canonical
-  loop, compaction, checkpoints, recovery, and `LoopPromptBundleAuthority`
-  work unchanged. A long tool-using execution compacts exactly like a
-  conversation; the *durable request* stays as-submitted while the loop's
-  working context evolves.
+- **Materialization** (I1). There is exactly **one materialization path** —
+  the existing thread-backed context port — for both context kinds: a
+  snapshot run materializes from its own seeded thread. The canonical loop,
+  compaction, checkpoints, recovery, and `LoopPromptBundleAuthority` apply
+  unchanged and unforked. (Per-iteration re-materialization over a thread
+  nobody else writes to is behaviorally identical to a frozen snapshot —
+  freshness machinery over an unchanging source needs no special case.)
 
 ### 4.3 Output
 
@@ -635,45 +716,44 @@ pub struct ExecutionSubmitted {
 
 ```python
 def submit(caller, request):
-    # PUBLIC: authorize the seam, land inline content as refs, admit, queue.
-    authorize_seam(caller)                                       # caller carries scope + acting user
+    # PUBLIC: authorize the seam; both idioms end in today's turn admission.
+    authorize_seam(caller)                                   # caller carries scope + acting user
 
-    landed = land_inline_content_as_refs(request.execution)      # Snapshot text → refs (I5)
-    profile = resolve_profile(request.execution)                 # Thread → conversation profiles, as today;
-                                                                 # Snapshot → detached_{structured|default} (I4)
-    validate_limits_narrow_only(request.execution.limits, profile)
+    match request.execution.context:
+        case Thread(thread_id, accepted_message):
+            pass                                             # bound thread; message already accepted
+        case Snapshot(system_prompt, messages):
+            # MINT-SEED-SUBMIT: an unbound, ownerless thread; id stays internal.
+            thread_id = threads.create_unbound_ownerless()
+            accepted_message = threads.seed(thread_id, system_prompt, messages)
+            # rows land via the same content-ref path as accepted messages (I5)
 
-    # Same process journal, leases, wake+poll scheduler as conversation turns.
-    admission = process_runtime.admit_or_replay(
-        kind=kind_for(request.execution.context),                # Thread = today's turn admission
-                                                                 # (incl. one-active-run-per-thread + busy→steering)
-        scope=caller.scope,
-        acting_user=caller.acting_user,
-        payload_refs=landed,
-        resolved_run_profile=profile,
-        operation_id=request.idempotency_key,
-    )
-    if admission.is_new:
-        scheduler.wake(admission.scope)
-    return ExecutionSubmitted(admission.execution_id, replayed=not admission.is_new)
+    profile = resolve_profile(request.execution)             # Thread → conversation profiles, as today;
+                                                             # Snapshot → detached_{structured|default} (I4)
+    validate_knob_matrix_and_limits(request.execution, profile)
+
+    # The SAME admission as every turn on main: exclusivity, idempotency,
+    # profile persisted once, process journal, wake — nothing bespoke.
+    run = turn_admission.submit(thread_id, accepted_message, profile,
+                                caller.scope, caller.acting_user,
+                                operation_id=request.idempotency_key)
+    return ExecutionSubmitted(run.execution_id, replayed=run.replayed)
 
 
 def execute_claimed(claimed):
-    # PRIVATE WORKER: identical machinery for both context kinds. Thread
-    # context builds the thread-backed host — exactly today's path; Snapshot
-    # context builds the one new component in this proposal.
-    host = host_factory.create_host(claimed, context_source=context_port_for(claimed))
-    #   Thread   → ThreadBackedLoopContextPort (existing)
-    #   Snapshot → SnapshotBackedLoopContextPort (new, over the stored refs)
+    # PRIVATE WORKER: unchanged from main — one host, one thread-backed
+    # materialization path, for every run.
+    host = host_factory.create_host(claimed)                 # ThreadBackedLoopContextPort
     driver = driver_registry.get(claimed.resolved_run_profile.loop_driver)
     exit = driver.run_or_resume(host, load_checkpoint_if_any(claimed))
     loop_exit_applier.apply(claimed, exit)   # evidence-validated terminal settle
 ```
 
-There is no bespoke scheduler, lease logic, retry logic, or crash recovery in
-this proposal: admission/replay, claims, heartbeats, bounded reclaims, and
+There is no bespoke scheduler, lease logic, retry logic, crash recovery, or
+second materialization path in this proposal: admission/replay, claims,
+heartbeats, bounded reclaims, thread-backed materialization, and
 evidence-validated terminal settlement are the existing process/turn
-machinery (I5).
+machinery (I5), untouched.
 
 ## 5. Relationship to the existing runtime
 
@@ -681,19 +761,22 @@ Nothing is replaced.
 
 | Responsibility | Owner (unchanged) | This proposal adds |
 |---|---|---|
-| Durable admission, dedup, queueing | process journal + coordinator machinery | a detached admission path (no thread, no binding refs) |
+| Durable admission, dedup, queueing | process journal + coordinator machinery | a second admission *idiom*: mint-seed-submit of an unbound, ownerless thread (no binding; thread id internal) |
 | Scheduling, leases, crash recovery | `ProcessSupervisor` / scheduler | a run class with its own scheduling/concurrency class |
-| Model/tool loop, checkpoints, recovery | canonical loop + loop families | `detached_*` profiles; a snapshot-backed `LoopContextPort`; a schema-validating reply-admission strategy |
+| Model/tool loop, checkpoints, recovery, materialization | canonical loop + loop families + the one thread-backed context port | `detached_*` profiles; a schema-validating reply-admission strategy — the materialization path is unchanged and unforked |
 | Capability authorization, approvals | `CapabilityHost` + approvals | nothing — action-time auth applies as-is |
 | Durable events, projections, streams | events crates + product projections | an execution-scoped observation façade over both planes |
 | Threads, conversation binding, steering | threads/conversations/turn services | nothing — conversation machinery and semantics are unchanged; only its *entry point* moves behind this port (companion doc, phased) |
 
 **What is genuinely new** (complete list): the `AgentExecution` port and its
-DTOs (the request with its two-variant `ExecutionContext`);
-`SnapshotBackedLoopContextPort`;
+DTOs (the request with its two-variant `ExecutionContext`); mint-seed-submit
+admission (unbound, ownerless threads with internal ids);
 the `detached_default`/`detached_structured` run profiles; `OutputContract` +
 the reply-admission strategy enforcing it; the execution observation
-façade (cursor + subscription); the typed `GateNotSupported` failure.
+façade (cursor + subscription); the typed `GateNotSupported` failure; and
+the codified taxonomy rule — *a conversation is a thread with a binding* —
+pinned by tests proving unbound threads never surface in conversation
+listings.
 
 **Follow-ups this unlocks** (each its own change, not part of this proposal):
 
@@ -804,7 +887,7 @@ any new feature shipping.
 | `AgentExecution` port + request/result/event DTOs | `ironclaw_loop_contracts` (contracts layer) | products may consume; loop tier implements; no new crate unless review prefers one |
 | Neutral message/content extensions | `ironclaw_llm` | owns provider-neutral model vocabulary; no mirror DTOs |
 | `OutputContract` enforcement (reply admission) | `ironclaw_agent_loop` strategy + `detached_*` families | reuses the existing retry/repair machinery; schema is carried in-request |
-| `SnapshotBackedLoopContextPort`, seam implementation | `ironclaw_turn_runner` / kernel turn tier | beside the thread-backed host it parallels |
+| Seam implementation (mint-seed-submit + the port fronting the coordinator) | kernel turn tier (`ironclaw_turns`) | it *is* `TurnCoordinator`'s front, matured — not a sibling |
 | Suggestions (when real) and other workflows | `ironclaw_assistant` | product orchestration |
 | Wiring | `ironclaw_composition` | assembly only |
 
@@ -816,8 +899,9 @@ convention.
 
 | State | Owner |
 |---|---|
-| Conversation transcript and continuity | Thread service (unchanged) |
-| Execution request (refs), lifecycle, journal, result | Process journal + execution projection |
+| Conversation transcript and continuity | Thread store, via its binding (unchanged) |
+| Detached execution transcript (seeded request + run output) | Its own unbound, ownerless thread — the same thread store as every run |
+| Run lifecycle, resolved profile, idempotency, result settlement | Process journal (unchanged — as every run today) |
 | Artifact bytes and authorization | Artifact/filesystem store (unchanged) |
 | Output schema | The execution request (journaled with it) |
 | Suggestion request and validated cards | Suggestions store (future) |
@@ -827,6 +911,17 @@ convention.
 
 **Resolved (2026-08-13):**
 
+- **Threads are the unit of work; a conversation is a thread with a
+  binding.** Detached executions are runs on **unbound, ownerless threads**
+  minted by the seam at admission; the thread id stays internal
+  (`ExecutionId` is the caller's handle). Each consequence replaces an
+  earlier design element: there is **no snapshot-backed context port** (one
+  materialization path), **no thread-kind flag** (binding-absence plus
+  ownerlessness is the classifier, and owner-scoped listings already exclude
+  such threads structurally), **no kernel scope changes**
+  (`TurnScope`/`LoopRunContext` untouched), and the process journal keeps
+  its existing role. Subagent child threads are the in-tree precedent, now
+  codified rather than accidental.
 - **The schema travels in the request** (§4.5) — no host-owned registry.
   Admission journals it with the rest of the request, so stored results stay
   interpretable with nothing to own or version. How a feature constructs or
