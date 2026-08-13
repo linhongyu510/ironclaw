@@ -3,9 +3,9 @@
 **Status:** Discussion draft
 **Grounded in:** `main` @ `d4fa8e1f60`
 **Companion:** [2026-08-12-detached-turns.md](2026-08-12-detached-turns.md)
-— the contract itself: the expanded `TurnCoordinator`
-(`submit_detached_turn`), `AgentMessage`, `OutputContract`, run
-observation, and the invariants (I1–I5) this document builds on.
+— the contract itself: the one `submit_turn` with optional bindings, the
+shared `accept_detached_context` door, `AgentMessage`, `OutputContract`,
+run observation, and the invariants (I1–I5) this document builds on.
 
 ## 1. The rule this document exists to make obvious
 
@@ -15,9 +15,11 @@ three things:
 
 1. **Normalize its input** through its own ingress (webhook translation,
    session route, trigger fire, API request).
-2. **Submit through the one `TurnCoordinator`** — conversations via
-   `submit_turn` (exactly as today), detached work via the new
-   `submit_detached_turn`.
+2. **Submit through the one `TurnCoordinator::submit_turn`** — everyone.
+   Conversations accept content via `accept_user_message` and submit with
+   `Some` bindings; every non-channel caller (suggestions, OpenAI-compat,
+   subagent spawn, future features) accepts content via the **one shared**
+   `accept_detached_context` helper and submits with `None` bindings.
 3. **Interpret the run's output in its own way** — and *only* its own
    way: conversations reply through the channel reply machinery (manifest-
    driven: stream or final send), suggestions validate and store cards,
@@ -60,13 +62,13 @@ flowchart TB
         Compat["OpenAI-compat workflow"]
     end
 
-    subgraph Engine["ENGINE — the expanded TurnCoordinator + shared runtime"]
-        AE["TurnCoordinator (expanded) — <br/>submit_turn · submit_detached_turn (NEW) · <br/>get_run_state · cancel_run · resume_turn"]
-        MINT["MINT-SEED-SUBMIT — <br/>unbound, ownerless thread · messages seeded as rows · id internal"]
+    subgraph Engine["ENGINE — TurnCoordinator + shared runtime"]
+        AE["TurnCoordinator — ONE submission method: <br/>submit_turn (binding refs Option) · <br/>get_run_state · cancel_run · resume_turn"]
         RT["turn admission (unchanged) → process journal · scheduler · leases · <br/>canonical loop · ONE thread-backed materialization path · <br/>capability host (action-time auth) · gates · checkpoints · events"]
-        AE -->|"submit_turn: passes straight through"| RT
-        AE -->|"submit_detached_turn"| MINT --> RT
+        AE --> RT
     end
+
+    PREP["accept_detached_context — ONE shared helper (threads tier): <br/>mint unbound, ownerless thread · seed content rows · journal declarations <br/>(also used by subagent spawn, retiring its synthetic refs)"]
 
     Slack -->|"admit_channel_inbound"| Conv
     WebUI -->|"turn.submit"| Conv
@@ -74,9 +76,10 @@ flowchart TB
     SuggUI -->|"suggestions.generate"| Sugg
     OAIApi --> Compat
 
-    Conv -->|"submit_turn — a bound thread"| AE
-    Sugg -->|"submit_detached_turn + JSON schema"| AE
-    Compat -->|"submit_detached_turn"| AE
+    Conv -->|"submit_turn — bindings: Some"| AE
+    Sugg --> PREP
+    Compat --> PREP
+    PREP -->|"submit_turn — bindings: None"| AE
 
     RT -.->|"events + terminal result"| ConvOut["Conversation output handling<br/>manifest reply.transport:<br/>stream → host projection pipeline (no adapter)<br/>vendor → OutboundPolicy → ChannelReply::send_reply<br/>out-of-band → ChannelDelivery::deliver"]
     RT -.->|"terminal result"| SuggOut["Suggestions output handling<br/>validate schema → store cards once → publish ready"]
@@ -93,43 +96,51 @@ workflows, one coordinator, one runtime. Bottom-up: one output stream, three
 interpretations — reply machinery for anything conversation-shaped, a store
 for suggestions, an HTTP response for OpenAI-compat.
 
-## 4. Two methods, one runtime
+## 4. Two accept doors, one submit, one runtime
 
-The coordinator's two submission idioms (full contract in the companion
-document):
+Per-request data rides the accept step; coordinates ride the submit (full
+contract in the companion document):
 
 ```rust
-// Conversations — unchanged from main:
-submit_turn(SubmitTurnRequest)              // bound thread + accepted message ref
-
-// Detached work — the one new method:
-submit_detached_turn(SubmitDetachedTurnRequest {
+// Accept door 1 — conversations (existing):
+accept_user_message(thread_id, message)          // → AcceptedMessageRef
+// Accept door 2 — everything else (NEW, one shared implementation):
+accept_detached_context(DetachedContextRequest {
     tenant_id, agent_id, project_id, actor,      // who (run-acts-as-invoker)
     system_prompt, messages: Vec<AgentMessage>,  // what the model may see
     tools: Vec<CapabilityId>,                    // selection, authorized per call
-    model: Option<ModelProfileId>,               // preference; host validates + falls back
     output: OutputContract,                      // AssistantMessage | JsonSchema (in-request)
     limits: TurnLimits,                          // narrowing-only
-    idempotency_key,
+    idempotency_key,                             // replay-safe: no orphan threads
+})                                               // → { thread_id, AcceptedMessageRef }
+
+// The ONE submit — for everyone:
+submit_turn(SubmitTurnRequest {
+    scope,                                       // the REQUIRED thread: the unit of work
+    actor, accepted_message_ref,
+    source_binding_ref: Option<..>,              // Some = conversation,
+    reply_target_binding_ref: Option<..>,        //   None = detached
+    requested_model, requested_run_profile, idempotency_key,
 })
 ```
 
-The method split is the only structural difference between workflows, and
-the distinction underneath is *reference vs. content*:
+The accept-door split is the only structural difference between workflows,
+and the distinction underneath is *reference vs. content*:
 
-- **`submit_turn`** — a reference. The host materializes history from the
-  bound thread at run time through the thread-backed context port, so
-  steering, compaction, and rebuild-on-resume keep working by construction.
-- **`submit_detached_turn`** — content. The coordinator mints an **unbound,
-  ownerless thread** at admission (content landed as refs, messages seeded
-  as rows, thread id internal) and runs the *same* thread-backed path — a
-  conversation is a thread *with a binding*, and these deliberately have
-  none.
+- **Conversation accept** — a reference into living state. The host
+  materializes history from the bound thread at run time through the
+  thread-backed context port, so steering, compaction, and
+  rebuild-on-resume keep working by construction.
+- **Detached accept** — content, sealed. The one shared helper mints an
+  **unbound, ownerless thread** (content landed as refs, messages seeded as
+  rows, declarations journaled) and the run uses the *same* thread-backed
+  path — a conversation is a thread *with a binding*, and these
+  deliberately have none.
 
 Everything else that differs between workflows differs **by value**, and the
 engine behaves accordingly through profiles:
 
-| | `submit_turn` (conversations, automations) | `submit_detached_turn` (suggestions, OpenAI-compat) |
+| | conversation lane (channels, WebUI, automations) | detached lane (suggestions, OpenAI-compat) |
 |---|---|---|
 | Submitted by | conversation workflow only | detached workflows |
 | Admission | one active run per thread; busy input settles as steering (`DeferredBusy`) or `RejectedBusy` | concurrent; idempotency only |
@@ -140,6 +151,13 @@ engine behaves accordingly through profiles:
 | Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread — same machinery; internal, never listed |
 | Subagents | per profile | denied |
 | Typical `output` | `AssistantMessage` | either; suggestions use `JsonSchema` |
+
+Subagent child runs sit between the lanes on purpose: they share the
+detached lane's **thread mechanics** (unbound, ownerless threads via the
+same shared `accept_detached_context` helper, `None` bindings on
+`submit_child_run`) but run under the **subagent profile**, which keeps its
+own gate and steering posture — the table's profile-driven rows describe
+the `detached_*` profiles, not thread-boundness.
 
 ## 5. The flows
 
@@ -295,7 +313,8 @@ unbound one, and the output's home is the suggestions store.
 def generate_suggestions(surface_caller, req):
     # SURFACE: ProductSurface operation "suggestions.generate". The payload
     # selects inputs; it cannot select prompts, tools, or authority.
-    response = turn_coordinator.submit_detached_turn(SubmitDetachedTurnRequest(
+    # Step 1 — the ONE shared accept helper (same one subagents/OpenAI use).
+    prepared = detached_context.accept(DetachedContextRequest(
         tenant_id=surface_caller.tenant_id,
         agent_id=surface_caller.agent_id,
         project_id=surface_caller.project_id,
@@ -303,9 +322,17 @@ def generate_suggestions(surface_caller, req):
         system_prompt=SUGGESTIONS_PROMPT,            # prompts/*.md, include_str!
         messages=[user_message(req.goal)],
         tools=["builtin.memory_search"],             # or []
-        model=None,
         output=JsonSchema(SUGGESTION_CARDS_SCHEMA),  # schema JSON rides the request
         limits=TurnLimits(max_iterations=6, wall_clock=seconds(60)),
+        idempotency_key=req.idempotency_key,
+    ))
+    # Step 2 — the ONE submit, bindings None.
+    response = turn_coordinator.submit_turn(SubmitTurnRequest(
+        scope=turn_scope(prepared.thread_id),
+        actor=TurnActor(user_id=surface_caller.user_id),
+        accepted_message_ref=prepared.accepted_message_ref,
+        source_binding_ref=None, reply_target_binding_ref=None,
+        requested_model=None,
         idempotency_key=req.idempotency_key,
     ))
     suggestions.associate(req.id, response.run_id)
@@ -333,7 +360,7 @@ workflow.
 
 ```python
 def chat_completion(api_caller, api_request):
-    response = turn_coordinator.submit_detached_turn(SubmitDetachedTurnRequest(
+    prepared = detached_context.accept(DetachedContextRequest(
         tenant_id=api_caller.tenant_id,
         agent_id=api_caller.agent_id,
         project_id=api_caller.project_id,
@@ -341,9 +368,16 @@ def chat_completion(api_caller, api_request):
         system_prompt=from_system_messages(api_request.messages),
         messages=non_system_messages(api_request.messages),      # no flattening
         tools=external_tool_ids(api_request.tools),              # ExternalToolCatalog path
-        model=model_hint(api_request.model),
         output=output_contract_from(api_request.response_format),# no longer dropped
         limits=from_openai_params(api_request),
+        idempotency_key=derive_key(api_request),
+    ))
+    response = turn_coordinator.submit_turn(SubmitTurnRequest(
+        scope=turn_scope(prepared.thread_id),
+        actor=TurnActor(user_id=api_caller.user_id),
+        accepted_message_ref=prepared.accepted_message_ref,
+        source_binding_ref=None, reply_target_binding_ref=None,
+        requested_model=model_hint(api_request.model),
         idempotency_key=derive_key(api_request),
     ))
 
@@ -367,9 +401,12 @@ no vendor anything.
    one of the two admission doors (channel admission or a `ProductSurface`
    operation). Untrusted payloads select inputs, never prompts, tools,
    models, or authority.
-2. **Workflows are the only submitters.** A workflow assembles the request
-   (the *what*) with scope + actor as request fields (the *who* —
-   run-acts-as-invoker, the same house style as every coordinator request),
+2. **Workflows are the only submitters, and non-channel workflows share
+   one accept door.** A workflow accepts its per-request data through its
+   lane's accept method — conversations via `accept_user_message`,
+   everything else via the single shared `accept_detached_context`
+   implementation (no per-workflow mint-seed code, ever) — then submits
+   coordinates with scope + actor as request fields (run-acts-as-invoker),
    and owns the association between its domain object and the run id.
 3. **The engine never *interprets* routing data.** `SubmitTurnRequest`
    still carries binding refs today (the slimming follow-up moves them
@@ -390,9 +427,10 @@ no vendor anything.
    call; any vendor transport means `send_reply`. Adding a channel adds
    manifest axes and translation methods — never a new engine or workflow
    branch.
-7. **Capability authority never rides in a request.** Tools are a selection;
-   every call is authorized at action time by the capability host, under the
-   run's acting identity — identically for both submission idioms.
+7. **Capability authority never rides in a request.** Tools are a
+   selection declared at the detached accept; every call is authorized at
+   action time by the capability host, under the run's acting identity —
+   identically for both lanes.
 8. **Thread transcripts are written by the run, not by output handlers.**
    The engine's thread-backed machinery persists messages lease-fenced
    during the run (exactly as today) — for every run: a detached turn's
@@ -403,15 +441,17 @@ no vendor anything.
 
 ## 7. Sequencing
 
-**Phase 1 — expand the coordinator** (the companion proposal, complete in
-one PR-sized change plus its tests). `submit_detached_turn` via
-mint-seed-submit (unbound, ownerless threads, ids internal — no new
-materialization path); the detached profiles and their concurrency cap;
-`OutputContract` (schema in-request) + reply-admission enforcement; taxonomy
-tests (unbound threads never surface in conversation listings; the subagent
-precedent pinned as a rule). Conversations are untouched — not migrated,
-untouched: they already call the trait being expanded. Suggestions and
-OpenAI-compat can adopt as soon as this lands.
+**Phase 1 — the detached lane** (the companion proposal, complete in one
+PR-sized change plus its tests). The one shared `accept_detached_context`
+helper (mint-seed-journal; no new materialization path); binding refs on
+`Submit`/`ResumeTurnRequest` become `Option` (conversations wrap today's
+values in `Some` — their only diff); declaration-driven profile derivation;
+the detached profiles and their concurrency cap; `OutputContract` (schema
+in-request) + reply-admission enforcement; taxonomy tests (unbound threads
+never surface in conversation listings; the subagent precedent pinned as a
+rule). Suggestions and OpenAI-compat can adopt as soon as this lands; the
+subagent-spawn refactor onto the helper follows as its own PR (live path,
+own revert unit).
 
 **Phase 2 — run observation.** The product-tier subscribe façade over the
 two existing event planes (composite cursor, rebase/lag semantics), then its
