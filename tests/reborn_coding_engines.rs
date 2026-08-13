@@ -60,10 +60,6 @@ fn registration_assets_byte_match_pinned_fixtures() {
 
     let cases = [
         (
-            pinned_assets::CODING_READ_SCHEMA,
-            include_str!("fixtures/pinned_coding_contract/schemas/read.json"),
-        ),
-        (
             pinned_assets::CODING_WRITE_SCHEMA,
             include_str!("fixtures/pinned_coding_contract/schemas/write.json"),
         ),
@@ -78,10 +74,6 @@ fn registration_assets_byte_match_pinned_fixtures() {
         (
             pinned_assets::CODING_GREP_SCHEMA,
             include_str!("fixtures/pinned_coding_contract/schemas/grep.json"),
-        ),
-        (
-            pinned_assets::CODING_READ_DESCRIPTION,
-            include_str!("fixtures/pinned_coding_contract/prompts/read.rendered.md"),
         ),
         (
             pinned_assets::CODING_WRITE_DESCRIPTION,
@@ -106,6 +98,41 @@ fn registration_assets_byte_match_pinned_fixtures() {
             "registration asset drifted from pinned fixture"
         );
     }
+}
+
+#[test]
+fn registered_read_description_only_advertises_supported_sources() {
+    use ironclaw_extension_support::coding::pinned::pinned_assets;
+
+    let description = pinned_assets::CODING_READ_DESCRIPTION;
+    for unsupported in [
+        "SHOULD use `read` (not browser) for web content",
+        "SQLite (`.sqlite`",
+        "Archives (`.tar`",
+        "Documents → extracted text",
+        "Images → decoded inline",
+        "ssh://host/<path>` reads",
+    ] {
+        assert!(
+            !description.contains(unsupported),
+            "registered read description advertises unsupported behavior {unsupported:?}"
+        );
+    }
+    assert!(description.contains("files"));
+    assert!(description.contains("directories"));
+    assert!(description.contains("artifact://<id>"));
+    assert!(description.contains("does not fetch web URLs"));
+    assert!(description.contains("not supported by this implementation"));
+
+    let schema: Value = serde_json::from_str(pinned_assets::CODING_READ_SCHEMA)
+        .expect("registered read schema is valid JSON");
+    let path_description = schema["properties"]["path"]["description"]
+        .as_str()
+        .expect("read path has a description");
+    assert!(path_description.contains("Scoped workspace file or directory"));
+    assert!(path_description.contains("artifact://<id>"));
+    assert!(path_description.contains("Web URLs and other URI schemes are not supported"));
+    assert!(!path_description.contains("memory://"));
 }
 
 impl Fixture {
@@ -265,6 +292,11 @@ impl ScopedArtifactReader for FixedArtifactReader {
             target.selector,
             ArtifactSelector::Lines(ArtifactLineRange { start: 2, end: 3 })
         );
+        assert_eq!(
+            target.max_output_bytes,
+            3 * 1024,
+            "artifact reads must stay inline instead of spilling into another artifact"
+        );
         Ok(Some(ArtifactReadChunk {
             content: b"beta\ngamma\n".to_vec(),
             content_type: "application/json".to_string(),
@@ -289,6 +321,11 @@ impl ScopedArtifactReader for ByteRangeArtifactReader {
                 start: 60_000,
                 end: 60_127,
             })
+        );
+        assert_eq!(
+            target.max_output_bytes,
+            3 * 1024,
+            "artifact byte ranges must stay inline instead of spilling into another artifact"
         );
         Ok(Some(ArtifactReadChunk {
             content: vec![b'x'; 128],

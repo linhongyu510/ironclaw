@@ -66,9 +66,8 @@ const CODING_EDIT_PROVIDER_TOOL_NAME: &str = "edit";
 const CODING_GLOB_PROVIDER_TOOL_NAME: &str = "glob";
 const CODING_GREP_PROVIDER_TOOL_NAME: &str = "grep";
 
-/// Pinned model-visible descriptions. `read` uses the RENDERED prompt for
-/// the issue-target context (fixture `prompts/read.rendered.md`); the others
-/// use the verbatim pinned prompt files (`write.md`, `hashline.md`,
+/// Model-visible descriptions. `read` uses the IronClaw-supported subset of
+/// the upstream prompt; the others use the verbatim pinned prompt files (`write.md`, `hashline.md`,
 /// `glob.md`, `grep.md` — upstream renders `write`/`edit` with an empty
 /// context and the fixture pins the `glob`/`grep` templates raw).
 const CODING_READ_DESCRIPTION: &str =
@@ -83,8 +82,8 @@ const CODING_GREP_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_DESCRIPTION;
 
 /// Schema refs resolving through `super::schemas::resolve_builtin_input_schema_ref`
-/// to the pinned fixture schema assets (byte-identical, verified by the
-/// pinned-fixtures byte-match crate test in `ironclaw_extension_support`).
+/// to the coding schema assets. `read` is narrowed to IronClaw's implemented
+/// source kinds; the other schemas remain byte-identical to the pinned fixtures.
 const CODING_READ_SCHEMA_REF: &str = "schemas/builtin/coding.read.input.v1.json";
 const CODING_WRITE_SCHEMA_REF: &str = "schemas/builtin/coding.write.input.v1.json";
 const CODING_EDIT_SCHEMA_REF: &str = "schemas/builtin/coding.edit.input.v1.json";

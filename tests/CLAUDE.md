@@ -338,8 +338,9 @@ noop, line/range errors), glob/grep behavior and exact errors, and the
 `reborn_integration_coding_registration.rs` (issue #7392 third delivery
 slice) registers the five pinned coding engines at the MODEL boundary
 through the existing first-party capability path under the exact pinned
-names (`read`/`write`/`edit`/`glob`/`grep`; schemas/descriptions byte-matched
-to the fixture snapshot), proves the read→edit→read chain and that the
+names (`read`/`write`/`edit`/`glob`/`grep`; schemas and fully supported
+descriptions matched to the fixture snapshot, with `read` narrowed to the
+IronClaw-implemented source kinds), proves the read→edit→read chain and that the
 derived spelling (`builtin__read`) fails to resolve through a real turn, and
 gates coding writes through the real approval path.
 

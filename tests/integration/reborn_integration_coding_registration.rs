@@ -6,7 +6,7 @@
 //!
 //! 1. The model-visible tool surface advertises EXACTLY the pinned names
 //!    `read`/`write`/`edit`/`glob`/`grep` with the pinned fixture schemas
-//!    and descriptions (byte equality on the provider payload). The legacy
+//!    and supported descriptions on the provider payload. The legacy
 //!    coding tools (`read_file`/`write_file`/`list_dir`/`apply_patch`,
 //!    `result_read`) are absent, and the derived `builtin__glob` /
 //!    `builtin__grep` spellings are gone: the benchmark surface is the exact
@@ -51,7 +51,7 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 use std::future::Future;
-use support::pinned_coding_contract::{rendered_tool_prompt, tool_prompt, tool_schema};
+use support::pinned_coding_contract::{tool_prompt, tool_schema};
 
 /// The five pinned coding tools and their provider names (must match the
 /// fixture manifest's `tool_names` subset for `read`/`write`/`edit`/`glob`/
@@ -64,11 +64,26 @@ const PINNED_CODING_TOOLS: [(&str, &str); 5] = [
     ("builtin.grep", "grep"),
 ];
 
-/// The pinned model-visible description for `tool` (the fixture prompt bytes
-/// the registration seam embeds). `read` uses the rendered prompt; the
-/// others the verbatim prompt files.
+/// The model-visible description for `tool`. `read` intentionally advertises
+/// only the IronClaw-implemented subset; the others use pinned prompt bytes.
 fn pinned_description(tool: &str) -> String {
-    rendered_tool_prompt(tool).unwrap_or_else(|| tool_prompt(tool))
+    if tool == "read" {
+        ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_DESCRIPTION
+            .to_string()
+    } else {
+        tool_prompt(tool)
+    }
+}
+
+fn coding_schema(tool: &str) -> serde_json::Value {
+    if tool == "read" {
+        serde_json::from_str(
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_SCHEMA,
+        )
+        .expect("IronClaw read schema is valid JSON")
+    } else {
+        tool_schema(tool)
+    }
 }
 
 fn output_text(value: &serde_json::Value) -> String {
@@ -116,8 +131,8 @@ fn coding_surface_advertises_exact_names_schemas_and_descriptions() {
                     let tool = pinned_name;
                     assert_eq!(
                         definition.parameters,
-                        tool_schema(tool),
-                        "schema for coding tool {tool} must byte-match the pinned fixture"
+                        coding_schema(tool),
+                        "schema for coding tool {tool} must match its registered contract"
                     );
                     assert_eq!(
                         definition.description,
@@ -301,8 +316,9 @@ fn coding_derived_spelling_does_not_resolve() {
 }
 
 /// A large pinned coding result is persisted before the model sees its
-/// bounded preview, and the same run can recover an exact line range through
-/// `read artifact://`.
+/// bounded preview, and the same run can recover a 3 KiB byte range through
+/// `read artifact://` without recursively spilling that continuation into a
+/// second artifact.
 #[test]
 fn coding_large_read_spills_and_is_readable_by_artifact_selector() {
     run_async_test_with_stack(
@@ -315,7 +331,10 @@ fn coding_large_read_spills_and_is_readable_by_artifact_selector() {
                 .with_coding_tools()
                 .script([
                     RebornScriptedReply::tool_call("read", json!({ "path": "large.txt" })),
-                    RebornScriptedReply::tool_call("read", json!({ "path": "artifact://0:1-2" })),
+                    RebornScriptedReply::tool_call(
+                        "read",
+                        json!({ "path": "artifact://0:bytes:0-3071" }),
+                    ),
                     RebornScriptedReply::text("artifact recovered"),
                 ])
                 .build()
@@ -327,18 +346,23 @@ fn coding_large_read_spills_and_is_readable_by_artifact_selector() {
                 .expect("host-runtime harness exposes the workspace root");
             std::fs::write(&path, content).expect("seed large workspace file");
 
-            h.submit_turn("read the large file, then recover its first two artifact lines")
+            h.submit_turn("read the large file, then recover its first 3 KiB artifact range")
                 .await
                 .expect("turn completes");
-            let recovered = output_text(
-                &h.tool_result_output("builtin.read")
-                    .await
-                    .expect("artifact read result"),
-            );
+            let artifact_read = h
+                .tool_result_output("builtin.read")
+                .await
+                .expect("artifact read result");
             assert!(
-                recovered.contains("1:[large.txt#") && recovered.contains("2:1:payload-0000-"),
-                "artifact selector returns the first two exact spilled lines: {recovered}"
+                artifact_read.get("artifact_ref").is_none(),
+                "an artifact continuation must remain inline instead of creating another artifact: {artifact_read}"
             );
+            let recovered = output_text(&artifact_read);
+            assert!(
+                recovered.starts_with("[large.txt#") && recovered.contains("1:payload-0000-"),
+                "artifact byte selector returns the start of the exact spilled output: {recovered}"
+            );
+            assert_eq!(recovered.len(), 3 * 1024);
         },
     );
 }

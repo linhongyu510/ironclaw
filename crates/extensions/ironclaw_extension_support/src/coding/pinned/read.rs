@@ -19,8 +19,8 @@ use std::time::SystemTime;
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::artifact::{
-    ArtifactAccessError, ArtifactByteRange, ArtifactLineRange, ArtifactReadTarget, ArtifactRef,
-    ArtifactSelector,
+    ARTIFACT_INLINE_PREVIEW_MAX_BYTES, ArtifactAccessError, ArtifactByteRange, ArtifactLineRange,
+    ArtifactReadTarget, ArtifactRef, ArtifactSelector,
 };
 use serde_json::Value;
 
@@ -40,6 +40,10 @@ use super::{
 const DEFAULT_MAX_LINES: u64 = 3000;
 /// Pinned `DEFAULT_MAX_BYTES` (session/streaming-output.ts: 50KB).
 const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+/// Artifact continuations must fit below the host's inline-result threshold.
+/// Otherwise reading one artifact produces another artifact reference instead
+/// of exposing the selected content to the model.
+const ARTIFACT_READ_MAX_BYTES: usize = ARTIFACT_INLINE_PREVIEW_MAX_BYTES / 8;
 /// `read.defaultLimit` for the issue #7392 target context: the rendered
 /// read prompt pins `DEFAULT_LIMIT: "3000"` (read.defaultLimit unset ->
 /// DEFAULT_MAX_LINES).
@@ -392,13 +396,13 @@ async fn read_artifact(
         .read(ArtifactReadTarget {
             artifact_id: artifact_ref.id(),
             selector,
-            max_output_bytes: DEFAULT_MAX_BYTES as u64,
+            max_output_bytes: ARTIFACT_READ_MAX_BYTES as u64,
         })
         .await
         .map_err(|error| {
             let message = if error == ArtifactAccessError::OversizedUnsliced {
                 format!(
-                    "Artifact {} exceeds the read limit. Use bounded byte selectors such as artifact://{}:bytes:0-8191, then continue with the next byte range.",
+                    "Artifact {} exceeds the read limit. Use bounded byte selectors such as artifact://{}:bytes:0-3071, then continue with the next byte range.",
                     artifact_ref.id().get(),
                     artifact_ref.id().get(),
                 )

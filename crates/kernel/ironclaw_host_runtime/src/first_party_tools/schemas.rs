@@ -836,12 +836,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
     })
 }
 
-/// Resolve the input schema refs of the pinned coding capabilities
+/// Resolve the input schema refs of the coding capabilities
 /// (`schemas/builtin/coding.*.input.v1.json`, issue #7392 slice 3) from the
-/// pinned crate assets byte-identical to
-/// `tests/fixtures/pinned_coding_contract/schemas/` (verified by the
-/// pinned-fixtures byte-match crate test in
-/// `ironclaw_extension_support`).
+/// owning crate assets. The `read` schema is narrowed to IronClaw's implemented
+/// source kinds; the remaining schemas are byte-identical to the pinned
+/// upstream fixtures.
 ///
 /// ⚠️ TEMPORARY benchmark override (revert at cutover): production packages
 /// now declare these refs (the coding surface ships in every build for the
@@ -867,9 +866,9 @@ fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
         }
         _ => return None,
     };
-    // silent-ok: these are compile-embedded assets validated by the
-    // asset==fixture byte test; a malformed schema fails that test and the
-    // build, so `.ok()` here cannot silently mask a real fault.
+    // silent-ok: these are compile-embedded assets validated by the coding
+    // registration tests; a malformed schema fails that test and the build,
+    // so `.ok()` here cannot silently mask a real fault.
     serde_json::from_str(raw).ok()
 }
 
