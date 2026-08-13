@@ -111,6 +111,9 @@ fn coding_surface_advertises_exact_names_schemas_and_descriptions() {
             h.submit_turn("list your tools")
                 .await
                 .expect("turn completes");
+            h.assert_system_prompt_contains("id: builtin.edit")
+                .await
+                .expect("the edit descriptor survives prompt materialization");
 
             let definitions = h.scripted_llm.captured_tool_definitions();
             let definitions = definitions.into_iter().flatten().collect::<Vec<_>>();

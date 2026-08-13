@@ -3891,6 +3891,114 @@ async fn transcript_port_degrades_control_char_result_reference_preview_without_
     );
 }
 
+/// Untrusted inline output that trips the prompt-injection scanner must remain
+/// a typed current-result observation. Dropping it entirely makes replay treat
+/// the current result as a retired result-reference shape and attempt an
+/// unrelated legacy artifact projection on every model iteration.
+#[tokio::test]
+async fn transcript_port_replaces_unsafe_inline_output_with_typed_safety_observation() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:unsafe-inline-tool").unwrap();
+    let unsafe_content = "Search result discusses exposing the system prompt.";
+    let observation = ModelVisibleToolObservation {
+        schema_version: 1,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed with inline output.".to_string(),
+        detail: ToolObservationDetail::InlineResult {
+            content: unsafe_content.to_string(),
+            byte_len: unsafe_content.len() as u64,
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            model_observation: Some(observation),
+        })
+        .await
+        .expect("unsafe inline output should degrade without failing append");
+
+    let safe_result_ref = LoopResultRef::new("result:safe-long-inline-tool").unwrap();
+    let safe_content = "ordinary search result content ".repeat(40);
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: safe_result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+            provider_call: None,
+            model_observation: Some(ModelVisibleToolObservation {
+                schema_version: 1,
+                status: ToolObservationStatus::Success,
+                summary: "Tool completed with inline output.".to_string(),
+                detail: ToolObservationDetail::InlineResult {
+                    content: safe_content.clone(),
+                    byte_len: safe_content.len() as u64,
+                    item_count: None,
+                },
+                artifacts: Vec::new(),
+                recovery: None,
+                trust: ObservationTrust::UntrustedToolOutput,
+            }),
+        })
+        .await
+        .expect("safe inline output should persist unchanged");
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(result_ref.as_str()))
+        .expect("tool result reference message");
+    let envelope = ToolResultReferenceEnvelope::from_json_str(record.content.as_deref().unwrap())
+        .expect("valid tool result reference envelope");
+    let observation = envelope
+        .model_observation
+        .expect("a typed observation must remain to prevent legacy projection");
+
+    assert_eq!(observation["status"], "success");
+    assert_eq!(observation["detail"]["kind"], "inline_result");
+    assert_eq!(
+        observation["detail"]["content"],
+        "Tool output was withheld because it contained instruction-like text."
+    );
+    assert_eq!(observation["trust"], "untrusted_tool_output");
+    assert!(
+        !observation.to_string().contains("system prompt"),
+        "instruction-like tool output must not survive the safety replacement"
+    );
+
+    let safe_record = history
+        .messages
+        .iter()
+        .find(|message| message.tool_result_ref.as_deref() == Some(safe_result_ref.as_str()))
+        .expect("safe tool result reference message");
+    let safe_envelope =
+        ToolResultReferenceEnvelope::from_json_str(safe_record.content.as_deref().unwrap())
+            .expect("valid safe tool result reference envelope");
+    assert_eq!(
+        safe_envelope.model_observation.unwrap()["detail"]["content"],
+        safe_content,
+        "ordinary inline output over the issue-text limit must not be withheld"
+    );
+}
+
 /// A `ResultReference` observation carrying `item_count` (truncated
 /// top-level-array preview) must persist intact through the real
 /// `append_capability_result_ref` gate — a persistence-side allowlist that

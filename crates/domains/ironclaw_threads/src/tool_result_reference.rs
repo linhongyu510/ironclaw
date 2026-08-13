@@ -370,6 +370,7 @@ fn normalized_model_observation(
         Err(error) => {
             let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
                 || strip_unsafe_invalid_input_issue_text(&mut model_observation)
+                || replace_unsafe_inline_result_content(&mut model_observation)
                 || strip_unstorable_generic_failure_detail(&mut model_observation);
             if repaired && validate_model_observation(&model_observation).is_ok() {
                 tracing::debug!(
@@ -434,6 +435,37 @@ fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) ->
     observation_detail_of_kind(observation, "result_reference")
         .and_then(|detail| detail.remove("preview"))
         .is_some()
+}
+
+/// Replace an unsafe complete inline result with a fixed marker while keeping
+/// the typed success observation. Removing the whole observation makes replay
+/// misclassify a current result as the retired result-reference shape and try
+/// to project it through legacy artifact storage on every model iteration.
+fn replace_unsafe_inline_result_content(observation: &mut serde_json::Value) -> bool {
+    const WITHHELD_CONTENT: &str =
+        "Tool output was withheld because it contained instruction-like text.";
+
+    let Some(detail) = observation_detail_of_kind(observation, "inline_result") else {
+        return false;
+    };
+    let content_needs_repair = detail
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|content| {
+            validate_model_observation_text(content, ObservationProvenance::Untrusted).is_err()
+        });
+    if !content_needs_repair {
+        return false;
+    }
+    detail.insert(
+        "content".to_string(),
+        serde_json::Value::String(WITHHELD_CONTENT.to_string()),
+    );
+    detail.insert(
+        "byte_len".to_string(),
+        serde_json::Value::from(WITHHELD_CONTENT.len() as u64),
+    );
+    true
 }
 
 /// Whether an issue-text field needs repair: either the content scan rejects
