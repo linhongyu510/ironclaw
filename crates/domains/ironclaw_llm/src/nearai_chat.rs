@@ -2022,6 +2022,143 @@ mod tests {
         }
     }
 
+    async fn write_http_sse_response(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncWriteExt;
+
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},",
+            "\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write SSE response");
+    }
+
+    async fn capture_requests_from_all_completion_paths(
+        mut config: NearAiConfig,
+    ) -> Vec<serde_json::Value> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback server");
+        config.base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(4);
+            while requests.len() < 4 {
+                let (mut socket, request) = accept_chat_request(&listener).await;
+                let streaming = request
+                    .get("stream")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                requests.push(request);
+
+                if streaming {
+                    write_http_sse_response(&mut socket).await;
+                } else {
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "ok"
+                                },
+                                "finish_reason": "stop"
+                            }]
+                        }),
+                    )
+                    .await;
+                }
+            }
+            requests
+        });
+
+        let provider = NearAiChatProvider::new(config, test_session()).expect("provider");
+        provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("complete")]))
+            .await
+            .expect("non-streaming completion");
+
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("stream")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("streaming completion");
+
+        provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("tools")],
+                vec![search_tool_definition()],
+            ))
+            .await
+            .expect("tool completion");
+
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(
+                    vec![ChatMessage::user("stream tools")],
+                    vec![search_tool_definition()],
+                ),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("streaming tool completion");
+
+        server.await.expect("loopback server")
+    }
+
+    #[tokio::test]
+    async fn all_completion_paths_forward_configured_thinking_controls() {
+        let mut config = test_nearai_config("http://127.0.0.1:1");
+        config.chat_template_kwargs = Some(serde_json::json!({
+            "thinking": false,
+            "effort": "high"
+        }));
+        config.reasoning_effort = Some("low".to_string());
+
+        let requests = capture_requests_from_all_completion_paths(config).await;
+        assert_eq!(requests.len(), 4);
+        for request in requests {
+            assert_eq!(
+                request.get("chat_template_kwargs"),
+                Some(&serde_json::json!({
+                    "thinking": false,
+                    "effort": "high"
+                }))
+            );
+            assert_eq!(
+                request.get("reasoning_effort"),
+                Some(&serde_json::json!("low"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn all_completion_paths_omit_unset_thinking_controls() {
+        let requests =
+            capture_requests_from_all_completion_paths(test_nearai_config("http://127.0.0.1:1"))
+                .await;
+        assert_eq!(requests.len(), 4);
+        for request in requests {
+            assert!(request.get("chat_template_kwargs").is_none());
+            assert!(request.get("reasoning_effort").is_none());
+        }
+    }
+
     struct RecordingCompletionStreamSink {
         sender: tokio::sync::mpsc::UnboundedSender<String>,
     }

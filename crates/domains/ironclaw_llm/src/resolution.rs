@@ -485,12 +485,18 @@ fn build_nearai_config(
 ) -> Result<NearAiConfig, LlmError> {
     let chat_template_kwargs = match nonempty_env("NEARAI_CHAT_TEMPLATE_KWARGS") {
         Some(raw) => {
-            Some(
+            let value: serde_json::Value =
                 serde_json::from_str(&raw).map_err(|error| LlmError::InvalidResponse {
                     provider: "nearai".to_string(),
                     reason: format!("NEARAI_CHAT_TEMPLATE_KWARGS must be valid JSON: {error}"),
-                })?,
-            )
+                })?;
+            if !value.is_object() {
+                return Err(LlmError::InvalidResponse {
+                    provider: "nearai".to_string(),
+                    reason: "NEARAI_CHAT_TEMPLATE_KWARGS must be a JSON object".to_string(),
+                });
+            }
+            Some(value)
         }
         None => None,
     };
@@ -1005,6 +1011,35 @@ mod tests {
             Some("low"),
             "reasoning_effort must pass through from env"
         );
+    }
+
+    #[test]
+    fn nearai_thinking_controls_remain_unset_by_default() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let _env = EnvGuard::clear(CHAIN_ENV_VARS);
+
+        let config = nearai_config_from_env(&ChainSettings::default())
+            .expect("nearai env config should resolve");
+        assert!(config.chat_template_kwargs.is_none());
+        assert!(config.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn nearai_chat_template_kwargs_rejects_non_objects() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+
+        for invalid_value in ["null", "[]", r#""text""#, "1"] {
+            env.set("NEARAI_CHAT_TEMPLATE_KWARGS", invalid_value);
+            let error = nearai_config_from_env(&ChainSettings::default())
+                .expect_err("non-object chat template kwargs must fail env resolution");
+            assert!(
+                error
+                    .to_string()
+                    .contains("NEARAI_CHAT_TEMPLATE_KWARGS must be a JSON object"),
+                "error must identify the object requirement for {invalid_value}, got: {error}"
+            );
+        }
     }
 
     /// Invalid JSON in `NEARAI_CHAT_TEMPLATE_KWARGS` must fail resolution

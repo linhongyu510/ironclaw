@@ -1795,6 +1795,8 @@ fn anthropic_llm_config(api_key: String, model: &str) -> LlmConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         },
         provider: Some(RegistryProviderConfig::generic(
             ProviderProtocol::Anthropic,
@@ -1842,6 +1844,8 @@ fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: false,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         },
         provider: None,
         bedrock: None,
