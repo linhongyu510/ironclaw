@@ -1388,6 +1388,111 @@ mod tests {
         assert_eq!(checkpoint.as_str(), "checkpoint:ok");
     }
 
+    /// Pins the durable wire spelling of every process kind. Journal rows live
+    /// forever under never-delete, so these spellings are a persistence
+    /// contract: renaming a variant or changing the serde representation
+    /// silently orphans every stored row of that kind.
+    #[test]
+    fn process_kind_wire_spellings_are_pinned() {
+        for (kind, wire) in [
+            (ProcessKind::AgentTurn, serde_json::json!("agent_turn")),
+            (
+                ProcessKind::CapabilityInvocation,
+                serde_json::json!("capability_invocation"),
+            ),
+            (
+                ProcessKind::CapabilityInvocationState,
+                serde_json::json!("capability_invocation_state"),
+            ),
+            (ProcessKind::Internal, serde_json::json!("internal")),
+        ] {
+            let encoded = serde_json::to_value(&kind).expect("serialize process kind");
+            assert_eq!(encoded, wire, "wire spelling changed for {kind:?}");
+            let decoded: ProcessKind =
+                serde_json::from_value(encoded).expect("round-trip process kind");
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    /// The process kind is deliberately FAIL-CLOSED on unknown wire values —
+    /// the opposite of the lenient checkpoint-kind field above. A build that
+    /// does not know a kind cannot claim, execute, or reproject rows of that
+    /// kind, so a snapshot carrying one must refuse to deserialize rather than
+    /// be misread as some kind this build does understand. This is the
+    /// rolling-compatibility guarantee a new run class relies on: rows written
+    /// by a newer build are rejected by older readers instead of executed.
+    #[test]
+    fn snapshot_with_unrecognized_process_kind_fails_closed() {
+        let snapshot = JournaledProcessSnapshot {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::AgentTurn,
+            scope: ResourceScope {
+                tenant_id: TenantId::new("tenant-kind-compat").expect("tenant"),
+                user_id: UserId::new("user-kind-compat").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            },
+            status: ProcessLifecycleStatus::Queued,
+            suspension: None,
+            checkpoint_ref: None,
+            checkpoint_kind: None,
+            input_ref: None,
+            failure: None,
+            journal_cursor: ProcessJournalCursor(1),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: chrono::Utc::now(),
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: Value::Null,
+        };
+        let mut encoded =
+            serde_json::to_value(&snapshot).expect("serialize journaled process snapshot");
+        let object = encoded.as_object_mut().expect("snapshot object");
+
+        object.insert(
+            "process_kind".to_string(),
+            Value::String("kind_from_a_future_build".to_string()),
+        );
+        let unknown_unit = serde_json::from_value::<JournaledProcessSnapshot>(encoded.clone());
+        assert!(
+            unknown_unit.is_err(),
+            "a snapshot carrying an unknown process kind must fail closed, not misclassify"
+        );
+
+        encoded.as_object_mut().expect("snapshot object").insert(
+            "process_kind".to_string(),
+            serde_json::json!({ "kind_from_a_future_build": "payload" }),
+        );
+        let unknown_tagged = serde_json::from_value::<JournaledProcessSnapshot>(encoded);
+        assert!(
+            unknown_tagged.is_err(),
+            "an unknown payload-carrying process kind must also fail closed"
+        );
+
+        // The claim filter shares the vocabulary: a claim request scoped to a
+        // kind this build knows round-trips unchanged.
+        let claim = ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted("worker-kind-compat"),
+            scope_filter: None,
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
+        };
+        let claim_encoded = serde_json::to_value(&claim).expect("serialize claim request");
+        let claim_decoded: ClaimProcessesRequest =
+            serde_json::from_value(claim_encoded).expect("round-trip claim request");
+        assert_eq!(
+            claim_decoded.process_kind_filter,
+            Some(ProcessKind::AgentTurn)
+        );
+    }
+
     /// The wire boundary lease recovery depends on: a persisted snapshot whose
     /// checkpoint kind an older or newer build does not recognize must degrade
     /// to `None` ("unknown kind") instead of failing the whole row, and a row

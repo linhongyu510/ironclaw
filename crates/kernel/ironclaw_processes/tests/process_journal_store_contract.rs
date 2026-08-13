@@ -2448,6 +2448,69 @@ async fn process_submission_idempotency_ignores_fresh_invocation_identity() {
     assert_eq!(replayed.journal_cursor, submitted.journal_cursor);
 }
 
+/// Pins the journal-level idempotency semantics the turn pipeline is built on:
+/// the replay key is `(scope owner, process kind, operation id)` and the
+/// PAYLOAD IS NOT COMPARED. A retry carrying the same operation id but a
+/// different metadata payload replays the ORIGINAL snapshot verbatim — it does
+/// not mint a second process and it does not surface a mismatch error at this
+/// layer. Callers that need same-key/different-payload to fail closed must
+/// enforce it in front of the journal (rule-12 adapter retries always carry an
+/// identical payload, so this layer never needs to tell them apart).
+#[tokio::test]
+async fn process_submission_idempotency_replays_original_despite_payload_drift() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let scope = scope();
+    let owner_user_id = scope.user_id.clone();
+    let request = |process_id, metadata: serde_json::Value| SubmitProcessRequest {
+        process_id,
+        process_kind: ProcessKind::Internal,
+        scope: scope.clone(),
+        exclusive_within_scope: false,
+        operation_id: Some(ProcessOperationId::from_trusted("payload-drift-operation")),
+        owner_user_id: Some(owner_user_id.clone()),
+        concurrency_class: None,
+        parent_process_id: None,
+        root_process_id: None,
+        spawn_tree_descendant_cap: None,
+        dependency: None,
+        checkpoint_ref: None,
+        input: None,
+        created_at: Utc::now(),
+        metadata,
+    };
+
+    let submitted = store
+        .submit_process(request(
+            ProcessId::new(),
+            serde_json::json!({ "payload": "original" }),
+        ))
+        .await
+        .expect("initial submission");
+    let replayed = store
+        .submit_process(request(
+            ProcessId::new(),
+            serde_json::json!({ "payload": "drifted" }),
+        ))
+        .await
+        .expect("same-key retry with a different payload replays at this layer");
+
+    assert_eq!(replayed.process_id, submitted.process_id);
+    assert_eq!(replayed.journal_cursor, submitted.journal_cursor);
+    assert_eq!(
+        replayed.metadata, submitted.metadata,
+        "replay must return the ORIGINAL payload, never the drifted retry's"
+    );
+    let persisted = store
+        .process_snapshots(&scope)
+        .await
+        .expect("read persisted process snapshots");
+    assert_eq!(
+        persisted.len(),
+        1,
+        "a drifted same-key retry must not mint a second process"
+    );
+}
+
 #[tokio::test]
 async fn process_claim_enforces_owner_and_class_concurrency_limits_atomically() {
     let owner_store = ProcessJournalStore::new(in_memory_backed_processes_filesystem())
