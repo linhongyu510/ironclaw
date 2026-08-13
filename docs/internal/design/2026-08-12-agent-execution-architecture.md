@@ -173,7 +173,7 @@ def conversation_submit(inbound):
         SubmitAgentExecutionRequest(
             idempotency_key=accepted.idempotency_key,
             execution=AgentExecutionRequest(
-                context=Thread(binding.thread_id, through=accepted.ref),
+                context=Thread(binding.thread_id, accepted_message=accepted.ref),
                 tools=[],                            # profile surface
                 model=None,                          # user/tenant default
                 output=AssistantMessage,

@@ -247,9 +247,16 @@ pub enum ExecutionContext {
     /// existing thread-backed context port, so steering, compaction, and
     /// rebuild-on-resume keep working by construction (I1, I2).
     Thread {
+        /// Which conversation. Kept alongside the message ref so admission
+        /// can key one-active-run-per-thread without a dereference, and
+        /// cross-check the two fail-closed.
         thread_id: ThreadId,
-        /// Freeze-point: the accepted user message this run answers.
-        through: AcceptedMessageRef,
+        /// The accepted user message this run answers — today's
+        /// `SubmitTurnRequest.accepted_message_ref`. History materializes
+        /// through this message; later arrivals steer into the running loop
+        /// or become the next turn, never silently widening this run's
+        /// input. Pinning it keeps replays and retries deterministic.
+        accepted_message: AcceptedMessageRef,
     },
 
     /// Detached surfaces (suggestions, OpenAI-compat, background work): a
