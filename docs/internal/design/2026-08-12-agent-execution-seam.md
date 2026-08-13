@@ -841,3 +841,15 @@ convention.
 6. **Gate-resolve affordance:** a design sketch for the future revision that
    allows gating tools on detached executions (actor model, rendering
    surface, lease semantics) — deliberately unresolved here.
+7. **Process-kind encoding:** a new `ProcessKind` variant vs. `AgentTurn`
+   plus a detached marker — either way, additive-only, with a rolling-compat
+   test proving an old binary tolerates rows carrying the new value
+   fail-closed (same pattern as the loop-exit retired-field test).
+8. **`ExecutionLimits` mapping:** which fields, mapped onto the existing
+   budget machinery (iteration limit, wall clock, USD accountant,
+   max output tokens) rather than invented; ceiling values per profile.
+9. **Per-tool crash-replay declaration:** adopt pi's
+   `replay: "never" | "safe"` self-declaration for detached crash recovery
+   (re-execute a persisted call only when both the stored and current
+   declarations say safe; otherwise a synthetic interrupted result)?
+   Orthogonal to approvals; cheap; undecided.

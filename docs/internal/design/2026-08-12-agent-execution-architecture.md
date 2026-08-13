@@ -411,6 +411,14 @@ move are by design: binding refs / `ProductTurnContext` leave the engine
 request for the workflow's association state, and the delivery observer reads
 reply routes from that state. Contract tests must prove admission semantics
 (`DeferredBusy`, `RejectedBusy`, replay) are byte-identical before cutover.
+Three questions stay open until this phase is scheduled: (a) where the
+origin/surface metadata the loop host consumes for origin-gated prompt
+assets ends up (binding *refs* are workflow-side; origin metadata is
+engine-relevant — the split is not yet drawn); (b) the delivery observer's
+transition shim (reading reply routes from old run state *and* the new
+association store while pre-cutover runs drain); (c) the exact pins
+inventory (busy admission outcomes, replay, one-active-run,
+prepare/submit reservation, cancel-time queue reconciliation).
 
 **Phase 3 — output-handling upgrades.** The delivery observer consumes
 terminal events from `subscribe` instead of polling `get_run_state` every
