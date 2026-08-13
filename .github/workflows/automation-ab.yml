@@ -1,0 +1,188 @@
+name: Automation A/B
+run-name: Automation A/B for PR #${{ github.event.pull_request.number }}
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automation-ab-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Natural-language automation comparison
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'automation-ab-live')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      STRICT_ARTIFACT_SCRUB: "true"
+      REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
+      REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
+      REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
+      REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE: "1"
+      REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_JUDGE_MODEL || vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
+    steps:
+      - name: Check out candidate head exactly
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve default-branch baseline
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CANDIDATE_REF: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CANDIDATE_REF}"
+          default_branch="$(gh api "repos/${REPO}" --jq '.default_branch')"
+          baseline_ref="$(gh api "repos/${REPO}/commits/${default_branch}" --jq '.sha')"
+          test "${baseline_ref}" != "${CANDIDATE_REF}"
+          echo "baseline_ref=${baseline_ref}" >> "${GITHUB_OUTPUT}"
+          echo "candidate_ref=${CANDIDATE_REF}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out baseline without replacing candidate harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ steps.refs.outputs.baseline_ref }}
+          path: .automation-ab/baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: automation-ab
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build candidate and baseline binaries
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CANDIDATE_TARGET: ${{ runner.temp }}/automation-ab/candidate-target
+          BASELINE_TARGET: ${{ runner.temp }}/automation-ab/baseline-target
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="${CANDIDATE_TARGET}" cargo build --locked -p ironclaw --bin ironclaw
+          (
+            cd .automation-ab/baseline
+            CARGO_TARGET_DIR="${BASELINE_TARGET}" cargo build --locked -p ironclaw --bin ironclaw
+          )
+
+      - name: Materialize live model secret
+        env:
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY || secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
+        run: |
+          set +x
+          set -euo pipefail
+          test -n "${NEARAI_API_KEY:-}"
+          secret_dir="${RUNNER_TEMP}/automation-ab-secrets"
+          mkdir -p "${secret_dir}"
+          chmod 700 "${secret_dir}"
+          printf '%s' "${NEARAI_API_KEY}" > "${secret_dir}/NEARAI_API_KEY"
+          chmod 600 "${secret_dir}/NEARAI_API_KEY"
+          echo "NEARAI_API_KEY_PATH=${secret_dir}/NEARAI_API_KEY" >> "${GITHUB_ENV}"
+
+      - name: Run both arms with the candidate test harness
+        env:
+          CANDIDATE_TARGET: ${{ runner.temp }}/automation-ab/candidate-target
+          BASELINE_TARGET: ${{ runner.temp }}/automation-ab/baseline-target
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/automation-ab
+          baseline_status=0
+          candidate_status=0
+          CARGO_TARGET_DIR="${BASELINE_TARGET}" \
+            python3 scripts/reborn_webui_v2_live_qa/run_live_qa.py \
+              --case automation_ab_happy_path \
+              --output-dir artifacts/automation-ab/baseline \
+              --reborn-home "${RUNNER_TEMP}/automation-ab/missing-baseline-home" \
+              --skip-build \
+              --playwright-install with-deps || baseline_status=$?
+          CARGO_TARGET_DIR="${CANDIDATE_TARGET}" \
+            python3 scripts/reborn_webui_v2_live_qa/run_live_qa.py \
+              --case automation_ab_happy_path \
+              --output-dir artifacts/automation-ab/candidate \
+              --reborn-home "${RUNNER_TEMP}/automation-ab/missing-candidate-home" \
+              --skip-build \
+              --playwright-install skip || candidate_status=$?
+          printf '{"baseline":%s,"candidate":%s}\n' \
+            "${baseline_status}" "${candidate_status}" \
+            > artifacts/automation-ab/runner-status.json
+
+      - name: Compare durable and semantic evidence
+        id: compare
+        continue-on-error: true
+        run: >-
+          python3 scripts/automation_ab/compare.py
+          --baseline artifacts/automation-ab/baseline/results.json
+          --candidate artifacts/automation-ab/candidate/results.json
+          --output-dir artifacts/automation-ab/comparison
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/automation-ab
+
+      - name: Publish job summary
+        if: always() && hashFiles('artifacts/automation-ab/comparison/comparison.md') != ''
+        run: cat artifacts/automation-ab/comparison/comparison.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish PR evidence
+        if: always() && hashFiles('artifacts/automation-ab/comparison/comparison.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CANDIDATE_REF: ${{ steps.refs.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          marker="<!-- automation-ab:evidence -->"
+          body_file="${RUNNER_TEMP}/automation-ab-comment.md"
+          {
+            echo "${marker}"
+            cat artifacts/automation-ab/comparison/comparison.md
+            echo
+            echo "Candidate: \`${CANDIDATE_REF}\`"
+            echo "Baseline: \`${{ steps.refs.outputs.baseline_ref }}\`"
+          } > "${body_file}"
+          comment_id="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --paginate --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -1)"
+          if [[ -n "${comment_id}" ]]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${comment_id}" \
+              -f body="$(cat "${body_file}")" >/dev/null
+          else
+            gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body-file "${body_file}"
+          fi
+
+      - name: Upload scrubbed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: automation-ab-${{ github.event.pull_request.head.sha }}
+          path: |
+            artifacts/automation-ab/
+            !artifacts/automation-ab/**/llm-traces/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce candidate quality contract
+        if: steps.compare.outcome != 'success'
+        run: |
+          echo "Automation A/B comparison did not pass; see the evidence report."
+          exit 1

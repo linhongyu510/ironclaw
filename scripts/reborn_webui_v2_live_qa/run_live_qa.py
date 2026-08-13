@@ -23,7 +23,7 @@ import urllib.parse
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -2717,6 +2717,8 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
         "prompt": None,
         "delivery_target": None,
         "delivery_target_column_missing": False,
+        "execution_spec": None,
+        "execution_spec_column_missing": False,
     }
     if not db_path.exists():
         snapshot["error"] = "reborn-local-dev.db missing"
@@ -2743,10 +2745,68 @@ def _trigger_record_snapshot(reborn_home: Path, routine_name: str) -> dict[str, 
                 if "no such column" not in str(exc):
                     raise
                 snapshot["delivery_target_column_missing"] = True
+            try:
+                spec_rows = db.execute(
+                    "SELECT execution_spec_json FROM trigger_records WHERE name = ?",
+                    (routine_name,),
+                ).fetchall()
+                if spec_rows and spec_rows[0][0]:
+                    snapshot["execution_spec"] = json.loads(spec_rows[0][0])
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc):
+                    raise
+                snapshot["execution_spec_column_missing"] = True
+            except (TypeError, json.JSONDecodeError) as exc:
+                snapshot["execution_spec_error"] = _exc_text(exc)
             snapshot["checked"] = True
     except sqlite3.Error as exc:
         snapshot["error"] = _exc_text(exc)
     return snapshot
+
+
+def _finalized_assistant_replies(
+    reborn_home: Path, *, thread_id: str, run_id: str
+) -> list[str]:
+    """Read finalized assistant output for one scheduled run.
+
+    This is the durable evidence seam: a completed scheduler row without a
+    finalized thread message is not a successful user-visible automation.
+    """
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists() or not thread_id or not run_id:
+        return []
+    database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True)) as db:
+        rows = db.execute(
+            """
+            SELECT contents
+            FROM root_filesystem_entries
+            WHERE is_dir = 0
+              AND content_type = 'application/json'
+              AND path LIKE ?
+            ORDER BY path
+            """,
+            (f"%/threads/{thread_id}/messages/%",),
+        ).fetchall()
+    replies: list[str] = []
+    for (raw_contents,) in rows:
+        if isinstance(raw_contents, bytes):
+            raw_contents = raw_contents.decode("utf-8", errors="replace")
+        try:
+            message = json.loads(raw_contents)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(message, dict)
+            or message.get("turn_run_id") != run_id
+            or message.get("kind") != "assistant"
+            or message.get("status") != "finalized"
+        ):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            replies.append(content.strip())
+    return replies
 
 
 def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, object] | None:
@@ -5535,6 +5595,130 @@ async def _routine_creation_case(
             f"routine scope {routine_name!r} did not add a trigger_record"
         )
     return result
+
+
+async def _wait_for_completed_trigger_run(
+    reborn_home: Path,
+    routine_name: str,
+    *,
+    timeout: float = 360.0,
+    poll_interval: float = 2.0,
+) -> dict[str, object] | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = _trigger_run_rows(reborn_home, routine_name)
+        for row in rows:
+            if (
+                str(row.get("status") or "").lower() == "ok"
+                and row.get("completed_at")
+                and row.get("run_id")
+                and row.get("thread_id")
+            ):
+                return row
+        await asyncio.sleep(poll_interval)
+    return None
+
+
+def _automation_ab_prompt(
+    routine_name: str, due_at: datetime
+) -> tuple[str, str]:
+    expected_reply = (
+        "Automation A/B check is complete.\n"
+        "Result: scheduled output persisted."
+    )
+    prompt = (
+        f"Please set up a one-time check-in called {routine_name} for "
+        f"{due_at.strftime('%Y-%m-%d at %H:%M UTC')}. When it runs, leave a "
+        "result I can read afterward containing exactly these two lines:\n"
+        f"{expected_reply}\n"
+        "If it cannot produce a result, say: Automation A/B check had no result."
+    )
+    return prompt, expected_reply
+
+
+async def case_automation_ab_happy_path(ctx: LiveQaContext) -> ProbeResult:
+    """Exercise one natural automation request through creation and delivery."""
+    case_name = "automation_ab_happy_path"
+    started = time.monotonic()
+    suffix = uuid.uuid4().hex[:8]
+    routine_name = f"automation-ab-check-{suffix}"
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+    prompt, expected_reply = _automation_ab_prompt(routine_name, due_at)
+    details: dict[str, object] = {
+        "natural_prompt": prompt,
+        "routine_name": routine_name,
+        "expected_reply": expected_reply,
+    }
+    try:
+        creation = await _routine_creation_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=None,
+            routine_name=routine_name,
+            required_text=["check-in|scheduled|automation|routine"],
+        )
+        details["creation_succeeded"] = creation.success
+        details["creation"] = creation.details
+        if not creation.success:
+            return _result(case_name, False, started, details)
+
+        snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
+        execution_spec = snapshot.get("execution_spec")
+        details.update(
+            {
+                "execution_contract_present": isinstance(execution_spec, dict),
+                "execution_spec_column_missing": snapshot.get(
+                    "execution_spec_column_missing", False
+                ),
+                "execution_spec_error": snapshot.get("execution_spec_error"),
+            }
+        )
+        completed_run = await _wait_for_completed_trigger_run(
+            ctx.reborn_home, routine_name
+        )
+        details["scheduled_run_completed"] = completed_run is not None
+        if completed_run is None:
+            details["error"] = "scheduled automation did not complete before timeout"
+            return _result(case_name, False, started, details)
+
+        replies = _finalized_assistant_replies(
+            ctx.reborn_home,
+            thread_id=str(completed_run["thread_id"]),
+            run_id=str(completed_run["run_id"]),
+        )
+        reply = replies[-1] if replies else ""
+        semantic_judgment = await _judge_assistant_reply_completion(
+            marker=None,
+            required_text=[
+                "Automation A/B check is complete.",
+                "Result: scheduled output persisted.",
+            ],
+            assistant_text=reply,
+            main_text="",
+            semantic_goal=(
+                "The scheduled automation must leave a readable result confirming "
+                "that the check completed and its output persisted."
+            ),
+        )
+        details.update(
+            {
+                "final_reply_persisted": bool(reply),
+                "final_reply": reply,
+                "exact_result_match": reply == expected_reply,
+                "semantic_judgment": semantic_judgment,
+                "semantic_result_correct": _semantic_judge_passed(
+                    semantic_judgment
+                ),
+            }
+        )
+        success = bool(reply) and _semantic_judge_passed(semantic_judgment)
+        if not success:
+            details["error"] = "scheduled output was missing or semantically incorrect"
+        return _result(case_name, success, started, details)
+    except Exception as exc:
+        details["error"] = _exc_text(exc)
+        return _result(case_name, False, started, details)
 
 
 async def case_qa_3c_endpoint_status_slack_routine(ctx: LiveQaContext) -> ProbeResult:
@@ -8595,7 +8779,17 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
         )
 
 
+TARGETED_EXPERIMENT_CASES = frozenset({"automation_ab_happy_path"})
+
+
 CASES: dict[str, CaseSpec] = {
+    "automation_ab_happy_path": CaseSpec(
+        case_automation_ab_happy_path,
+        tier="behavioral",
+        blocking=False,
+        default_enabled=False,
+        retry_policy="never",
+    ),
     "qa_1a_telegram_connect": CaseSpec(
         _gated_case("qa_1a_telegram_connect"),
         requires_telegram=True,
@@ -8960,6 +9154,20 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 ),
             }
             for name, spec in CASES.items()
+            if name not in TARGETED_EXPERIMENT_CASES
+        ],
+        "experiments": [
+            {
+                "case": name,
+                "case_tier": spec.tier,
+                "blocking": spec.blocking,
+                "default_enabled": spec.default_enabled,
+                "expects_llm_trace": spec.expects_llm_trace,
+                "retry_policy": spec.retry_policy,
+                "status": "targeted",
+            }
+            for name, spec in CASES.items()
+            if name in TARGETED_EXPERIMENT_CASES
         ],
     }
     path = output_dir / "case-manifest.json"

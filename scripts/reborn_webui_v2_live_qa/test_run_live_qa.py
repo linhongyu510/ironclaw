@@ -6581,13 +6581,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 db.execute(
                     "CREATE TABLE trigger_records ("
                     "name TEXT, schedule_kind TEXT, next_run_at TEXT, "
-                    "prompt TEXT, delivery_target TEXT)"
+                    "prompt TEXT, delivery_target TEXT, execution_spec_json TEXT)"
                 )
                 db.execute(
                     "INSERT INTO trigger_records VALUES "
                     "('probe', 'once', '2026-07-09T21:16:11.000000000Z', "
                     "'deliver via builtin__outbound_deliver to tgt-1', "
-                    "'slack:personal-dm:T1:me')"
+                    "'slack:personal-dm:T1:me', "
+                    "'{\"goal\":\"Report the result\"}')"
                 )
             snapshot = run_live_qa._trigger_record_snapshot(home, "probe")
             self.assertTrue(snapshot["checked"])
@@ -6598,6 +6599,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(snapshot["delivery_target"], "slack:personal-dm:T1:me")
             self.assertFalse(snapshot["delivery_target_column_missing"])
+            self.assertEqual(snapshot["execution_spec"], {"goal": "Report the result"})
+            self.assertFalse(snapshot["execution_spec_column_missing"])
 
     def test_trigger_record_snapshot_flags_missing_delivery_target_column(self):
         import sqlite3 as sqlite3_module
@@ -6622,8 +6625,77 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             # column reported missing (NOT an opaque sqlite error).
             self.assertTrue(snapshot["checked"])
             self.assertTrue(snapshot["delivery_target_column_missing"])
+            self.assertTrue(snapshot["execution_spec_column_missing"])
             self.assertEqual(snapshot["schedule_kind"], "cron")
             self.assertIsNone(snapshot["delivery_target"])
+
+    def test_finalized_assistant_replies_reads_only_matching_run(self):
+        import sqlite3 as sqlite3_module
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db_dir = home / "local-dev"
+            db_dir.mkdir(parents=True)
+            db_path = db_dir / "reborn-local-dev.db"
+            with sqlite3_module.connect(db_path) as db:
+                db.execute(
+                    "CREATE TABLE root_filesystem_entries ("
+                    "path TEXT, contents BLOB, is_dir INTEGER, content_type TEXT)"
+                )
+                for index, payload in enumerate(
+                    (
+                        {
+                            "turn_run_id": "wanted-run",
+                            "kind": "assistant",
+                            "status": "finalized",
+                            "content": "durable answer",
+                        },
+                        {
+                            "turn_run_id": "other-run",
+                            "kind": "assistant",
+                            "status": "finalized",
+                            "content": "wrong run",
+                        },
+                        {
+                            "turn_run_id": "wanted-run",
+                            "kind": "assistant",
+                            "status": "streaming",
+                            "content": "not final",
+                        },
+                    )
+                ):
+                    db.execute(
+                        "INSERT INTO root_filesystem_entries VALUES (?, ?, 0, 'application/json')",
+                        (
+                            f"/tenants/t/threads/wanted-thread/messages/{index}",
+                            json.dumps(payload),
+                        ),
+                    )
+            self.assertEqual(
+                run_live_qa._finalized_assistant_replies(
+                    home, thread_id="wanted-thread", run_id="wanted-run"
+                ),
+                ["durable answer"],
+            )
+
+    def test_automation_ab_prompt_uses_user_language_not_internal_contract_names(self):
+        due_at = run_live_qa.datetime(
+            2026, 8, 13, 12, 30, tzinfo=run_live_qa.timezone.utc
+        )
+        prompt, expected_reply = run_live_qa._automation_ab_prompt(
+            "daily-check-in", due_at
+        )
+        self.assertIn("Please set up a one-time check-in", prompt)
+        self.assertIn("daily-check-in", prompt)
+        self.assertIn(expected_reply, prompt)
+        for internal_term in (
+            "trigger_create",
+            "execution_contract",
+            "capability_id",
+            "execution_spec_json",
+        ):
+            self.assertNotIn(internal_term, prompt)
 
     def test_trigger_record_snapshot_reports_unreadable_db(self):
         import tempfile
@@ -8434,6 +8506,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "gated:requires_live_google_product_auth",
         )
         self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["implemented"])
+
         self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["requires_slack_target"])
         self.assertEqual(
             cases["qa_5d_slack_strategy_doc_answer"]["status"],
@@ -8457,6 +8530,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             cases["qa_1a_telegram_connect"]["status"],
             "gated:requires_live_telegram",
         )
+
+    def test_case_manifest_keeps_targeted_experiments_out_of_qa_sheet_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = run_live_qa.write_case_manifest(
+                Path(tmpdir), ["automation_ab_happy_path"]
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        qa_cases = {case["case"] for case in manifest["cases"]}
+        experiments = {case["case"] for case in manifest["experiments"]}
+        self.assertNotIn("automation_ab_happy_path", qa_cases)
+        self.assertIn("automation_ab_happy_path", experiments)
 
     def test_gmail_delivery_target_prefers_explicit_env(self):
         target = asyncio.run(

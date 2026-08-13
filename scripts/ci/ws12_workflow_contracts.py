@@ -70,6 +70,14 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         '- cron: "0 */3 * * *"',
         "github.event.schedule == '0 */3 * * *'",
     ),
+    ".github/workflows/automation-ab.yml": (
+        "types: [labeled, synchronize]",
+        "github.event.pull_request.head.repo.full_name == github.repository",
+        "automation-ab-live",
+        "scripts/automation_ab/compare.py",
+        "scripts/live-canary/scrub-artifacts.sh artifacts/automation-ab",
+        "Enforce candidate quality contract",
+    ),
     ".github/workflows/code_style.yml": (
         # The docs publication-boundary gate: the job, its self-test step, its
         # check step, and the roll-up guard that fails closed BEFORE the

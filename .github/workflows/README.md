@@ -71,6 +71,23 @@ Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
 
+## Opt-in live PR evidence
+
+`automation-ab.yml` is a supplemental, non-required pull-request check. Adding
+the `automation-ab-live` label to a same-repository PR runs the same natural,
+coworker-style scheduled-automation request against the current default branch
+and the exact PR head. The candidate harness reads durable run and finalized
+reply evidence from both isolated homes, applies the same pinned semantic
+judge, scrubs artifacts, and publishes a comparison on the PR. A synchronize
+event reruns a labeled PR at its new exact head.
+
+The lane fails when the candidate does not persist a structured execution
+contract, complete the scheduled run, retain a finalized reply, or satisfy the
+semantic judge. Contract evidence and semantic improvement are reported
+separately: adding structure alone is never presented as proof that the answer
+became semantically better. Forked PRs cannot enter this secret-bearing lane,
+and the workflow deliberately does not use `pull_request_target`.
+
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all
 code events. Pull-request Clippy covers production libraries and binaries for

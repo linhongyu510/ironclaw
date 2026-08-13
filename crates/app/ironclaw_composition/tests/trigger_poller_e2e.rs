@@ -57,6 +57,7 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore,
 };
+use ironclaw_threads::{MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
@@ -71,6 +72,8 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+const AUTOMATION_AB_INTENT: &str = "Report the automation A/B completion marker";
+const AUTOMATION_AB_REPLY: &str = "trigger e2e ok";
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
@@ -1230,6 +1233,220 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         final_record.state,
         TriggerState::Completed,
         "once schedule: state must be Completed after clear_active_fire — record: {final_record:?}",
+    );
+}
+
+/// Paired characterization of the compatibility arm and the structured arm.
+///
+/// Both records express the same user intent and fire through the production
+/// poller into durable run threads. The legacy record is seeded directly (new
+/// creation must never regain that path); the structured record is created
+/// through `builtin.trigger_create`. This makes the quality delta explicit:
+/// equivalent completion behavior is preserved while only the structured arm
+/// carries frozen criteria and output policy.
+#[tokio::test]
+async fn legacy_and_structured_automations_complete_the_same_intent_with_stronger_contract_evidence()
+ {
+    const LEGACY_NAME: &str = "automation-ab-legacy";
+    const STRUCTURED_NAME: &str = "automation-ab-structured";
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway::default());
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
+        ),
+    )
+    .await;
+    pair_trigger_creator(&runtime).await;
+
+    let repository = runtime.trigger_repository();
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let legacy_id = TriggerId::new();
+    let due_at = Utc::now() - chrono::Duration::seconds(120);
+    repository
+        .upsert_trigger(TriggerRecord {
+            trigger_id: legacy_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: UserId::new(USER).expect("user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent id")),
+            project_id: None,
+            name: LEGACY_NAME.to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::once(due_at, "UTC").expect("valid once schedule"),
+            prompt: AUTOMATION_AB_INTENT.to_string(),
+            execution_spec: None,
+            delivery_target: None,
+            state: TriggerState::Scheduled,
+            next_run_at: due_at,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed legacy automation");
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": STRUCTURED_NAME,
+            "execution_contract": {
+                "version": 1,
+                "goal": AUTOMATION_AB_INTENT,
+                "success_criteria": ["The final reply confirms the automation completed"],
+                "output_instructions": format!("Reply exactly with: {AUTOMATION_AB_REPLY}"),
+                "no_result_text": "The automation produced no result",
+                "policy": { "allowed_capability_ids": [] }
+            },
+            "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    let structured_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("structured trigger id"),
+    )
+    .expect("valid structured trigger id");
+    let mut structured = repository
+        .get_trigger(tenant_id.clone(), structured_id)
+        .await
+        .expect("read structured automation")
+        .expect("structured automation persisted");
+    structured.next_run_at = due_at;
+    repository
+        .upsert_trigger(structured.clone())
+        .await
+        .expect("make structured automation due");
+
+    let legacy_run = wait_for_completed_run(&repository, &tenant_id, legacy_id).await;
+    let structured_run = wait_for_completed_run(&repository, &tenant_id, structured_id).await;
+
+    let legacy = repository
+        .get_trigger(tenant_id.clone(), legacy_id)
+        .await
+        .expect("read completed legacy automation")
+        .expect("legacy automation retained");
+    let structured = repository
+        .get_trigger(tenant_id.clone(), structured_id)
+        .await
+        .expect("read completed structured automation")
+        .expect("structured automation retained");
+    assert_eq!(legacy.execution_spec, None, "legacy rows stay legacy");
+    assert_eq!(
+        legacy.prompt, AUTOMATION_AB_INTENT,
+        "legacy prompt is unchanged"
+    );
+    assert!(
+        structured.execution_spec.is_some(),
+        "structured creation must persist its execution contract"
+    );
+    assert!(
+        structured.prompt.contains("## Success criteria")
+            && structured.prompt.contains("## Output requirements"),
+        "the frozen structured prompt must retain criteria and output policy: {:?}",
+        structured.prompt
+    );
+
+    let thread_service = runtime
+        .standalone_thread_service_for_test()
+        .expect("standalone runtime exposes thread service");
+    let scope = ThreadScope {
+        tenant_id,
+        agent_id: AgentId::new(AGENT).expect("agent id"),
+        project_id: None,
+        owner_user_id: Some(UserId::new(USER).expect("user id")),
+        mission_id: None,
+    };
+    assert_finalized_automation_reply(
+        thread_service.as_ref(),
+        scope.clone(),
+        &legacy_run,
+        AUTOMATION_AB_REPLY,
+    )
+    .await;
+    assert_finalized_automation_reply(
+        thread_service.as_ref(),
+        scope,
+        &structured_run,
+        AUTOMATION_AB_REPLY,
+    )
+    .await;
+
+    let captured = gateway.captured_message_contents().await;
+    assert!(
+        captured
+            .iter()
+            .any(|message| message == AUTOMATION_AB_INTENT),
+        "legacy execution must receive its stored raw prompt: {captured:?}"
+    );
+    assert!(
+        captured.iter().any(|message| {
+            message.contains(AUTOMATION_AB_INTENT)
+                && message.contains("## Success criteria")
+                && message.contains("## Output requirements")
+        }),
+        "structured execution must receive the frozen contract prompt: {captured:?}"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+async fn wait_for_completed_run(
+    repository: &Arc<dyn TriggerRepository>,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+) -> ironclaw_triggers::TriggerRunRecord {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let history = repository
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 1)
+            .await
+            .expect("read automation A/B run history");
+        if let Some(run) = history.into_iter().next()
+            && run.status == ironclaw_triggers::TriggerRunHistoryStatus::Ok
+            && run.completed_at.is_some()
+            && run.run_id.is_some()
+            && run.thread_id.is_some()
+        {
+            return run;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "automation {trigger_id} did not complete with durable run evidence"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn assert_finalized_automation_reply(
+    thread_service: &dyn ironclaw_threads::SessionThreadService,
+    scope: ThreadScope,
+    run: &ironclaw_triggers::TriggerRunRecord,
+    expected: &str,
+) {
+    let run_id = run.run_id.expect("completed run has run id").to_string();
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: run.thread_id.clone().expect("completed run has thread id"),
+        })
+        .await
+        .expect("read automation A/B thread history");
+    assert!(
+        history.messages.iter().any(|message| {
+            message.kind == MessageKind::Assistant
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(run_id.as_str())
+                && message.content.as_deref() == Some(expected)
+        }),
+        "completed automation must retain the exact finalized reply: {:?}",
+        history.messages
     );
 }
 
