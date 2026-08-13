@@ -764,6 +764,8 @@ impl LlmProvider for NearAiChatProvider {
             tool_choice: None,
             stream: false,
             stream_options: None,
+            chat_template_kwargs: self.config.chat_template_kwargs.clone(),
+            reasoning_effort: self.config.reasoning_effort.clone(),
         };
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -843,6 +845,8 @@ impl LlmProvider for NearAiChatProvider {
             stream_options: Some(ChatCompletionStreamOptions {
                 include_usage: true,
             }),
+            chat_template_kwargs: self.config.chat_template_kwargs.clone(),
+            reasoning_effort: self.config.reasoning_effort.clone(),
         };
 
         let response = self.send_streaming_request(&request, sink).await?;
@@ -896,10 +900,14 @@ impl LlmProvider for NearAiChatProvider {
             model,
             messages,
             req.tools,
-            req.temperature,
-            req.max_tokens,
-            req.stop_sequences,
-            req.tool_choice,
+            CompletionOptions {
+                temperature: req.temperature,
+                max_tokens: req.max_tokens,
+                stop: req.stop_sequences,
+                tool_choice: req.tool_choice,
+                chat_template_kwargs: self.config.chat_template_kwargs.clone(),
+                reasoning_effort: self.config.reasoning_effort.clone(),
+            },
         );
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -1008,10 +1016,14 @@ impl LlmProvider for NearAiChatProvider {
             model,
             messages,
             req.tools,
-            req.temperature,
-            req.max_tokens,
-            req.stop_sequences,
-            req.tool_choice,
+            CompletionOptions {
+                temperature: req.temperature,
+                max_tokens: req.max_tokens,
+                stop: req.stop_sequences,
+                tool_choice: req.tool_choice,
+                chat_template_kwargs: self.config.chat_template_kwargs.clone(),
+                reasoning_effort: self.config.reasoning_effort.clone(),
+            },
         );
         request.stream = true;
         request.stream_options = Some(ChatCompletionStreamOptions {
@@ -1125,6 +1137,16 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<ChatCompletionStreamOptions>,
+    /// Provider-specific chat template overrides (e.g. `{"thinking": false}`
+    /// to disable DeepSeek-style thinking, `{"thinking": true, "effort":
+    /// "high"}` for deep agentic reasoning). Omitted when unset so the
+    /// provider/server default applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
+    /// OpenAI-style reasoning effort level (e.g. "low", "high", "max").
+    /// Omitted when unset so the provider/server default applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1431,14 +1453,22 @@ fn convert_tool_definition(tool: crate::provider::ToolDefinition) -> ChatComplet
     }
 }
 
-fn build_chat_completion_request(
-    model: String,
-    messages: Vec<ChatCompletionMessage>,
-    tools: Vec<crate::provider::ToolDefinition>,
+/// Non-model, non-message completion options forwarded into the request body.
+#[derive(Debug, Clone, Default)]
+struct CompletionOptions {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     stop: Option<Vec<String>>,
     tool_choice: Option<String>,
+    chat_template_kwargs: Option<serde_json::Value>,
+    reasoning_effort: Option<String>,
+}
+
+fn build_chat_completion_request(
+    model: String,
+    messages: Vec<ChatCompletionMessage>,
+    tools: Vec<crate::provider::ToolDefinition>,
+    options: CompletionOptions,
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
@@ -1446,13 +1476,15 @@ fn build_chat_completion_request(
     ChatCompletionRequest {
         model,
         messages,
-        temperature,
-        max_tokens,
-        stop,
+        temperature: options.temperature,
+        max_tokens: options.max_tokens,
+        stop: options.stop,
         tools: if has_tools { Some(tools) } else { None },
-        tool_choice: if has_tools { tool_choice } else { None },
+        tool_choice: if has_tools { options.tool_choice } else { None },
         stream: false,
         stream_options: None,
+        chat_template_kwargs: options.chat_template_kwargs,
+        reasoning_effort: options.reasoning_effort,
     }
 }
 
@@ -1858,6 +1890,8 @@ mod tests {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         }
     }
 
@@ -3865,10 +3899,14 @@ data: [DONE]
                     ]
                 }),
             }],
-            Some(0.2),
-            Some(16),
-            None,
-            Some("auto".to_string()),
+            CompletionOptions {
+                temperature: Some(0.2),
+                max_tokens: Some(16),
+                stop: None,
+                tool_choice: Some("auto".to_string()),
+                chat_template_kwargs: None,
+                reasoning_effort: None,
+            },
         );
 
         let tools = request.tools.expect("tools present");
@@ -3938,6 +3976,8 @@ data: [DONE]
             tool_choice: None,
             stream: false,
             stream_options: None,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "gpt-4o");
@@ -3948,6 +3988,8 @@ data: [DONE]
         assert!(json.get("max_tokens").is_none());
         assert!(json.get("tools").is_none());
         assert!(json.get("tool_choice").is_none());
+        assert!(json.get("chat_template_kwargs").is_none());
+        assert!(json.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3974,6 +4016,8 @@ data: [DONE]
             tool_choice: Some("auto".to_string()),
             stream: false,
             stream_options: None,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         // f32 precision: 0.7f32 serializes as 0.699999988... in JSON
@@ -3987,6 +4031,34 @@ data: [DONE]
         // Tool uses "type" key (via rename), not "tool_type"
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "get_weather");
+        assert!(json.get("chat_template_kwargs").is_none());
+        assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_request_serializes_thinking_controls_when_set() {
+        let req = ChatCompletionRequest {
+            model: "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("Hello".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            stream_options: None,
+            chat_template_kwargs: Some(serde_json::json!({ "thinking": false })),
+            reasoning_effort: Some("high".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_template_kwargs"]["thinking"], false);
+        assert_eq!(json["reasoning_effort"], "high");
     }
 
     #[test]
@@ -3995,10 +4067,14 @@ data: [DONE]
             "gpt-4o".to_string(),
             vec![ChatMessage::user("continue").into()],
             vec![],
-            None,
-            None,
-            None,
-            Some("auto".to_string()),
+            CompletionOptions {
+                temperature: None,
+                max_tokens: None,
+                stop: None,
+                tool_choice: Some("auto".to_string()),
+                chat_template_kwargs: None,
+                reasoning_effort: None,
+            },
         );
 
         let json = serde_json::to_value(&request).unwrap();

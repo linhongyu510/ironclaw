@@ -78,6 +78,16 @@ NEARAI_BASE_URL=https://private.near.ai
 
 Popular models: `Qwen/Qwen3.5-122B-A10B`, `black-forest-labs/FLUX.2-klein-4B`, `zai-org/GLM-5-FP8`
 
+Thinking/effort control for reasoning models (e.g. `deepseek-ai/DeepSeek-V4-Flash`).
+Both default to unset, which preserves the provider/server default:
+
+```env
+# Disable model-side thinking for normal chats, or tune it for deeper reasoning:
+NEARAI_CHAT_TEMPLATE_KWARGS={"thinking": false}
+# OpenAI-style effort level (low|medium|high|max):
+NEARAI_REASONING_EFFORT=low
+```
+
 ---
 
 ## Anthropic (Claude)

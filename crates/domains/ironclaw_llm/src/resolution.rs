@@ -433,7 +433,7 @@ fn apply_registry_provider_env(config: &mut RegistryProviderConfig) -> Result<()
 fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmError> {
     let api_key = nonempty_env("NEARAI_API_KEY").map(SecretString::from);
     let base_url = default_nearai_base_url(nonempty_env("NEARAI_BASE_URL"));
-    Ok(build_nearai_config(
+    build_nearai_config(
         NearAiRuntimeFields {
             model: nonempty_env("NEARAI_MODEL").unwrap_or_else(|| crate::DEFAULT_MODEL.to_string()),
             api_key,
@@ -442,7 +442,7 @@ fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmErro
             failover_cooldown_threshold: 3,
         },
         chain,
-    ))
+    )
 }
 
 fn nearai_config_from_dedicated(
@@ -457,7 +457,7 @@ fn nearai_config_from_dedicated(
     };
     let base_url = default_nearai_base_url(configured_base_url);
 
-    Ok(build_nearai_config(
+    build_nearai_config(
         NearAiRuntimeFields {
             model: resolved.model.clone(),
             api_key,
@@ -468,7 +468,7 @@ fn nearai_config_from_dedicated(
                 .unwrap_or(3),
         },
         chain,
-    ))
+    )
 }
 
 struct NearAiRuntimeFields {
@@ -479,8 +479,22 @@ struct NearAiRuntimeFields {
     failover_cooldown_threshold: u32,
 }
 
-fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> NearAiConfig {
-    NearAiConfig {
+fn build_nearai_config(
+    fields: NearAiRuntimeFields,
+    chain: &ChainSettings,
+) -> Result<NearAiConfig, LlmError> {
+    let chat_template_kwargs = match nonempty_env("NEARAI_CHAT_TEMPLATE_KWARGS") {
+        Some(raw) => {
+            Some(
+                serde_json::from_str(&raw).map_err(|error| LlmError::InvalidResponse {
+                    provider: "nearai".to_string(),
+                    reason: format!("NEARAI_CHAT_TEMPLATE_KWARGS must be valid JSON: {error}"),
+                })?,
+            )
+        }
+        None => None,
+    };
+    Ok(NearAiConfig {
         model: fields.model,
         cheap_model: nonempty_env("NEARAI_CHEAP_MODEL"),
         base_url: fields.base_url,
@@ -495,7 +509,9 @@ fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> Ne
         failover_cooldown_secs: fields.failover_cooldown_secs,
         failover_cooldown_threshold: fields.failover_cooldown_threshold,
         smart_routing_cascade: chain.smart_routing_cascade,
-    }
+        chat_template_kwargs,
+        reasoning_effort: nonempty_env("NEARAI_REASONING_EFFORT"),
+    })
 }
 
 pub const NEARAI_CLOUD_DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai";
@@ -798,6 +814,8 @@ mod tests {
         "NEARAI_MODEL",
         "NEARAI_CHEAP_MODEL",
         "NEARAI_FALLBACK_MODEL",
+        "NEARAI_CHAT_TEMPLATE_KWARGS",
+        "NEARAI_REASONING_EFFORT",
     ];
 
     struct EnvGuard {
@@ -955,5 +973,54 @@ mod tests {
         };
         assert_eq!(dedicated.model, "Qwen/Qwen3.5-122B-A10B");
         assert_eq!(dedicated.base_url, "https://private.near.ai");
+    }
+
+    /// Thinking/effort controls must flow from env into the nearai config:
+    /// `NEARAI_CHAT_TEMPLATE_KWARGS` parses as JSON, `NEARAI_REASONING_EFFORT`
+    /// passes through as a string, and both stay `None` when unset so the
+    /// provider/server default applies.
+    #[test]
+    fn nearai_thinking_controls_parse_from_env() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("LLM_BACKEND", "nearai");
+        env.set(
+            "NEARAI_CHAT_TEMPLATE_KWARGS",
+            r#"{"thinking": false, "effort": "high"}"#,
+        );
+        env.set("NEARAI_REASONING_EFFORT", "low");
+
+        let config = nearai_config_from_env(&ChainSettings::default())
+            .expect("nearai env config should resolve");
+        assert_eq!(
+            config
+                .chat_template_kwargs
+                .as_ref()
+                .and_then(|value| value.get("thinking")),
+            Some(&serde_json::json!(false)),
+            "chat_template_kwargs must carry the parsed JSON object"
+        );
+        assert_eq!(
+            config.reasoning_effort.as_deref(),
+            Some("low"),
+            "reasoning_effort must pass through from env"
+        );
+    }
+
+    /// Invalid JSON in `NEARAI_CHAT_TEMPLATE_KWARGS` must fail resolution
+    /// loudly rather than silently falling back to the provider default.
+    #[test]
+    fn nearai_chat_template_kwargs_rejects_invalid_json() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("LLM_BACKEND", "nearai");
+        env.set("NEARAI_CHAT_TEMPLATE_KWARGS", "{thinking: false}");
+
+        let error = nearai_config_from_env(&ChainSettings::default())
+            .expect_err("invalid NEARAI_CHAT_TEMPLATE_KWARGS JSON must fail env resolution");
+        assert!(
+            error.to_string().contains("NEARAI_CHAT_TEMPLATE_KWARGS"),
+            "error must name the offending env var, got: {error}"
+        );
     }
 }

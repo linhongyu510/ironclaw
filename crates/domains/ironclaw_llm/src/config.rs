@@ -539,6 +539,15 @@ pub struct NearAiConfig {
     pub failover_cooldown_threshold: u32,
     /// Enable cascade mode for smart routing. Default: true.
     pub smart_routing_cascade: bool,
+    /// Raw `chat_template_kwargs` object sent with every completion request
+    /// (e.g. `{"thinking": false}` to disable DeepSeek-style thinking, or
+    /// `{"thinking": true, "effort": "high"}` for deep agentic reasoning).
+    /// `None` = provider/server default. Read from `NEARAI_CHAT_TEMPLATE_KWARGS`.
+    pub chat_template_kwargs: Option<serde_json::Value>,
+    /// OpenAI-style `reasoning_effort` string sent with every completion
+    /// request (e.g. "low", "medium", "high", "max"). `None` = provider/server
+    /// default. Read from `NEARAI_REASONING_EFFORT`.
+    pub reasoning_effort: Option<String>,
 }
 
 impl NearAiConfig {
@@ -575,6 +584,8 @@ impl NearAiConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -770,6 +781,8 @@ mod tests {
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
                 smart_routing_cascade: true,
+                chat_template_kwargs: None,
+                reasoning_effort: None,
             },
             provider: None,
             bedrock: None,

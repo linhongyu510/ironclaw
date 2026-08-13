@@ -228,6 +228,8 @@ fn nearai_config(model: &str) -> LlmConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
         },
         provider: None,
         bedrock: None,
