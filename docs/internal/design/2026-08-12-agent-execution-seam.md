@@ -226,8 +226,10 @@ pub struct AgentExecutionRequest {
     /// workflows (see below).
     pub context: ExecutionContext,
 
-    /// A selection, never authority (I3): intersected with profile policy
-    /// and authorized per-call at action time. Empty = no tools.
+    /// A selection, never authority (I3), validated against profile policy
+    /// and authorized per-call at action time. Snapshot: exactly these,
+    /// empty = no tools. Thread: must be empty — the surface is
+    /// profile-derived host-side, per iteration (knob table below).
     pub tools: Vec<CapabilityId>,
 
     /// Preference, not resolution (I4): the host validates the route
@@ -332,6 +334,21 @@ detached profiles (`detached_structured` when `output` is a JSON schema,
 profiles through the existing resolver exactly as turns do today
 (interactive, scheduled trigger, …). A hint field can be added if variants
 multiply.
+
+**Request knobs are per-invocation choices; the profile is the per-class
+policy that bounds them.** A knob never overrides the profile — it composes
+with it, and the meaning differs by context kind:
+
+| Field | `Thread` (conversations) | `Snapshot` (detached) |
+|---|---|---|
+| `tools` | **must be empty** — the visible surface is derived host-side from the profile surface, installed extensions, and grants, recomputed each iteration (I2) | exactly the named selection, validated as a **subset** of the profile surface; empty = no tools |
+| `model` | per-invocation preference (the user's model picker — today's `requested_model` hint); `None` = profile/tenant default; host-validated with fallback retained (I4) | same semantics |
+| `output` | `AssistantMessage` only (initially) | `AssistantMessage` or `JsonSchema` |
+| `limits` | narrowing-only against profile ceilings | narrowing-only against profile ceilings |
+
+A submission violating this matrix — a `Thread` request naming tools, or
+declaring a JSON-schema output — is rejected fail-closed at the seam
+(`SubmitExecutionError`), so invalid combinations never reach the journal.
 
 What the host still owns at execution time, identically for both context
 kinds:

@@ -174,8 +174,10 @@ def conversation_submit(inbound):
             idempotency_key=accepted.idempotency_key,
             execution=AgentExecutionRequest(
                 context=Thread(binding.thread_id, accepted_message=accepted.ref),
-                tools=[],                            # profile surface
-                model=None,                          # user/tenant default
+                tools=[],                            # must be empty for Thread:
+                                                     # surface is profile-derived
+                model=None,                          # user/tenant default (a model
+                                                     # picker choice would ride here)
                 output=AssistantMessage,
                 limits=conversation_limits(),
             ),
