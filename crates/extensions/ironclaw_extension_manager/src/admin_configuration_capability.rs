@@ -546,6 +546,7 @@ mod tests {
             fields: vec![AdminConfigurationFieldState {
                 handle: SecretHandle::new("fixture_token").unwrap(),
                 label: "Token".to_string(),
+                description: String::new(),
                 secret: true,
                 required: true,
                 provided: true,

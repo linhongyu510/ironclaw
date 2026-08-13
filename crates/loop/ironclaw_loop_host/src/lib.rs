@@ -207,11 +207,12 @@ use ironclaw_loop_contracts::{
     LoopHostMilestoneSink, LoopInlineMessageBody, LoopInputCursor, LoopModelMessage, LoopModelPort,
     LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRequest,
     LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, MemoryPromptContextService, ModelProfileId,
-    ModelStreamChunk, ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust,
-    ParentLoopOutput, PromptMode, ToolObservationDetail, ToolObservationStatus,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, MemoryPromptContextLoad,
+    MemoryPromptContextService, ModelProfileId, ModelStreamChunk, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
+    ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
 };
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
@@ -332,10 +333,22 @@ where
     /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
-    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// Per-run cache for the fetched memory load. Shared across clones via
     /// `Arc` so the "fetch once per run" guarantee holds even if the port is
-    /// cloned, exactly like `identity_candidates`.
-    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
+    /// cloned, exactly like `identity_candidates`. The cached value is the
+    /// whole [`MemoryPromptContextLoad`], degradations included: a failed
+    /// fetch must not be remembered as a plain empty result for the rest of
+    /// the run.
+    memory_snippets_cache: Arc<OnceCell<MemoryPromptContextLoad>>,
+    /// One-shot guard so a degraded memory retrieval produces exactly ONE
+    /// operator-visible driver note per run, however many prompt builds read
+    /// the cached load. `Arc`-shared for the same reason as the cache itself.
+    /// Set only AFTER the note is published, so a transient sink failure does
+    /// not permanently suppress it; `memory_degradation_note_in_flight` keeps
+    /// the window between claim and publish from producing duplicates. Same
+    /// pair, and same rationale, as `personal_context_admitted`.
+    memory_degradation_note_emitted: Arc<OnceCell<()>>,
+    memory_degradation_note_in_flight: Arc<AtomicBool>,
     /// Pre-resolved channel conversation history for shared-channel runs
     /// (UNTRUSTED third-party text carried on the run's persisted product
     /// context). Rendered as ONE framed system-context block per prompt
@@ -410,6 +423,8 @@ where
             milestone_sink: None,
             memory_context_service: None,
             memory_snippets_cache: Arc::new(OnceCell::new()),
+            memory_degradation_note_emitted: Arc::new(OnceCell::new()),
+            memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
         }
     }
