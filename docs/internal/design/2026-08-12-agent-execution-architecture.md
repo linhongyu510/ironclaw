@@ -100,7 +100,7 @@ pub struct AgentExecutionRequest {
     pub context: ExecutionContext,      // Thread(reference) | Snapshot(system_prompt, messages)
     pub tools: Vec<CapabilityId>,       // selection, authorized per-call at action time
     pub model: Option<ModelProfileId>,  // preference; host resolves, validates, falls back
-    pub output: OutputContract,         // AssistantMessage | JsonSchema { schema, strict }
+    pub output: OutputContract,         // AssistantMessage | JsonSchema { schema } (strict, in-request)
     pub limits: ExecutionLimits,        // narrowing-only
 }
 ```
@@ -297,7 +297,7 @@ def generate_suggestions(surface_caller, req):
             ),
             tools=["builtin.memory_search"],             # or []
             model=None,
-            output=JsonSchema("suggestion-cards:v1", strict=True),
+            output=JsonSchema(SUGGESTION_CARDS_SCHEMA),      # schema JSON rides the request
             limits=ExecutionLimits(max_iterations=6, wall_clock=seconds(60)),
         ),
     ))
@@ -307,7 +307,7 @@ def generate_suggestions(surface_caller, req):
 def on_suggestion_terminal(execution_id, result, req):
     # The engine already schema-validated the output before reporting
     # success; this re-checks the declared schema and stores idempotently.
-    cards = require_structured(result.output, "suggestion-cards:v1")
+    cards = validate_structured(result.output, SUGGESTION_CARDS_SCHEMA)
     suggestions.persist_cards_once(req.id, execution_id, cards)
     suggestion_events.publish_ready(req.id)
 ```

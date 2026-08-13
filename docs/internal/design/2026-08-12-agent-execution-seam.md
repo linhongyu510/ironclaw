@@ -383,7 +383,8 @@ pub struct AgentExecutionResult {
 
 pub enum AgentOutput {
     AssistantMessage(AgentMessage),
-    Structured { schema: OutputSchemaRef, value: serde_json::Value },
+    /// Validated against the schema the request carried (§4.5).
+    Structured { value: serde_json::Value },
 }
 ```
 
@@ -495,8 +496,9 @@ the seam, so nothing invalid ever reaches a journal or a provider.
   unresolved work); at least one `Text` or artifact part.
 
 **Bounds.** Per-part, per-message, and per-request byte budgets are enforced
-at submission, and `BoundedJson` bounds tool arguments (values set with the
-implementation; the workspace's bounded-ref discipline is the precedent).
+at submission, and `BoundedJson` bounds tool arguments. Values mirror the
+bounds the transcript/content layer enforces today — no new size behavior at
+the seam.
 
 **Snapshot input vs. thread history.** Snapshot callers author these messages
 directly. Thread-context history never becomes caller-visible
@@ -509,21 +511,22 @@ validated model-visible observations).
 ```rust
 pub enum OutputContract {
     AssistantMessage,
-    JsonSchema {
-        schema: OutputSchemaRef,   // versioned, e.g. "suggestion-cards:v1"
-        strict: bool,
-    },
+    /// The JSON schema itself rides the request.
+    JsonSchema { schema: serde_json::Value },
 }
 ```
 
-- **Registry ownership:** schemas are registered by the owning workflow crate
-  into a host-owned registry keyed by name+version (declared, not inline JSON
-  per request), so stored results stay interpretable after the fact.
-- **Semantics:** `strict: true` — the terminal output must parse and validate
-  against the schema or the attempt is rejected; `strict: false` — validate,
-  and on failure surface the raw output with a typed `SchemaViolation`
-  failure instead of retrying to exhaustion. (If review cannot name a use for
-  `strict: false`, ship strict-only.)
+- **The schema is request data — there is no registry.** The schema travels
+  inline on the contract and is journaled (as refs, like all request
+  content) at admission, so it is durably recorded with every execution and
+  stored results stay interpretable after the fact with nothing to own or
+  version host-side. How a product feature constructs or stores its schemas
+  (a `prompts/`-style asset, product config) is that feature's decision when
+  it ships.
+- **Validation is strict, always.** The terminal output must parse and
+  validate against the schema or the attempt is rejected into the
+  repair/retry path below; exhausted retries fail the run as
+  `invalid_model_output`. (A tolerant mode was considered and cut.)
 - **Enforcement point:** a reply-admission strategy in the loop family. The
   loop already has a reply-admission slot that rejects invalid finals and
   drives a retry with a model-visible repair hint; a schema-validating
@@ -531,13 +534,13 @@ pub enum OutputContract {
   retries fail the run as `invalid_model_output`.
 - **Provider mechanism: the schema is presented as one forced tool.** For a
   `JsonSchema` contract, the host injects a synthetic, host-owned result
-  tool whose parameters *are* the registered schema — riding the one schema
+  tool whose parameters *are* the request's schema — riding the one schema
   path every provider already supports: tool parameters (`ironclaw_llm`'s
   strict tool-schema normalization applies unchanged). The model finishes by
   calling it — the loop may force tool choice for the final response once
   ordinary tool work concludes — and the reply-admission strategy intercepts
   that call as the terminal output, validating the arguments against the
-  registry schema. Two boundary rules: the result tool is **not a
+  request's schema. Two boundary rules: the result tool is **not a
   capability** — it never crosses authorization or dispatch, exactly like
   the existing synthetic `capability_info` tool — and a plain-text final
   under a schema contract is rejected with a repair hint directing the model
@@ -733,7 +736,7 @@ def generate_suggestions(surface_caller, suggestion_request):
             ),
             tools=["builtin.memory_search"],                 # or []
             model=None,                                      # profile default
-            output=OutputContract.JsonSchema("suggestion-cards:v1", strict=True),
+            output=OutputContract.JsonSchema(SUGGESTION_CARDS_SCHEMA),  # schema JSON, e.g. include_str! asset
             limits=ExecutionLimits(max_iterations=6, wall_clock=Duration.seconds(60)),
         ),
     ))
@@ -742,7 +745,7 @@ def generate_suggestions(surface_caller, suggestion_request):
 
 
 def project_suggestion_result(execution_id, result, suggestion_request):
-    cards = require_structured(result.output, "suggestion-cards:v1")
+    cards = validate_structured(result.output, SUGGESTION_CARDS_SCHEMA)
     suggestions.persist_cards_once(suggestion_request.id, execution_id, cards)  # idempotent
     suggestion_events.publish_ready(suggestion_request.id)
 ```
@@ -800,9 +803,8 @@ any new feature shipping.
 |---|---|---|
 | `AgentExecution` port + request/result/event DTOs | `ironclaw_loop_contracts` (contracts layer) | products may consume; loop tier implements; no new crate unless review prefers one |
 | Neutral message/content extensions | `ironclaw_llm` | owns provider-neutral model vocabulary; no mirror DTOs |
-| `OutputContract` enforcement (reply admission) | `ironclaw_agent_loop` strategy + `detached_*` families | reuses the existing retry/repair machinery |
+| `OutputContract` enforcement (reply admission) | `ironclaw_agent_loop` strategy + `detached_*` families | reuses the existing retry/repair machinery; schema is carried in-request |
 | `SnapshotBackedLoopContextPort`, seam implementation | `ironclaw_turn_runner` / kernel turn tier | beside the thread-backed host it parallels |
-| Schema registry | host-owned, kernel tier (exact crate per review) | results must stay interpretable after the fact |
 | Suggestions (when real) and other workflows | `ironclaw_assistant` | product orchestration |
 | Wiring | `ironclaw_composition` | assembly only |
 
@@ -817,39 +819,49 @@ convention.
 | Conversation transcript and continuity | Thread service (unchanged) |
 | Execution request (refs), lifecycle, journal, result | Process journal + execution projection |
 | Artifact bytes and authorization | Artifact/filesystem store (unchanged) |
-| Output schemas | Host schema registry |
+| Output schema | The execution request (journaled with it) |
 | Suggestion request and validated cards | Suggestions store (future) |
 | Vendor reply/delivery attempts | Outbound/delivery subsystem (unchanged) |
 
-## 9. Open questions
+## 9. Decisions and open questions
+
+**Resolved (2026-08-13):**
+
+- **The schema travels in the request** (§4.5) — no host-owned registry.
+  Admission journals it with the rest of the request, so stored results stay
+  interpretable with nothing to own or version. How a feature constructs or
+  stores its schemas is that feature's decision when it ships.
+- **Validation is strict-only.** The tolerant (`strict: false`) mode is cut.
+- **Process-kind: a new `ProcessKind` variant.** The same change audits the
+  kind enum and retires unused legacy variants through the standard
+  rolling-compat path — old rows must keep deserializing (retire the
+  writers, keep the readers tolerant), with one tolerance test proving an
+  old binary handles rows carrying the new value fail-closed.
+- **`ExecutionLimits` maps onto the existing budget machinery** (iteration
+  limit, wall clock, USD accountant, max output tokens) — nothing invented;
+  ceilings come from the profile.
+- **Observation live-hint buffers reuse existing sizing** (the thread ring).
+- **Crate placement as tabled in §7**, finalized in PR review.
+- **Message bounds mirror today's transcript/content bounds** (§4.4) — no
+  new size behavior at the seam.
+- **No per-tool crash-replay declaration.** Detached executions inherit the
+  standard recovery semantics conversation runs already have (bounded
+  reclaims, checkpoint resume, invocation fingerprinting) — behavior stays
+  exactly as it is now.
+
+**Still open:**
 
 1. **Does suggestions need tools at all?** If the feature's first version is a
    single schema-validated completion, it can ship on `SystemInferencePort`
    and adopt this seam when it needs the loop. The seam's first committed
    adopter may be OpenAI-compat rather than suggestions.
-2. **Scheduling fairness:** which `scheduling_class`/concurrency limits do
-   detached profiles get so a burst of executions cannot starve interactive
-   conversations — and do interactive detached callers need a fast-claim path
-   to shave the queue hop?
-3. **Schema registry mechanics:** registration lifecycle, versioning policy,
-   and whether schemas may reference artifact parts (and how that is
-   expressed).
-4. **`strict: false`:** keep or cut (§4.5).
-5. **Observation retention:** the durable plane inherits never-delete; is the
-   live-hint buffer sizing (per-execution ring) the same as threads or
-   smaller?
-6. **Gate-resolve affordance:** a design sketch for the future revision that
+2. **Detached concurrency cap:** the shared worker pool already enforces
+   per-class concurrency limits from config (`max_concurrent_trigger_runs`,
+   `max_concurrent_conversation_runs`); detached executions get a third cap
+   the same way so a burst of them cannot occupy every worker and delay live
+   chats. Open: the default value, and whether interactive detached callers
+   (a user waiting on a panel) ever need a priority path — deferred until
+   there is latency data.
+3. **Gate-resolve affordance:** a design sketch for the future revision that
    allows gating tools on detached executions (actor model, rendering
    surface, lease semantics) — deliberately unresolved here.
-7. **Process-kind encoding:** a new `ProcessKind` variant vs. `AgentTurn`
-   plus a detached marker — either way, additive-only, with a rolling-compat
-   test proving an old binary tolerates rows carrying the new value
-   fail-closed (same pattern as the loop-exit retired-field test).
-8. **`ExecutionLimits` mapping:** which fields, mapped onto the existing
-   budget machinery (iteration limit, wall clock, USD accountant,
-   max output tokens) rather than invented; ceiling values per profile.
-9. **Per-tool crash-replay declaration:** adopt pi's
-   `replay: "never" | "safe"` self-declaration for detached crash recovery
-   (re-execute a persisted call only when both the stored and current
-   declarations say safe; otherwise a synthetic interrupted result)?
-   Orthogonal to approvals; cheap; undecided.
