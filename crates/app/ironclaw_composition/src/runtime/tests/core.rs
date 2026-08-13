@@ -1214,6 +1214,7 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 .as_str()
                 .expect("large result advertises artifact URI")
                 .to_string();
+            let bounded_artifact_ref = format!("{artifact_ref}:bytes:0-3071");
             let read_id = CapabilityId::new("builtin.read").expect("reader id");
             let read_tool = capabilities
                 .tool_definitions()
@@ -1230,7 +1231,7 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                         id: "call-2".to_string(),
                         name: read_tool.name,
                         arguments: serde_json::json!({
-                            "path": artifact_ref,
+                            "path": bounded_artifact_ref,
                         }),
                         response_reasoning: None,
                         reasoning: None,
@@ -1259,12 +1260,20 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 .expect("third model call should include coding read output");
             assert!(
                 tool_result.content.contains(LARGE_ECHO_MESSAGE),
-                "coding read must expose the artifact-backed result to the model"
+                "bounded artifact read must expose the requested byte range"
             );
+            let observation: serde_json::Value =
+                serde_json::from_str(&tool_result.content).expect("result observation");
+            assert_eq!(
+                observation["model_observation"]["detail"]["kind"],
+                serde_json::json!("inline_result")
+            );
+            let content = observation["model_observation"]["detail"]["content"]
+                .as_str()
+                .expect("bounded artifact read content");
             assert!(
-                tool_result.content.contains("artifact output elided"),
-                "coding read must retain its pinned bounded output shape (elided head/tail preview): {}",
-                tool_result.content.chars().take(200).collect::<String>()
+                content.contains(LARGE_ECHO_MESSAGE) && !content.contains(LARGE_ECHO_TAIL),
+                "coding read must expose only the requested bounded artifact range"
             );
             assert!(
                 tool_result.content.len() <= TOOL_RESULT_RECORD_READ_MAX_BYTES * 2,
