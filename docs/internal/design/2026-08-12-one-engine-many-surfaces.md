@@ -1,11 +1,11 @@
-# Agent execution architecture: one engine, many surfaces
+# One engine, many surfaces
 
 **Status:** Discussion draft
 **Grounded in:** `main` @ `d4fa8e1f60`
-**Companion:** [2026-08-12-agent-execution-seam.md](2026-08-12-agent-execution-seam.md)
-— the seam itself: the `AgentExecution` port, the request contract,
-`AgentMessage`, `OutputContract`, events, and the invariants (I1–I5) this
-document builds on.
+**Companion:** [2026-08-12-detached-turns.md](2026-08-12-detached-turns.md)
+— the contract itself: the expanded `TurnCoordinator`
+(`submit_detached_turn`), `AgentMessage`, `OutputContract`, run
+observation, and the invariants (I1–I5) this document builds on.
 
 ## 1. The rule this document exists to make obvious
 
@@ -15,9 +15,10 @@ three things:
 
 1. **Normalize its input** through its own ingress (webhook translation,
    session route, trigger fire, API request).
-2. **Submit one `AgentExecutionRequest`** through the one `AgentExecution`
-   seam.
-3. **Interpret the execution's output in its own way** — and *only* its own
+2. **Submit through the one `TurnCoordinator`** — conversations via
+   `submit_turn` (exactly as today), detached work via the new
+   `submit_detached_turn`.
+3. **Interpret the run's output in its own way** — and *only* its own
    way: conversations reply through the channel reply machinery (manifest-
    driven: stream or final send), suggestions validate and store cards,
    OpenAI-compat renders an HTTP response.
@@ -30,8 +31,8 @@ never delivers anything. Nothing else in the system runs the agent.
 | Layer | Examples | Owns | Never does |
 |---|---|---|---|
 | **Surface** (ingress + rendering) | Slack/Telegram adapters, WebUI routes, trigger worker, suggestions UI, OpenAI-compat HTTP | Protocol translation, verification hand-off, rendering output for its vendor/client | Create threads, build prompts, call the engine, touch policy or delivery stores |
-| **Workflow** (product logic) | Conversation workflow, suggestions workflow, OpenAI-compat workflow | Request assembly (the *what*), output handling, its own state (threads/bindings, suggestion store) and reply-route associations | Run the loop, authorize capabilities, invent events, bypass the seam to mutate run state |
-| **Engine** (`AgentExecution` + shared runtime) | Seam port; process journal, scheduler, leases, canonical loop, capability host, gates, events | Admission, scheduling, execution, action-time authorization, gates, checkpoints, the execution journal and live hints, cancellation | Know about surfaces, hold reply targets or vendor IDs, deliver output, parse external identifiers |
+| **Workflow** (product logic) | Conversation workflow, suggestions workflow, OpenAI-compat workflow | Request assembly (the *what*), output handling, its own state (threads/bindings, suggestion store) and reply-route associations | Run the loop, authorize capabilities, invent events, bypass the coordinator to mutate run state |
+| **Engine** (`TurnCoordinator` + shared runtime) | The expanded coordinator; process journal, scheduler, leases, canonical loop, capability host, gates, events | Admission, scheduling, execution, action-time authorization, gates, checkpoints, durable events and live hints, cancellation | Know about surfaces, hold reply targets or vendor IDs, deliver output, parse external identifiers |
 
 Two admission doors already exist on `main` and stay exactly where they are:
 verified vendor messages enter through
@@ -59,12 +60,12 @@ flowchart TB
         Compat["OpenAI-compat workflow"]
     end
 
-    subgraph Engine["ENGINE — AgentExecution seam + shared runtime"]
-        AE["AgentExecution — <br/>submit · get · subscribe · cancel <br/>(TurnCoordinator's front, matured)"]
-        MINT["Snapshot admission: MINT-SEED-SUBMIT — <br/>unbound, ownerless thread · messages seeded as rows · id internal"]
+    subgraph Engine["ENGINE — the expanded TurnCoordinator + shared runtime"]
+        AE["TurnCoordinator (expanded) — <br/>submit_turn · submit_detached_turn (NEW) · <br/>get_run_state · cancel_run · resume_turn"]
+        MINT["MINT-SEED-SUBMIT — <br/>unbound, ownerless thread · messages seeded as rows · id internal"]
         RT["turn admission (unchanged) → process journal · scheduler · leases · <br/>canonical loop · ONE thread-backed materialization path · <br/>capability host (action-time auth) · gates · checkpoints · events"]
-        AE -->|"context: Thread — passes straight through"| RT
-        AE -->|"context: Snapshot"| MINT --> RT
+        AE -->|"submit_turn: passes straight through"| RT
+        AE -->|"submit_detached_turn"| MINT --> RT
     end
 
     Slack -->|"admit_channel_inbound"| Conv
@@ -73,9 +74,9 @@ flowchart TB
     SuggUI -->|"suggestions.generate"| Sugg
     OAIApi --> Compat
 
-    Conv -->|"context: Thread — a bound thread"| AE
-    Sugg -->|"context: Snapshot + JSON schema"| AE
-    Compat -->|"context: Snapshot"| AE
+    Conv -->|"submit_turn — a bound thread"| AE
+    Sugg -->|"submit_detached_turn + JSON schema"| AE
+    Compat -->|"submit_detached_turn"| AE
 
     RT -.->|"events + terminal result"| ConvOut["Conversation output handling<br/>manifest reply.transport:<br/>stream → host projection pipeline (no adapter)<br/>vendor → OutboundPolicy → ChannelReply::send_reply<br/>out-of-band → ChannelDelivery::deliver"]
     RT -.->|"terminal result"| SuggOut["Suggestions output handling<br/>validate schema → store cards once → publish ready"]
@@ -88,42 +89,47 @@ flowchart TB
 ```
 
 Read it once top-down and once bottom-up. Top-down: five surfaces, three
-workflows, one seam, one runtime. Bottom-up: one output stream, three
+workflows, one coordinator, one runtime. Bottom-up: one output stream, three
 interpretations — reply machinery for anything conversation-shaped, a store
 for suggestions, an HTTP response for OpenAI-compat.
 
-## 4. The one request, and the one point of variance
+## 4. Two methods, one runtime
 
-Every workflow submits the same five-field request (full contract in the
-companion document):
+The coordinator's two submission idioms (full contract in the companion
+document):
 
 ```rust
-pub struct AgentExecutionRequest {
-    pub context: ExecutionContext,      // Thread(reference) | Snapshot(system_prompt, messages)
-    pub tools: Vec<CapabilityId>,       // selection, authorized per-call at action time
-    pub model: Option<ModelProfileId>,  // preference; host resolves, validates, falls back
-    pub output: OutputContract,         // AssistantMessage | JsonSchema { schema } (strict, in-request)
-    pub limits: ExecutionLimits,        // narrowing-only
-}
+// Conversations — unchanged from main:
+submit_turn(SubmitTurnRequest)              // bound thread + accepted message ref
+
+// Detached work — the one new method:
+submit_detached_turn(SubmitDetachedTurnRequest {
+    tenant_id, agent_id, project_id, actor,      // who (run-acts-as-invoker)
+    system_prompt, messages: Vec<AgentMessage>,  // what the model may see
+    tools: Vec<CapabilityId>,                    // selection, authorized per call
+    model: Option<ModelProfileId>,               // preference; host validates + falls back
+    output: OutputContract,                      // AssistantMessage | JsonSchema (in-request)
+    limits: TurnLimits,                          // narrowing-only
+    idempotency_key,
+})
 ```
 
-`context` is the only structural difference between workflows, and the
-distinction is *reference vs. copy*:
+The method split is the only structural difference between workflows, and
+the distinction underneath is *reference vs. content*:
 
-- **`Thread`** — a reference. The host materializes history from the thread
-  at run time through the existing thread-backed context port, so steering,
-  compaction, and rebuild-on-resume keep working by construction. This is how
-  conversations share the seam without freezing what must stay alive.
-- **`Snapshot`** — a caller-supplied, point-in-time input. The seam mints an
-  **unbound, ownerless thread** from it at admission (content landed as
-  refs, messages seeded as rows, thread id internal) and runs the same
-  thread-backed path — a conversation is a thread *with a binding*, and
-  these deliberately have none.
+- **`submit_turn`** — a reference. The host materializes history from the
+  bound thread at run time through the thread-backed context port, so
+  steering, compaction, and rebuild-on-resume keep working by construction.
+- **`submit_detached_turn`** — content. The coordinator mints an **unbound,
+  ownerless thread** at admission (content landed as refs, messages seeded
+  as rows, thread id internal) and runs the *same* thread-backed path — a
+  conversation is a thread *with a binding*, and these deliberately have
+  none.
 
 Everything else that differs between workflows differs **by value**, and the
 engine behaves accordingly through profiles:
 
-| | `Thread` (conversations, automations) | `Snapshot` (suggestions, OpenAI-compat) |
+| | `submit_turn` (conversations, automations) | `submit_detached_turn` (suggestions, OpenAI-compat) |
 |---|---|---|
 | Submitted by | conversation workflow only | detached workflows |
 | Admission | one active run per thread; busy input settles as steering (`DeferredBusy`) or `RejectedBusy` | concurrent; idempotency only |
@@ -173,24 +179,19 @@ def conversation_submit(inbound):
         # steering input and the RUNNING loop will drain it. No new run.
         return
 
-    execution = agent_execution.submit(
-        execution_caller_from(inbound.actor),        # run acts as its invoker
-        SubmitAgentExecutionRequest(
-            idempotency_key=accepted.idempotency_key,
-            execution=AgentExecutionRequest(
-                context=Thread(binding.thread_id, accepted_message=accepted.ref),
-                tools=[],                            # must be empty for Thread:
-                                                     # surface is profile-derived
-                model=None,                          # user/tenant default (a model
-                                                     # picker choice would ride here)
-                output=AssistantMessage,
-                limits=conversation_limits(),
-            ),
-        ),
-    )
-
-    # Reply routing NEVER enters the engine. The workflow keeps it.
-    conversation_runs.associate(binding, execution.execution_id)
+    # UNCHANGED FROM MAIN — this is exactly today's call. Conversations have
+    # no migration in this proposal; the trait they already use is the one
+    # being expanded.
+    response = turn_coordinator.submit_turn(SubmitTurnRequest(
+        scope=turn_scope_for(binding.thread_id),      # tenant/agent/project + thread
+        actor=inbound.actor,                          # run acts as its invoker
+        accepted_message_ref=accepted.ref,
+        source_binding_ref=binding.source,            # today's shape; slimming these
+        reply_target_binding_ref=binding.reply_target,#   off the request is a named
+        requested_model=None,                         #   follow-up, not this proposal
+        idempotency_key=accepted.idempotency_key,
+    ))
+    conversation_runs.associate(binding, response.run_id)
 ```
 
 ### 5.2 Conversation output handling — one generic flow, manifest-driven
@@ -203,14 +204,14 @@ and the adapter is never called; any other transport means the extension
 implements `ChannelReply::send_reply`.
 
 ```python
-def handle_conversation_output(binding, execution_id):
+def handle_conversation_output(binding, run_id):
     # PRODUCT (conversation workflow). The thread transcript was already
     # written by the run itself (lease-fenced, engine-side) — output handling
     # is about REPLY, never persistence.
     reply = manifest(binding.channel).reply
 
     if reply.transport == "stream":
-        # Host-owned: execution events/live hints project into the durable
+        # Host-owned: run events/live hints project into the durable
         # product stream; the surface (WebUI tab) tails it over SSE with a
         # resumable cursor. ChannelReply is never called — that absence is
         # what `stream` means.
@@ -218,7 +219,9 @@ def handle_conversation_output(binding, execution_id):
 
     # Vendor-transport reply: wait for the terminal result, then send one
     # source-routed answer through the reply lane.
-    result = await_terminal(agent_execution.subscribe(caller, execution_id))
+    result = await_terminal(run_observation.subscribe(scope, actor, run_id))
+    # (until the observation façade lands, this is today's polling delivery
+    # observer — the flow is identical, only the wait mechanism differs)
     envelope = outbound_envelope(binding.reply_route, result.output.assistant_message)
 
     validated = outbound_policy.validate(envelope)     # revalidates the target,
@@ -231,7 +234,7 @@ Two deliberate consequences:
 - **Streaming vs. whole-message is a manifest fact, not vendor code.** WebUI
   is simply a channel whose reply transport is `stream`. A future vendor that
   can stream (message edits) opts in through its manifest and a presentation
-  policy over the same execution events — no new engine surface, no
+  policy over the same run events — no new engine surface, no
   per-vendor workflow code.
 - **Reply and delivery stay orthogonal lanes.** Answering the run's input is
   `ChannelReply` (source-routed). Reaching someone out of band —
@@ -275,7 +278,7 @@ def on_trigger_due(fire, materialized_prompt):
     # scheduled_trigger profile, whose deny-map strips trigger-mutating
     # capabilities.
     conversation_trusted_submitter.submit_trusted_trigger_fire(trusted)
-    #   → conversation_submit(...) → context: Thread → the same seam
+    #   → conversation_submit(...) → submit_turn → the same coordinator
 ```
 
 Output handling is §5.2 unchanged: reply into the bound conversation through
@@ -284,40 +287,40 @@ under outbound policy. Automations never grow their own delivery path.
 
 ### 5.5 Suggestions
 
-Suggestions are the canonical detached workflow: no thread, no binding, no
-reply machinery — the output's home is the suggestions store.
+Suggestions are the canonical detached workflow: no conversation, no
+binding, no reply machinery — its thread is the coordinator-internal
+unbound one, and the output's home is the suggestions store.
 
 ```python
 def generate_suggestions(surface_caller, req):
     # SURFACE: ProductSurface operation "suggestions.generate". The payload
     # selects inputs; it cannot select prompts, tools, or authority.
-    caller = execution_caller_from(surface_caller)
-
-    execution = agent_execution.submit(caller, SubmitAgentExecutionRequest(
+    response = turn_coordinator.submit_detached_turn(SubmitDetachedTurnRequest(
+        tenant_id=surface_caller.tenant_id,
+        agent_id=surface_caller.agent_id,
+        project_id=surface_caller.project_id,
+        actor=TurnActor(user_id=surface_caller.user_id),
+        system_prompt=SUGGESTIONS_PROMPT,            # prompts/*.md, include_str!
+        messages=[user_message(req.goal)],
+        tools=["builtin.memory_search"],             # or []
+        model=None,
+        output=JsonSchema(SUGGESTION_CARDS_SCHEMA),  # schema JSON rides the request
+        limits=TurnLimits(max_iterations=6, wall_clock=seconds(60)),
         idempotency_key=req.idempotency_key,
-        execution=AgentExecutionRequest(
-            context=Snapshot(
-                system_prompt=SUGGESTIONS_PROMPT,        # prompts/*.md, include_str!
-                messages=[user_message(req.goal)],
-            ),
-            tools=["builtin.memory_search"],             # or []
-            model=None,
-            output=JsonSchema(SUGGESTION_CARDS_SCHEMA),      # schema JSON rides the request
-            limits=ExecutionLimits(max_iterations=6, wall_clock=seconds(60)),
-        ),
     ))
-    suggestions.associate(req.id, execution.execution_id)
+    suggestions.associate(req.id, response.run_id)
 
 
-def on_suggestion_terminal(execution_id, result, req):
+def on_suggestion_terminal(run_id, result, req):
     # The engine already schema-validated the output before reporting
     # success; this re-checks the declared schema and stores idempotently.
     cards = validate_structured(result.output, SUGGESTION_CARDS_SCHEMA)
-    suggestions.persist_cards_once(req.id, execution_id, cards)
+    suggestions.persist_cards_once(req.id, run_id, cards)
     suggestion_events.publish_ready(req.id)
 ```
 
-What suggestions deliberately never touch: threads, conversation bindings,
+What the suggestions workflow deliberately never touches: thread APIs,
+conversation bindings,
 `ChannelReply`, `ChannelDelivery`, outbound policy. Readiness reaches the UI
 through the product event stream like any other product projection.
 
@@ -325,34 +328,31 @@ through the product event stream like any other product projection.
 
 The adopter that retires a live hack: today the caller's message list is
 JSON-flattened into one user message in a manufactured thread and
-`response_format` is dropped. On the seam it is a plain detached workflow.
+`response_format` is dropped. With the new method it is a plain detached
+workflow.
 
 ```python
 def chat_completion(api_caller, api_request):
-    execution = agent_execution.submit(
-        execution_caller_from(api_caller),
-        SubmitAgentExecutionRequest(
-            idempotency_key=derive_key(api_request),
-            execution=AgentExecutionRequest(
-                context=Snapshot(
-                    system_prompt=from_system_messages(api_request.messages),
-                    messages=non_system_messages(api_request.messages),  # no flattening
-                ),
-                tools=external_tool_ids(api_request.tools),  # ExternalToolCatalog path
-                model=model_hint(api_request.model),
-                output=output_contract_from(api_request.response_format),  # no longer dropped
-                limits=from_openai_params(api_request),
-            ),
-        ),
-    )
+    response = turn_coordinator.submit_detached_turn(SubmitDetachedTurnRequest(
+        tenant_id=api_caller.tenant_id,
+        agent_id=api_caller.agent_id,
+        project_id=api_caller.project_id,
+        actor=TurnActor(user_id=api_caller.user_id),
+        system_prompt=from_system_messages(api_request.messages),
+        messages=non_system_messages(api_request.messages),      # no flattening
+        tools=external_tool_ids(api_request.tools),              # ExternalToolCatalog path
+        model=model_hint(api_request.model),
+        output=output_contract_from(api_request.response_format),# no longer dropped
+        limits=from_openai_params(api_request),
+        idempotency_key=derive_key(api_request),
+    ))
 
     if api_request.stream:
-        # SSE chunks are derived from the execution's live text hints
-        # (cumulative → delta at the HTTP edge); the terminal event closes
-        # the stream.
-        return sse_from(agent_execution.subscribe(caller, execution.execution_id))
+        # SSE chunks are derived from the run's live text hints (cumulative →
+        # delta at the HTTP edge); the terminal event closes the stream.
+        return sse_from(run_observation.subscribe(scope, actor, response.run_id))
 
-    result = await_terminal(agent_execution.subscribe(caller, execution.execution_id))
+    result = await_terminal(run_observation.subscribe(scope, actor, response.run_id))
     return openai_response_from(result)
 ```
 
@@ -363,19 +363,20 @@ no vendor anything.
 
 ## 6. Boundary rules
 
-1. **Surfaces never call `AgentExecution`.** They reach a workflow through
+1. **Surfaces never call `TurnCoordinator`.** They reach a workflow through
    one of the two admission doors (channel admission or a `ProductSurface`
    operation). Untrusted payloads select inputs, never prompts, tools,
    models, or authority.
 2. **Workflows are the only submitters.** A workflow assembles the request
-   (the *what*), constructs the authenticated `ExecutionCaller` (the *who* —
-   scope + acting user, run-acts-as-invoker), and owns the association
-   between its domain object and the `ExecutionId`.
-3. **The engine never sees routing data.** No reply targets, binding refs,
-   vendor IDs, HTTP details, or `ProductTurnContext` inside the request or
-   the journal. Reply routing lives in the conversation workflow's
-   association state.
-4. **Output leaves the engine exactly one way**: the observation seam —
+   (the *what*) with scope + actor as request fields (the *who* —
+   run-acts-as-invoker, the same house style as every coordinator request),
+   and owns the association between its domain object and the run id.
+3. **The engine never *interprets* routing data.** `SubmitTurnRequest`
+   still carries binding refs today (the slimming follow-up moves them
+   workflow-side); the engine stores them as opaque pass-through and never
+   parses or routes. The detached request carries none. Reply-routing
+   *decisions* live in the conversation workflow, always.
+4. **Output leaves the engine exactly one way**: run observation —
    durable events plus terminal result, with live hints on the ephemeral
    plane. Every workflow interprets that same output differently, and no
    workflow reads another's.
@@ -391,54 +392,50 @@ no vendor anything.
    branch.
 7. **Capability authority never rides in a request.** Tools are a selection;
    every call is authorized at action time by the capability host, under the
-   execution's acting identity — identically for both context kinds.
+   run's acting identity — identically for both submission idioms.
 8. **Thread transcripts are written by the run, not by output handlers.**
    The engine's thread-backed machinery persists messages lease-fenced
-   during the run (exactly as today) — for every run: a snapshot execution's
+   during the run (exactly as today) — for every run: a detached turn's
    transcript is its own unbound, ownerless thread, seeded at admission and
-   written by the same machinery, internal to the seam and never enumerated
-   by conversation surfaces (those query by owner and binding). Output
-   handling is about reply, never persistence.
+   written by the same machinery, internal to the coordinator and never
+   enumerated by conversation surfaces (those query by owner and binding).
+   Output handling is about reply, never persistence.
 
 ## 7. Sequencing
 
-**Phase 1 — the seam and the detached class** (the companion proposal).
-`AgentExecution` port; `Snapshot` context via mint-seed-submit (unbound,
-ownerless threads, ids internal — no new materialization path); detached
-profiles; `OutputContract` (schema in-request) + reply-admission
-enforcement; the observation façade; taxonomy tests (unbound threads never
-surface in conversation listings). Conversations untouched; suggestions and
+**Phase 1 — expand the coordinator** (the companion proposal, complete in
+one PR-sized change plus its tests). `submit_detached_turn` via
+mint-seed-submit (unbound, ownerless threads, ids internal — no new
+materialization path); the detached profiles and their concurrency cap;
+`OutputContract` (schema in-request) + reply-admission enforcement; taxonomy
+tests (unbound threads never surface in conversation listings; the subagent
+precedent pinned as a rule). Conversations are untouched — not migrated,
+untouched: they already call the trait being expanded. Suggestions and
 OpenAI-compat can adopt as soon as this lands.
 
-**Phase 2 — conversations behind the seam.** `ExecutionContext::Thread` maps
-1:1 onto today's `SubmitTurnRequest` core (scope + actor → caller; thread +
-accepted message → context; profile/model hints; idempotency key), so this
-phase is a re-plumbing of the entry point, not a rebuild: the coordinator's
-admission (one-active-run-per-thread, busy → steering), scheduler, loop host,
-gates, and transcript writes are unchanged underneath. The two things that
-move are by design: binding refs / `ProductTurnContext` leave the engine
-request for the workflow's association state, and the delivery observer reads
-reply routes from that state. Contract tests must prove admission semantics
-(`DeferredBusy`, `RejectedBusy`, replay) are byte-identical before cutover.
-Three questions stay open until this phase is scheduled: (a) where the
-origin/surface metadata the loop host consumes for origin-gated prompt
-assets ends up (binding *refs* are workflow-side; origin metadata is
-engine-relevant — the split is not yet drawn); (b) the delivery observer's
-transition shim (reading reply routes from old run state *and* the new
-association store while pre-cutover runs drain); (c) the exact pins
-inventory (busy admission outcomes, replay, one-active-run,
-prepare/submit reservation, cancel-time queue reconciliation).
+**Phase 2 — run observation.** The product-tier subscribe façade over the
+two existing event planes (composite cursor, rebase/lag semantics), then its
+first consumer: the delivery observer stops polling `get_run_state` every
+250 ms and consumes terminal events. Vendor streaming-by-edits can follow as
+a manifest presentation policy over the same events for channels that want
+it.
 
-**Phase 3 — output-handling upgrades.** The delivery observer consumes
-terminal events from `subscribe` instead of polling `get_run_state` every
-250 ms; vendor streaming-by-edits ships as a manifest presentation policy
-over the same execution events for channels that want it.
+**Named follow-up (independent of both phases): `SubmitTurnRequest`
+slimming.** The source/reply binding refs it carries are workflow routing
+data, not engine input; they can move to the conversation workflow's
+association state with a dual-read shim while pre-cutover runs drain. Two
+questions stay open until someone schedules it: (a) where the origin/surface
+metadata the loop host consumes for origin-gated prompt assets ends up
+(binding *refs* are workflow-side; origin metadata is engine-relevant); (b)
+the shim's lifetime and its regression coverage. No behavior changes either
+way — this is hygiene, not architecture.
 
 ## 8. Related documents
 
-- [2026-08-12-agent-execution-seam.md](2026-08-12-agent-execution-seam.md) —
-  the seam contract this document composes (request, `AgentMessage`,
-  `OutputContract`, events, invariants I1–I5, crate placement).
+- [2026-08-12-detached-turns.md](2026-08-12-detached-turns.md) — the
+  contract this document composes (the expanded `TurnCoordinator`,
+  `AgentMessage`, `OutputContract`, run observation, invariants I1–I5,
+  crate placement).
 - [2026-08-10-unified-channel-model.md](2026-08-10-unified-channel-model.md)
   — why WebUI is a channel and `authenticated_session` ingress is host-owned.
 - [2026-08-11-channel-adapter-contract.md](2026-08-11-channel-adapter-contract.md)
