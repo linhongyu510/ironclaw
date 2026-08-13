@@ -60,9 +60,11 @@ flowchart TB
     end
 
     subgraph Engine["ENGINE — AgentExecution seam + shared runtime"]
-        AE["AgentExecution<br/>submit · get · subscribe · cancel"]
-        RT["process journal · scheduler · leases<br/>canonical loop · capability host (action-time auth)<br/>gates · checkpoints · events (durable + live)"]
-        AE --> RT
+        AE["AgentExecution — <br/>submit · get · subscribe · cancel <br/>(TurnCoordinator's front, matured)"]
+        MINT["Snapshot admission: MINT-SEED-SUBMIT — <br/>unbound, ownerless thread · messages seeded as rows · id internal"]
+        RT["turn admission (unchanged) → process journal · scheduler · leases · <br/>canonical loop · ONE thread-backed materialization path · <br/>capability host (action-time auth) · gates · checkpoints · events"]
+        AE -->|"context: Thread — passes straight through"| RT
+        AE -->|"context: Snapshot"| MINT --> RT
     end
 
     Slack -->|"admit_channel_inbound"| Conv
@@ -71,7 +73,7 @@ flowchart TB
     SuggUI -->|"suggestions.generate"| Sugg
     OAIApi --> Compat
 
-    Conv -->|"context: Thread (reference)"| AE
+    Conv -->|"context: Thread — a bound thread"| AE
     Sugg -->|"context: Snapshot + JSON schema"| AE
     Compat -->|"context: Snapshot"| AE
 

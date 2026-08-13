@@ -191,24 +191,34 @@ time, exactly as for conversation turns today.
 
 ```mermaid
 flowchart TB
-    Slack["Slack / vendor channels"] --> Conv["Conversation workflow<br/>bindings · threads · steering admission"]
+    Slack["Slack / vendor channels"] --> Conv["Conversation workflow — <br/>bindings · threads · steering admission"]
     WebUI["WebUI"] --> Conv
     Auto["Automations (trigger fires)"] -->|"trusted ingress"| Conv
     Sugg["Suggestions UI"] --> SuggWf["Suggestions workflow"]
     OAI["OpenAI-compat API"] --> CompatWf["OpenAI-compat workflow"]
 
-    Conv -->|"context: Thread (reference)"| AE["AgentExecution<br/>submit · get · subscribe · cancel"]
-    SuggWf -->|"context: Snapshot"| AE
-    CompatWf -->|"context: Snapshot"| AE
+    Conv -->|"submit · context: Thread — a BOUND thread, message already accepted"| AE
+    SuggWf -->|"submit · context: Snapshot — content + knobs"| AE
+    CompatWf -->|"submit · context: Snapshot"| AE
 
-    AE --> RT["Shared runtime — unchanged<br/>process journal · scheduler · leases<br/>canonical loop · capability host · gates · events"]
+    AE["AgentExecution — <br/>submit · get · subscribe · cancel <br/>(TurnCoordinator's front, matured)"]
 
-    RT -->|"events + terminal result"| Out["Per-workflow output handling<br/>conversation → channel reply (manifest-driven) / WebUI stream<br/>suggestions → validate + store cards<br/>OpenAI-compat → SSE or final HTTP response"]
+    AE -->|"Thread: passes straight through"| ADM
+    AE -->|"Snapshot: MINT-SEED-SUBMIT — <br/>unbound, ownerless thread · id internal"| ADM
+
+    ADM["Turn admission — unchanged: <br/>one-active-run-per-thread · idempotency · profile resolved once"]
+
+    ADM --> RT["Shared runtime — unchanged: <br/>process journal · scheduler · leases · canonical loop · <br/>ONE thread-backed materialization path · <br/>capability host · gates · events"]
+
+    RT -->|"events + terminal result"| Out["Per-workflow output handling: <br/>conversation → channel reply (manifest-driven) / WebUI stream · <br/>suggestions → validate + store cards · <br/>OpenAI-compat → SSE or final HTTP response"]
 ```
 
-Each workflow interprets the same execution output differently — the flows,
-including the manifest-driven stream-vs-reply decision for channels, are
-specified in the companion architecture document.
+Behind the door there is one path: a `Snapshot` submission becomes an
+unbound, ownerless thread before admission, and from that point on the two
+idioms are indistinguishable — same admission, same runtime, same
+materialization. Each workflow interprets the same execution output
+differently — the flows, including the manifest-driven stream-vs-reply
+decision for channels, are specified in the companion architecture document.
 
 ## 4. Proposed design
 
