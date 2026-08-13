@@ -528,9 +528,24 @@ pub enum OutputContract {
   loop already has a reply-admission slot that rejects invalid finals and
   drives a retry with a model-visible repair hint; a schema-validating
   admission strategy gets bounded retry/repair for free, and exhausted
-  retries fail the run as `invalid_model_output`. This also gives
-  `ironclaw_llm` a natural place to grow provider-native structured-output
-  support later without changing the contract.
+  retries fail the run as `invalid_model_output`.
+- **Provider mechanism: the schema is presented as one forced tool.** For a
+  `JsonSchema` contract, the host injects a synthetic, host-owned result
+  tool whose parameters *are* the registered schema — riding the one schema
+  path every provider already supports: tool parameters (`ironclaw_llm`'s
+  strict tool-schema normalization applies unchanged). The model finishes by
+  calling it — the loop may force tool choice for the final response once
+  ordinary tool work concludes — and the reply-admission strategy intercepts
+  that call as the terminal output, validating the arguments against the
+  registry schema. Two boundary rules: the result tool is **not a
+  capability** — it never crosses authorization or dispatch, exactly like
+  the existing synthetic `capability_info` tool — and a plain-text final
+  under a schema contract is rejected with a repair hint directing the model
+  to the result tool. (This is the same idiom pi uses for typed output;
+  here it is the mechanism behind a declared contract rather than the
+  contract itself.) Provider-native structured-output response modes become
+  per-provider upgrades inside `ironclaw_llm` later, behind the same
+  `OutputContract` — callers never see the difference.
 
 ### 4.6 Gates: explicit policy
 
