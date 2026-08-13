@@ -513,6 +513,34 @@ async fn workspace_upload_uses_fixed_argv_and_binary_stdin_then_checkpoints() {
         .find(|call| call.operation == RailwayCliOperation::WriteWorkspaceFile)
         .expect("workspace upload invocation");
     assert_eq!(upload.stdin.as_deref(), Some(bytes.as_slice()));
+    let remote_command = &upload.args[upload
+        .args
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("Railway exec command separator")
+        + 1..];
+    assert_eq!(&remote_command[..3], ["docker", "run", "--rm"]);
+    assert!(remote_command.iter().any(|arg| arg == "-i"));
+    assert_pair(remote_command, "--network", "none");
+    assert!(remote_command.iter().any(|arg| arg == "--read-only"));
+    assert!(!remote_command.iter().any(|arg| arg == "--user"));
+    assert_pair(remote_command, "--cap-drop", "ALL");
+    for capability in ["CHOWN", "DAC_OVERRIDE", "FOWNER"] {
+        assert!(
+            remote_command
+                .windows(2)
+                .any(|pair| pair == ["--cap-add", capability])
+        );
+    }
+    assert!(remote_command.iter().any(|arg| {
+        arg.starts_with("type=bind,src=/workspace/ironclaw-users/")
+            && arg.ends_with(",dst=/workspace")
+    }));
+    assert!(
+        remote_command
+            .windows(2)
+            .any(|pair| { pair[0] == transport.config.worker_image && pair[1] == "python3" })
+    );
     assert!(
         upload
             .args
@@ -587,7 +615,7 @@ async fn checkpoint_failure_after_upload_is_recoverable_by_identical_retry() {
 #[tokio::test]
 async fn workspace_download_decodes_binary_bytes_and_enforces_requested_bound() {
     let cli = Arc::new(FakeRailwayCli::new());
-    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     let bytes = [0, 255, 7, 8, 9];
     transport
         .write_file(write_request(
@@ -611,6 +639,28 @@ async fn workspace_download_decodes_binary_bytes_and_enforces_requested_bound() 
         .unwrap();
     assert_eq!(output.bytes, bytes);
     assert_eq!(output.sha256, hex::encode(Sha256::digest(bytes)));
+    let invocations = cli.invocations().await;
+    let download = invocations
+        .iter()
+        .find(|call| call.operation == RailwayCliOperation::ReadWorkspaceFile)
+        .expect("workspace download invocation");
+    let remote_command = &download.args[download
+        .args
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("Railway exec command separator")
+        + 1..];
+    assert_eq!(&remote_command[..3], ["docker", "run", "--rm"]);
+    assert!(!remote_command.iter().any(|arg| arg == "-i"));
+    assert!(remote_command.iter().any(|arg| {
+        arg.starts_with("type=bind,src=/workspace/ironclaw-users/")
+            && arg.ends_with(",dst=/workspace,readonly")
+    }));
+    assert!(
+        remote_command
+            .windows(2)
+            .any(|pair| { pair[0] == transport.config.worker_image && pair[1] == "python3" })
+    );
     assert_eq!(
         transport
             .read_file(read_request(

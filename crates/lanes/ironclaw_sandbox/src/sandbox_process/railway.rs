@@ -805,6 +805,7 @@ impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
                 deadline_remaining(deadline)
                     .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?,
                 workspace_file_read_argv(
+                    &self.config,
                     &railway_workspace_path(&key),
                     &request.path,
                     request.max_bytes,
@@ -870,6 +871,7 @@ impl SandboxWorkspaceFileTransport for RailwayPreviewSandboxTransport {
                 deadline_remaining(deadline)
                     .map_err(|_| SandboxWorkspaceFileError::TransportFailed)?,
                 workspace_file_write_argv(
+                    &self.config,
                     &railway_workspace_path(&key),
                     &request.path,
                     request.overwrite,
@@ -1451,36 +1453,76 @@ fn workspace_bootstrap_argv(workspace: &str) -> Vec<String> {
 }
 
 fn workspace_file_write_argv(
+    config: &RailwayPreviewSandboxConfig,
     railway_workspace: &str,
     path: &str,
     overwrite: bool,
     expected_len: usize,
     expected_sha256: &str,
 ) -> Vec<String> {
-    vec![
-        "python3".into(),
-        "-c".into(),
-        WORKSPACE_FILE_WRITE_HELPER.into(),
-        railway_workspace.into(),
-        path.into(),
-        if overwrite { "1" } else { "0" }.into(),
-        MAX_WORKSPACE_FILE_BYTES.to_string(),
-        expected_len.to_string(),
-        expected_sha256.into(),
-        WORKSPACE_WORKER_UID.to_string(),
-        WORKSPACE_WORKER_GID.to_string(),
-    ]
+    workspace_file_helper_argv(
+        config,
+        railway_workspace,
+        true,
+        WORKSPACE_FILE_WRITE_HELPER,
+        vec![
+            WORKSPACE_ROOT.into(),
+            path.into(),
+            if overwrite { "1" } else { "0" }.into(),
+            MAX_WORKSPACE_FILE_BYTES.to_string(),
+            expected_len.to_string(),
+            expected_sha256.into(),
+            WORKSPACE_WORKER_UID.to_string(),
+            WORKSPACE_WORKER_GID.to_string(),
+        ],
+    )
 }
 
-fn workspace_file_read_argv(railway_workspace: &str, path: &str, max_bytes: usize) -> Vec<String> {
-    vec![
+fn workspace_file_read_argv(
+    config: &RailwayPreviewSandboxConfig,
+    railway_workspace: &str,
+    path: &str,
+    max_bytes: usize,
+) -> Vec<String> {
+    workspace_file_helper_argv(
+        config,
+        railway_workspace,
+        false,
+        WORKSPACE_FILE_READ_HELPER,
+        vec![WORKSPACE_ROOT.into(), path.into(), max_bytes.to_string()],
+    )
+}
+
+fn workspace_file_helper_argv(
+    config: &RailwayPreviewSandboxConfig,
+    railway_workspace: &str,
+    attach_stdin: bool,
+    script: &str,
+    protocol: Vec<String>,
+) -> Vec<String> {
+    let mut command = vec!["docker".into(), "run".into(), "--rm".into()];
+    if attach_stdin {
+        command.push("-i".into());
+    }
+    command.extend(
+        super::worker_spec::DockerWorkerSecuritySpec::new(Some("none".to_string()))
+            .trusted_root_helper_docker_run_args(),
+    );
+    command.extend([
+        "--mount".into(),
+        format!(
+            "type=bind,src={railway_workspace},dst={WORKSPACE_ROOT}{}",
+            if attach_stdin { "" } else { ",readonly" }
+        ),
+        "--memory".into(),
+        "128m".into(),
+        config.worker_image.clone(),
         "python3".into(),
         "-c".into(),
-        WORKSPACE_FILE_READ_HELPER.into(),
-        railway_workspace.into(),
-        path.into(),
-        max_bytes.to_string(),
-    ]
+        script.into(),
+    ]);
+    command.extend(protocol);
+    command
 }
 
 fn ephemeral_worker_argv(
