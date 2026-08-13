@@ -397,7 +397,7 @@ no vendor anything.
 
 **Phase 1 — the seam and the detached class** (the companion proposal).
 `AgentExecution` port; `Snapshot` context; detached profiles;
-`OutputContract` + schema registry + reply-admission enforcement; the
+`OutputContract` (schema in-request) + reply-admission enforcement; the
 observation façade. Conversations untouched; suggestions and OpenAI-compat
 can adopt as soon as this lands.
 

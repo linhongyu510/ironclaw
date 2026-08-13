@@ -692,7 +692,7 @@ Nothing is replaced.
 DTOs (the request with its two-variant `ExecutionContext`);
 `SnapshotBackedLoopContextPort`;
 the `detached_default`/`detached_structured` run profiles; `OutputContract` +
-the schema registry + the reply-admission strategy; the execution observation
+the reply-admission strategy enforcing it; the execution observation
 façade (cursor + subscription); the typed `GateNotSupported` failure.
 
 **Follow-ups this unlocks** (each its own change, not part of this proposal):
