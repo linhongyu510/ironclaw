@@ -144,11 +144,13 @@ Script and shell process execution keep Docker containers ambient-network-disabl
 Remote sandbox workspaces are separate from the scoped IronClaw workspace. A
 deployment may expose `builtin.sandbox_workspace_copy` only when it supplies a
 typed `SandboxWorkspaceFileTransport` alongside the sandbox process binding.
-The host handler resolves the IronClaw side through the invocation mount view;
-the lane receives only the caller scope, one sandbox `/workspace/...` path, and
-bounded bytes. The capability copies one regular file in either direction,
-rejects directory/symlink traversal, defaults to atomic no-clobber, and reports
-success only after byte-count and SHA-256 read-back verification. A mutating
+The host-runtime handler is a thin manifest/dispatch adapter. The executor in
+`ironclaw_extension_support` resolves the IronClaw side through the invocation
+mount view; the lane receives only the caller scope, one sandbox
+`/workspace/...` path, and bounded bytes. The capability copies one regular
+file in either direction, rejects directory/symlink traversal, defaults to
+atomic no-clobber, and reports success only after byte-count and SHA-256
+read-back verification. A mutating
 remote upload additionally requires a successful durable checkpoint. No model
 path or file payload is interpolated into host-authored shell source. Validated
 paths are passed as quoted positional arguments; payload bytes travel over
