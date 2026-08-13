@@ -286,6 +286,32 @@ style snapshot callers need no third variant: because content lands as refs
 at admission, a workflow composes a follow-on snapshot by reusing the prior
 execution's refs and appending new input.)
 
+**Why can't conversations just materialize a snapshot too?** The obvious
+simpler design — the conversation workflow assembles `system_prompt` +
+`messages` + `tools` from its `ThreadId`/`AcceptedMessageRef` before
+submitting, so the engine never cares which kind it is — was this proposal's
+own first draft, and it is the right design for a stateless system. It fails
+here because a conversation run's context is not an input: the engine keeps
+deriving and *mutating* it for the whole life of the run.
+
+| If conversations submitted frozen content | What breaks | Where the behavior lives today |
+|---|---|---|
+| Input sealed at submit | Steering: a message arriving while the thread is busy settles as `DeferredBusy` and is drained by the **running** loop before its next model call. A sealed payload has no aperture; cancel-and-resubmit loses in-flight tool work. | conversation-binding contract rule 12; `LoopInput::Steering` + drain stage |
+| System prompt fixed at submit | Skills are re-selected **every iteration** from run content (the model can activate a skill mid-run); memory may first attach at iteration N>0; identity assets are per-run conditional. | skill activation, memory/identity context sources |
+| Messages fixed at submit | Window-eviction compaction durably rewrites history **mid-run** and persists the summary into the thread so future turns benefit — the engine writes context back, not just reads it. | compaction task (`ReplaceRangeWhenSelected`, #7504) |
+| Journal replayed on resume | Gate resume deliberately **rebuilds** context (checkpoints are refs-only, ≤64 KiB): messages queued during the block drain in; skills re-select; the surface re-versions. | planned-driver resume path |
+| Tools fixed at submit | The visible surface is versioned and must change mid-run: AuthRequired → user authorizes → surface changes → model retries. | `LoopInput::CapabilitySurfaceChanged` |
+| Caller-built prompt text | The engine rejects model requests whose messages do not byte-match the **host-built** bundle; the loop holds content refs, never text. Caller-materialized lists are what this anti-forgery check exists to block. | `LoopPromptBundleAuthority` (I1) |
+| Full history serialized per turn | O(n²) journal growth per thread under never-delete; turn state is refs-only by rule. | `ironclaw_turns` guidance ("lifecycle metadata and references only") |
+| Tool results re-rendered by product code | Replayed tool results pass a host-side redaction/validation contract before becoming model-visible; product-tier materialization would duplicate security-critical code. | safe summaries + validated model-visible observations |
+
+A snapshot run is precisely the case where none of this dynamism is wanted —
+which is why the caller may supply content there, and only there. The enum
+marks the one real boundary (*who materializes*: engine, and it may keep
+mutating; vs. caller, and it is sealed); everything after submit — admission,
+scheduling, loop, action-time authorization, gates, events, observation — is
+one shared stack for both.
+
 **Identity rides on the caller, not in the payload.** `submit(caller,
 request)` already carries an authenticated `ExecutionCaller` (§4.1) with the
 tenant scope and acting user; duplicating them inside the request would only
