@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: automation-semantic-${{ github.event.pull_request.number }}
+  group: automation-semantic-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
