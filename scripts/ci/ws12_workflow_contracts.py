@@ -71,13 +71,26 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "github.event.schedule == '0 */3 * * *'",
     ),
     ".github/workflows/automation-ab.yml": (
-        "types: [labeled, synchronize]",
+        "types: [labeled]",
         "github.event.pull_request.head.repo.full_name == github.repository",
+        "github.event.label.name == 'automation-ab-live'",
         "automation-ab-live",
         "scripts/automation_ab/compare.py",
         "Remove generated runtime homes from publishable artifacts",
         "scripts/live-canary/scrub-artifacts.sh artifacts/automation-ab",
         "Enforce candidate quality contract",
+    ),
+    ".github/workflows/automation-semantic-benchmark.yml": (
+        "types: [labeled]",
+        "github.event.pull_request.head.repo.full_name == github.repository",
+        "github.event.label.name == 'automation-semantic-benchmark'",
+        "automation-semantic-benchmark",
+        "arm: [baseline, candidate]",
+        "repetition: [1, 2, 3, 4, 5]",
+        "--case automation_semantic_benchmark",
+        "scripts/automation_ab/benchmark.py",
+        "Blind semantic comparison",
+        "Fail loud on blocked or regressed benchmark",
     ),
     ".github/workflows/code_style.yml": (
         # The docs publication-boundary gate: the job, its self-test step, its

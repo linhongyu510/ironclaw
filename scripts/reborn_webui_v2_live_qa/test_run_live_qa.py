@@ -6697,6 +6697,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             self.assertNotIn(internal_term, prompt)
 
+    def test_semantic_benchmark_prompts_use_natural_language(self):
+        due_at = run_live_qa.datetime(
+            2026, 8, 13, 12, 30, tzinfo=run_live_qa.timezone.utc
+        )
+        for benchmark_case in run_live_qa.AUTOMATION_BENCHMARK_CASES:
+            prompt = run_live_qa._automation_benchmark_prompt(
+                benchmark_case,
+                routine_name=f"semantic-{benchmark_case.case_id}",
+                due_at=due_at,
+            )
+            self.assertIn(benchmark_case.task, prompt)
+            self.assertIn(benchmark_case.reference_data, prompt)
+            for internal_term in (
+                "trigger_create",
+                "execution_contract",
+                "capability_id",
+                "execution_spec_json",
+            ):
+                self.assertNotIn(internal_term, prompt)
+
     def test_trigger_record_snapshot_reports_unreadable_db(self):
         import tempfile
 

@@ -78,8 +78,9 @@ the `automation-ab-live` label to a same-repository PR runs the same natural,
 coworker-style scheduled-automation request against the current default branch
 and the exact PR head. The candidate harness reads durable run and finalized
 reply evidence from both isolated homes, applies the same pinned semantic
-judge, scrubs artifacts, and publishes a comparison on the PR. A synchronize
-event reruns a labeled PR at its new exact head.
+judge, scrubs artifacts, and publishes a comparison on the PR. Labels authorize
+only the head present at the label event; after a push, remove and re-add the
+label to authorize the new exact head.
 
 The lane fails when the candidate does not persist a structured execution
 contract, complete the scheduled run, retain a finalized reply, or satisfy the
@@ -87,6 +88,17 @@ semantic judge. Contract evidence and semantic improvement are reported
 separately: adding structure alone is never presented as proof that the answer
 became semantically better. Forked PRs cannot enter this secret-bearing lane,
 and the workflow deliberately does not use `pull_request_target`.
+
+For deeper evidence, the separate `automation-semantic-benchmark.yml` workflow
+runs only when a same-repository PR has the `automation-semantic-benchmark`
+label. It evaluates eight fixed natural-language cases across five isolated
+repetitions of both the default-branch baseline and exact candidate head (40
+paired answers). Deterministic fact/forbidden-claim checks and one-sided rubric
+scores are recorded before a pinned judge receives each anonymized pair in a
+hash-balanced A/B order. The report publishes hard regression count, decisive
+candidate win rate, and a 95% Wilson confidence interval. `IMPROVED` requires
+zero hard regressions and a win-rate interval wholly above 50%; neutral evidence
+is reported as `NO_REGRESSION`, never promoted to improvement.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all

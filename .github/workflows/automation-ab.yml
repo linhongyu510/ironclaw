@@ -3,7 +3,7 @@ run-name: Automation A/B for PR #${{ github.event.pull_request.number }}
 
 on:
   pull_request:
-    types: [labeled, synchronize]
+    types: [labeled]
 
 permissions:
   contents: read
@@ -17,6 +17,7 @@ jobs:
     name: Natural-language automation comparison
     if: >
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.label.name == 'automation-ab-live' &&
       contains(github.event.pull_request.labels.*.name, 'automation-ab-live')
     runs-on: ubuntu-latest
     timeout-minutes: 90

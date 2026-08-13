@@ -43,6 +43,11 @@ from scripts.live_canary.common import (  # noqa: E402
     wait_for_ready,
     write_results,
 )
+from scripts.automation_ab.corpus import (  # noqa: E402
+    CASES as AUTOMATION_BENCHMARK_CASES,
+    BenchmarkCase,
+    deterministic_checks,
+)
 from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
     CaseFn,
     CaseSpec,
@@ -5721,6 +5726,119 @@ async def case_automation_ab_happy_path(ctx: LiveQaContext) -> ProbeResult:
         return _result(case_name, False, started, details)
 
 
+def _automation_benchmark_prompt(
+    benchmark_case: BenchmarkCase,
+    *,
+    routine_name: str,
+    due_at: datetime,
+) -> str:
+    criteria = "\n".join(f"- {criterion}" for criterion in benchmark_case.criteria)
+    return (
+        f"Please set up a one-time check-in called {routine_name} for "
+        f"{due_at.strftime('%Y-%m-%d at %H:%M UTC')}. When it runs, complete "
+        "the task using only the reference data below and leave the result for me.\n\n"
+        f"Task: {benchmark_case.task}\n\n"
+        f"Reference data: {benchmark_case.reference_data}\n\n"
+        f"A good result must meet these requirements:\n{criteria}\n\n"
+        "If the reference data cannot support a requested conclusion, say that "
+        "the conclusion could not be verified."
+    )
+
+
+async def case_automation_semantic_benchmark(ctx: LiveQaContext) -> ProbeResult:
+    """Create the corpus first, then evaluate all scheduled outputs together."""
+    case_name = "automation_semantic_benchmark"
+    started = time.monotonic()
+    batch_id = uuid.uuid4().hex[:8]
+    due_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    created: list[tuple[BenchmarkCase, str, str]] = []
+    outcomes: list[dict[str, object]] = []
+
+    for benchmark_case in AUTOMATION_BENCHMARK_CASES:
+        routine_name = f"semantic-{benchmark_case.case_id}-{batch_id}"
+        prompt = _automation_benchmark_prompt(
+            benchmark_case, routine_name=routine_name, due_at=due_at
+        )
+        creation = await _routine_creation_case(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            marker=None,
+            routine_name=routine_name,
+            required_text=["check-in|scheduled|automation|routine"],
+        )
+        if not creation.success:
+            outcomes.append(
+                {
+                    "benchmark_id": benchmark_case.case_id,
+                    "created": False,
+                    "error": creation.details.get("error", "creation failed"),
+                }
+            )
+            continue
+        created.append((benchmark_case, routine_name, prompt))
+
+    for benchmark_case, routine_name, prompt in created:
+        snapshot = _trigger_record_snapshot(ctx.reborn_home, routine_name)
+        completed_run = await _wait_for_completed_trigger_run(
+            ctx.reborn_home,
+            routine_name,
+            timeout=900.0,
+        )
+        answer = ""
+        if completed_run is not None:
+            replies = _finalized_assistant_replies(
+                ctx.reborn_home,
+                thread_id=str(completed_run["thread_id"]),
+                run_id=str(completed_run["run_id"]),
+            )
+            answer = replies[-1] if replies else ""
+        deterministic = deterministic_checks(benchmark_case, answer)
+        semantic_goal = "\n".join(benchmark_case.criteria)
+        judgment = await _judge_assistant_reply_completion(
+            marker=None,
+            required_text=[],
+            assistant_text=answer,
+            main_text="",
+            semantic_goal=semantic_goal,
+        )
+        outcomes.append(
+            {
+                "benchmark_id": benchmark_case.case_id,
+                "created": True,
+                "natural_prompt": prompt,
+                "criteria": list(benchmark_case.criteria),
+                "execution_contract_present": isinstance(
+                    snapshot.get("execution_spec"), dict
+                ),
+                "scheduled_run_completed": completed_run is not None,
+                "final_reply_persisted": bool(answer),
+                "answer": answer,
+                "deterministic": deterministic,
+                "semantic_judgment": judgment,
+                "semantic_passed": _semantic_judge_passed(judgment),
+            }
+        )
+
+    complete = len(outcomes) == len(AUTOMATION_BENCHMARK_CASES) and all(
+        outcome.get("created") is True
+        and outcome.get("scheduled_run_completed") is True
+        and outcome.get("final_reply_persisted") is True
+        for outcome in outcomes
+    )
+    return _result(
+        case_name,
+        complete,
+        started,
+        {
+            "benchmark_version": 1,
+            "benchmark_case_count": len(AUTOMATION_BENCHMARK_CASES),
+            "benchmark_cases": outcomes,
+            "error": None if complete else "one or more benchmark runs were incomplete",
+        },
+    )
+
+
 async def case_qa_3c_endpoint_status_slack_routine(ctx: LiveQaContext) -> ProbeResult:
     routine_name = "reborn-qa-3c-endpoint-status-slack"
     prompt = _qa_sheet_prompt("qa_3c_endpoint_status_slack_routine").replace(
@@ -8779,12 +8897,21 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
         )
 
 
-TARGETED_EXPERIMENT_CASES = frozenset({"automation_ab_happy_path"})
+TARGETED_EXPERIMENT_CASES = frozenset(
+    {"automation_ab_happy_path", "automation_semantic_benchmark"}
+)
 
 
 CASES: dict[str, CaseSpec] = {
     "automation_ab_happy_path": CaseSpec(
         case_automation_ab_happy_path,
+        tier="behavioral",
+        blocking=False,
+        default_enabled=False,
+        retry_policy="never",
+    ),
+    "automation_semantic_benchmark": CaseSpec(
+        case_automation_semantic_benchmark,
         tier="behavioral",
         blocking=False,
         default_enabled=False,
