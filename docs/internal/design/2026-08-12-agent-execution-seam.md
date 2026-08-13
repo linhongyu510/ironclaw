@@ -331,9 +331,9 @@ refs, so the journal never stores a second copy of transcript-scale content
 adding a profile field to the request: `Snapshot` context resolves the new
 detached profiles (`detached_structured` when `output` is a JSON schema,
 `detached_default` otherwise); `Thread` context resolves conversation
-profiles through the existing resolver exactly as turns do today
-(interactive, scheduled trigger, …). A hint field can be added if variants
-multiply.
+profiles through the existing resolver exactly as turns do today (`None` →
+the planned default; trigger fires forced onto the deny-mapped
+scheduled-trigger profile). A hint field can be added if variants multiply.
 
 **Request knobs are per-invocation choices; the profile is the per-class
 policy that bounds them.** A knob never overrides the profile — it composes
