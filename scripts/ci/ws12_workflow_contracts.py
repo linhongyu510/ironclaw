@@ -75,6 +75,7 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "github.event.pull_request.head.repo.full_name == github.repository",
         "automation-ab-live",
         "scripts/automation_ab/compare.py",
+        "Remove generated runtime homes from publishable artifacts",
         "scripts/live-canary/scrub-artifacts.sh artifacts/automation-ab",
         "Enforce candidate quality contract",
     ),

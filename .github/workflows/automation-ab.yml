@@ -135,7 +135,17 @@ jobs:
           --candidate artifacts/automation-ab/candidate/results.json
           --output-dir artifacts/automation-ab/comparison
 
+      - name: Remove generated runtime homes from publishable artifacts
+        if: always()
+        run: |
+          rm -rf \
+            artifacts/automation-ab/baseline/reborn-home \
+            artifacts/automation-ab/baseline/generated-reborn-home \
+            artifacts/automation-ab/candidate/reborn-home \
+            artifacts/automation-ab/candidate/generated-reborn-home
+
       - name: Scrub artifacts
+        id: scrub
         if: always()
         run: scripts/live-canary/scrub-artifacts.sh artifacts/automation-ab
 
@@ -171,7 +181,7 @@ jobs:
           fi
 
       - name: Upload scrubbed evidence
-        if: always()
+        if: always() && steps.scrub.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: automation-ab-${{ github.event.pull_request.head.sha }}
