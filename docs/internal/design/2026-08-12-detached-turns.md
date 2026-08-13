@@ -648,11 +648,19 @@ pub enum OutputContract {
 ### 4.6 Gates: explicit policy
 
 Detached profiles expose **non-gating surfaces**: capabilities whose policy
-can require approval/auth are absent from the visible surface (the same
-hide-vs-expose shaping surfaces already implement). If a gate fires anyway —
-policy drift, auth expiry mid-run — the execution fails with a typed
-`GateNotSupported { gate_kind }` outcome. No hung runs, and no approval
-UI with no home to render in.
+can require approval or auth are absent from the visible surface (the same
+hide-vs-expose shaping surfaces already implement). If an approval, auth,
+or resource gate fires anyway — policy drift, auth expiry mid-run — the run
+fails with a typed `GateNotSupported { gate_kind }` outcome. No hung runs,
+and no approval UI with no home to render in.
+
+**One deliberate exemption: the ExternalTool gate is supported.** It is not
+a human-approval gate — its resolver is the submitting client itself
+(OpenAI-compat's client-executed tools park the run on it; the client posts
+the tool output and the run resumes via `resume_turn` with `None`
+bindings, exactly as that flow works today). `AwaitDependentRun` is
+unreachable on detached profiles by construction (subagent spawn is
+denied).
 
 The durable event vocabulary still includes `Blocked`/`Resumed` so the journal
 stays honest, and so a later revision can add a resolve affordance (wired to
@@ -1002,11 +1010,15 @@ convention.
   interpretable with nothing to own or version. How a feature constructs or
   stores its schemas is that feature's decision when it ships.
 - **Validation is strict-only.** The tolerant (`strict: false`) mode is cut.
-- **Process-kind: a new `ProcessKind` variant.** The same change audits the
-  kind enum and retires unused legacy variants through the standard
-  rolling-compat path — old rows must keep deserializing (retire the
-  writers, keep the readers tolerant), with one tolerance test proving an
-  old binary handles rows carrying the new value fail-closed.
+- **No new `ProcessKind`** *(supersedes an earlier resolution that added
+  one)*. A detached turn is an ordinary `AgentTurn` process — same kind,
+  same projection, same executor; from `submit_turn` onward the idioms are
+  indistinguishable, so a separate kind would be exactly the fork this
+  design forbids. Rolling compatibility reframes onto what actually
+  changes: rows whose binding refs are `None` and whose profile id is a
+  `detached_*` value, with one tolerance test proving an old-style reader
+  treats them fail-closed. The kind-enum legacy audit decouples into
+  optional hygiene.
 - **`TurnLimits` maps onto the existing budget machinery** (iteration
   limit, wall clock, USD accountant, max output tokens) — nothing invented;
   ceilings come from the profile.
