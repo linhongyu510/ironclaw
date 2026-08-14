@@ -180,11 +180,14 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// the profile-stable durable-storage branch. This is the exact merged-tree
 /// production-source count, including both main's composition changes and the
 /// branch's storage adoption assembly; it is not a sum of historical pins.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_989;
+/// Re-measured 42_989 -> 43_265 on 2026-08-14 after the current
+/// profile-stable storage review changes, using
+/// `bash scripts/ci/check-composition-budget.sh --print`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_265;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
-/// 839 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 839;
+/// 837 Arc<dyn> (governed prod, excl slack/extension_host)".
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 837;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's
