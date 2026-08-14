@@ -2051,6 +2051,7 @@ mod tests {
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2086,6 +2087,7 @@ mod tests {
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

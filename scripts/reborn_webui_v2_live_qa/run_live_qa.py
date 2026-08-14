@@ -203,6 +203,16 @@ DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+# The composer's message POST rides the session channel ingress route since
+# the channel normalization split (#7477):
+# `/api/webchat/v2/channels/<extension>/messages`. The older thread-scoped
+# route is still accepted so one harness spans binaries on either side of
+# that split — the same migration the stress client made in #7568. QA 10
+# went 0/10 (submission-identity capture timing out on a healthy, streaming
+# turn) when this predicate only knew the retired route.
+SUBMISSION_MESSAGE_ROUTE_RE = re.compile(
+    r"/api/webchat/v2/(?:threads|channels)/[^/]+/messages$"
+)
 # Live QA is model- and network-nondeterministic: the same commit can pass then
 # flake red hours later. Retry a transient (assertion/behavioral) case failure up
 # to this many total attempts before recording a red. Default 2 = one retry;
@@ -807,6 +817,11 @@ def parse_case_llm_trace_metrics(trace_path: Path) -> dict[str, object]:
 
     model_call_count = 0
     tool_call_count = 0
+    tool_call_batch_count = 0
+    multi_tool_call_batch_count = 0
+    tool_calls_in_multi_batches = 0
+    max_tool_call_batch_width = 0
+    tool_call_batch_width_counts: dict[str, int] = {}
     step_input_tokens = 0
     step_output_tokens = 0
     for step in steps:
@@ -826,7 +841,18 @@ def parse_case_llm_trace_metrics(trace_path: Path) -> dict[str, object]:
         if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
             step_output_tokens += max(0, output_tokens)
         if response_type == "tool_calls" and isinstance(response.get("tool_calls"), list):
-            tool_call_count += len(response["tool_calls"])
+            batch_width = len(response["tool_calls"])
+            tool_call_count += batch_width
+            if batch_width > 0:
+                tool_call_batch_count += 1
+                max_tool_call_batch_width = max(max_tool_call_batch_width, batch_width)
+                width_key = str(batch_width)
+                tool_call_batch_width_counts[width_key] = (
+                    tool_call_batch_width_counts.get(width_key, 0) + 1
+                )
+                if batch_width > 1:
+                    multi_tool_call_batch_count += 1
+                    tool_calls_in_multi_batches += batch_width
 
     usage = payload.get("usage")
     has_provider_usage = isinstance(usage, dict)
@@ -860,6 +886,11 @@ def parse_case_llm_trace_metrics(trace_path: Path) -> dict[str, object]:
     return {
         "model_call_count": model_call_count,
         "tool_call_count": tool_call_count,
+        "tool_call_batch_count": tool_call_batch_count,
+        "multi_tool_call_batch_count": multi_tool_call_batch_count,
+        "tool_calls_in_multi_batches": tool_calls_in_multi_batches,
+        "max_tool_call_batch_width": max_tool_call_batch_width,
+        "tool_call_batch_width_counts": tool_call_batch_width_counts,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
@@ -873,6 +904,11 @@ def _zero_case_metrics() -> dict[str, object]:
     return {
         "model_call_count": 0,
         "tool_call_count": 0,
+        "tool_call_batch_count": 0,
+        "multi_tool_call_batch_count": 0,
+        "tool_calls_in_multi_batches": 0,
+        "max_tool_call_batch_width": 0,
+        "tool_call_batch_width_counts": {},
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_tokens": 0,
@@ -886,6 +922,11 @@ def _unavailable_case_metrics() -> dict[str, object]:
     return {
         "model_call_count": None,
         "tool_call_count": None,
+        "tool_call_batch_count": None,
+        "multi_tool_call_batch_count": None,
+        "tool_calls_in_multi_batches": None,
+        "max_tool_call_batch_width": None,
+        "tool_call_batch_width_counts": None,
         "input_tokens": None,
         "output_tokens": None,
         "cache_read_tokens": None,
@@ -1859,8 +1900,7 @@ async def _live_chat_case(
             request = response.request  # type: ignore[attr-defined]
             if request.method != "POST":
                 return False
-            if not re.search(
-                r"/api/webchat/v2/threads/[^/]+/messages$",
+            if not SUBMISSION_MESSAGE_ROUTE_RE.search(
                 str(response.url),  # type: ignore[attr-defined]
             ):
                 return False
