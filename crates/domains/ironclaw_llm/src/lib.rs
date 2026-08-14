@@ -466,7 +466,7 @@ fn create_anthropic_from_registry(
             base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
             "Using Anthropic OAuth API"
         );
-        let provider = anthropic_oauth::AnthropicProvider::new(config)?;
+        let provider = anthropic_oauth::AnthropicProvider::new(config, request_timeout_secs)?;
         return Ok(Arc::new(provider));
     }
 
@@ -2169,8 +2169,8 @@ mod tests {
     }
 
     /// Construction-path coverage for the Anthropic cache wiring (#6984):
-    /// every retention mode builds the rig provider, including the
-    /// unsupported-model downgrade that disables rig's typed breakpoints.
+    /// every retention mode builds the unified `AnthropicProvider`, including
+    /// the unsupported-model downgrade that disables prompt caching.
     #[test]
     fn anthropic_registry_provider_builds_for_every_cache_retention() {
         use crate::config::CacheRetention;

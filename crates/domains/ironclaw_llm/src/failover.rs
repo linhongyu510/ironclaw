@@ -423,7 +423,7 @@ impl LlmProvider for FailoverProvider {
         !self.providers.is_empty()
             && self.providers.iter().all(|provider| {
                 provider.supports_deferred_tool_loading(model)
-                    && provider.supports_deferred_tool_loading(provider.model_name())
+                    && provider.supports_deferred_tool_loading(&provider.active_model_name())
             })
     }
 
@@ -936,6 +936,10 @@ mod tests {
             &self.name
         }
 
+        fn supports_deferred_tool_loading(&self, model: &str) -> bool {
+            model == "deferred-model"
+        }
+
         fn cost_per_token(&self) -> (Decimal, Decimal) {
             (self.input_cost, self.output_cost)
         }
@@ -982,6 +986,21 @@ mod tests {
 
     fn make_tool_request() -> ToolCompletionRequest {
         ToolCompletionRequest::new(vec![crate::ChatMessage::user("hello")], vec![])
+    }
+
+    #[test]
+    fn deferred_loading_checks_each_fallback_active_model() {
+        let primary = Arc::new(MockProvider::succeeding("deferred-model", "primary"));
+        let fallback = Arc::new(MockProvider::succeeding("deferred-model", "fallback"));
+        fallback
+            .set_model("legacy-model")
+            .expect("fallback active model changes");
+        let failover = FailoverProvider::new(vec![primary, fallback]).expect("failover provider");
+
+        assert!(
+            !failover.supports_deferred_tool_loading("deferred-model"),
+            "a fallback serving a legacy active model must reject a native deferred request"
+        );
     }
 
     // Test 1: Primary succeeds, no failover occurs.

@@ -304,7 +304,8 @@ async fn gateway_redacts_every_message_role_before_plain_provider_dispatch() {
 
 #[tokio::test]
 async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() {
-    let provider = Arc::new(ToolAwareProvider::tool_stop_reply("done"));
+    let provider =
+        Arc::new(ToolAwareProvider::tool_stop_reply("done").with_native_deferred_tools());
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         Arc::clone(&provider),
@@ -332,6 +333,18 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
         "Authorization: Bearer ghp_firstsecretvalue123",
         "Authorization: Bearer ghp_secondsecretvalue456"
     ]);
+    let mut deferred = capability_port.definitions[0].clone();
+    deferred.capability_id = CapabilityId::new("demo.deferred").unwrap();
+    deferred.name = provider_name("demo__deferred");
+    deferred.description = "Use password: deferred-secret-value".to_string();
+    deferred.parameters["properties"]["api_key"] = serde_json::json!({
+        "type": "string",
+        "default": "deferred-schema-secret"
+    });
+    capability_port
+        .resolvable_definitions
+        .push(deferred.clone());
+    capability_port.deferred_definitions.push(deferred);
 
     gateway
         .stream_model_with_capabilities(
@@ -380,6 +393,17 @@ async fn gateway_redacts_tool_descriptions_and_schema_strings_before_dispatch() 
             "required reference {required:?} must follow its renamed property"
         );
     }
+    let deferred_tool = &requests[0].deferred_tools[0];
+    assert!(
+        !deferred_tool.description.contains("deferred-secret-value"),
+        "provider saw a secret in the deferred tool description"
+    );
+    let deferred_schema = deferred_tool.parameters.to_string();
+    assert!(
+        !deferred_schema.contains("deferred-schema-secret"),
+        "provider saw a secret in the deferred tool schema"
+    );
+    assert!(deferred_schema.contains("[REDACTED_SECRET]"));
 }
 
 #[traced_test]

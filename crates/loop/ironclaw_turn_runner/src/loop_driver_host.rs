@@ -2245,6 +2245,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         self.capabilities.deferred_tool_definitions()
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_loop_contracts::ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        self.capabilities
+            .provider_tool_call_capability_ids(tool_call)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -2921,6 +2929,10 @@ mod thread_scope_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/deferred_resolution_tests.rs"]
+mod deferred_resolution_tests;
 
 #[cfg(test)]
 #[path = "loop_driver_host/run_lease_fence_tests.rs"]

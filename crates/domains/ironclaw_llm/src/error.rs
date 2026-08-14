@@ -215,7 +215,13 @@ pub(crate) async fn read_bounded_provider_error_body(
 }
 
 pub(crate) fn map_provider_http_error(error: ProviderHttpError<'_>) -> LlmError {
-    let provider = error.adapter.provider_id();
+    map_provider_http_error_for(error, error.adapter.provider_id())
+}
+
+pub(crate) fn map_provider_http_error_for(
+    error: ProviderHttpError<'_>,
+    provider: &str,
+) -> LlmError {
     if let Some(context_error) = context_length_error(error.status, error.body) {
         return context_error;
     }

@@ -1471,8 +1471,17 @@ where
                         .map(provider_tool_definition_to_llm),
                 );
             }
+            let mut llm_deferred_tool_definitions = if use_native_deferred_tools {
+                deferred_tool_definitions
+                    .into_iter()
+                    .map(provider_tool_definition_to_llm)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let tool_redaction_started_at = Instant::now();
-            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions);
+            let tool_redaction_count = redact_tool_definitions(&mut llm_tool_definitions)
+                .saturating_add(redact_tool_definitions(&mut llm_deferred_tool_definitions));
             if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
                 debug!(
                     target: CONTEXT_SHADOW_TARGET,
@@ -1491,12 +1500,7 @@ where
             let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
-            if use_native_deferred_tools {
-                tool_request.deferred_tools = deferred_tool_definitions
-                    .into_iter()
-                    .map(provider_tool_definition_to_llm)
-                    .collect();
-            }
+            tool_request.deferred_tools = llm_deferred_tool_definitions;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {

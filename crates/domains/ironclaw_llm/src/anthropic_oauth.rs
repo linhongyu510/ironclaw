@@ -134,27 +134,30 @@ pub(crate) struct AnthropicProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
+    /// Registry-supplied headers applied to buffered, streaming, and model-list requests.
+    extra_headers: reqwest::header::HeaderMap,
     /// Anthropic prompt-cache retention; drives the explicit `cache_control`
     /// breakpoints (system prompt, last tool, last message block). See #6984.
     cache_retention: crate::config::CacheRetention,
 }
 
 impl AnthropicProvider {
-    pub(crate) fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+    pub(crate) fn new(
+        config: &RegistryProviderConfig,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
         let token = config
             .oauth_token
             .clone()
             .ok_or_else(|| LlmError::AuthFailed {
-                provider: "anthropic_oauth".to_string(),
+                provider: config.provider_id.clone(),
             })?;
 
-        let client =
-            crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS)
-                .build()
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: "anthropic_oauth".to_string(),
-                    reason: format!("Failed to build HTTP client: {}", e),
-                })?;
+        let client = crate::provider_http_client(
+            &config.provider_id,
+            &config.base_url,
+            request_timeout_secs,
+        )?;
         let streaming_client = crate::url_check::build_http_client(
             &config.provider_id,
             &config.base_url,
@@ -176,13 +179,14 @@ impl AnthropicProvider {
         Ok(Self {
             client,
             streaming_client,
-            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             auth: AnthropicAuth::OAuth(std::sync::RwLock::new(token)),
-            provider_id: "anthropic_oauth".to_string(),
+            provider_id: config.provider_id.clone(),
             model: config.model.clone(),
             base_url,
             active_model,
             unsupported_params,
+            extra_headers: Self::registry_extra_headers(config)?,
             cache_retention,
         })
     }
@@ -216,8 +220,32 @@ impl AnthropicProvider {
             base_url: (!config.base_url.is_empty()).then(|| config.base_url.clone()),
             active_model: std::sync::RwLock::new(config.model.clone()),
             unsupported_params: config.unsupported_params.iter().cloned().collect(),
+            extra_headers: Self::registry_extra_headers(config)?,
             cache_retention,
         })
+    }
+
+    fn registry_extra_headers(
+        config: &RegistryProviderConfig,
+    ) -> Result<reqwest::header::HeaderMap, LlmError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in &config.extra_headers {
+            let name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                    LlmError::RequestFailed {
+                        provider: config.provider_id.clone(),
+                        reason: format!("invalid extra HTTP header name: {error}"),
+                    }
+                })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                LlmError::RequestFailed {
+                    provider: config.provider_id.clone(),
+                    reason: format!("invalid extra HTTP header value: {error}"),
+                }
+            })?;
+            headers.insert(name, value);
+        }
+        Ok(headers)
     }
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
@@ -253,26 +281,31 @@ impl AnthropicProvider {
         }
     }
 
-    /// Read the current token from the RwLock.
-    fn current_token(&self) -> String {
+    /// Read the current OAuth token. API-key providers have no OAuth token.
+    fn current_token(&self) -> Result<Option<String>, LlmError> {
         let AnthropicAuth::OAuth(token) = &self.auth else {
-            return String::new();
+            return Ok(None);
         };
-        match token.read() {
-            Ok(guard) => guard.expose_secret().to_string(),
-            Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
-        }
+        let guard = token.read().map_err(|error| LlmError::RequestFailed {
+            provider: self.provider_id(),
+            reason: format!("OAuth credential lock unavailable: {error}"),
+        })?;
+        Ok(Some(guard.expose_secret().to_string()))
     }
 
-    /// Update the stored token after a successful Keychain refresh.
-    fn update_token(&self, new_token: SecretString) {
+    /// Update the stored OAuth token after a successful Keychain refresh.
+    fn update_token(&self, new_token: SecretString) -> Result<(), LlmError> {
         let AnthropicAuth::OAuth(token) = &self.auth else {
-            return;
+            return Err(LlmError::AuthFailed {
+                provider: self.provider_id(),
+            });
         };
-        match token.write() {
-            Ok(mut guard) => *guard = new_token,
-            Err(poisoned) => *poisoned.into_inner() = new_token,
-        }
+        let mut guard = token.write().map_err(|error| LlmError::RequestFailed {
+            provider: self.provider_id(),
+            reason: format!("OAuth credential lock unavailable: {error}"),
+        })?;
+        *guard = new_token;
+        Ok(())
     }
 
     /// Comma-joined `anthropic-beta` value for a request, covering the auth
@@ -292,20 +325,30 @@ impl AnthropicProvider {
             (false, false) => None,
         }
     }
+    fn with_extra_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        builder.headers(self.extra_headers.clone())
+    }
 
     fn authorize(
         &self,
         builder: reqwest::RequestBuilder,
         beta: Option<&str>,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
         let builder = match &self.auth {
-            AnthropicAuth::OAuth(_) => builder.bearer_auth(self.current_token()),
-            AnthropicAuth::ApiKey(api_key) => builder.header("x-api-key", api_key.expose_secret()),
+            AnthropicAuth::OAuth(_) => {
+                let token = self.current_token()?.ok_or_else(|| LlmError::AuthFailed {
+                    provider: self.provider_id(),
+                })?;
+                self.with_extra_headers(builder).bearer_auth(token)
+            }
+            AnthropicAuth::ApiKey(api_key) => self
+                .with_extra_headers(builder)
+                .header("x-api-key", api_key.expose_secret()),
         };
-        match beta {
+        Ok(match beta {
             Some(value) => builder.header("anthropic-beta", value),
             None => builder,
-        }
+        })
     }
 
     fn uses_oauth(&self) -> bool {
@@ -322,7 +365,7 @@ impl AnthropicProvider {
 
         let beta = self.beta_header_value(body);
         let response = self
-            .authorize(self.client.post(&url), beta.as_deref())
+            .authorize(self.client.post(&url), beta.as_deref())?
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("Content-Type", "application/json")
             .json(body)
@@ -380,7 +423,7 @@ impl AnthropicProvider {
                     if retry_status.is_success() {
                         // Persist the refreshed token so subsequent requests
                         // don't hit 401 again (fixes #1136).
-                        self.update_token(fresh_token);
+                        self.update_token(fresh_token)?;
                         tracing::info!("Anthropic OAuth token refreshed from credential store");
 
                         let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
@@ -407,7 +450,7 @@ impl AnthropicProvider {
                         "Anthropic OAuth 401 retry with refreshed token also failed ({})",
                         retry_status
                     );
-                    return Err(crate::error::map_provider_http_error(
+                    return Err(crate::error::map_provider_http_error_for(
                         crate::error::ProviderHttpError {
                             adapter: self.error_adapter(),
                             model: &self.active_model_name(),
@@ -415,13 +458,14 @@ impl AnthropicProvider {
                             body: &retry_text,
                             retry_after,
                         },
+                        &self.provider_id,
                     ));
                 }
                 return Err(LlmError::AuthFailed {
                     provider: self.provider_id(),
                 });
             }
-            return Err(crate::error::map_provider_http_error(
+            return Err(crate::error::map_provider_http_error_for(
                 crate::error::ProviderHttpError {
                     adapter: self.error_adapter(),
                     model: &self.active_model_name(),
@@ -429,6 +473,7 @@ impl AnthropicProvider {
                     body: &response_text,
                     retry_after,
                 },
+                &self.provider_id,
             ));
         }
 
@@ -476,7 +521,7 @@ impl AnthropicProvider {
                 .send_streaming_http_request(&url, body, Some(fresh_token.expose_secret()))
                 .await?;
             if response.status().is_success() {
-                self.update_token(fresh_token);
+                self.update_token(fresh_token)?;
                 tracing::info!("Anthropic OAuth token refreshed from credential store");
             }
         }
@@ -503,7 +548,7 @@ impl AnthropicProvider {
             .and_then(Result::ok)
             .unwrap_or_default();
             let response_text = String::from_utf8_lossy(&response_body);
-            return Err(crate::error::map_provider_http_error(
+            return Err(crate::error::map_provider_http_error_for(
                 crate::error::ProviderHttpError {
                     adapter: self.error_adapter(),
                     model: &self.active_model_name(),
@@ -511,6 +556,7 @@ impl AnthropicProvider {
                     body: response_text.as_ref(),
                     retry_after,
                 },
+                &self.provider_id,
             ));
         }
 
@@ -558,8 +604,10 @@ impl AnthropicProvider {
     ) -> Result<reqwest::Response, LlmError> {
         let beta = self.beta_header_value(body);
         let builder = match oauth_token_override {
-            Some(token) => self.streaming_client.post(url).bearer_auth(token),
-            None => self.authorize(self.streaming_client.post(url), None),
+            Some(token) => self
+                .with_extra_headers(self.streaming_client.post(url))
+                .bearer_auth(token),
+            None => self.authorize(self.streaming_client.post(url), None)?,
         };
         let builder = match beta {
             Some(value) => builder.header("anthropic-beta", value),
@@ -828,7 +876,7 @@ impl LlmProvider for AnthropicProvider {
             .authorize(
                 self.client.get(self.models_url()),
                 self.uses_oauth().then_some(ANTHROPIC_OAUTH_BETA),
-            )
+            )?
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .send()
             .await
@@ -847,8 +895,12 @@ impl LlmProvider for AnthropicProvider {
                 status.as_u16(),
                 response.headers().get("retry-after"),
             );
-            let body = crate::error::read_bounded_provider_error_body(response).await?;
-            return Err(crate::error::map_provider_http_error(
+            // silent-ok: the error body is diagnostic only; preserve the known
+            // status and retry metadata if the bounded body read fails.
+            let body = crate::error::read_bounded_provider_error_body(response)
+                .await
+                .unwrap_or_default();
+            return Err(crate::error::map_provider_http_error_for(
                 crate::error::ProviderHttpError {
                     adapter: self.error_adapter(),
                     model: &self.active_model_name(),
@@ -856,6 +908,7 @@ impl LlmProvider for AnthropicProvider {
                     body: &String::from_utf8_lossy(&body),
                     retry_after,
                 },
+                &self.provider_id,
             ));
         }
         let payload: AnthropicModelsResponse =
@@ -996,6 +1049,8 @@ enum AnthropicToolResultContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum AnthropicToolResultBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
     #[serde(rename = "tool_reference")]
     ToolReference { tool_name: String },
 }
@@ -1522,32 +1577,31 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 // flow through the consecutive-tool-result merge below, because
                 // Anthropic requires the results of one assistant turn's
                 // parallel tool calls to sit in a single user message.
-                let mut pending: Vec<AnthropicContentBlock> = if msg.tool_references.is_empty() {
-                    vec![AnthropicContentBlock::ToolResult {
-                        tool_use_id: tool_call_id,
-                        content: AnthropicToolResultContent::Text(msg.content),
-                        cache_control: None,
-                    }]
-                } else {
-                    let blocks = msg
-                        .tool_references
-                        .into_iter()
-                        .map(|tool_name| AnthropicToolResultBlock::ToolReference { tool_name })
-                        .collect();
-                    let tool_result = AnthropicContentBlock::ToolResult {
-                        tool_use_id: tool_call_id,
-                        content: AnthropicToolResultContent::Blocks(blocks),
-                        cache_control: None,
-                    };
-                    let mut blocks = vec![tool_result];
-                    if !msg.content.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text {
-                            text: msg.content,
+                let mut pending: Vec<AnthropicContentBlock> =
+                    if msg.tool_references.is_empty() {
+                        vec![AnthropicContentBlock::ToolResult {
+                            tool_use_id: tool_call_id,
+                            content: AnthropicToolResultContent::Text(msg.content),
                             cache_control: None,
-                        });
-                    }
-                    blocks
-                };
+                        }]
+                    } else {
+                        let mut blocks = Vec::with_capacity(
+                            msg.tool_references
+                                .len()
+                                .saturating_add(usize::from(!msg.content.is_empty())),
+                        );
+                        if !msg.content.is_empty() {
+                            blocks.push(AnthropicToolResultBlock::Text { text: msg.content });
+                        }
+                        blocks.extend(msg.tool_references.into_iter().map(|tool_name| {
+                            AnthropicToolResultBlock::ToolReference { tool_name }
+                        }));
+                        vec![AnthropicContentBlock::ToolResult {
+                            tool_use_id: tool_call_id,
+                            content: AnthropicToolResultContent::Blocks(blocks),
+                            cache_control: None,
+                        }]
+                    };
                 // If the last message is already a user message of tool-result
                 // blocks, append to it (Anthropic requires consecutive tool
                 // results in one user message). A reference-carrying result may

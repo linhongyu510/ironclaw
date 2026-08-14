@@ -45,7 +45,7 @@ async fn complete_preserves_missing_retry_after_on_headerless_502() {
         "claude-test",
     );
     config.oauth_token = Some(SecretString::from("test-token".to_string()));
-    let provider = AnthropicProvider::new(&config).expect("provider");
+    let provider = AnthropicProvider::new(&config, 60).expect("provider");
     let error = provider
         .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
         .await
@@ -62,10 +62,16 @@ async fn complete_preserves_missing_retry_after_on_headerless_502() {
     ));
 }
 
+#[derive(Debug)]
+struct CapturedRequest {
+    headers: String,
+    body: String,
+}
+
 /// One-shot loopback capture server: returns the base URL and a handle
-/// resolving to the captured request body. Replies 400 — these tests
-/// assert the request wire shape, not response handling.
-async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+/// resolving to the captured request. Replies 400 — these tests assert the
+/// request wire shape, not response handling.
+async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<CapturedRequest>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -106,10 +112,11 @@ async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String
             if request.len() < body_start + content_length {
                 continue;
             }
-            tx.send(
-                String::from_utf8(request[body_start..body_start + content_length].to_vec())
+            tx.send(CapturedRequest {
+                headers: headers.to_string(),
+                body: String::from_utf8(request[body_start..body_start + content_length].to_vec())
                     .expect("request body is UTF-8"),
-            )
+            })
             .expect("test receives captured request");
             socket
                 .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
@@ -119,6 +126,29 @@ async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String
         }
     });
     (base_url, rx)
+}
+
+async fn serve_one_response(response: String) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("loopback address")
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await.expect("read request");
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write scripted response");
+    });
+    (base_url, server)
 }
 
 fn provider_with_retention(base_url: &str, retention: CacheRetention) -> AnthropicProvider {
@@ -131,15 +161,19 @@ fn provider_with_retention(base_url: &str, retention: CacheRetention) -> Anthrop
     );
     config.oauth_token = Some(SecretString::from("test-token".to_string()));
     config.cache_retention = retention;
-    AnthropicProvider::new(&config).expect("provider")
+    AnthropicProvider::new(&config, 60).expect("provider")
 }
 
-async fn captured_json(rx: tokio::sync::oneshot::Receiver<String>) -> serde_json::Value {
-    let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+async fn captured_request(rx: tokio::sync::oneshot::Receiver<CapturedRequest>) -> CapturedRequest {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx)
         .await
         .expect("request capture timed out")
-        .expect("captured request body");
-    serde_json::from_str(&body).expect("captured body is JSON")
+        .expect("captured request")
+}
+
+async fn captured_json(rx: tokio::sync::oneshot::Receiver<CapturedRequest>) -> serde_json::Value {
+    let request = captured_request(rx).await;
+    serde_json::from_str(&request.body).expect("captured body is JSON")
 }
 
 /// Wire-level pin for issue #6984: under `Short` retention the OAuth
@@ -253,7 +287,7 @@ async fn oauth_unsupported_model_downgrades_to_no_caching() {
     );
     config.oauth_token = Some(SecretString::from("test-token".to_string()));
     config.cache_retention = CacheRetention::Short;
-    let provider = AnthropicProvider::new(&config).expect("provider");
+    let provider = AnthropicProvider::new(&config, 60).expect("provider");
 
     let _ = provider
         .complete(CompletionRequest::new(vec![
@@ -864,7 +898,7 @@ async fn complete_streaming_rejects_eof_without_terminal_event() {
         "claude-test",
     );
     config.oauth_token = Some(SecretString::from("test-token".to_string()));
-    let provider = AnthropicProvider::new(&config).expect("provider");
+    let provider = AnthropicProvider::new(&config, 60).expect("provider");
     let sink = Arc::new(RecordingSink::default());
     let error = provider
         .complete_streaming(
@@ -958,12 +992,14 @@ fn parallel_tool_results_with_references_stay_in_one_user_message() {
             {
                 "type": "tool_result",
                 "tool_use_id": "call-1",
-                "content": [{
-                    "type": "tool_reference",
-                    "tool_name": "calendar_list"
-                }]
+                "content": [
+                    {"type": "text", "text": "matches"},
+                    {
+                        "type": "tool_reference",
+                        "tool_name": "calendar_list"
+                    }
+                ]
             },
-            {"type": "text", "text": "matches"},
             {
                 "type": "tool_result",
                 "tool_use_id": "call-2",
@@ -1035,7 +1071,7 @@ fn beta_header_value_covers_auth_and_deferred_combinations() {
         tool_choice: None,
     };
 
-    let oauth = AnthropicProvider::new(&oauth_config()).expect("oauth provider");
+    let oauth = AnthropicProvider::new(&oauth_config(), 60).expect("oauth provider");
     let api_key = AnthropicProvider::new_with_api_key(&key_config(), 60).expect("api-key provider");
 
     assert_eq!(
@@ -1052,6 +1088,151 @@ fn beta_header_value_covers_auth_and_deferred_combinations() {
     );
     assert_eq!(api_key.beta_header_value(&request(false)), None);
 }
+#[test]
+fn api_key_auth_has_no_oauth_token() {
+    let config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "anthropic",
+        Some(SecretString::from("test-key".to_string())),
+        String::new(),
+        "claude-test",
+    );
+    let provider = AnthropicProvider::new_with_api_key(&config, 60).expect("api-key provider");
+
+    assert!(provider.current_token().expect("token access").is_none());
+}
+
+#[test]
+fn poisoned_oauth_token_lock_fails_authentication() {
+    let mut config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "anthropic_oauth",
+        None,
+        String::new(),
+        "claude-test",
+    );
+    config.oauth_token = Some(SecretString::from("test-token".to_string()));
+    let provider = AnthropicProvider::new(&config, 60).expect("oauth provider");
+    let AnthropicAuth::OAuth(token) = &provider.auth else {
+        panic!("oauth config must construct OAuth auth");
+    };
+    let _ = std::panic::catch_unwind(|| {
+        let _guard = token.write().expect("token lock");
+        panic!("poison token lock");
+    });
+
+    let error = match provider.authorize(provider.client.get("http://127.0.0.1:9"), None) {
+        Ok(_) => panic!("poisoned token lock must reject authorization"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        LlmError::RequestFailed { provider, reason }
+            if provider == "anthropic_oauth"
+                && reason.contains("OAuth credential lock unavailable")
+    ));
+}
+
+#[test]
+fn configured_timeout_is_preserved_for_both_auth_modes() {
+    let mut oauth_config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "anthropic_oauth",
+        None,
+        String::new(),
+        "claude-test",
+    );
+    oauth_config.oauth_token = Some(SecretString::from("test-token".to_string()));
+    let api_key_config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "anthropic",
+        Some(SecretString::from("test-key".to_string())),
+        String::new(),
+        "claude-test",
+    );
+
+    let oauth = AnthropicProvider::new(&oauth_config, 17).expect("oauth provider");
+    let api_key =
+        AnthropicProvider::new_with_api_key(&api_key_config, 23).expect("api-key provider");
+    assert_eq!(oauth.stream_idle_timeout, Duration::from_secs(17));
+    assert_eq!(api_key.stream_idle_timeout, Duration::from_secs(23));
+}
+
+#[tokio::test]
+async fn deferred_tool_request_sends_advanced_tool_use_beta_header() {
+    let (base_url, captured) = capture_one_request().await;
+    let config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "anthropic",
+        Some(SecretString::from("test-key".to_string())),
+        base_url,
+        "claude-opus-4-6",
+    );
+    let provider = AnthropicProvider::new_with_api_key(&config, 60).expect("api-key provider");
+    let mut request = ToolCompletionRequest::new(
+        vec![ChatMessage::user("hello")],
+        vec![test_tool("tool_search")],
+    );
+    request.deferred_tools = vec![test_tool("calendar_list")];
+
+    let _ = provider.complete_with_tools(request).await;
+    let captured = captured_request(captured).await;
+    assert!(
+        captured
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("anthropic-beta: advanced-tool-use-2025-11-20")),
+        "deferred tool request omitted the advanced-tool-use beta header: {}",
+        captured.headers
+    );
+}
+
+#[tokio::test]
+async fn registry_extra_headers_reach_all_anthropic_transports() {
+    for oauth in [false, true] {
+        for streaming in [false, true] {
+            let (base_url, captured) = capture_one_request().await;
+            let mut config = RegistryProviderConfig::generic(
+                crate::registry::ProviderProtocol::Anthropic,
+                if oauth {
+                    "anthropic_oauth"
+                } else {
+                    "anthropic"
+                },
+                (!oauth).then(|| SecretString::from("test-key".to_string())),
+                base_url,
+                "claude-opus-4-6",
+            );
+            if oauth {
+                config.oauth_token = Some(SecretString::from("test-token".to_string()));
+            }
+            config.extra_headers = vec![("x-acme-route".to_string(), "preserved".to_string())];
+            let provider = if oauth {
+                AnthropicProvider::new(&config, 60).expect("oauth provider")
+            } else {
+                AnthropicProvider::new_with_api_key(&config, 60).expect("api-key provider")
+            };
+            let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+
+            if streaming {
+                let _ = provider
+                    .complete_streaming(request, Arc::new(RecordingSink::default()))
+                    .await;
+            } else {
+                let _ = provider.complete(request).await;
+            }
+            let captured = captured_request(captured).await;
+            assert!(
+                captured
+                    .headers
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("x-acme-route: preserved")),
+                "registry extra header missing for oauth={oauth}, streaming={streaming}: {}",
+                captured.headers
+            );
+        }
+    }
+}
 
 #[test]
 fn deferred_tool_reference_is_isolated_from_result_text() {
@@ -1062,17 +1243,17 @@ fn deferred_tool_reference_is_isolated_from_result_text() {
 
     assert_eq!(
         value[0]["content"],
-        serde_json::json!([
-            {
-                "type": "tool_result",
-                "tool_use_id": "call-1",
-                "content": [{
+        serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": "call-1",
+            "content": [
+                {"type": "text", "text": "matches"},
+                {
                     "type": "tool_reference",
                     "tool_name": "calendar_list"
-                }]
-            },
-            {"type": "text", "text": "matches"}
-        ])
+                }
+            ]
+        }])
     );
 }
 
@@ -1147,7 +1328,7 @@ async fn list_models_loopback_projects_data_ids() {
         "claude-test",
     );
     config.oauth_token = Some(SecretString::from("test-token".to_string()));
-    let provider = AnthropicProvider::new(&config).expect("provider");
+    let provider = AnthropicProvider::new(&config, 60).expect("provider");
     let models = provider.list_models().await.expect("list models");
     server.await.expect("loopback server");
 
@@ -1158,4 +1339,79 @@ async fn list_models_loopback_projects_data_ids() {
             "claude-opus-4-5".to_string()
         ]
     );
+}
+
+fn custom_oauth_config(base_url: String) -> RegistryProviderConfig {
+    let mut config = RegistryProviderConfig::generic(
+        crate::registry::ProviderProtocol::Anthropic,
+        "acme",
+        None,
+        base_url,
+        "claude-test",
+    );
+    config.oauth_token = Some(SecretString::from("test-token".to_string()));
+    config
+}
+
+#[tokio::test]
+async fn configured_provider_id_survives_buffered_and_streaming_http_errors() {
+    for streaming in [false, true] {
+        let body = r#"{"error":{"message":"upstream unavailable"}}"#;
+        let response = format!(
+            "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (base_url, server) = serve_one_response(response).await;
+        let provider =
+            AnthropicProvider::new(&custom_oauth_config(base_url), 60).expect("custom provider");
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        let error = if streaming {
+            provider
+                .complete_streaming(request, Arc::new(RecordingSink::default()))
+                .await
+                .expect_err("scripted streaming error")
+        } else {
+            provider
+                .complete(request)
+                .await
+                .expect_err("scripted buffered error")
+        };
+        server.await.expect("loopback server");
+
+        match error {
+            LlmError::BadGateway {
+                provider,
+                status: 502,
+                ..
+            } => assert_eq!(provider, "acme", "streaming={streaming}"),
+            other => panic!("expected acme 502, streaming={streaming}, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn list_models_preserves_status_when_error_body_is_truncated() {
+    let response = "HTTP/1.1 503 Service Unavailable\r\n\
+                    content-type: application/json\r\n\
+                    content-length: 10\r\n\r\nx"
+        .to_string();
+    let (base_url, server) = serve_one_response(response).await;
+    let provider =
+        AnthropicProvider::new(&custom_oauth_config(base_url), 60).expect("custom provider");
+
+    let error = provider
+        .list_models()
+        .await
+        .expect_err("truncated error body must retain HTTP classification");
+    server.await.expect("loopback server");
+
+    assert!(matches!(
+        error,
+        LlmError::BadGateway {
+            provider,
+            status: 503,
+            ..
+        } if provider == "acme"
+    ));
 }
