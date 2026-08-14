@@ -4,8 +4,9 @@ use crate::{
     AutomationListRequest, AutomationProductService, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, TriggerRunThreadScope,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSemanticEvaluation,
+    RebornAutomationSemanticVerdict, RebornAutomationSource, RebornAutomationState,
+    TriggerRunThreadScope,
 };
 use ironclaw_host_api::{Timestamp, ids::ThreadId};
 use ironclaw_product_contracts::surface::{
@@ -476,6 +477,23 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         status,
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
+        semantic_evaluation: run.semantic_evaluation.as_ref().map(|evaluation| {
+            RebornAutomationSemanticEvaluation {
+                verdict: match evaluation.verdict {
+                    ironclaw_triggers::TriggerSemanticVerdict::Satisfied => {
+                        RebornAutomationSemanticVerdict::Satisfied
+                    }
+                    ironclaw_triggers::TriggerSemanticVerdict::Unsatisfied => {
+                        RebornAutomationSemanticVerdict::Unsatisfied
+                    }
+                    ironclaw_triggers::TriggerSemanticVerdict::EvaluationFailed => {
+                        RebornAutomationSemanticVerdict::EvaluationFailed
+                    }
+                },
+                reason: evaluation.reason.clone(),
+                evaluated_at: evaluation.evaluated_at,
+            }
+        }),
     })
 }
 

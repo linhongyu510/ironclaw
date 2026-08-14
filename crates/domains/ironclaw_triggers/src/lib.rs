@@ -741,6 +741,23 @@ pub enum TriggerRunHistoryStatus {
     Ok,
     Error,
 }
+
+/// Semantic assessment of a completed structured automation run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerSemanticVerdict {
+    Satisfied,
+    Unsatisfied,
+    EvaluationFailed,
+}
+
+/// Durable semantic outcome, independent from execution and delivery status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerSemanticEvaluation {
+    pub verdict: TriggerSemanticVerdict,
+    pub reason: String,
+    pub evaluated_at: Timestamp,
+}
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
@@ -810,6 +827,26 @@ pub(crate) fn parse_run_history_status_codec(
     }
 }
 
+pub(crate) fn semantic_verdict_text(value: TriggerSemanticVerdict) -> &'static str {
+    match value {
+        TriggerSemanticVerdict::Satisfied => "satisfied",
+        TriggerSemanticVerdict::Unsatisfied => "unsatisfied",
+        TriggerSemanticVerdict::EvaluationFailed => "evaluation_failed",
+    }
+}
+
+pub(crate) fn parse_semantic_verdict(value: &str) -> Result<TriggerSemanticVerdict, TriggerError> {
+    match value {
+        "satisfied" => Ok(TriggerSemanticVerdict::Satisfied),
+        "unsatisfied" => Ok(TriggerSemanticVerdict::Unsatisfied),
+        "evaluation_failed" => Ok(TriggerSemanticVerdict::EvaluationFailed),
+        other => Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::Other,
+            reason: format!("semantic_verdict: unsupported value `{other}`"),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerRunRecord {
     pub tenant_id: TenantId,
@@ -829,6 +866,8 @@ pub struct TriggerRunRecord {
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_evaluation: Option<TriggerSemanticEvaluation>,
 }
 
 impl TriggerRunRecord {
@@ -854,6 +893,7 @@ impl TriggerRunRecord {
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
+            semantic_evaluation: None,
         }
     }
 }
@@ -1277,6 +1317,37 @@ pub trait TriggerRepository: Send + Sync {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Atomically reserves semantic evaluation for one accepted run. Returns
+    /// `false` when this run was already reserved or evaluated.
+    async fn claim_semantic_evaluation(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _fire_slot: Timestamp,
+        _run_id: TurnRunId,
+        _claimed_at: Timestamp,
+    ) -> Result<bool, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "semantic evaluation claims are not implemented by this repository".to_string(),
+        })
+    }
+
+    /// Finalizes a previously claimed semantic evaluation. Returns `false`
+    /// when the run does not match the claim or was already finalized.
+    async fn complete_semantic_evaluation(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _fire_slot: Timestamp,
+        _run_id: TurnRunId,
+        _evaluation: TriggerSemanticEvaluation,
+    ) -> Result<bool, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "semantic evaluation completion is not implemented by this repository"
+                .to_string(),
+        })
+    }
 
     /// Looks up the run-history row and its parent trigger by `thread_id`.
     ///

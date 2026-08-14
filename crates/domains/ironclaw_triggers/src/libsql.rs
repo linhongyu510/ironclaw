@@ -3,8 +3,9 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
     TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
-    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
+    TriggerSchedule, TriggerSemanticEvaluation, TriggerState, parse_semantic_verdict,
+    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    semantic_verdict_text, trigger_run_history_status_text,
 };
 // arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use crate::AutomationName;
@@ -62,7 +63,8 @@ const SCHEDULE_AT_COL: usize = 19;
 const DELIVERY_TARGET_COL: usize = 20;
 const EXECUTION_SPEC_JSON_COL: usize = 21;
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
+    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, \
+    semantic_verdict, semantic_reason, semantic_evaluated_at";
 const RUN_TENANT_ID_COL: usize = 0;
 const RUN_TRIGGER_ID_COL: usize = 1;
 const RUN_FIRE_SLOT_COL: usize = 2;
@@ -71,6 +73,9 @@ const RUN_THREAD_ID_COL: usize = 4;
 const RUN_STATUS_COL: usize = 5;
 const RUN_SUBMITTED_AT_COL: usize = 6;
 const RUN_COMPLETED_AT_COL: usize = 7;
+const RUN_SEMANTIC_VERDICT_COL: usize = 8;
+const RUN_SEMANTIC_REASON_COL: usize = 9;
+const RUN_SEMANTIC_EVALUATED_AT_COL: usize = 10;
 
 /// Durable libSQL trigger repository.
 pub struct LibSqlTriggerRepository {
@@ -175,6 +180,11 @@ impl LibSqlTriggerRepository {
                         status TEXT NOT NULL,
                         submitted_at TEXT NOT NULL,
                         completed_at TEXT,
+                        semantic_evaluation_state TEXT,
+                        semantic_claimed_at TEXT,
+                        semantic_verdict TEXT,
+                        semantic_reason TEXT,
+                        semantic_evaluated_at TEXT,
                         PRIMARY KEY (tenant_id, trigger_id, fire_slot)
                     )"
                 ),
@@ -182,6 +192,26 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger_run_history table", error))?;
+            for (column, definition) in [
+                ("semantic_evaluation_state", "TEXT"),
+                ("semantic_claimed_at", "TEXT"),
+                ("semantic_verdict", "TEXT"),
+                ("semantic_reason", "TEXT"),
+                ("semantic_evaluated_at", "TEXT"),
+            ] {
+                if let Err(error) = conn
+                    .execute(
+                        &format!("ALTER TABLE {TRIGGER_RUN_TABLE} ADD COLUMN {column} {definition}"),
+                        (),
+                    )
+                    .await
+                {
+                    let message = error.to_string();
+                    if !message.contains("duplicate column") && !message.contains("already exists") {
+                        return Err(backend_error("add semantic evaluation column", error));
+                    }
+                }
+            }
             conn.execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
@@ -340,10 +370,18 @@ impl LibSqlTriggerRepository {
                         status TEXT NOT NULL,
                         submitted_at TEXT NOT NULL,
                         completed_at TEXT,
+                        semantic_evaluation_state TEXT,
+                        semantic_claimed_at TEXT,
+                        semantic_verdict TEXT,
+                        semantic_reason TEXT,
+                        semantic_evaluated_at TEXT,
                         PRIMARY KEY (tenant_id, trigger_id, fire_slot)
                     );
                     INSERT INTO {TRIGGER_RUN_TABLE}_new
-                        SELECT tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at
+                        SELECT tenant_id, trigger_id, fire_slot, run_id, thread_id, status,
+                               submitted_at, completed_at, semantic_evaluation_state,
+                               semantic_claimed_at, semantic_verdict, semantic_reason,
+                               semantic_evaluated_at
                         FROM {TRIGGER_RUN_TABLE};
                     DROP TABLE {TRIGGER_RUN_TABLE};
                     ALTER TABLE {TRIGGER_RUN_TABLE}_new RENAME TO {TRIGGER_RUN_TABLE};
@@ -1376,6 +1414,70 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
         Ok(runs_by_trigger)
     }
+
+    async fn claim_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        claimed_at: Timestamp,
+    ) -> Result<bool, TriggerError> {
+        let conn = self.write_connection().await?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_RUN_TABLE}
+                SET semantic_evaluation_state = 'evaluating', semantic_claimed_at = ?5
+                WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3
+                  AND run_id = ?4 AND semantic_evaluation_state IS NULL"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    trigger_id.to_string(),
+                    fmt_ts(&fire_slot),
+                    run_id.to_string(),
+                    fmt_ts(&claimed_at)
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("claim semantic evaluation", error))?;
+        Ok(changed == 1)
+    }
+
+    async fn complete_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        evaluation: TriggerSemanticEvaluation,
+    ) -> Result<bool, TriggerError> {
+        let conn = self.write_connection().await?;
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_RUN_TABLE}
+                SET semantic_evaluation_state = 'complete', semantic_verdict = ?5,
+                    semantic_reason = ?6, semantic_evaluated_at = ?7
+                WHERE tenant_id = ?1 AND trigger_id = ?2 AND fire_slot = ?3
+                  AND run_id = ?4 AND semantic_evaluation_state = 'evaluating'
+                  AND semantic_verdict IS NULL"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    trigger_id.to_string(),
+                    fmt_ts(&fire_slot),
+                    run_id.to_string(),
+                    semantic_verdict_text(evaluation.verdict),
+                    evaluation.reason,
+                    fmt_ts(&evaluation.evaluated_at)
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("complete semantic evaluation", error))?;
+        Ok(changed == 1)
+    }
 }
 fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let trigger_id = TriggerId::parse(&required_text(row, TRIGGER_ID_COL, "trigger_id")?)?;
@@ -1777,6 +1879,18 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
     let completed_at = optional_text(row, RUN_COMPLETED_AT_COL, "completed_at")?
         .map(|value| parse_timestamp(&value, "completed_at"))
         .transpose()?;
+    let semantic_evaluation = optional_text(row, RUN_SEMANTIC_VERDICT_COL, "semantic_verdict")?
+        .map(|verdict| {
+            Ok(TriggerSemanticEvaluation {
+                verdict: parse_semantic_verdict(&verdict)?,
+                reason: required_text(row, RUN_SEMANTIC_REASON_COL, "semantic_reason")?,
+                evaluated_at: parse_timestamp(
+                    &required_text(row, RUN_SEMANTIC_EVALUATED_AT_COL, "semantic_evaluated_at")?,
+                    "semantic_evaluated_at",
+                )?,
+            })
+        })
+        .transpose()?;
     Ok(TriggerRunRecord {
         tenant_id,
         trigger_id,
@@ -1786,6 +1900,7 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         status,
         submitted_at,
         completed_at,
+        semantic_evaluation,
     })
 }
 async fn upsert_run_history(

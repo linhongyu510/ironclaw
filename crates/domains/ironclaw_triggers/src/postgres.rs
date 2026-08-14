@@ -16,8 +16,9 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
     TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
-    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
+    TriggerSchedule, TriggerSemanticEvaluation, TriggerState,
+    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -40,7 +41,8 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
        state, next_run_at, last_run_at, last_fired_slot, last_status,
        active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, execution_spec_json";
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
+    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, \
+    semantic_verdict, semantic_reason, semantic_evaluated_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
 
 /// PostgreSQL-backed [`TriggerRepository`] storing trigger records.
@@ -1124,6 +1126,72 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         Ok(runs_by_trigger)
     }
+
+    async fn claim_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        claimed_at: Timestamp,
+    ) -> Result<bool, TriggerError> {
+        let client = self.connect().await?;
+        let changed = client
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_RUN_TABLE}
+                SET semantic_evaluation_state = 'evaluating', semantic_claimed_at = $5
+                WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
+                  AND run_id = $4 AND semantic_evaluation_state IS NULL"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &trigger_id.to_string(),
+                    &fmt_ts(&fire_slot),
+                    &run_id.to_string(),
+                    &fmt_ts(&claimed_at),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("claim semantic evaluation", error))?;
+        Ok(changed == 1)
+    }
+
+    async fn complete_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        evaluation: TriggerSemanticEvaluation,
+    ) -> Result<bool, TriggerError> {
+        let client = self.connect().await?;
+        let verdict = crate::semantic_verdict_text(evaluation.verdict);
+        let evaluated_at = fmt_ts(&evaluation.evaluated_at);
+        let changed = client
+            .execute(
+                &format!(
+                    "UPDATE {TRIGGER_RUN_TABLE}
+                SET semantic_evaluation_state = 'complete', semantic_verdict = $5,
+                    semantic_reason = $6, semantic_evaluated_at = $7
+                WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
+                  AND run_id = $4 AND semantic_evaluation_state = 'evaluating'
+                  AND semantic_verdict IS NULL"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &trigger_id.to_string(),
+                    &fmt_ts(&fire_slot),
+                    &run_id.to_string(),
+                    &verdict,
+                    &evaluation.reason,
+                    &evaluated_at,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("complete semantic evaluation", error))?;
+        Ok(changed == 1)
+    }
 }
 
 async fn locked_record(
@@ -1349,6 +1417,18 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let completed_at = optional_text(row, "completed_at")?
         .map(|value| parse_timestamp(&value, "completed_at"))
         .transpose()?;
+    let semantic_evaluation = optional_text(row, "semantic_verdict")?
+        .map(|verdict| {
+            Ok(TriggerSemanticEvaluation {
+                verdict: crate::parse_semantic_verdict(&verdict)?,
+                reason: required_text(row, "semantic_reason")?,
+                evaluated_at: parse_timestamp(
+                    &required_text(row, "semantic_evaluated_at")?,
+                    "semantic_evaluated_at",
+                )?,
+            })
+        })
+        .transpose()?;
     Ok(TriggerRunRecord {
         tenant_id,
         trigger_id,
@@ -1358,6 +1438,7 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
         status,
         submitted_at,
         completed_at,
+        semantic_evaluation,
     })
 }
 
@@ -1554,6 +1635,11 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
     status TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
     completed_at TEXT,
+    semantic_evaluation_state TEXT,
+    semantic_claimed_at TEXT,
+    semantic_verdict TEXT,
+    semantic_reason TEXT,
+    semantic_evaluated_at TEXT,
     PRIMARY KEY (tenant_id, trigger_id, fire_slot)
 );
 
@@ -1567,4 +1653,9 @@ CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
     ON trigger_run_history (tenant_id, thread_id);
 
 ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_evaluation_state TEXT;
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_claimed_at TEXT;
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_verdict TEXT;
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_reason TEXT;
+ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_evaluated_at TEXT;
 "#;

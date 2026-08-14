@@ -540,6 +540,26 @@ Capability follow-ups before launch:
   correctness gate. The schema owns a composite scoped-list index; add
   NULL-specific partial indexes only with `EXPLAIN` or benchmark evidence.
 
+### 8.1 Semantic execution outcomes
+
+After a structured automation run reaches `Completed`, a post-submit consumer
+reads that run's finalized assistant answer and performs one bounded,
+capability-free system inference against the stored goal and success criteria.
+The result is persisted on the run-history row independently from both the
+turn-run status and any delivery outcome:
+
+- `satisfied` — the answer provides evidence that every stored criterion was met;
+- `unsatisfied` — the answer is usable but does not meet every criterion;
+- `evaluation_failed` — the answer could not be read or the judge call/output
+  was unavailable or invalid.
+
+The record contains only the verdict, a bounded sanitized reason, and the
+evaluation timestamp. Legacy raw-prompt runs, non-completed runs, and runs
+without a structured execution spec have no semantic record. An atomic durable
+claim keyed by `(tenant_id, trigger_id, fire_slot, run_id)` prevents settlement
+replay from issuing a second judge call. Semantic evaluation does not deliver,
+retry, cancel, or change the run's execution status.
+
 ---
 
 ## 9. Delivery

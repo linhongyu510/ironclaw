@@ -69,6 +69,7 @@ mod steering;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
+pub use run_delivery::SemanticRunEvaluator;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use admin_user_directory::{
@@ -323,17 +324,18 @@ pub use reborn_services::{
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
     RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountInfo, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornAutomationRunStatus, RebornAutomationSemanticEvaluation, RebornAutomationSemanticVerdict,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCommandRejection,
+    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,

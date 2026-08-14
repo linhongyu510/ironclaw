@@ -13,7 +13,8 @@ use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
     TriggerDeliveryTargetId, TriggerError, TriggerExecutionSpec, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSemanticEvaluation,
+    TriggerSemanticVerdict, TriggerSourceKind, TriggerState,
 };
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
@@ -3527,6 +3528,64 @@ mod fire_claim_contract {
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
         assert_eq!(runs[0].submitted_at, submitted_at);
         assert!(runs[0].completed_at.is_some());
+        assert_eq!(runs[0].semantic_evaluation, None);
+
+        assert!(
+            repo.claim_semantic_evaluation(
+                tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                ts(1_704_067_210),
+            )
+            .await
+            .expect("claim semantic evaluation")
+        );
+        assert!(
+            !repo
+                .claim_semantic_evaluation(
+                    tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    run_id,
+                    ts(1_704_067_211),
+                )
+                .await
+                .expect("duplicate semantic evaluation claim")
+        );
+        let evaluation = TriggerSemanticEvaluation {
+            verdict: TriggerSemanticVerdict::Satisfied,
+            reason: "The answer includes every required section.".to_string(),
+            evaluated_at: ts(1_704_067_212),
+        };
+        assert!(
+            repo.complete_semantic_evaluation(
+                tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                evaluation.clone(),
+            )
+            .await
+            .expect("complete semantic evaluation")
+        );
+        assert!(
+            !repo
+                .complete_semantic_evaluation(
+                    tenant_id.clone(),
+                    trigger_id,
+                    fire_slot,
+                    run_id,
+                    evaluation.clone(),
+                )
+                .await
+                .expect("duplicate semantic evaluation completion")
+        );
+        let evaluated_runs = repo
+            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
+            .await
+            .expect("list semantically evaluated run history");
+        assert_eq!(evaluated_runs[0].semantic_evaluation, Some(evaluation));
 
         let empty_runs = repo
             .list_trigger_run_history(tenant_id.clone(), trigger_id, 0)

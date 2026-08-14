@@ -292,6 +292,7 @@ channel-delivery journeys (two-lane model):
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
 | The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
+| A completed structured automation gets one persisted semantic verdict, independently of delivery | `crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs::trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is
 unreachable from another: `reborn_agent_scope_isolation_parity.rs`,

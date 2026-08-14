@@ -35,7 +35,8 @@ use ironclaw_triggers::{
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerSchedule, TriggerSemanticEvaluation, TriggerSemanticVerdict, TriggerSourceKind,
+    TriggerState,
 };
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
@@ -167,6 +168,7 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         status,
         submitted_at: now(),
         completed_at: None,
+        semantic_evaluation: None,
     }
 }
 
@@ -713,12 +715,25 @@ async fn automation_service_maps_run_history_and_skips_batch_when_run_limit_zero
 
     // Verify mapped run fields by constructing a run record directly and
     // using the private mapping helper.
-    let run = make_run_record(id, TriggerRunHistoryStatus::Ok);
+    let mut run = make_run_record(id, TriggerRunHistoryStatus::Ok);
+    run.semantic_evaluation = Some(TriggerSemanticEvaluation {
+        verdict: TriggerSemanticVerdict::Unsatisfied,
+        reason: "The total was missing.".to_string(),
+        evaluated_at: now(),
+    });
     let mapped = super::map_recent_run(&run).expect("map_recent_run");
     assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Ok);
     assert!(mapped.run_id.is_some());
     assert!(mapped.submitted_at <= chrono::Utc::now());
     assert!(mapped.completed_at.is_none());
+    let semantic = mapped
+        .semantic_evaluation
+        .expect("semantic evaluation is projected");
+    assert_eq!(semantic.reason, "The total was missing.");
+    assert_eq!(
+        semantic.verdict,
+        crate::RebornAutomationSemanticVerdict::Unsatisfied
+    );
     assert!(
         mapped.thread_id.is_some(),
         "post-acceptance run must carry a canonical thread_id"

@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct InMemoryTriggerRepositoryState {
     records: HashMap<TriggerRepositoryKey, TriggerRecord>,
     runs: HashMap<TriggerRunRepositoryKey, TriggerRunRecord>,
+    semantic_evaluation_claims: HashSet<TriggerRunRepositoryKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -580,6 +581,50 @@ impl TriggerRepository for InMemoryTriggerRepository {
             });
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
         Ok(Some(record))
+    }
+
+    async fn claim_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        _claimed_at: Timestamp,
+    ) -> Result<bool, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
+        let eligible = state
+            .runs
+            .get(&key)
+            .is_some_and(|run| run.run_id == Some(run_id) && run.semantic_evaluation.is_none());
+        if !eligible || !state.semantic_evaluation_claims.insert(key) {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    async fn complete_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        evaluation: TriggerSemanticEvaluation,
+    ) -> Result<bool, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
+        if !state.semantic_evaluation_claims.contains(&key) {
+            return Ok(false);
+        }
+        let Some(run) = state.runs.get_mut(&key) else {
+            return Ok(false);
+        };
+        if run.run_id != Some(run_id) || run.semantic_evaluation.is_some() {
+            return Ok(false);
+        }
+        run.semantic_evaluation = Some(evaluation);
+        state.semantic_evaluation_claims.remove(&key);
+        Ok(true)
     }
 
     async fn find_trigger_run_by_thread_id(

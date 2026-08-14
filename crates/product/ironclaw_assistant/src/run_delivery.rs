@@ -55,9 +55,11 @@ mod gate_routes;
 pub mod notifications;
 mod observer;
 pub(crate) mod prompts;
+mod semantic_evaluation;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
+pub use semantic_evaluation::SemanticRunEvaluator;
 pub use triggered::TriggeredRunDeliveryDriver;
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);

@@ -26,6 +26,51 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTru
 use crate::runtime_input::TriggerPollerSettings;
 pub(crate) use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
 
+pub(crate) struct CompositePostSubmitHook {
+    delivery: Option<Arc<dyn PostSubmitDeliveryHook>>,
+    semantic_evaluator: Arc<ironclaw_assistant::SemanticRunEvaluator>,
+}
+
+impl CompositePostSubmitHook {
+    pub(crate) fn new(
+        delivery: Option<Arc<dyn PostSubmitDeliveryHook>>,
+        semantic_evaluator: Arc<ironclaw_assistant::SemanticRunEvaluator>,
+    ) -> Self {
+        Self {
+            delivery,
+            semantic_evaluator,
+        }
+    }
+}
+
+#[async_trait]
+impl PostSubmitDeliveryHook for CompositePostSubmitHook {
+    async fn on_trigger_submitted(
+        &self,
+        fire: ironclaw_triggers::TriggerFire,
+        run_id: ironclaw_turns::TurnRunId,
+        scope: ironclaw_turns::TurnScope,
+    ) {
+        if let Some(delivery) = &self.delivery {
+            tokio::join!(
+                delivery.on_trigger_submitted(fire.clone(), run_id, scope.clone()),
+                self.semantic_evaluator
+                    .on_trigger_submitted(fire, run_id, scope),
+            );
+        } else {
+            self.semantic_evaluator
+                .on_trigger_submitted(fire, run_id, scope)
+                .await;
+        }
+    }
+
+    async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
+        if let Some(delivery) = &self.delivery {
+            delivery.on_trigger_failed_before_submit(event).await;
+        }
+    }
+}
+
 mod active_run_lookup;
 pub(crate) use active_run_lookup::{
     ProcessActiveRunLookup, RebindableProcessLifecycleLookupSource,

@@ -4026,6 +4026,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             ),
         )) as Arc<dyn ironclaw_loop_contracts::SystemInferencePort>
     });
+    let semantic_evaluation_inference = Arc::clone(&failure_explanation_inference);
     // Terminal reconciliation of stranded steering inputs: every cancel caller
     // goes through this ONE decorated coordinator, so a run cancelled before
     // its next drain flips its queued messages to `RejectedBusy` (resend
@@ -4318,28 +4319,28 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
     }
 
-    // Generic triggered-run delivery (extension-runtime P6): one hook routes
-    // each settled trigger fire to the owning channel extension's driver via
-    // the assembly's vendor codecs.
-    if let (Some(slot), Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
-        runtime_post_submit_hook_slot.as_ref(),
-        channel_host_assembly.as_ref(),
-        channel_workflow_factory.as_ref(),
-        local_runtime,
-    ) {
-        let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        // ONE background-run notifier for every channel extension, built by
-        // the SAME product-side workflow factory the channel host graphs are
-        // built by (§12.11 D-A). It decodes each stored notification target
-        // through the assembly's LIVE codec view, so a channel activated
-        // after boot still decodes its own targets.
-        let notifier = workflow_factory.background_run_notifier(Arc::new(
+    // Channel notification and semantic assessment are sibling post-submit
+    // consumers. Semantic evaluation remains active even when no channel host
+    // is composed; delivery is optional and independent.
+    let delivery_hook: Option<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>> =
+        if let (Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
+            channel_host_assembly.as_ref(),
+            channel_workflow_factory.as_ref(),
+            local_runtime,
+        ) {
+            let triggered_run_delivery = &local_runtime.triggered_run_delivery;
+            // ONE background-run notifier for every channel extension, built by
+            // the SAME product-side workflow factory the channel host graphs are
+            // built by (§12.11 D-A). It decodes each stored notification target
+            // through the assembly's LIVE codec view, so a channel activated
+            // after boot still decodes its own targets.
+            let notifier = workflow_factory.background_run_notifier(Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
                 Arc::clone(assembly),
             ),
         ));
 
-        let generic_trigger_hook: Arc<
+            let hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
@@ -4347,9 +4348,28 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(triggered_run_delivery),
             ),
         );
-        if slot.set(generic_trigger_hook).is_err() {
+            Some(hook)
+        } else {
+            None
+        };
+    if let Some(slot) = runtime_post_submit_hook_slot.as_ref() {
+        let semantic_evaluator = Arc::new(ironclaw_assistant::SemanticRunEvaluator::new(
+            Arc::clone(&trigger_repository),
+            Arc::clone(&planned_turn_coordinator),
+            Arc::clone(&thread_service),
+            semantic_evaluation_inference,
+            validated_identity.agent_id.clone(),
+        ));
+        let post_submit_hook: Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook> =
+            Arc::new(
+                crate::automation::trigger_poller::CompositePostSubmitHook::new(
+                    delivery_hook,
+                    semantic_evaluator,
+                ),
+            );
+        if slot.set(post_submit_hook).is_err() {
             tracing::debug!(
-                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
+                "post-submit trigger hook slot was already occupied; keeping the first hook"
             );
         }
     }

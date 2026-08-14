@@ -1015,6 +1015,21 @@ pub enum RebornAutomationRecentRunStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationSemanticVerdict {
+    Satisfied,
+    Unsatisfied,
+    EvaluationFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationSemanticEvaluation {
+    pub verdict: RebornAutomationSemanticVerdict,
+    pub reason: String,
+    pub evaluated_at: DateTime<Utc>,
+}
+
 /// Client-safe automation run projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationRecentRunInfo {
@@ -1032,6 +1047,8 @@ pub struct RebornAutomationRecentRunInfo {
     pub submitted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_evaluation: Option<RebornAutomationSemanticEvaluation>,
 }
 
 /// Allowlisted client-visible state for automation list projections.

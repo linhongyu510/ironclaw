@@ -59,9 +59,9 @@ use ironclaw_outbound::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus,
+    TriggerSchedule, TriggerSemanticVerdict, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
@@ -151,9 +151,19 @@ impl HostManagedModelGateway for RecordingGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let semantic_evaluation = request.messages.iter().any(|message| {
+            message
+                .content
+                .contains("You judge whether a completed automation answer")
+        });
         self.requests.lock().await.push(request);
         Ok(HostManagedModelResponse::assistant_reply(
-            "trigger e2e ok".to_string(),
+            if semantic_evaluation {
+                r#"{"satisfied":true,"reason":"The final answer completed the requested task."}"#
+                    .to_string()
+            } else {
+                "trigger e2e ok".to_string()
+            },
         ))
     }
 }
@@ -1127,6 +1137,14 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         .await
         .expect("pair external actor for trigger creator");
 
+    let execution_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: TRIGGER_PROMPT.to_string(),
+        success_criteria: vec!["Return a successful completion result.".to_string()],
+        output_instructions: "Return a concise result.".to_string(),
+        no_result_text: "No result.".to_string(),
+        policy: Default::default(),
+    };
     let record = TriggerRecord {
         trigger_id,
         tenant_id: tenant_id.clone(),
@@ -1138,8 +1156,8 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         // One-shot: fires once, then becomes Completed via clear_active_fire.
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
-        prompt: TRIGGER_PROMPT.to_string(),
-        execution_spec: None,
+        prompt: execution_spec.render_prompt(),
+        execution_spec: Some(execution_spec),
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
@@ -1208,6 +1226,21 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     )
     .await;
 
+    let semantic_evaluation = loop {
+        let runs = repo
+            .list_trigger_run_history(tenant_id.clone(), record.trigger_id, 1)
+            .await
+            .expect("list trigger run history");
+        if let Some(evaluation) = runs.first().and_then(|run| run.semantic_evaluation.clone()) {
+            break evaluation;
+        }
+        assert!(
+            Instant::now() < deadline + Duration::from_secs(5),
+            "semantic evaluation did not persist for completed structured run: {runs:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
     runtime.shutdown().await.expect("runtime shutdown");
 
     // Final snapshot for diagnostics, once. Taken after shutdown so a request
@@ -1240,6 +1273,17 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         final_record.state,
         TriggerState::Completed,
         "once schedule: state must be Completed after clear_active_fire — record: {final_record:?}",
+    );
+    assert_eq!(
+        semantic_evaluation.verdict,
+        TriggerSemanticVerdict::Satisfied
+    );
+    assert_eq!(
+        recording_gateway
+            .request_count_containing("You judge whether a completed automation answer")
+            .await,
+        1,
+        "completed structured run must issue exactly one semantic judge call"
     );
 }
 
@@ -2149,6 +2193,13 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         "recurring trigger next_run_at should have advanced — original: {:?}, current: {:?}",
         original_next_run_at,
         settled.next_run_at
+    );
+    assert_eq!(
+        recording_gateway
+            .request_count_containing("You judge whether a completed automation answer")
+            .await,
+        0,
+        "legacy raw-prompt runs must not invoke semantic evaluation"
     );
 }
 
