@@ -1383,6 +1383,22 @@ pub trait TriggerRepository: Send + Sync {
         })
     }
 
+    /// Loads one exact completed structured run when it still requires
+    /// semantic evaluation. Terminal-success observers use this instead of
+    /// scanning unrelated automation runs.
+    async fn get_pending_semantic_evaluation(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _fire_slot: Timestamp,
+        _run_id: TurnRunId,
+    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "pending semantic evaluation lookup is not implemented by this repository"
+                .to_string(),
+        })
+    }
+
     /// Reads the retained semantic result independently of prunable run
     /// history. This is the source of truth used to project recent history.
     async fn get_semantic_evaluation(
@@ -1512,8 +1528,8 @@ pub use worker::{
     TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
     TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
     TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRunFailureSettlement,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
-    active_hold_projection, active_holds_for_records,
+    TriggerRunSuccessSettlement, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

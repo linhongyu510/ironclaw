@@ -1344,6 +1344,43 @@ impl TriggerRepository for PostgresTriggerRepository {
             .map(row_to_pending_semantic_evaluation)
             .collect()
     }
+
+    async fn get_pending_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
+        let client = self.connect().await?;
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT rh.tenant_id, rh.trigger_id, rh.fire_slot, rh.run_id, rh.thread_id,
+                            tr.creator_user_id, tr.agent_id, tr.project_id, tr.execution_spec_json
+                     FROM {TRIGGER_RUN_TABLE} rh
+                     JOIN {TRIGGER_TABLE} tr
+                       ON tr.tenant_id = rh.tenant_id AND tr.trigger_id = rh.trigger_id
+                     LEFT JOIN {TRIGGER_SEMANTIC_EVALUATION_TABLE} se
+                       ON se.tenant_id = rh.tenant_id AND se.trigger_id = rh.trigger_id
+                      AND se.fire_slot = rh.fire_slot AND se.run_id = rh.run_id
+                     WHERE rh.tenant_id = $1 AND rh.trigger_id = $2 AND rh.fire_slot = $3
+                       AND rh.run_id = $4 AND rh.status = 'ok' AND rh.thread_id IS NOT NULL
+                       AND tr.execution_spec_json IS NOT NULL AND se.verdict IS NULL"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &trigger_id.to_string(),
+                    &fmt_ts(&fire_slot),
+                    &run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query pending semantic evaluation", error))?;
+        row.as_ref()
+            .map(row_to_pending_semantic_evaluation)
+            .transpose()
+    }
 }
 
 fn row_to_pending_semantic_evaluation(

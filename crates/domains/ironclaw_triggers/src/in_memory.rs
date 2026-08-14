@@ -721,6 +721,52 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(pending)
     }
 
+    async fn get_pending_semantic_evaluation(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
+        let state = self.lock_state()?;
+        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
+        let Some(run) = state.runs.get(&key) else {
+            return Ok(None);
+        };
+        if run.status != TriggerRunHistoryStatus::Ok
+            || run.run_id != Some(run_id)
+            || state
+                .semantic_evaluations
+                .get(&key)
+                .is_some_and(|record| record.evaluation.is_some())
+        {
+            return Ok(None);
+        }
+        let Some(thread_id) = run.thread_id.clone() else {
+            return Ok(None);
+        };
+        let Some(trigger) = state
+            .records
+            .get(&TriggerRepositoryKey::new(&tenant_id, trigger_id))
+        else {
+            return Ok(None);
+        };
+        let Some(execution_spec) = trigger.execution_spec.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(PendingTriggerSemanticEvaluation {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id,
+            creator_user_id: trigger.creator_user_id.clone(),
+            agent_id: trigger.agent_id.clone(),
+            project_id: trigger.project_id.clone(),
+            execution_spec,
+        }))
+    }
+
     async fn find_trigger_run_by_thread_id(
         &self,
         tenant_id: TenantId,

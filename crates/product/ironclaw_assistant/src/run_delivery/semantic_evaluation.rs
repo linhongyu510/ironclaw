@@ -1,4 +1,5 @@
-use std::sync::{Arc, Weak};
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -10,13 +11,12 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::{
-    ClaimTriggerSemanticEvaluationRequest, PendingTriggerSemanticEvaluation, TriggerFire,
-    TriggerRepository, TriggerSemanticEvaluation, TriggerSemanticEvaluationClaimId,
+    ClaimTriggerSemanticEvaluationRequest, PendingTriggerSemanticEvaluation, TriggerRepository,
+    TriggerRunSuccessSettlement, TriggerSemanticEvaluation, TriggerSemanticEvaluationClaimId,
     TriggerSemanticVerdict,
 };
-use ironclaw_turns::{TurnRunId, TurnScope};
 use serde::Deserialize;
-use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 const SYSTEM_PROMPT: &str = include_str!("prompts/semantic_evaluation.md");
 const MAX_INPUT_TOKENS: u64 = 12_000;
@@ -26,7 +26,6 @@ const MAX_REASON_CHARS: usize = 500;
 // which takes twelve JSON bytes. Leave a small fixed allowance for the object
 // keys, boolean, punctuation, and quotes around the maximum valid reason.
 const MAX_MODEL_OUTPUT_BYTES: usize = MAX_REASON_CHARS * 12 + 64;
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 const RECONCILE_BATCH_SIZE: usize = 64;
 const MAX_CONCURRENT_EVALUATIONS: usize = 8;
 const CLAIM_LEASE: chrono::Duration = chrono::Duration::minutes(2);
@@ -38,10 +37,12 @@ struct JudgeOutput {
     reason: String,
 }
 
-/// Reconciles completed structured trigger runs into independent semantic
-/// verdicts. Delivery remains a separate post-submit consumer.
+/// Evaluates durably settled successful structured trigger runs. Delivery
+/// remains an independent consumer.
+#[derive(Clone)]
 pub struct SemanticRunEvaluator {
     worker: Arc<SemanticEvaluationWorker>,
+    tasks: Arc<SemanticEvaluationTasks>,
 }
 
 struct SemanticEvaluationWorker {
@@ -49,7 +50,46 @@ struct SemanticEvaluationWorker {
     thread_service: Arc<dyn SessionThreadService>,
     inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
     fallback_agent_id: AgentId,
-    wake: Notify,
+}
+
+/// Runtime-owned task set for judge calls and the bounded startup recovery
+/// pass. Evaluation is detached from trigger settlement, but never hidden from
+/// runtime shutdown.
+#[derive(Default)]
+struct SemanticEvaluationTasks {
+    handles: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl SemanticEvaluationTasks {
+    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        let handle = tokio::spawn(future);
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        handles.retain(|handle| !handle.is_finished());
+        handles.push(handle);
+    }
+
+    async fn shutdown(&self) {
+        let handles = {
+            let mut handles = self
+                .handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *handles)
+        };
+        for handle in &handles {
+            handle.abort();
+        }
+        for handle in handles {
+            if let Err(error) = handle.await
+                && error.is_panic()
+            {
+                tracing::error!(%error, "semantic evaluation task panicked during shutdown");
+            }
+        }
+    }
 }
 
 impl SemanticRunEvaluator {
@@ -59,66 +99,96 @@ impl SemanticRunEvaluator {
         inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
         fallback_agent_id: AgentId,
     ) -> Self {
-        let worker = Arc::new(SemanticEvaluationWorker {
-            repository,
-            thread_service,
-            inference,
-            fallback_agent_id,
-            wake: Notify::new(),
-        });
-        spawn_reconciler(Arc::downgrade(&worker));
-        Self { worker }
-    }
-
-    pub async fn on_trigger_submitted(
-        &self,
-        _fire: TriggerFire,
-        _run_id: TurnRunId,
-        _scope: TurnScope,
-    ) {
-        // Accepted-fire callbacks are deliberately constant-time. Completed
-        // structured runs are discovered from durable storage by one bounded
-        // reconciler, so bursts cannot create one long-lived watcher per run.
-        self.worker.wake.notify_one();
-    }
-}
-
-fn spawn_reconciler(worker: Weak<SemanticEvaluationWorker>) {
-    tokio::spawn(async move {
-        loop {
-            let Some(current) = worker.upgrade() else {
-                return;
-            };
-            current.reconcile_once().await;
-            tokio::select! {
-                _ = current.wake.notified() => {}
-                _ = tokio::time::sleep(RECONCILE_INTERVAL) => {}
-            }
+        Self {
+            worker: Arc::new(SemanticEvaluationWorker {
+                repository,
+                thread_service,
+                inference,
+                fallback_agent_id,
+            }),
+            tasks: Arc::new(SemanticEvaluationTasks::default()),
         }
-    });
+    }
+
+    /// Starts one immediate recovery drain plus one lease-expiry retry for
+    /// work abandoned by a process that stopped while holding a claim.
+    pub fn start_recovery(&self) {
+        let worker = Arc::clone(&self.worker);
+        self.tasks.spawn(async move {
+            if worker.recover_available().await {
+                tokio::time::sleep(CLAIM_LEASE.to_std().unwrap_or(Duration::from_secs(120))).await;
+                worker.recover_available().await;
+            }
+        });
+    }
+
+    /// Schedules evaluation for this exact run after terminal success has been
+    /// durably settled. Failed, cancelled, and pre-submit events never enter
+    /// this path.
+    pub fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
+        let worker = Arc::clone(&self.worker);
+        self.tasks.spawn(async move {
+            worker.evaluate_settled_run(event).await;
+        });
+    }
+
+    pub async fn shutdown(&self) {
+        self.tasks.shutdown().await;
+    }
 }
 
 impl SemanticEvaluationWorker {
-    async fn reconcile_once(&self) {
-        let candidates = match self
+    async fn evaluate_settled_run(&self, event: TriggerRunSuccessSettlement) {
+        match self
             .repository
-            .list_pending_semantic_evaluations(RECONCILE_BATCH_SIZE)
+            .get_pending_semantic_evaluation(
+                event.tenant_id,
+                event.trigger_id,
+                event.fire_slot,
+                event.run_id,
+            )
             .await
         {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::warn!(%error, "semantic evaluation reconciliation query failed");
-                return;
+            Ok(Some(candidate)) => {
+                self.evaluate(candidate).await;
             }
-        };
-        stream::iter(candidates)
-            .for_each_concurrent(MAX_CONCURRENT_EVALUATIONS, |candidate| {
-                self.evaluate(candidate)
-            })
-            .await;
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(run_id = %event.run_id, %error, "semantic evaluation candidate lookup failed");
+            }
+        }
     }
 
-    async fn evaluate(&self, candidate: PendingTriggerSemanticEvaluation) {
+    /// Returns `true` when durable candidates remain but none could advance,
+    /// which indicates a stale lease or temporarily unavailable final message.
+    async fn recover_available(&self) -> bool {
+        loop {
+            let candidates = match self
+                .repository
+                .list_pending_semantic_evaluations(RECONCILE_BATCH_SIZE)
+                .await
+            {
+                Ok(candidates) if candidates.is_empty() => return false,
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    tracing::warn!(%error, "semantic evaluation recovery query failed");
+                    return true;
+                }
+            };
+            let progressed = stream::iter(candidates)
+                .map(|candidate| self.evaluate(candidate))
+                .buffer_unordered(MAX_CONCURRENT_EVALUATIONS)
+                .fold(false, |progressed, evaluated| async move {
+                    progressed || evaluated
+                })
+                .await;
+            if !progressed {
+                return true;
+            }
+        }
+    }
+
+    async fn evaluate(&self, candidate: PendingTriggerSemanticEvaluation) -> bool {
         let thread_scope = ThreadScope {
             tenant_id: candidate.tenant_id.clone(),
             agent_id: candidate
@@ -141,11 +211,11 @@ impl SemanticEvaluationWorker {
             Ok(Some(message)) => message.content.filter(|text| !text.trim().is_empty()),
             Ok(None) => {
                 tracing::warn!(run_id = %candidate.run_id, "semantic evaluation final answer is not visible yet");
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::warn!(run_id = %candidate.run_id, %error, "semantic evaluation could not read final answer");
-                return;
+                return false;
             }
         };
         let claimed_at = Utc::now();
@@ -164,10 +234,10 @@ impl SemanticEvaluationWorker {
             .await
         {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => return false,
             Err(error) => {
                 tracing::warn!(run_id = %candidate.run_id, %error, "semantic evaluation claim failed");
-                return;
+                return false;
             }
         }
         let evaluation = match answer {
@@ -199,11 +269,11 @@ impl SemanticEvaluationWorker {
             {
                 Ok(true) => {
                     tracing::info!(run_id = %candidate.run_id, "semantic evaluation persisted");
-                    return;
+                    return true;
                 }
                 Ok(false) => {
                     tracing::warn!(run_id = %candidate.run_id, "semantic evaluation claim was no longer owned at completion");
-                    return;
+                    return false;
                 }
                 Err(error) if attempt < 3 => {
                     tracing::warn!(run_id = %candidate.run_id, attempt, %error, "semantic evaluation persistence failed; retrying");
@@ -214,6 +284,7 @@ impl SemanticEvaluationWorker {
                 }
             }
         }
+        false
     }
 }
 

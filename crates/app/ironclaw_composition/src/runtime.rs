@@ -687,6 +687,7 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    semantic_run_evaluator: Option<ironclaw_assistant::SemanticRunEvaluator>,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: ironclaw_trace_commons::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
@@ -2468,6 +2469,9 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        if let Some(semantic_run_evaluator) = self.semantic_run_evaluator {
+            semantic_run_evaluator.shutdown().await;
+        }
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
                 .shutdown(ironclaw_auth::KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT)
@@ -4192,17 +4196,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         })?;
     }
 
-    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
+    // `trigger_poller_handle`, `settlement_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
-    let runtime_post_submit_hook_slot: Option<
-        Arc<
-            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
-        >,
+    let runtime_settlement_hook_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::TriggerSettlementHook>>>,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
@@ -4295,8 +4297,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             trigger_conversation_pairing_value =
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
-        let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
+        let hook_slot = Arc::clone(&trigger_poller_services.settlement_hook_slot);
+        runtime_settlement_hook_slot = Some(Arc::clone(&hook_slot));
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -4304,7 +4306,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
-                post_submit_hook_slot: hook_slot,
+                settlement_hook_slot: hook_slot,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -4312,14 +4314,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         })?;
     } else {
         trigger_poller_handle = None;
-        runtime_post_submit_hook_slot = None;
+        runtime_settlement_hook_slot = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
         }
     }
 
-    // Channel notification and semantic assessment are sibling post-submit
+    // Channel notification and semantic assessment are sibling settlement
     // consumers. Semantic evaluation remains active even when no channel host
     // is composed; delivery is optional and independent.
     let delivery_hook = if let (Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
@@ -4348,24 +4350,30 @@ pub(crate) async fn build_runtime_with_resource_governor(
     } else {
         None
     };
-    if let Some(slot) = runtime_post_submit_hook_slot.as_ref() {
+    let semantic_run_evaluator = if let Some(slot) = runtime_settlement_hook_slot.as_ref() {
         let semantic_evaluator = ironclaw_assistant::SemanticRunEvaluator::new(
             Arc::clone(&trigger_repository),
             Arc::clone(&thread_service),
             semantic_evaluation_inference,
             validated_identity.agent_id.clone(),
         );
-        let post_submit_hook =
-            ironclaw_extension_host::channel_triggered_delivery::PostSubmitHookFanout::new(
+        let settlement_hook =
+            ironclaw_extension_host::channel_triggered_delivery::TriggerSettlementHookFanout::new(
                 delivery_hook,
-                crate::automation::trigger_poller::SemanticEvaluationHook::new(semantic_evaluator),
+                crate::automation::trigger_poller::SemanticEvaluationHook::new(
+                    semantic_evaluator.clone(),
+                ),
             );
-        if slot.set(Arc::new(post_submit_hook)).is_err() {
+        if slot.set(Arc::new(settlement_hook)).is_err() {
             tracing::debug!(
-                "post-submit trigger hook slot was already occupied; keeping the first hook"
+                "trigger settlement hook slot was already occupied; keeping the first hook"
             );
         }
-    }
+        semantic_evaluator.start_recovery();
+        Some(semantic_evaluator)
+    } else {
+        None
+    };
 
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
@@ -4569,6 +4577,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
+        semantic_run_evaluator,
         credential_refresh_worker_handle,
         trace_flush_worker,
         skill_learning_extraction_tasks,

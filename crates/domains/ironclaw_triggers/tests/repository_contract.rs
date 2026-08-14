@@ -3554,6 +3554,25 @@ mod fire_claim_contract {
             }),
             "completed structured run must enter the durable evaluation backlog: {pending:?}"
         );
+        let exact_pending = repo
+            .get_pending_semantic_evaluation(tenant_id.clone(), trigger_id, fire_slot, run_id)
+            .await
+            .expect("load exact pending semantic evaluation")
+            .expect("successful structured run must be directly addressable");
+        assert_eq!(exact_pending.run_id, run_id);
+        assert_eq!(exact_pending.thread_id, canonical_thread_id);
+        assert!(
+            repo.get_pending_semantic_evaluation(
+                tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                TurnRunId::new(),
+            )
+            .await
+            .expect("mismatched run lookup")
+            .is_none(),
+            "terminal callback lookup must not select a different run"
+        );
 
         let first_claim_id = TriggerSemanticEvaluationClaimId::new();
         let second_claim_id = TriggerSemanticEvaluationClaimId::new();
@@ -3663,6 +3682,13 @@ mod fire_claim_contract {
             .await
             .expect("list semantically evaluated run history");
         assert_eq!(evaluated_runs[0].semantic_evaluation, Some(evaluation));
+        assert!(
+            repo.get_pending_semantic_evaluation(tenant_id.clone(), trigger_id, fire_slot, run_id,)
+                .await
+                .expect("load exact semantic evaluation after completion")
+                .is_none(),
+            "completed evaluations must not be returned to terminal callbacks"
+        );
         assert!(
             repo.list_pending_semantic_evaluations(10)
                 .await

@@ -1,10 +1,10 @@
 //! Generic background-run notification over the channel host assembly
 //! (extension-runtime §5.4, P6 c-rest).
 //!
-//! One composition-owned [`PostSubmitDeliveryHook`] serves every channel
-//! extension. On a settled trigger fire it hands either the accepted run or a
-//! permanent pre-submit failure to the single background-run notifier, which
-//! resolves the creator's stored
+//! One composition-owned [`TriggerSettlementHook`] serves delivery and
+//! independent terminal-outcome observers for every channel extension. For
+//! delivery, it hands either the accepted run or a permanent pre-submit
+//! failure to the single background-run notifier, which resolves the creator's stored
 //! **notification channels** at fire time and fans gate/auth/failure notices
 //! out over every one of them.
 //!
@@ -28,7 +28,7 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest,
     TriggeredRunDeliveryStore,
 };
-use ironclaw_triggers::{TriggerFailedFireSettlement, TriggerFire};
+use ironclaw_triggers::{TriggerFailedFireSettlement, TriggerFire, TriggerRunSuccessSettlement};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::channel_host::GenericChannelHostAssembly;
@@ -40,37 +40,48 @@ use crate::channel_host::GenericChannelHostAssembly;
 /// ledger scope. Composition uses it to build the notifier's services.
 pub const BACKGROUND_RUN_NOTIFIER_ID: &str = "background-run-notifier";
 
-/// Hook invoked by the trigger poller after a successful submission or a
-/// permanent pre-submit failure has been durably settled in trigger storage.
+/// Hook invoked for durable trigger settlements. Delivery consumes submission
+/// and pre-submit failure; independent observers may consume terminal outcome.
 #[async_trait::async_trait]
-pub trait PostSubmitDeliveryHook: Send + Sync {
+pub trait TriggerSettlementHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
     /// turn scope the run was submitted under.
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
+    async fn on_trigger_submitted(
+        &self,
+        _fire: TriggerFire,
+        _run_id: TurnRunId,
+        _scope: TurnScope,
+    ) {
+    }
 
     /// Called after a trigger fire permanently fails before a run exists and
     /// the failure has been durably settled in trigger storage.
     async fn on_trigger_failed_before_submit(&self, _event: TriggerFailedFireSettlement) {}
+
+    /// Called after an accepted run is durably settled as successful. Delivery
+    /// ignores this because its watcher starts at submission; terminal outcome
+    /// observers such as semantic evaluation consume it.
+    async fn on_run_success_settled(&self, _event: TriggerRunSuccessSettlement) {}
 }
 
 /// Fans accepted runs out to an optional delivery hook and one independent
 /// observer. Pre-submit failures remain delivery-only because no run exists.
-pub struct PostSubmitHookFanout<Delivery, Observer> {
+pub struct TriggerSettlementHookFanout<Delivery, Observer> {
     delivery: Option<Delivery>,
     observer: Observer,
 }
 
-impl<Delivery, Observer> PostSubmitHookFanout<Delivery, Observer> {
+impl<Delivery, Observer> TriggerSettlementHookFanout<Delivery, Observer> {
     pub fn new(delivery: Option<Delivery>, observer: Observer) -> Self {
         Self { delivery, observer }
     }
 }
 
 #[async_trait]
-impl<Delivery, Observer> PostSubmitDeliveryHook for PostSubmitHookFanout<Delivery, Observer>
+impl<Delivery, Observer> TriggerSettlementHook for TriggerSettlementHookFanout<Delivery, Observer>
 where
-    Delivery: PostSubmitDeliveryHook,
-    Observer: PostSubmitDeliveryHook,
+    Delivery: TriggerSettlementHook,
+    Observer: TriggerSettlementHook,
 {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
         if let Some(delivery) = &self.delivery {
@@ -89,6 +100,10 @@ where
         if let Some(delivery) = &self.delivery {
             delivery.on_trigger_failed_before_submit(event).await;
         }
+    }
+
+    async fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
+        self.observer.on_run_success_settled(event).await;
     }
 }
 
@@ -137,7 +152,7 @@ impl GenericTriggeredRunDeliveryHook {
 }
 
 #[async_trait]
-impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
+impl TriggerSettlementHook for GenericTriggeredRunDeliveryHook {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
         let Some(notifier) = self.notifier.as_ref() else {
             tracing::warn!(
