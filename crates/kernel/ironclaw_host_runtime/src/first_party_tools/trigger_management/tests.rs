@@ -704,6 +704,109 @@ async fn scheduled_origin_may_still_list_routines() {
     );
 }
 
+#[tokio::test]
+async fn trigger_list_exposes_persisted_semantic_evaluation_in_recent_runs() {
+    use ironclaw_triggers::{
+        ClaimTriggerSemanticEvaluationRequest, ClearActiveFireRequest, TriggerRunHistoryStatus,
+        TriggerSemanticEvaluation, TriggerSemanticEvaluationClaimId, TriggerSemanticVerdict,
+    };
+    use ironclaw_turns::TurnRunId;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("semantic-status-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let execution_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Produce the scheduled report".to_string(),
+        success_criteria: vec!["Include the total".to_string()],
+        output_instructions: "Return a concise report".to_string(),
+        no_result_text: "No report data".to_string(),
+        policy: Default::default(),
+    };
+    record.prompt = execution_spec.render_prompt();
+    record.execution_spec = Some(execution_spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+
+    let claim_id = TriggerSemanticEvaluationClaimId::new();
+    repository
+        .claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            claim_id,
+            claimed_at: fire_slot + chrono::Duration::seconds(1),
+            stale_before: fire_slot,
+        })
+        .await
+        .expect("claim semantic evaluation");
+    let evaluated_at = fire_slot + chrono::Duration::seconds(2);
+    repository
+        .complete_semantic_evaluation(
+            scope.tenant_id.clone(),
+            record.trigger_id,
+            fire_slot,
+            run_id,
+            claim_id,
+            TriggerSemanticEvaluation {
+                verdict: TriggerSemanticVerdict::Satisfied,
+                reason: "The report includes the required total.".to_string(),
+                evaluated_at,
+            },
+        )
+        .await
+        .expect("complete semantic evaluation");
+
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+    let result = handler.dispatch(request).await.expect("list routines");
+
+    assert_eq!(
+        result.output["triggers"][0]["recent_runs"][0]["semantic_evaluation"],
+        json!({
+            "verdict": "satisfied",
+            "reason": "The report includes the required total.",
+            "evaluated_at": evaluated_at,
+        }),
+        "the authoritative model-facing read must expose the persisted semantic outcome"
+    );
+}
+
 /// #7474 review: `limit: 0` would return an empty `triggers` array while
 /// routines exist, and the description tells the model an empty list proves
 /// absence — the exact false-absence claim #7246 exists to prevent. Zero is
