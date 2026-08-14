@@ -30,10 +30,9 @@ use ironclaw_auth::{
 };
 use ironclaw_composition::test_support::SkillActivationTestSource;
 use ironclaw_composition::{
-    LegacySkillSnapshotSource, OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts,
-    RebornRuntimeInput,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
 };
-use ironclaw_config::RebornStoragePaths;
+use ironclaw_config::{LegacyStorageSource, RebornStoragePaths};
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
@@ -772,7 +771,7 @@ impl HostRuntimeCapabilityHarness {
             )?;
         }
         let legacy_skill_snapshot_source =
-            (!user_skill_fixtures.is_empty()).then_some(LegacySkillSnapshotSource::BareHome);
+            (!user_skill_fixtures.is_empty()).then_some(LegacyStorageSource::BareHome);
         if let Some(snapshot_source) = legacy_skill_snapshot_source {
             let tenant = skill_activation_tenant
                 .as_ref()
