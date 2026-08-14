@@ -34,7 +34,11 @@ const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with copied v1 validation and saved-file references for large local output",
+        "Execute shell commands with copied v1 validation and saved-file references for large local \
+         output. One call runs a full shell command line, so related steps belong in a single call \
+         (`a && b`, a `for` loop over ids, a heredoc script) rather than one call per step. Pass \
+         `workdir` instead of a leading `cd` — the working directory is per-call and does not carry \
+         over between calls.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
