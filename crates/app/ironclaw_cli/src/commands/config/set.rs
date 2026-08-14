@@ -5,7 +5,7 @@
 //! from that single chokepoint.
 
 use std::io::{IsTerminal, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::Args;
@@ -134,20 +134,6 @@ fn set_value_key(
         ShapeVerdict::Ok => {}
     }
 
-    // Secret writes are durable state. Admit the canonical layout before the
-    // opener can create or inspect a database, master-key cache, or keychain
-    // binding. Config-TOML and token-file writes remain intentionally pure
-    // with respect to the durable-state layout.
-    let state_root = if key.destination() == ConfigDestination::SecretStorePort {
-        Some(
-            crate::runtime::ensure_embedded_secret_store_for_active_profile(context.boot_config())?
-                .state_root()
-                .to_path_buf(),
-        )
-    } else {
-        None
-    };
-
     // This is a host-owned operator/bootstrap write plane, not an in-turn
     // model capability. Sending API keys, OAuth secrets, or the WebUI token
     // through ToolDispatcher would make secret ingress model-visible.
@@ -155,15 +141,8 @@ fn set_value_key(
     let home = context.boot_config().home();
     match &key {
         ConfigKey::LlmApiKey { provider_id } => {
-            write_llm_api_key(
-                context,
-                provider_id,
-                &value,
-                state_root.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("secret destination did not admit a durable state root")
-                })?,
-                store_opener,
-            )?;
+            let state_root = admit_secret_store_state_root(context)?;
+            write_llm_api_key(context, provider_id, &value, &state_root, store_opener)?;
         }
         ConfigKey::GoogleClientId => {
             write_google_field(home, Some(GoogleFieldUpdate::Set(value.clone())), None)?;
@@ -172,13 +151,8 @@ fn set_value_key(
             write_google_field(home, None, Some(GoogleFieldUpdate::Set(value.clone())))?;
         }
         ConfigKey::GoogleClientSecret => {
-            write_google_client_secret(
-                &value,
-                state_root.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("secret destination did not admit a durable state root")
-                })?,
-                store_opener,
-            )?;
+            let state_root = admit_secret_store_state_root(context)?;
+            write_google_client_secret(&value, &state_root, store_opener)?;
         }
         ConfigKey::WebuiToken => unreachable!("handled by execute_webui_token"),
     }
@@ -187,6 +161,17 @@ fn set_value_key(
     print_remaining_setup_guidance(&key);
     print_apply_step();
     Ok(())
+}
+
+/// Admit the canonical durable layout for a secret write and return its state
+/// namespace. Call only from a `SecretStorePort` destination arm: config and
+/// token-file writes must not create durable state as a side effect.
+fn admit_secret_store_state_root(context: &RebornCliContext) -> anyhow::Result<PathBuf> {
+    Ok(
+        crate::runtime::ensure_embedded_secret_store_for_active_profile(context.boot_config())?
+            .state_root()
+            .to_path_buf(),
+    )
 }
 
 /// After a successful write, print the remaining BYO setup steps for the
@@ -404,17 +389,7 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
         &self,
         state_root: &Path,
     ) -> anyhow::Result<ironclaw_operator::LlmKeyStore> {
-        // `config set` is a write command: create the canonical state directory
-        // (if missing) before opening the store, mirroring
-        // `onboard::llm_credentials::open_llm_key_store` — a never-onboarded
-        // state namespace has no directory yet, and `open_standalone_secret_store` opens
-        // a libSQL file directly under it without creating parents itself.
-        std::fs::create_dir_all(state_root).map_err(|error| {
-            anyhow::anyhow!(
-                "create canonical state root {}: {error}",
-                state_root.display()
-            )
-        })?;
+        prepare_standalone_secret_store_root(state_root)?;
         let state_root = state_root.to_path_buf();
         crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&state_root)
@@ -430,14 +405,7 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
         &self,
         state_root: &Path,
     ) -> anyhow::Result<ironclaw_composition::GoogleOauthSecretStore> {
-        // See `open_llm_key_store` above: `config set` is a write command,
-        // so create the canonical state directory before opening the store.
-        std::fs::create_dir_all(state_root).map_err(|error| {
-            anyhow::anyhow!(
-                "create canonical state root {}: {error}",
-                state_root.display()
-            )
-        })?;
+        prepare_standalone_secret_store_root(state_root)?;
         let state_root = state_root.to_path_buf();
         crate::runtime::block_on_cli(async move {
             let store = ironclaw_composition::open_standalone_secret_store(&state_root)
@@ -448,9 +416,39 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
     }
 }
 
+/// Prepare a canonical state root before a standalone libSQL-backed secret
+/// store opens files beneath it. Secrets and their database must not retain
+/// group or world access inherited from the process umask.
+fn prepare_standalone_secret_store_root(state_root: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(state_root).map_err(|error| {
+        anyhow::anyhow!(
+            "create canonical state root {}: {error}",
+            state_root.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(state_root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "restrict canonical state root {} to its owner: {error}",
+                    state_root.display()
+                )
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
 
     struct FixedPromptSource {
@@ -569,6 +567,10 @@ mod tests {
         assert!(
             toml.contains("client_id = \"abc123.apps.googleusercontent.com\""),
             "config: {toml}"
+        );
+        assert!(
+            !crate::runtime::local_state_root(context.boot_config()).exists(),
+            "config.toml writes must not admit or create durable state"
         );
     }
 
@@ -869,6 +871,17 @@ mod tests {
         result.expect(
             "writing a secret-destination key must create the canonical state directory \
              on first use, not surface a raw SQLITE_CANTOPEN",
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(crate::runtime::local_state_root(context.boot_config()))
+                .expect("canonical state root exists after secret write")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the canonical secret-store root must be owner-only"
         );
     }
 

@@ -38,10 +38,6 @@ use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
-#[cfg(all(test, unix))]
-use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
-#[cfg(test)]
-use crate::standalone_bootstrap_assembly::backfill_legacy_user_skills;
 use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornHostBindings, RebornReadiness,

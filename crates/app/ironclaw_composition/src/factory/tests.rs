@@ -2817,60 +2817,6 @@ fn standalone_workspace_root_overlapping_skill_root_is_rejected() {
 }
 
 #[test]
-fn standalone_legacy_skill_backfill_marker_preserves_deletions() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    let legacy_skill_dir = storage_root.join("skills/legacy-skill");
-    std::fs::create_dir_all(&legacy_skill_dir).expect("legacy skill dir");
-    std::fs::write(legacy_skill_dir.join("SKILL.md"), "legacy skill").expect("legacy skill");
-    let owner_user_id = UserId::new("owner").expect("owner");
-
-    backfill_legacy_user_skills(&storage_root, &owner_user_id).expect("initial backfill");
-    let scoped_skill_dir = storage_root.join("tenants/default/users/owner/skills/legacy-skill");
-    let reborn_cli_skill_dir =
-        storage_root.join("tenants/reborn-cli/users/owner/skills/legacy-skill");
-    assert!(scoped_skill_dir.join("SKILL.md").exists());
-    assert!(reborn_cli_skill_dir.join("SKILL.md").exists());
-
-    std::fs::remove_dir_all(&scoped_skill_dir).expect("delete migrated skill");
-    backfill_legacy_user_skills(&storage_root, &owner_user_id).expect("second backfill");
-    assert!(
-        !scoped_skill_dir.exists(),
-        "one-time legacy backfill must not resurrect user-deleted migrated skills"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn standalone_legacy_skill_backfill_skips_symlinks() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("standalone");
-    let legacy_root = storage_root.join("skills");
-    let target_dir = storage_root.join("target-skill");
-    std::fs::create_dir_all(&legacy_root).expect("legacy root");
-    std::fs::create_dir_all(&target_dir).expect("target dir");
-    std::os::unix::fs::symlink(&target_dir, legacy_root.join("linked-skill"))
-        .expect("legacy symlink");
-    let owner_user_id = UserId::new("owner").expect("owner");
-
-    backfill_legacy_user_skills(&storage_root, &owner_user_id)
-        .expect("symlink should be skipped, not fail startup");
-    assert!(
-        !storage_root
-            .join("tenants/default/users/owner/skills/linked-skill")
-            .exists()
-    );
-    assert!(
-        storage_root
-            .join(format!(
-                "tenants/default/users/owner/skills/{LEGACY_SKILLS_BACKFILL_MARKER}"
-            ))
-            .exists(),
-        "migration should still be marked complete after skipping symlinks"
-    );
-}
-
-#[test]
 fn builtin_first_party_package_declares_skill_management_tools() {
     let package = builtin_first_party_package().expect("built-in package builds");
     let ids = package

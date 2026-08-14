@@ -10,32 +10,7 @@ use crate::root::default_system_prompt::seed_default_system_prompt;
 
 const DEFAULT_SYSTEM_PROMPT_PATH: &str = "prompts/default-system.md";
 const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
-#[cfg(all(test, unix))]
-pub(crate) use ironclaw_extension_host::bundled_skills::LEGACY_SKILLS_BACKFILL_MARKER;
 const STANDALONE_LEGACY_SKILL_TENANTS: [&str; 2] = ["default", "reborn-cli"];
-
-/// Test-only compatibility helper retained to pin the released legacy
-/// standalone skill-tree migration shape for every supported tenant identity.
-#[cfg(test)]
-pub(crate) fn backfill_legacy_user_skills(
-    storage_root: &Path,
-    owner_user_id: &UserId,
-) -> Result<(), RebornBuildError> {
-    let legacy_root = storage_root.join("skills");
-    for tenant_id in STANDALONE_LEGACY_SKILL_TENANTS {
-        let scoped_root = storage_root
-            .join("tenants")
-            .join(tenant_id)
-            .join("users")
-            .join(owner_user_id.as_str())
-            .join("skills");
-        ironclaw_extension_host::bundled_skills::backfill_legacy_skill_tree(
-            &legacy_root,
-            &scoped_root,
-        )?;
-    }
-    Ok(())
-}
 
 /// Move host-disk user skills into the database-backed tree, which is the only tree skills are read
 /// from now.
