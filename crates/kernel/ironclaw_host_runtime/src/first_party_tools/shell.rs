@@ -323,20 +323,32 @@ mod tests {
         // so the model treated it as one-primitive-per-call and paid a round
         // trip per `ls`/`cat` (~2.2x the tool calls of harnesses whose shell
         // description carries calling guidance, for the same work).
+        // Each assertion pins one instruction, not just a keyword: a
+        // description that names `workdir` while dropping "instead of a
+        // leading cd" has lost the guidance and must still fail here.
         let description = manifest().expect("shell manifest builds").description;
-        assert!(
-            description.contains("full shell command line"),
-            "description must say one call takes a whole command line: {description}"
-        );
-        assert!(
-            description.contains("workdir"),
-            "description must point at the per-call workdir parameter instead of a leading cd: \
-             {description}"
-        );
+        for required in [
+            "full shell command line",
+            "single call",
+            "rather than one call per step",
+            "workdir",
+            "instead of a leading `cd`",
+            "does not carry over",
+        ] {
+            assert!(
+                description.contains(required),
+                "description lost the calling guidance ({required:?} missing): {description}"
+            );
+        }
     }
 
     #[test]
-    fn the_command_forms_the_description_recommends_actually_validate() {
+    fn the_recommended_command_forms_pass_validation_and_workdir_parsing() {
+        // Scope is deliberately validation + parsing, the two gates a batched
+        // call meets before dispatch. Execution is not covered: this handler's
+        // scoped-path branch fails closed pending a process backend that can
+        // take a virtual cwd, so there is no executor here to assert against.
+        //
         // The description tells the model to batch with `&&`, loops, and
         // heredocs, and to pass `workdir`. If validation is ever tightened to
         // reject composition, that advice becomes a lie the model cannot
