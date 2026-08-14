@@ -770,7 +770,8 @@ mod tests {
     #[tokio::test]
     async fn exact_system_skills_root_does_not_append_the_system_namespace() {
         let filesystem = InMemoryBackend::new();
-        let system_skills_root = VirtualPath::new("/exact-system-skills").expect("valid root");
+        let system_skills_root =
+            VirtualPath::new("/system/skills/exact-system-skills").expect("valid root");
 
         ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root)
             .await
@@ -779,21 +780,28 @@ mod tests {
         assert!(
             filesystem
                 .stat(
-                    &VirtualPath::new("/exact-system-skills/code-review/SKILL.md")
+                    &VirtualPath::new("/system/skills/exact-system-skills/code-review/SKILL.md")
                         .expect("valid skill path"),
                 )
                 .await
                 .is_ok()
         );
-        assert!(
-            matches!(
-                filesystem
-                    .stat(&VirtualPath::new("/exact-system-skills/system").expect("valid path"))
-                    .await,
-                Err(FilesystemError::NotFound { .. })
-            ),
-            "an exact system skills root must not receive another system namespace"
-        );
+        for appended_namespace in ["system", "skills"] {
+            assert!(
+                matches!(
+                    filesystem
+                        .stat(
+                            &VirtualPath::new(format!(
+                                "/system/skills/exact-system-skills/{appended_namespace}"
+                            ))
+                            .expect("valid path"),
+                        )
+                        .await,
+                    Err(FilesystemError::NotFound { .. })
+                ),
+                "an exact system skills root must not receive another {appended_namespace} namespace"
+            );
+        }
     }
 
     #[tokio::test]
