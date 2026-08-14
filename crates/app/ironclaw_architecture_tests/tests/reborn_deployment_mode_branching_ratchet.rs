@@ -97,19 +97,35 @@ struct ProfileControl {
 }
 
 const REBORN_COMPOSITION_PROFILE: &str = "RebornCompositionProfile";
+const REBORN_PROFILE: &str = "RebornProfile";
 
-fn is_reborn_composition_profile_variant(name: &str) -> bool {
-    matches!(
-        name,
-        "Disabled"
-            | "Standalone"
-            | "StandaloneUnrestricted"
-            | "HostedSingleTenant"
-            | "HostedSingleTenantVolume"
-            | "HostedSingleTenantVolumeSandboxed"
-            | "HostedSingleTenantVolumeSandboxedRailway"
-            | "Production"
-            | "MigrationDryRun"
+fn enum_variant_names(source: &str, enum_name: &str) -> BTreeSet<String> {
+    let file = syn::parse_file(source).unwrap_or_else(|error| panic!("parse source: {error}"));
+    let variants = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == enum_name => Some(&item.variants),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("source does not declare enum {enum_name}"));
+    variants
+        .iter()
+        .map(|variant| variant.ident.to_string())
+        .collect()
+}
+
+fn enum_variant_names_from_workspace(path: &str, enum_name: &str) -> BTreeSet<String> {
+    let source_path = crate_path(&workspace_root(), path);
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", source_path.display()));
+    enum_variant_names(&source, enum_name)
+}
+
+fn reborn_composition_profile_variant_names() -> BTreeSet<String> {
+    enum_variant_names_from_workspace(
+        "crates/ironclaw_composition/src/root/profile.rs",
+        REBORN_COMPOSITION_PROFILE,
     )
 }
 
@@ -117,6 +133,7 @@ struct ProfileImports {
     type_names: BTreeSet<String>,
     imported_variant_names: BTreeSet<String>,
     imports_all_variants: bool,
+    variant_names: BTreeSet<String>,
 }
 
 impl Default for ProfileImports {
@@ -125,6 +142,7 @@ impl Default for ProfileImports {
             type_names: BTreeSet::from([REBORN_COMPOSITION_PROFILE.to_string()]),
             imported_variant_names: BTreeSet::new(),
             imports_all_variants: false,
+            variant_names: reborn_composition_profile_variant_names(),
         }
     }
 }
@@ -145,14 +163,14 @@ impl ProfileImports {
             && path.segments.last().is_some_and(|segment| {
                 let name = segment.ident.to_string();
                 self.imported_variant_names.contains(&name)
-                    || (self.imports_all_variants && is_reborn_composition_profile_variant(&name))
+                    || (self.imports_all_variants && self.variant_names.contains(&name))
             }))
     }
 
     fn identifier_is_imported_variant(&self, identifier: &proc_macro2::Ident) -> bool {
         let name = identifier.to_string();
         self.imported_variant_names.contains(&name)
-            || (self.imports_all_variants && is_reborn_composition_profile_variant(&name))
+            || (self.imports_all_variants && self.variant_names.contains(&name))
     }
 }
 
@@ -176,6 +194,9 @@ impl<'ast> Visit<'ast> for ProfileImportVisitor {
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
         collect_profile_imports(&node.tree, false, &mut self.imports);
     }
 }
@@ -192,9 +213,7 @@ fn collect_profile_imports(tree: &syn::UseTree, profile_scope: bool, imports: &m
                 imports
                     .type_names
                     .insert(REBORN_COMPOSITION_PROFILE.to_string());
-            } else if profile_scope
-                && is_reborn_composition_profile_variant(&name.ident.to_string())
-            {
+            } else if profile_scope && imports.variant_names.contains(&name.ident.to_string()) {
                 imports
                     .imported_variant_names
                     .insert(name.ident.to_string());
@@ -203,9 +222,9 @@ fn collect_profile_imports(tree: &syn::UseTree, profile_scope: bool, imports: &m
         syn::UseTree::Rename(rename) => {
             if rename.ident == REBORN_COMPOSITION_PROFILE {
                 imports.type_names.insert(rename.rename.to_string());
-            } else if profile_scope
-                && is_reborn_composition_profile_variant(&rename.ident.to_string())
-            {
+            } else if profile_scope && rename.ident == "self" {
+                imports.type_names.insert(rename.rename.to_string());
+            } else if profile_scope && imports.variant_names.contains(&rename.ident.to_string()) {
                 imports
                     .imported_variant_names
                     .insert(rename.rename.to_string());
@@ -535,6 +554,13 @@ impl<'ast> Visit<'ast> for SourceProfileVariantFinder<'_> {
         visit::visit_item_fn(self, node);
     }
 
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if is_cfg_test_item(&node.attrs) {
+            return;
+        }
+        visit::visit_item_use(self, node);
+    }
+
     fn visit_path(&mut self, node: &'ast syn::Path) {
         self.found |= self.imports.path_is_variant(node);
         visit::visit_path(self, node);
@@ -593,6 +619,58 @@ fn deployment_rs_is_the_target_state_entry() {
         target.1.contains("TARGET STATE"),
         "deployment.rs's allowlist reason must mark it terminal, got: {}",
         target.1
+    );
+}
+
+fn assert_reborn_profile_variants_are_covered(
+    reborn_profile_source: &str,
+    composition_profile_source: &str,
+) {
+    let reborn_profile_variants = enum_variant_names(reborn_profile_source, REBORN_PROFILE);
+    let composition_profile_variants =
+        enum_variant_names(composition_profile_source, REBORN_COMPOSITION_PROFILE);
+    let omitted: Vec<_> = reborn_profile_variants
+        .difference(&composition_profile_variants)
+        .collect();
+    assert!(
+        omitted.is_empty(),
+        "RebornCompositionProfile omits RebornProfile variants: {omitted:?}"
+    );
+}
+
+#[test]
+fn composition_profile_covers_every_reborn_profile_variant() {
+    let reborn_profile_path =
+        crate_path(&workspace_root(), "crates/ironclaw_config/src/profile.rs");
+    let reborn_profile_source = std::fs::read_to_string(&reborn_profile_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", reborn_profile_path.display()));
+    let composition_profile_path = crate_path(
+        &workspace_root(),
+        "crates/ironclaw_composition/src/root/profile.rs",
+    );
+    let composition_profile_source = std::fs::read_to_string(&composition_profile_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", composition_profile_path.display()));
+
+    assert_reborn_profile_variants_are_covered(&reborn_profile_source, &composition_profile_source);
+}
+
+#[test]
+fn composition_profile_coverage_guard_rejects_an_omitted_reborn_profile_variant() {
+    let failure = std::panic::catch_unwind(|| {
+        assert_reborn_profile_variants_are_covered(
+            "enum RebornProfile { Standalone, FutureProfile }",
+            "enum RebornCompositionProfile { Disabled, Standalone }",
+        );
+    })
+    .expect_err("an omitted RebornProfile variant must fail the coverage guard");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic payload");
+    assert!(
+        message.contains("FutureProfile"),
+        "coverage failure must name the omitted variant: {message}"
     );
 }
 
@@ -683,6 +761,16 @@ fn scanner_detects_glob_and_renamed_profile_variant_imports() {
                 }
             "#,
         ),
+        (
+            "self-renamed profile import",
+            r#"
+                use RebornCompositionProfile::{self as Profile};
+
+                fn bypass(profile: RebornCompositionProfile) {
+                    if profile == Profile::Production {}
+                }
+            "#,
+        ),
     ];
 
     for (name, source) in cases {
@@ -691,6 +779,23 @@ fn scanner_detects_glob_and_renamed_profile_variant_imports() {
             "{name} must count as a profile-variant reference"
         );
     }
+}
+
+#[test]
+fn scanner_ignores_cfg_test_imports() {
+    let source = r#"
+        #[cfg(test)]
+        use RebornCompositionProfile::Production;
+
+        fn production_code(profile: RebornCompositionProfile) {
+            if matches!(profile, Production) {}
+        }
+    "#;
+
+    assert!(
+        !source_names_reborn_profile_variant(source),
+        "test-only imports must not make production code look profile-dependent"
+    );
 }
 
 #[test]
@@ -819,6 +924,16 @@ fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
             "renamed profile import",
             r#"
                 use RebornCompositionProfile as Profile;
+
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    if selected_profile == Profile::Production {}
+                }
+            "#,
+        ),
+        (
+            "self-renamed profile import",
+            r#"
+                use RebornCompositionProfile::{self as Profile};
 
                 fn bypass(selected_profile: RebornCompositionProfile) {
                     if selected_profile == Profile::Production {}

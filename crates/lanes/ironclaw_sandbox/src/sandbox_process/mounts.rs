@@ -35,14 +35,13 @@ impl RebornSandboxMountSources {
         scope: &ResourceScope,
         mounts: Option<&MountView>,
     ) -> Result<Vec<ContainerBind>, RuntimeProcessError> {
-        validate_mandatory_workspace_mount_view(scope, mounts)?;
+        let mandatory_workspace_grant = validate_mandatory_workspace_mount_view(scope, mounts)?;
         // `workspace` is the canonical leaf from `admit_workspace_leaf`.
         // Do not re-resolve it here: the final admission immediately before
         // Docker create deliberately performs the TOCTOU revalidation.
 
-        let workspace_bind = mounts
-            .and_then(|mounts| mounts.mounts.first())
-            .map(|grant| resolve_mandatory_workspace_grant(workspace, scope, grant))
+        let workspace_bind = mandatory_workspace_grant
+            .map(|grant| resolve_mandatory_workspace_grant(workspace, grant))
             .unwrap_or_else(|| {
                 ContainerBind::new(
                     workspace.to_path_buf(),
@@ -60,18 +59,18 @@ impl RebornSandboxMountSources {
 /// provider-owned leaf. Validating the common authority shape here prevents a
 /// public, manually constructed `MountView` from changing either transport's
 /// selection semantics.
-pub(super) fn validate_mandatory_workspace_mount_view(
+pub(super) fn validate_mandatory_workspace_mount_view<'a>(
     scope: &ResourceScope,
-    mounts: Option<&MountView>,
-) -> Result<(), RuntimeProcessError> {
+    mounts: Option<&'a MountView>,
+) -> Result<Option<&'a MountGrant>, RuntimeProcessError> {
     let Some(mounts) = mounts else {
-        return Ok(());
+        return Ok(None);
     };
     mounts.validate().map_err(|error| {
         RuntimeProcessError::ExecutionFailed(format!("sandbox mount view is invalid: {error}"))
     })?;
     let Some(grant) = mounts.mounts.first() else {
-        return Ok(());
+        return Ok(None);
     };
     if mounts.mounts.len() != 1 || grant.alias.as_str() != CONTAINER_WORKSPACE_ROOT {
         return Err(RuntimeProcessError::ExecutionFailed(
@@ -90,24 +89,13 @@ pub(super) fn validate_mandatory_workspace_mount_view(
         ));
     }
     DockerBindMode::from_grant(grant)?;
-    Ok(())
+    Ok(Some(grant))
 }
 
 fn resolve_mandatory_workspace_grant(
     workspace: &Path,
-    scope: &ResourceScope,
     grant: &MountGrant,
 ) -> Result<ContainerBind, RuntimeProcessError> {
-    let key = TenantUserWorkspaceKey::from_scope(scope);
-    let expected_target = format!(
-        "{MANDATORY_WORKSPACE_TARGET_ROOT}/users/{}",
-        key.digest_segment()
-    );
-    if grant.target.as_str() != expected_target {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox /workspace mount must target the current caller workspace leaf".to_string(),
-        ));
-    }
     ContainerBind::new(
         workspace.to_path_buf(),
         CONTAINER_WORKSPACE_ROOT,
@@ -208,6 +196,23 @@ mod tests {
             key.digest_segment()
         ))
         .expect("workspace target")
+    }
+
+    #[test]
+    fn mandatory_workspace_validation_returns_the_admitted_grant() {
+        let scope = caller_scope();
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("workspace alias"),
+            caller_workspace_target(&scope),
+            process_read_write_permissions(),
+        )])
+        .expect("mount view");
+
+        let grant = validate_mandatory_workspace_mount_view(&scope, Some(&mounts))
+            .expect("valid mount view")
+            .expect("mandatory workspace grant");
+
+        assert_eq!(grant, mounts.mounts.first().expect("workspace grant"));
     }
 
     #[tokio::test]

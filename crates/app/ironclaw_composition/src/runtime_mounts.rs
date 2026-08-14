@@ -228,6 +228,19 @@ impl WorkspaceMountPolicy {
             Self::PerCaller => scoped_workspace_mount_view(scope, MountPermissions::read_write()),
         }
     }
+
+    /// The WebUI browser's read-only workspace target for one caller.
+    ///
+    /// Memory remains caller-scoped regardless of this decision. The browser
+    /// must, however, use the same workspace policy as the capability grants
+    /// and attachment writers: shared deployments browse the shared workspace
+    /// root, while scoped deployments browse only the caller's digest leaf.
+    fn browse_workspace_target(&self, scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
+        match self {
+            Self::Shared(_) => VirtualPath::new(WORKSPACE_TARGET),
+            Self::PerCaller => scoped_workspace_target(scope),
+        }
+    }
 }
 
 /// The read-write workspace handle every write lane that lands *bytes* uses:
@@ -262,9 +275,12 @@ pub(crate) fn read_write_workspace_filesystem(
     }
 }
 
-pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+pub(crate) fn webui_browse_mount_view(
+    policy: &WorkspaceMountPolicy,
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
     let memory_target = scoped_memory_target(scope)?;
-    let workspace_target = scoped_workspace_target(scope)?;
+    let workspace_target = policy.browse_workspace_target(scope)?;
     MountView::new(vec![
         grant(
             WORKSPACE_ALIAS,
@@ -279,7 +295,7 @@ pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountVie
     ])
 }
 
-fn scoped_workspace_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
+pub(crate) fn scoped_workspace_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
     let workspace_key = TenantUserWorkspaceKey::from_scope(scope);
     VirtualPath::new(format!(
         "{WORKSPACE_TARGET}/users/{}",
@@ -397,13 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn scoped_browser_and_workspace_writer_resolve_the_same_caller_leaf() {
+    fn shared_browser_workspace_uses_shared_root_while_memory_stays_caller_scoped() {
         use ironclaw_host_api::{
             ids::{InvocationId, TenantId, UserId},
             path::ScopedPath,
         };
 
-        let scope = ResourceScope {
+        let alice_scope = ResourceScope {
             tenant_id: TenantId::new("acme").expect("tenant id"),
             user_id: UserId::new("alice").expect("user id"),
             agent_id: None,
@@ -412,21 +428,90 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         };
-        let writer = scoped_workspace_mount_view(&scope, MountPermissions::read_write())
-            .expect("writer mount view");
-        let browser = scoped_browse_mount_view(&scope).expect("browser mount view");
-        let writer_target = writer
-            .resolve(&ScopedPath::new("/workspace/landed.txt").expect("workspace path"))
-            .expect("writer workspace resolve");
-        let browser_target = browser
+        let bob_scope = ResourceScope {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            user_id: UserId::new("bob").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let policy = WorkspaceMountPolicy::Shared(
+            workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("shared workspace policy"),
+        );
+        let alice_browser =
+            webui_browse_mount_view(&policy, &alice_scope).expect("alice browser mount view");
+        let bob_browser =
+            webui_browse_mount_view(&policy, &bob_scope).expect("bob browser mount view");
+        let workspace_target = alice_browser
             .resolve(&ScopedPath::new("/workspace/landed.txt").expect("workspace path"))
             .expect("browser workspace resolve");
+        let bob_workspace_target = bob_browser
+            .resolve(&ScopedPath::new("/workspace/landed.txt").expect("workspace path"))
+            .expect("bob browser workspace resolve");
+        let memory_target = alice_browser
+            .resolve(&ScopedPath::new("/memory/note.md").expect("memory path"))
+            .expect("browser memory resolve");
+        let bob_memory_target = bob_browser
+            .resolve(&ScopedPath::new("/memory/note.md").expect("memory path"))
+            .expect("bob browser memory resolve");
 
-        assert_eq!(writer_target, browser_target);
+        assert_eq!(workspace_target.as_str(), "/projects/workspace/landed.txt");
+        assert_eq!(workspace_target, bob_workspace_target);
         assert_eq!(
-            writer_target.as_str(),
+            memory_target.as_str(),
+            "/memory/tenants/acme/users/alice/agents/_none/projects/_none/note.md"
+        );
+        assert_eq!(
+            bob_memory_target.as_str(),
+            "/memory/tenants/acme/users/bob/agents/_none/projects/_none/note.md"
+        );
+    }
+
+    #[test]
+    fn per_caller_browser_workspace_stays_isolated_between_callers() {
+        use ironclaw_host_api::{
+            ids::{InvocationId, TenantId, UserId},
+            path::ScopedPath,
+        };
+
+        let alice_scope = ResourceScope {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            user_id: UserId::new("alice").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let bob_scope = ResourceScope {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            user_id: UserId::new("bob").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let path = ScopedPath::new("/workspace/landed.txt").expect("workspace path");
+        let policy = WorkspaceMountPolicy::PerCaller;
+
+        let alice_target = webui_browse_mount_view(&policy, &alice_scope)
+            .expect("alice browser mount view")
+            .resolve(&path)
+            .expect("alice browser workspace resolve");
+        let bob_target = webui_browse_mount_view(&policy, &bob_scope)
+            .expect("bob browser mount view")
+            .resolve(&path)
+            .expect("bob browser workspace resolve");
+
+        assert_eq!(
+            alice_target.as_str(),
             "/projects/workspace/users/c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22/landed.txt"
         );
+        assert_ne!(alice_target, bob_target);
     }
 
     #[test]

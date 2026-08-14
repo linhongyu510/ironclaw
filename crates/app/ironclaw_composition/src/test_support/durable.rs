@@ -5,19 +5,19 @@
 //! All reopen at the SAME on-disk standalone installation root.
 
 /// Test-support entry point (E-DURABLE seam): reopen a fresh, independent
-/// extension-installation store at an existing standalone `storage_root`. Lets
+/// extension-installation store at an existing standalone `installation_root`. Lets
 /// the integration harness prove capability-produced durable state survives a
 /// reopen, paralleling `assert_reply_persists_after_reopen`. Delegates to the
 /// production filesystem mounts + install-store load in `factory` so the reopen
 /// path never drifts from `build_runtime_substrate`. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_extension_installation_store_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<
     std::sync::Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     crate::RebornBuildError,
 > {
-    crate::factory::open_standalone_extension_installation_store_for_test(storage_root).await
+    crate::factory::open_standalone_extension_installation_store_for_test(installation_root).await
 }
 
 /// Test-support entry point (DURABLE-COLD): reopen a fresh independent
@@ -26,7 +26,7 @@ pub async fn open_standalone_extension_installation_store_for_test(
 /// constructing a second full runtime.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_thread_service_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
 ) -> Result<
     std::sync::Arc<
         ironclaw_threads::FilesystemSessionThreadService<
@@ -35,7 +35,7 @@ pub async fn open_standalone_thread_service_for_test(
     >,
     crate::RebornBuildError,
 > {
-    crate::factory::test_support::open_standalone_thread_service_for_test(storage_root).await
+    crate::factory::test_support::open_standalone_thread_service_for_test(installation_root).await
 }
 
 /// Test-support entry point (DURABLE-COLD): reopen a fresh production
@@ -43,18 +43,18 @@ pub async fn open_standalone_thread_service_for_test(
 /// has dropped. Tests only.
 #[cfg(feature = "test-support")]
 pub async fn open_standalone_skill_management_for_test(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
     owner_user_id: ironclaw_host_api::ids::UserId,
 ) -> Result<std::sync::Arc<ironclaw_skills::ScopedSkillManagementPort>, crate::RebornBuildError> {
     crate::factory::test_support::open_standalone_skill_management_for_test(
-        storage_root,
+        installation_root,
         owner_user_id,
     )
     .await
 }
 
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
-/// `ApprovalRequestStore` at an existing standalone `storage_root`. Mirrors
+/// `ApprovalRequestStore` at an existing standalone `installation_root`. Mirrors
 /// [`open_standalone_extension_installation_store_for_test`] for approval-gate
 /// records instead of extension installs. Tests only.
 #[cfg(feature = "test-support")]
@@ -66,7 +66,7 @@ pub async fn open_standalone_approval_request_store_for_test(
 }
 
 /// Test-support entry point (C-DURABLE): reopen a fresh, independent
-/// `TriggerRepository` at an existing standalone `storage_root`. Mirrors
+/// `TriggerRepository` at an existing standalone `installation_root`. Mirrors
 /// [`open_standalone_extension_installation_store_for_test`] for triggers
 /// instead of extension installs. Tests only.
 #[cfg(feature = "test-support")]
@@ -77,7 +77,7 @@ pub async fn open_standalone_trigger_repository_for_test(
 }
 
 /// Test-support entry point (W6-COLD-SPOTS): reopen a fresh, independent
-/// `CommunicationPreferenceRepository` at an existing standalone `storage_root`.
+/// `CommunicationPreferenceRepository` at an existing standalone `installation_root`.
 /// Mirrors [`open_standalone_approval_request_store_for_test`] for outbound
 /// preferences instead of approval-gate records. Tests only.
 #[cfg(feature = "test-support")]
@@ -93,7 +93,7 @@ pub async fn open_standalone_outbound_preferences_store_for_test(
 /// Test-support entry point (W5-WEBUI-API-1 seam): reopen FRESH, independent
 /// `ToolPermissionOverrideStore` / `AutoApproveSettingStore` /
 /// `PersistentApprovalPolicyStore` handles at an existing standalone
-/// `storage_root`. Mirrors [`open_standalone_extension_installation_store_for_test`]
+/// `installation_root`. Mirrors [`open_standalone_extension_installation_store_for_test`]
 /// for the tool-settings/approval-policy stores instead of extension installs
 /// — lets a cold-reopen test prove settings state survives a fresh standalone
 /// store reopen rather than re-reading the same live `Arc`s. Tests only.

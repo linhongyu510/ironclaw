@@ -1,5 +1,5 @@
 use std::{
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -108,6 +108,84 @@ pub struct DeploymentSecurityEnvelope {
 pub struct LayoutRequirement {
     pub durable_state: DurableStateKind,
     pub security: DeploymentSecurityEnvelope,
+}
+
+/// One supported pre-profile-stable durable-state source.
+///
+/// This is persisted in the one-time layout-adoption journal. Its serialized
+/// values, source directories, historical security envelopes, and retained
+/// snapshot locations are compatibility facts, never inferred from a target
+/// deployment profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LegacyStorageSource {
+    LocalDev,
+    HostedSingleTenant,
+    HostedSingleTenantVolume,
+    BareHome,
+}
+
+impl LegacyStorageSource {
+    /// The stable serialized label recorded in adoption journals.
+    pub const fn label(self) -> &'static str {
+        self.snapshot_directory()
+    }
+
+    /// The fixed pre-cutover profile directory, if this source had one.
+    pub const fn profile_directory(self) -> Option<&'static str> {
+        match self {
+            Self::LocalDev => Some("local-dev"),
+            Self::HostedSingleTenant => Some("hosted-single-tenant"),
+            Self::HostedSingleTenantVolume => Some("hosted-single-tenant-volume"),
+            Self::BareHome => None,
+        }
+    }
+
+    /// The fixed directory name below a retained adoption snapshot.
+    pub const fn snapshot_directory(self) -> &'static str {
+        match self {
+            Self::LocalDev => "local-dev",
+            Self::HostedSingleTenant => "hosted-single-tenant",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::BareHome => "bare-home",
+        }
+    }
+
+    /// Derive this source's retained snapshot below one canonical layout.
+    pub fn snapshot_root(self, paths: &RebornStoragePaths) -> PathBuf {
+        paths
+            .runtime_root()
+            .join("layout-adoption")
+            .join("snapshot")
+            .join(self.snapshot_directory())
+    }
+
+    /// The historical durable-state and security envelope of this source.
+    pub const fn requirement(self) -> LayoutRequirement {
+        match self {
+            Self::LocalDev | Self::BareHome => LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            Self::HostedSingleTenant => LayoutRequirement {
+                durable_state: DurableStateKind::ExternalPostgres,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::SingleUser,
+                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
+                },
+            },
+            Self::HostedSingleTenantVolume => LayoutRequirement {
+                durable_state: DurableStateKind::EmbeddedLibSql,
+                security: DeploymentSecurityEnvelope {
+                    tenancy: TenancyModel::MultiUser,
+                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+                },
+            },
+        }
+    }
 }
 
 /// Canonical durable paths below one validated [`RebornHome`].
@@ -288,7 +366,17 @@ impl LayoutManifest {
 /// root changes, so later profile or deployment-config changes cannot silently
 /// strand remote memory under a different `app_id`.
 pub fn legacy_memory_provider_app_id(storage_root: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
+    legacy_memory_provider_app_id_v1(storage_root)
+}
+
+/// Frozen codec for the released implicit mem0 namespace.
+///
+/// The released runtime used `DefaultHasher`, whose current implementation is
+/// SipHash-1-3 with zero keys but whose algorithm is not a stable Rust API.
+/// Name and pin that wire algorithm here so a toolchain upgrade cannot strand
+/// legacy remote memory during a later layout adoption.
+fn legacy_memory_provider_app_id_v1(storage_root: &Path) -> String {
+    let mut hasher = siphasher::sip::SipHasher13::new();
     storage_root.hash(&mut hasher);
     format!("ws-{:016x}", hasher.finish())
 }

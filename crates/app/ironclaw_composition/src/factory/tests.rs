@@ -1265,6 +1265,18 @@ async fn standalone_adoption_verifier_rejects_an_existing_store_under_a_differen
         .await
         .expect("the configured key must authenticate an existing secret before adoption");
 
+    // Leave a deliberate schema gap as a witness that adoption verification
+    // authenticates existing ciphertext without advancing storage migrations.
+    // Normal runtime startup owns migration after adoption admission succeeds.
+    let database = open_standalone_libsql_database(root)
+        .await
+        .expect("open standalone database");
+    let connection = database.connect().expect("connect standalone database");
+    connection
+        .execute("DROP TABLE root_filesystem_sequences", ())
+        .await
+        .expect("remove migration-owned table");
+
     std::fs::write(
         &key_path,
         ironclaw_secrets::keychain::generate_master_key_hex(),
@@ -1277,6 +1289,65 @@ async fn standalone_adoption_verifier_rejects_an_existing_store_under_a_differen
         error,
         RebornBuildError::SecretStateVerification(_)
     ));
+
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'root_filesystem_sequences'",
+            (),
+        )
+        .await
+        .expect("inspect schema after failed verification");
+    assert!(
+        rows.next().await.expect("read schema row").is_none(),
+        "wrong-key preflight must not run migrations before rejecting adoption"
+    );
+}
+
+#[tokio::test]
+async fn standalone_adoption_verifier_does_not_create_a_missing_database() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let database_path = crate::filesystem_assembly::standalone_db_path(root);
+
+    verify_standalone_secret_store_for_adoption(root)
+        .await
+        .expect("a legacy root with no database has no encrypted state to authenticate");
+
+    assert!(
+        !database_path.exists(),
+        "read-only adoption preflight must not initialize a missing database"
+    );
+}
+
+#[tokio::test]
+async fn standalone_adoption_preparation_initializes_only_after_read_only_preflight() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let database_path = crate::filesystem_assembly::standalone_db_path(root);
+
+    prepare_standalone_store_for_adoption(root)
+        .await
+        .expect("an empty canonical store is initialized after preflight");
+
+    assert!(
+        database_path.is_file(),
+        "post-preflight preparation must initialize the canonical database"
+    );
+    let database = open_standalone_libsql_database(root)
+        .await
+        .expect("open initialized database");
+    let connection = database.connect().expect("connect initialized database");
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'root_filesystem_sequences'",
+            (),
+        )
+        .await
+        .expect("inspect initialized schema");
+    assert!(
+        rows.next().await.expect("read schema row").is_some(),
+        "post-preflight preparation must run the canonical migrations"
+    );
 }
 
 #[tokio::test]

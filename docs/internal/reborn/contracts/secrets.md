@@ -102,10 +102,14 @@ readiness must fail closed when the configured master key is missing or
 malformed. The earlier filesystem-stored key-check sentinel was removed with the
 tenant-aware `ScopedFilesystem` rework. Normal runtime access verifies a
 master-key mismatch on the first per-tenant decrypt operation. The offline
-storage-adoption path additionally performs a bounded raw-store scan and
-authenticates one existing encrypted secret or credential-account record before
-it is allowed to publish the canonical layout manifest; an empty store has no
-prior ciphertext available for that check.
+storage-adoption path scans every reconstructable encrypted secret and
+credential-account record, up to the 100,000 encrypted-record verification
+limit, before it is allowed to publish the canonical layout manifest. It fails
+closed if the limit is exceeded, any scanned record cannot be deserialized or
+authenticated, or it finds a credential-session record: session AAD includes
+identity that is intentionally encrypted in the record, so that ciphertext
+cannot be authenticated from its durable locator alone. An empty store has no
+prior ciphertext against which a key can be checked.
 
 The shared Reborn runtime HTTP egress service uses this surface to:
 

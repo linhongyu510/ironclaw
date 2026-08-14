@@ -339,7 +339,7 @@ fn adoption_preserves_a_legacy_user_skill_tree_and_nominates_its_snapshot() {
     );
     assert_eq!(
         ready_legacy_skill_snapshot_source(&home).expect("ready snapshot source"),
-        Some(LegacySkillSnapshotSource::LocalDev)
+        Some(LegacyStorageSource::LocalDev)
     );
     assert!(temp.path().join("state/reborn-local-dev.db").is_file());
 }

@@ -45,11 +45,6 @@ pub async fn list_reborn_local_skills_from_state(
         })?,
     );
     let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(runtime));
-    filesystem.run_migrations().await.map_err(|error| {
-        ironclaw_extension_host::skill_listing::RebornSkillListError::Unavailable {
-            reason: error.to_string(),
-        }
-    })?;
     let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
         owner_user_id,
         filesystem,
@@ -62,4 +57,42 @@ pub async fn list_reborn_local_skills_from_state(
         skill_management,
     ))
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn listing_an_uninitialized_existing_database_is_read_only() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database =
+            crate::filesystem_assembly::open_standalone_libsql_database(directory.path())
+                .await
+                .expect("create empty database file");
+        let connection = database.connect().expect("connect empty database");
+        drop(connection);
+        drop(database);
+
+        list_reborn_local_skills_from_state("owner", directory.path())
+            .await
+            .expect_err("inspection must not initialize or migrate an existing database");
+
+        let database =
+            crate::filesystem_assembly::open_standalone_libsql_database(directory.path())
+                .await
+                .expect("reopen empty database");
+        let connection = database.connect().expect("connect empty database");
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'root_filesystem_entries'",
+                (),
+            )
+            .await
+            .expect("inspect empty database schema");
+        assert!(
+            rows.next().await.expect("read schema row").is_none(),
+            "skills list must not create the filesystem schema"
+        );
+    }
 }

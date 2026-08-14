@@ -1530,7 +1530,17 @@ fn skills_list_verbose_reports_reborn_skill_details() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
-    assert!(stdout.contains("standalone_root:"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "state_root: {}",
+            reborn_home.join("state").display()
+        )),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("standalone_root:"),
+        "skills list must report the canonical state-root vocabulary: {stdout}"
+    );
     assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
     assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
     assert!(
@@ -1574,11 +1584,60 @@ fn skills_list_json_reports_reborn_skill_data() {
     assert_skill_source(&json, "code-review", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
+    assert_eq!(
+        json["details"]["state_root"],
+        reborn_home.join("state").to_string_lossy().as_ref()
+    );
     assert_eq!(json["details"]["owner_id"], "reborn-cli");
+    assert!(
+        json["details"].get("standalone_root").is_none(),
+        "the unreleased standalone_root field must not remain as a compatibility alias: {json}"
+    );
     assert!(json.get("limit").is_none(), "json: {json}");
     assert!(json.get("truncated").is_none(), "json: {json}");
     assert!(json.get("status").is_none(), "json: {json}");
     assert!(json.get("v1_state").is_none(), "json: {json}");
+}
+
+#[test]
+fn skills_list_fails_loudly_without_repairing_a_corrupt_existing_state_database() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(
+        &reborn_home,
+        "corrupt-state-fixture",
+        "corrupt state fixture",
+    );
+    let state_root = reborn_home.join("state");
+    let database = state_root.join(ironclaw_composition::test_support::STANDALONE_DB_FILENAME);
+    let corrupt_database = b"not a sqlite database";
+    std::fs::write(&database, corrupt_database).expect("corrupt state database fixture");
+    let state_before = state_file_snapshot(&state_root);
+
+    let output = reborn_command()
+        .args(["skills", "list"])
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw skills list should run against corrupt state");
+
+    assert!(
+        !output.status.success(),
+        "skills list must fail instead of silently repairing corrupt state: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Error:"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert_eq!(
+        state_file_snapshot(&state_root),
+        state_before,
+        "skills list must not migrate or repair an existing corrupt state database"
+    );
+    assert_eq!(
+        std::fs::read(&database).expect("read corrupt database after skills list"),
+        corrupt_database
+    );
 }
 
 fn assert_skill_source(json: &serde_json::Value, name: &str, source: &str) {
@@ -1914,6 +1973,24 @@ fn write_reborn_skill_contents(reborn_home: &std::path::Path, name: &str, conten
             contents.as_bytes(),
         ),
     );
+}
+
+fn state_file_snapshot(state_root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut snapshot = std::fs::read_dir(state_root)
+        .expect("read state root")
+        .map(|entry| {
+            let entry = entry.expect("state root entry");
+            let path = entry.path();
+            (
+                path.strip_prefix(state_root)
+                    .expect("state entry stays below state root")
+                    .to_path_buf(),
+                std::fs::read(&path).expect("read state file"),
+            )
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    snapshot
 }
 
 #[test]
@@ -5463,7 +5540,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
 /// ordering relative to config resolution would still pass it. This test
 /// seeds an encrypted NearAI credential AFTER provider selection, AT THE
 /// SAME CANONICAL REBORN-HOME STATE ROOT `serve` actually opens
-/// (`local_runtime_storage_root`, i.e. `<reborn_home>/state`), with
+/// (`local_state_root`, i.e. `<reborn_home>/state`), with
 /// both NearAI env overrides removed. Asserts through the resolved-LLM
 /// boot-trace seam that the late-attached stored credential still resolves
 /// to the cloud endpoint, AND — the discriminating half, since

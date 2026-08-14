@@ -8,10 +8,9 @@ use std::thread;
 #[cfg(any(unix, windows))]
 use std::time::{Duration, Instant};
 
-use ironclaw_composition::LegacySkillSnapshotSource;
 use ironclaw_config::{
-    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement, RebornHome,
-    TenancyModel, WorkspaceAccessFloor,
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
+    LegacyStorageSource, RebornHome, TenancyModel, WorkspaceAccessFloor,
 };
 use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 

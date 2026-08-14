@@ -516,16 +516,16 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
         return Err(error.into());
     };
     let provider_id = provider.clone();
-    let runtime_storage_root = local_runtime_storage_root(config);
-    // The runtime storage root is only created lazily (onboarding writing a
+    let state_root = local_state_root(config);
+    // The canonical state root is only created lazily (onboarding writing a
     // key, or a prior `serve` boot). If it was never created there is
     // definitely no stored key — fail through to the original error instead
     // of letting the secret-store opener fail on a missing directory.
-    if !runtime_storage_root.exists() {
+    if !state_root.exists() {
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&runtime_storage_root)
+        let store = ironclaw_composition::open_standalone_secret_store(&state_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_operator::LlmKeyStore::new(
@@ -928,7 +928,7 @@ fn build_sandboxed_local_runtime_services_input(
     profile: RebornProfile,
     owner_id: &str,
     paths: ironclaw_config::RebornStoragePaths,
-    legacy_skill_snapshot_source: Option<ironclaw_composition::LegacySkillSnapshotSource>,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let process_binding = match profile {
@@ -961,7 +961,7 @@ fn build_standalone_local_runtime_services_input(
     profile: RebornProfile,
     owner_id: &str,
     paths: ironclaw_config::RebornStoragePaths,
-    legacy_skill_snapshot_source: Option<ironclaw_composition::LegacySkillSnapshotSource>,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let mut services_input = local_runtime_build_input_with_options(
@@ -991,7 +991,7 @@ fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     owner_id: &str,
     paths: ironclaw_config::RebornStoragePaths,
-    legacy_skill_snapshot_source: Option<ironclaw_composition::LegacySkillSnapshotSource>,
+    legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
     let runtime_policy = hosted_single_tenant_runtime_policy()
@@ -1076,14 +1076,14 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
-    let storage_root = local_runtime_storage_root(config);
+    let state_root = local_state_root(config);
     // Boot may open/migrate local runtime state, but it can still avoid all
     // keychain/filesystem writes when no store exists yet.
-    if !ironclaw_composition::standalone_db_path(&storage_root).exists() {
+    if !ironclaw_composition::standalone_db_path(&state_root).exists() {
         return Ok(None);
     }
     block_on_cli(async move {
-        let store = ironclaw_composition::open_standalone_secret_store(&storage_root)
+        let store = ironclaw_composition::open_standalone_secret_store(&state_root)
             .await
             .map_err(anyhow::Error::from)?;
         ironclaw_composition::GoogleOauthSecretStore::new(store)
@@ -1365,7 +1365,7 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .context("HOME or USERPROFILE must be set")
 }
 
-pub(crate) fn local_runtime_storage_root(config: &RebornBootConfig) -> PathBuf {
+pub(crate) fn local_state_root(config: &RebornBootConfig) -> PathBuf {
     ironclaw_config::RebornStoragePaths::from_home(config.home())
         .state_root()
         .to_path_buf()
@@ -1719,7 +1719,7 @@ mod tests {
     };
     use ironclaw_config::GoogleSection;
     // Only the hosted-volume tests consume this.
-    use super::local_runtime_storage_root;
+    use super::local_state_root;
     use ironclaw_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
     struct RuntimeEnvGuard {
@@ -2636,10 +2636,7 @@ regex_activation_enabled = false
         );
         assert_eq!(policy.process_backend.as_str(), "none");
         assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
-        assert_eq!(
-            local_runtime_storage_root(&config),
-            reborn_home.join("state")
-        );
+        assert_eq!(local_state_root(&config), reborn_home.join("state"));
     }
 
     #[test]
@@ -4578,7 +4575,7 @@ poll_interval_secs = 15
         )
         .expect("boot config");
 
-        let storage_root = super::local_runtime_storage_root(&config);
+        let storage_root = super::local_state_root(&config);
         std::fs::create_dir_all(&storage_root).expect("create canonical state root");
         // Keep this a hermetic store-wiring test: without a cached key, the
         // production resolver falls through to the real OS keychain while

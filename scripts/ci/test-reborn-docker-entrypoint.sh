@@ -96,6 +96,15 @@ expect_present() {
   fi
 }
 
+expect_literal_present() {
+  local name="$1" needle="$2" haystack="$3"
+  if ! printf '%s' "$haystack" | grep -Fq -- "$needle"; then
+    echo "FAIL[${name}]: expected literal '${needle}' to be present:" >&2
+    printf '%s\n' "$haystack" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 LEGACY_DISABLED='[slack]
 enabled = false
 signing_secret_env = "SLACK_SIGNING_SECRET"
@@ -118,12 +127,12 @@ expect_absent plain 'signing_secret_env' "$out"
 expect_absent plain 'bot_token_env' "$out"
 expect_present plain 'enabled = false' "$out"
 local_argv="$(cat "${WORK}/plain/argv")"
-expect_present plain 'serve --host 0.0.0.0 --port 3000' "$local_argv"
+expect_literal_present plain 'serve --host 127.0.0.1 --port 3000' "$local_argv"
 
 out="$(run_entrypoint explicit_host "$LEGACY_DISABLED" \
   "IRONCLAW_REBORN_SERVE_HOST=127.0.0.1")"
 explicit_argv="$(cat "${WORK}/explicit_host/argv")"
-expect_present explicit_host 'serve --host 127.0.0.1 --port 3000' "$explicit_argv"
+expect_literal_present explicit_host 'serve --host 127.0.0.1 --port 3000' "$explicit_argv"
 
 # 2. The regression itself. Every truthy spelling the entrypoint's `is_truthy`
 #    accepts used to suppress the migration; the docs taught `=true`.
@@ -149,12 +158,34 @@ out="$(run_entrypoint railway_volume/ironclaw-reborn "$LEGACY_DISABLED" \
   "IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1")"
 railway_argv="$(cat "${WORK}/railway_volume/ironclaw-reborn/argv")"
 railway_cutover="$(cat "${WORK}/railway_volume/ironclaw-reborn/cutover")"
-expect_present railway_startup 'serve --host 0.0.0.0 --port 3000' "$railway_argv"
+expect_literal_present railway_startup 'serve --host 0.0.0.0 --port 3000' "$railway_argv"
 expect_present railway_startup '^legacy-layout-v1$' "$railway_cutover"
 
 # An image-level host value would look like an operator override to the
 # entrypoint and silently defeat its container-reachable default.
-if grep -Eq '^[[:space:]]*(ENV[[:space:]]+)?IRONCLAW_REBORN_SERVE_HOST=' "${ROOT}/Dockerfile"; then
+if awk '
+  function inspect_instruction() {
+    if (instruction ~ /^[[:space:]]*ENV[[:space:]]+/ \
+        && instruction ~ /(^|[[:space:]])IRONCLAW_REBORN_SERVE_HOST([=[:space:]]|$)/) {
+      found = 1
+    }
+  }
+  {
+    line = $0
+    continued = sub(/\\[[:space:]]*$/, "", line)
+    instruction = instruction " " line
+    if (!continued) {
+      inspect_instruction()
+      instruction = ""
+    }
+  }
+  END {
+    if (instruction != "") {
+      inspect_instruction()
+    }
+    exit !found
+  }
+' "${ROOT}/Dockerfile"; then
   echo "FAIL: Dockerfile must not bake IRONCLAW_REBORN_SERVE_HOST; the entrypoint derives it per runtime" >&2
   failures=$((failures + 1))
 fi

@@ -23,17 +23,32 @@ successful adoption, its durable filesystem layout is:
 │   ├── prompts/
 │   └── skills/
 ├── workspaces/users/<tenant-user-digest>/
-└── runtime/layout-adoption/
-    ├── journal.toml
-    └── snapshot/<legacy-source>/
+├── runtime/layout-adoption/
+│   ├── journal.toml
+│   └── snapshot/<legacy-source>/
+├── logs/
+├── cache/
+└── tmp/
 ```
 
 `state/` is authoritative application state. `system/` contains host-managed
 extensions, prompts, and skills. `workspaces/users/<tenant-user-digest>/` is a
 persistent tenant-plus-user workspace leaf. `runtime/` contains provider and
-process bookkeeping plus bounded adoption recovery. Cache and temporary
-invocation data are disposable and never replace any of these authoritative
-namespaces.
+process bookkeeping plus bounded adoption recovery. `logs/`, `cache/`, and
+`tmp/` are operational namespaces, never authoritative application state:
+
+- `logs/` may retain diagnostic output on the volume, but it is not an adoption
+  source, rollback source, or durable record store. Its retention is the
+  observability owner's policy.
+- `cache/` holds rebuildable data and may be evicted at any time. Adoption and
+  rollback do not preserve it as application state.
+- `tmp/` holds invocation-local scratch data. It has no retention or rollback
+  guarantee and must not be used to recover a turn, credential, or workspace.
+
+The layout state machine creates or validates these directories as ordinary
+directories, but never copies their contents as canonical state. A non-empty
+target namespace during adoption is an unexplained-content conflict, not a
+reason to merge or infer provenance.
 
 There is no deployment-id directory and no profile-named state directory. The
 root `layout.toml` is published last and records the durable-state and security
@@ -127,12 +142,15 @@ or an external workspace source.
 For embedded libSQL, verification reopens the adopted database and encrypted
 secret resolver. For hosted PostgreSQL, the command validates both operator
 acknowledgements before opening the configured pool or running production
-filesystem migrations. It then constructs the encrypted secret store and, when
-existing encrypted secret or credential-account records are present,
-authenticates one of those records with the configured master key before making
-any filesystem mutation. An empty store has no existing ciphertext against
-which a key can be checked. Connection, migration, or key-verification failures
-leave the legacy source in place and do not publish `layout.toml`.
+filesystem migrations. It then constructs the encrypted secret store and
+authenticates every reconstructable encrypted secret and credential-account
+record, up to the 100,000-record verification limit, before making the layout
+ready. A malformed or unauthenticatable record, an over-limit scan, or any
+credential-session record fails the cutover: session AAD identity is encrypted
+inside that record and cannot be reconstructed from its durable locator for this
+offline check. An empty store has no existing ciphertext against which a key can
+be checked. Connection, migration, or key-verification failures leave the
+legacy source in place and do not publish `layout.toml`.
 
 Released tenant/user skill trees under
 `tenants/<tenant>/users/<user>/skills/` remain in the retained adoption
@@ -175,6 +193,18 @@ its original legacy location (or restore the full pre-adoption backup/home)
 before starting the old binary. An old binary cannot safely read the canonical
 layout. Never run old and new binaries against diverging copies. This procedure
 does not delete any source, snapshot, journal, or workspace.
+
+## Recorded-QA credential source
+
+`IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT`, used by recorded QA fixtures, is
+the Reborn **installation root**—the directory that contains `config.toml` and
+`state/`—not a legacy `local-dev/` profile directory and not `state/` itself.
+The fixture derives the database and master-key paths from
+`<source-root>/state/`; its tenant, user, and agent selectors are separately
+controlled by the corresponding `..._TENANT`, `..._USER`, and `..._AGENT`
+variables. Point it at a ready canonical installation and supply selectors that
+identify exactly one configured source account; it is a QA credential-import
+source, not an adoption or rollback authority.
 
 ## Regression commands
 

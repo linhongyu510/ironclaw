@@ -378,17 +378,8 @@ fn snapshot_owned_recovery_discards_only_marker_proven_partial_staging() {
     .expect("first staged copy");
     let mut journal = AdoptionJournal::new(candidate, requirement, None);
     journal.phase = AdoptionPhase::SnapshotOwned;
-    let journal_contents = toml::to_string(&journal).expect("serialize journal");
-    let mut journal: toml::Value = toml::from_str(&journal_contents).expect("journal TOML");
-    journal.as_table_mut().expect("journal table").insert(
-        "operation_id".into(),
-        toml::Value::String("00000000-0000-4000-8000-000000000001".into()),
-    );
-    fs::write(
-        adoption_root.join("journal.toml"),
-        toml::to_string(&journal).expect("journal with owner"),
-    )
-    .expect("journal");
+    journal.operation_id = "00000000-0000-4000-8000-000000000001".to_string();
+    write_journal(&adoption_root.join(JOURNAL_FILE), &journal).expect("journal with owner");
 
     adopt_layout(&home, requirement, confirmed_options())
         .expect("proven partial staging is discarded and copied again");

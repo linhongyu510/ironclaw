@@ -97,9 +97,15 @@ The `runtime/layout-adoption/snapshot/` tree is migration evidence, not an
 active profile root. It may retain the source profile name in metadata because
 normal reads and writes never resolve through it.
 
-The first implementation does not need to create empty `logs/`, `cache/`,
-`tmp/`, or provider-runtime directories eagerly. Their path ownership is
-reserved now; each owner creates its directory when it has real data.
+`logs/`, `cache/`, and `tmp/` are non-authoritative operational namespaces.
+`logs/` may persist according to the observability owner's retention policy,
+but is never a durable application-state, adoption, or rollback source.
+`cache/` is rebuildable and may be evicted at any time; `tmp/` is
+invocation-local scratch data with no retention or rollback guarantee. Neither
+may hold the only copy of a turn, credential, or workspace change. The layout
+creates or validates the three directory roots, but adoption never copies their
+contents as canonical state; unexpected non-empty target directories are an
+explicit conflict rather than a merge source.
 
 Scope decision: a flatter first release with the DB/key directly at Reborn
 home would reduce composition churn, but it is intentionally not selected. It

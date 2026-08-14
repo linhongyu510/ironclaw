@@ -77,7 +77,19 @@ The exact filenames remain subject to compatibility design, but the ownership bo
 - `system/` is host-managed product content and is profile-agnostic.
 - `workspaces/` is persistent user-created content, keyed by typed tenant plus user identity.
 - `runtime/` contains provider-specific bookkeeping, never authoritative conversations, extensions, or secrets.
-- `cache/` and `tmp/` are disposable.
+- `logs/` is non-authoritative operational output. It may persist according to
+  the observability owner's retention policy, but it is never an application
+  state, adoption, or rollback source.
+- `cache/` is rebuildable and may be evicted at any time; it has no application
+  state retention or rollback guarantee.
+- `tmp/` is invocation-local scratch data and has no retention or rollback
+  guarantee. It must never carry the only copy of a turn, credential, or
+  workspace change.
+
+The layout owns these three directory names and validates them as ordinary
+directories, but their contents are not copied as canonical state during
+adoption. Unexplained non-empty target directories are a conflict, not a source
+to merge or infer.
 
 Profiles that use the same home must not produce directories such as `local-dev/`, `hosted-single-tenant-volume/`, or `hosted-single-tenant-volume-sandboxed/` in the target layout. Runtime policy and process backend selection must not alter storage paths.
 

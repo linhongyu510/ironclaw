@@ -790,9 +790,7 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .as_slice(),
-            &[crate::runtime::local_runtime_storage_root(
-                context.boot_config()
-            )],
+            &[crate::runtime::local_state_root(context.boot_config())],
             "Google secrets must use the canonical Reborn state root"
         );
     }
@@ -943,9 +941,7 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .as_slice(),
-            &[crate::runtime::local_runtime_storage_root(
-                context.boot_config()
-            )],
+            &[crate::runtime::local_state_root(context.boot_config())],
             "LLM keys must use the canonical Reborn state root"
         );
     }

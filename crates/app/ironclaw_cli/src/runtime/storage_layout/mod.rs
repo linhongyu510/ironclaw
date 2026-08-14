@@ -9,10 +9,9 @@ use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, anyhow, bail};
-use ironclaw_composition::LegacySkillSnapshotSource;
 use ironclaw_config::{
-    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
-    ProfileTransitionAdmission, RebornHome, RebornStoragePaths, TenancyModel, WorkspaceAccessFloor,
+    DurableStateKind, LayoutManifest, LayoutRequirement, LegacyStorageSource,
+    ProfileTransitionAdmission, RebornHome, RebornStoragePaths,
 };
 use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
 use serde::{Deserialize, Serialize};

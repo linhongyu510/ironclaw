@@ -453,7 +453,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_request_environment(&request)?;
-        super::mounts::validate_mandatory_workspace_mount_view(
+        let _mandatory_workspace_grant = super::mounts::validate_mandatory_workspace_mount_view(
             &request.scope,
             request.mounts.as_ref(),
         )?;

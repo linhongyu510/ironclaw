@@ -123,7 +123,7 @@ fn validate_ready_namespace_roots(paths: &RebornStoragePaths) -> anyhow::Result<
 /// caller-selected host path, and derives the snapshot location itself.
 pub(crate) fn ready_legacy_skill_snapshot_source(
     home: &RebornHome,
-) -> anyhow::Result<Option<LegacySkillSnapshotSource>> {
+) -> anyhow::Result<Option<LegacyStorageSource>> {
     let paths = RebornStoragePaths::from_home(home);
     let journal_path = paths.runtime_root().join(ADOPTION_DIR).join(JOURNAL_FILE);
     if !journal_path.exists() {
@@ -139,7 +139,7 @@ pub(crate) fn ready_legacy_skill_snapshot_source(
     Ok(journal
         .inventory
         .has_legacy_skills
-        .then(|| journal.source.skill_snapshot_source()))
+        .then_some(journal.source))
 }
 
 /// Read the durable external-memory namespace committed by fresh

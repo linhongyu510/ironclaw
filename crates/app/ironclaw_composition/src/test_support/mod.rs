@@ -100,7 +100,9 @@ pub fn with_local_runtime_workspace_root_for_test(
         } => {
             *workspace_root_for_test = Some(workspace_root);
         }
-        _ => {}
+        _ => panic!(
+            "with_local_runtime_workspace_root_for_test supports only local filesystem and hosted single-tenant PostgreSQL storage"
+        ),
     }
     bindings
 }

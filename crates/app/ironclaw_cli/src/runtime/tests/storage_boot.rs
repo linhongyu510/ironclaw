@@ -370,7 +370,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         assert!(
             !error
                 .to_string()
-                .contains("verify canonical external PostgreSQL store"),
+                .contains("open hosted single-tenant PostgreSQL store"),
             "{case} reached PostgreSQL verification: {error:#}"
         );
         assert_eq!(
@@ -455,11 +455,11 @@ fn runtime_input_refuses_legacy_state_before_constructing_runtime_services() {
 }
 
 #[test]
-fn local_runtime_storage_root_is_the_canonical_state_namespace_for_every_profile() {
+fn local_state_root_is_the_canonical_state_namespace_for_every_profile() {
     for &profile in ironclaw_config::RebornProfile::all() {
         let (_temp, config) = boot_config_with_config_toml(profile.as_str(), "");
         assert_eq!(
-            local_runtime_storage_root(&config),
+            local_state_root(&config),
             config.home().path().join("state")
         );
     }

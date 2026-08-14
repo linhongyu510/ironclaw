@@ -1933,9 +1933,12 @@ impl RebornRuntime {
         Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
     > {
         let extension_filesystem = &self.extension_filesystem;
+        let workspace_mount_policy = self.workspace_mount_policy.clone();
         Some(Arc::new(ironclaw_filesystem::ScopedFilesystem::new(
             Arc::clone(extension_filesystem),
-            crate::runtime_mounts::scoped_browse_mount_view,
+            move |scope| {
+                crate::runtime_mounts::webui_browse_mount_view(&workspace_mount_policy, scope)
+            },
         )))
     }
 

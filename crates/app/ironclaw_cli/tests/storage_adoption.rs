@@ -372,6 +372,7 @@ output_schema_ref = "schemas/read.output.json"
         !reborn_home.join("layout.toml").exists(),
         "fixture must enter normal startup with only the released legacy layout"
     );
+    let legacy_rollback_snapshot = snapshot_tree(&legacy_root);
     let isolated_home = temp.path().join("isolated-home");
     let home_before_denied_start = snapshot_tree(&reborn_home);
     let occupied_listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -405,6 +406,26 @@ output_schema_ref = "schemas/read.output.json"
     wait_for_serve_banner(&mut serve);
     serve.kill().expect("stop fresh serve process");
     serve.wait().expect("reap fresh serve process");
+    assert!(
+        reborn_home.join("layout.toml").is_file(),
+        "adoption must publish the canonical layout manifest last"
+    );
+    assert!(
+        !legacy_root.exists(),
+        "the legacy root is taken over by the journal-owned rollback snapshot"
+    );
+    let rollback_snapshot = adopted_paths
+        .runtime_root()
+        .join("layout-adoption/snapshot/local-dev");
+    assert!(
+        rollback_snapshot.is_dir(),
+        "adoption must retain the immutable legacy snapshot as rollback evidence"
+    );
+    assert_eq!(
+        snapshot_tree(&rollback_snapshot),
+        legacy_rollback_snapshot,
+        "rollback snapshot must retain the exact adopted legacy layout"
+    );
     let reopened_threads = open_standalone_thread_service_for_test(&reborn_home)
         .await
         .expect("fresh thread-service reopen after adoption");

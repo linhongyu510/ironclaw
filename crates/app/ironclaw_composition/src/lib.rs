@@ -98,6 +98,7 @@ pub use factory::production_first_party_trust_policy;
 // consumer: `ironclaw_cli storage adopt` · pinned by: `ironclaw_cli/tests/storage_adoption.rs`
 pub use factory::verify_hosted_postgres_store_for_adoption;
 // consumer: `ironclaw_cli storage adopt` · pinned by: `ironclaw_cli/tests/storage_adoption.rs`
+pub use factory::prepare_standalone_store_for_adoption;
 pub use factory::verify_standalone_secret_store_for_adoption;
 // consumer: `ironclaw_cli` onboard/master_key · pinned by: `ironclaw_cli` build (the outcome is the fn's return type; `factory` is private)
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
@@ -112,8 +113,7 @@ pub use channel_initialization::{
 };
 // consumer: `ironclaw_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
-    ChannelExtensionBinding, LegacySkillSnapshotSource, OAuthClientConfig, RebornHostBindings,
-    RebornRuntimeProcessBinding,
+    ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
 // WS1.4 deleted the `extension_contracts::channel_adapter` second import path; WS6 did
 // the same for the `auth`/`host_api`/`host_runtime`/`product_contracts`/`failure_lane`/

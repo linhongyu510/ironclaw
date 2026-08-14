@@ -4994,7 +4994,8 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     let storage_paths = ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
-    let snapshot_root = crate::LegacySkillSnapshotSource::LocalDev.snapshot_root(&storage_paths);
+    let snapshot_root =
+        ironclaw_config::LegacyStorageSource::LocalDev.snapshot_root(&storage_paths);
     std::fs::create_dir_all(snapshot_root.join("skills/legacy-helper")).expect("legacy skill dir");
     std::fs::write(
         snapshot_root.join("skills/legacy-helper/SKILL.md"),
@@ -5011,7 +5012,7 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
             "runtime-legacy-skill-owner",
             storage_root.clone(),
         )
-        .with_legacy_skill_snapshot_source(crate::LegacySkillSnapshotSource::LocalDev)
+        .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev)
         .with_runtime_policy(standalone_runtime_policy()),
     );
     let runtime = build_reborn_runtime(input).await.expect("runtime");

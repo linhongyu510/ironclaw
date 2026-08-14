@@ -1874,6 +1874,73 @@ async fn query_filters_on_structural_record_kind(filesystem: &dyn RootFilesystem
 async fn libsql_query_filters_on_structural_record_kind() {
     query_filters_on_structural_record_kind(&*libsql_root().await).await;
 }
+
+async fn query_or_filters_on_structural_record_kind(
+    filesystem: &dyn RootFilesystem,
+    prefix: &VirtualPath,
+) {
+    let selected = RecordKind::new("selected").unwrap();
+    let scope = IndexKey::new("scope").unwrap();
+    for (leaf, kind, indexed_scope) in [
+        ("selected", Some(selected.clone()), "excluded"),
+        (
+            "index-match",
+            Some(RecordKind::new("other").unwrap()),
+            "included",
+        ),
+        ("opaque", None, "excluded"),
+    ] {
+        let entry = match kind {
+            Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+            None => Entry::bytes(Vec::new()),
+        }
+        .with_indexed(scope.clone(), IndexValue::Text(indexed_scope.into()));
+        let path = VirtualPath::new(format!("{}/{leaf}", prefix.as_str())).unwrap();
+        filesystem
+            .put(&path, entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+    }
+
+    let results = filesystem
+        .query(
+            prefix,
+            &Filter::Or(vec![
+                Filter::Kind { kind: selected },
+                Filter::Eq {
+                    key: scope,
+                    value: IndexValue::Text("included".into()),
+                },
+            ]),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+
+    let paths: Vec<_> = results.into_iter().map(|entry| entry.path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            VirtualPath::new(format!("{}/index-match", prefix.as_str())).unwrap(),
+            VirtualPath::new(format!("{}/selected", prefix.as_str())).unwrap(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn in_memory_query_or_filters_on_structural_record_kind() {
+    let filesystem = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/secrets/kind-query-or").unwrap();
+    query_or_filters_on_structural_record_kind(&filesystem, &prefix).await;
+}
+
+#[tokio::test]
+async fn libsql_query_or_filters_on_structural_record_kind() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/secrets/kind-query-or").unwrap();
+    query_or_filters_on_structural_record_kind(&*filesystem, &prefix).await;
+}
+
 #[tokio::test]
 async fn libsql_query_prefix_filter_matches_text_prefix() {
     let filesystem = libsql_root().await;
@@ -3624,6 +3691,15 @@ mod postgres_tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, vpath(&prefix, "selected"));
+    }
+
+    #[tokio::test]
+    async fn postgres_query_or_filters_on_structural_record_kind() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix = VirtualPath::new(prefix).unwrap();
+        super::query_or_filters_on_structural_record_kind(&fs, &prefix).await;
     }
 
     #[tokio::test]

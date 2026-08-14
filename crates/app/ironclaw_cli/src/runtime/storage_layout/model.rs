@@ -58,75 +58,13 @@ pub(super) enum AdoptionPhase {
     StoreVerified,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(super) enum LegacySourceKind {
-    LocalDev,
-    HostedSingleTenant,
-    HostedSingleTenantVolume,
-    BareHome,
-}
-
-impl LegacySourceKind {
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::LocalDev => "local-dev",
-            Self::HostedSingleTenant => "hosted-single-tenant",
-            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
-            Self::BareHome => "bare-home",
-        }
-    }
-
-    pub(super) const fn profile_directory(self) -> Option<&'static str> {
-        match self {
-            Self::LocalDev => Some("local-dev"),
-            Self::HostedSingleTenant => Some("hosted-single-tenant"),
-            Self::HostedSingleTenantVolume => Some("hosted-single-tenant-volume"),
-            Self::BareHome => None,
-        }
-    }
-
-    pub(super) const fn skill_snapshot_source(self) -> LegacySkillSnapshotSource {
-        match self {
-            Self::LocalDev => LegacySkillSnapshotSource::LocalDev,
-            Self::HostedSingleTenant => LegacySkillSnapshotSource::HostedSingleTenant,
-            Self::HostedSingleTenantVolume => LegacySkillSnapshotSource::HostedSingleTenantVolume,
-            Self::BareHome => LegacySkillSnapshotSource::BareHome,
-        }
-    }
-
-    /// The historical source envelope is fixed and never inferred from the
-    /// requested target profile.
-    pub(super) const fn requirement(self) -> LayoutRequirement {
-        match self {
-            Self::LocalDev | Self::BareHome => LayoutRequirement {
-                durable_state: DurableStateKind::EmbeddedLibSql,
-                security: DeploymentSecurityEnvelope {
-                    tenancy: TenancyModel::SingleUser,
-                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-                },
-            },
-            Self::HostedSingleTenant => LayoutRequirement {
-                durable_state: DurableStateKind::ExternalPostgres,
-                security: DeploymentSecurityEnvelope {
-                    tenancy: TenancyModel::SingleUser,
-                    workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-                },
-            },
-            Self::HostedSingleTenantVolume => LayoutRequirement {
-                durable_state: DurableStateKind::EmbeddedLibSql,
-                security: DeploymentSecurityEnvelope {
-                    tenancy: TenancyModel::MultiUser,
-                    workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
-                },
-            },
-        }
-    }
-}
+// Keep the discovery module's in-flight split mechanically isolated while
+// journal and adoption code use the neutral config-owned source directly.
+pub(super) use ironclaw_config::LegacyStorageSource as LegacySourceKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LegacyCandidate {
-    pub(super) kind: LegacySourceKind,
+    pub(super) kind: LegacyStorageSource,
     pub(super) source_root: PathBuf,
     pub(super) db_files: Vec<String>,
     pub(super) has_master_key: bool,
@@ -140,7 +78,9 @@ impl LegacyCandidate {
     }
 
     pub(super) fn snapshot_root(&self, adoption_root: &Path) -> PathBuf {
-        adoption_root.join(SNAPSHOT_DIR).join(self.kind.label())
+        adoption_root
+            .join(SNAPSHOT_DIR)
+            .join(self.kind.snapshot_directory())
     }
 }
 
@@ -158,7 +98,7 @@ pub(super) struct AdoptionInventory {
 pub(super) struct AdoptionJournal {
     pub(super) schema_version: u32,
     pub(super) operation_id: String,
-    pub(super) source: LegacySourceKind,
+    pub(super) source: LegacyStorageSource,
     pub(super) phase: AdoptionPhase,
     pub(super) source_requirement: LayoutRequirement,
     pub(super) target_requirement: LayoutRequirement,
@@ -499,7 +439,7 @@ pub(super) fn validate_prepare_recovery_shape(
     snapshot: &Path,
 ) -> anyhow::Result<()> {
     if ordinary_directory_presence(snapshot, "prepare-phase adoption snapshot")? {
-        let source_is_absent = if candidate.kind == LegacySourceKind::BareHome {
+        let source_is_absent = if candidate.kind == LegacyStorageSource::BareHome {
             recorded_bare_source_entries_absent(candidate)?
         } else {
             path_is_absent(&candidate.source_root)?

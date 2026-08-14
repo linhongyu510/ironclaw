@@ -806,7 +806,7 @@ pub(super) fn verify_canonical_store(
         (DurableStateKind::EmbeddedLibSql, CanonicalStoreVerification::EmbeddedLibSql) => {
             let state_root = paths.state_root().to_path_buf();
             crate::runtime::block_on_cli(async move {
-                ironclaw_composition::verify_standalone_secret_store_for_adoption(&state_root).await
+                ironclaw_composition::prepare_standalone_store_for_adoption(&state_root).await
             })
             .context(
                 "verify canonical embedded store and secret resolver before committing adoption",

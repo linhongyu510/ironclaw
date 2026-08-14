@@ -43,7 +43,7 @@ impl SkillsListCommand {
         let config = build_skill_list_config(context.boot_config())?;
         let skills = crate::runtime::block_on_cli(list_reborn_local_skills_from_state(
             config.owner_id.clone(),
-            config.standalone_root.clone(),
+            config.state_root.clone(),
         ))?;
 
         if self.json {
@@ -52,7 +52,7 @@ impl SkillsListCommand {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
                     "reborn_home": context.boot_config().home().path(),
-                    "standalone_root": config.standalone_root,
+                    "state_root": config.state_root,
                     "owner_id": config.owner_id,
                 });
             }
@@ -70,7 +70,7 @@ impl SkillsListCommand {
                 "reborn_home: {}",
                 context.boot_config().home().path().display()
             );
-            println!("standalone_root: {}", config.standalone_root.display());
+            println!("state_root: {}", config.state_root.display());
             println!("owner_id: {}", config.owner_id);
         }
 
@@ -85,7 +85,7 @@ impl SkillsListCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillListConfig {
     owner_id: String,
-    standalone_root: PathBuf,
+    state_root: PathBuf,
     profile: RebornProfile,
 }
 
@@ -100,7 +100,7 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
     let paths = crate::runtime::ensure_ready_layout_for_profile(config, profile)?;
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        standalone_root: paths.state_root().to_path_buf(),
+        state_root: paths.state_root().to_path_buf(),
         profile,
     })
 }

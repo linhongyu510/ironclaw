@@ -137,6 +137,8 @@ async fn postgres_adoption_verifier_accepts_empty_and_existing_correct_secret_st
     let root = tempfile::tempdir().expect("tempdir");
     let key = "01234567890123456789012345678901";
 
+    initialize_postgres_filesystem(&pool).await;
+
     verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(
         pool.clone(),
         root.path(),
@@ -150,6 +152,33 @@ async fn postgres_adoption_verifier_accepts_empty_and_existing_correct_secret_st
     verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(pool, root.path(), key))
         .await
         .expect("an existing hosted secret authenticates with its configured master key");
+}
+
+#[tokio::test]
+async fn postgres_adoption_verifier_does_not_initialize_an_unmigrated_store() {
+    let Some((_container, pool, _database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let root = tempfile::tempdir().expect("tempdir");
+
+    verify_hosted_postgres_store_for_adoption(postgres_adoption_bindings(
+        pool.clone(),
+        root.path(),
+        "01234567890123456789012345678901",
+    ))
+    .await
+    .expect_err("read-only adoption preflight must reject an uninitialized database");
+
+    let client = pool.get().await.expect("inspect PostgreSQL schema");
+    let row = client
+        .query_one("SELECT to_regclass('root_filesystem_entries')::text", &[])
+        .await
+        .expect("query root filesystem table");
+    let table: Option<String> = row.get(0);
+    assert!(
+        table.is_none(),
+        "adoption preflight must not create the filesystem schema"
+    );
 }
 
 #[tokio::test]
@@ -302,11 +331,8 @@ fn postgres_adoption_bindings(
 }
 
 async fn seed_postgres_secret(pool: &deadpool_postgres::Pool, master_key: &str) {
+    initialize_postgres_filesystem(pool).await;
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
-    filesystem
-        .run_migrations()
-        .await
-        .expect("seed filesystem migrations");
     let crypto = Arc::new(
         SecretsCrypto::new(SecretMaterial::from(master_key)).expect("valid seed master key"),
     );
@@ -325,6 +351,14 @@ async fn seed_postgres_secret(pool: &deadpool_postgres::Pool, master_key: &str) 
         )
         .await
         .expect("seed encrypted Postgres secret");
+}
+
+async fn initialize_postgres_filesystem(pool: &deadpool_postgres::Pool) {
+    let filesystem = PostgresRootFilesystem::new(pool.clone());
+    filesystem
+        .run_migrations()
+        .await
+        .expect("seed filesystem migrations");
 }
 
 fn sandbox_process_port() -> Arc<ironclaw_host_runtime::UserSandboxProcessPort> {

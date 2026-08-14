@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     ids::{
         ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, SecretHandle,
-        TenantId, TenantUserWorkspaceKey, ThreadId, UserId,
+        TenantId, ThreadId, UserId,
     },
     resource::{ResourceEstimate, ResourceScope},
 };
@@ -359,16 +359,19 @@ async fn per_caller_workspace_policy_leases_only_the_gates_own_subtree() {
             .iter()
             .find(|mount| mount.alias.as_str() == "/workspace")
             .expect("workspace mount in lease");
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant").expect("tenant id"),
+            user_id: UserId::new(user).expect("user id"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let expected_target = crate::runtime_mounts::scoped_workspace_target(&scope)
+            .expect("mount owner workspace target");
         assert_eq!(
-            mount.target.as_str(),
-            format!(
-                "/projects/workspace/users/{}",
-                TenantUserWorkspaceKey::from_tenant_user(
-                    &TenantId::new("tenant").expect("tenant id"),
-                    &UserId::new(user).expect("user id"),
-                )
-                .digest_segment()
-            ),
+            mount.target, expected_target,
             "lease for {user} must key {user}'s own subtree"
         );
         targets.push(mount.target.as_str().to_string());

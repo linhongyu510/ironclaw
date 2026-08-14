@@ -300,50 +300,18 @@ pub(crate) enum PostgresPoolSource {
     Prebuilt(deadpool_postgres::Pool),
 }
 
-/// A fixed, journal-admitted legacy snapshot location that may supply the
-/// one-time disk-skill importer. This is deliberately not a path: callers
-/// cannot point composition at active state, system, or arbitrary host trees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacySkillSnapshotSource {
-    LocalDev,
-    HostedSingleTenant,
-    HostedSingleTenantVolume,
-    BareHome,
-}
-
-impl LegacySkillSnapshotSource {
-    /// Returns the fixed host-side root admitted for this legacy snapshot.
-    ///
-    /// Callers may inspect this location to stage an import, but cannot supply
-    /// an arbitrary path to the runtime importer: admission remains typed by
-    /// [`RebornHostBindings::with_legacy_skill_snapshot_source`].
-    pub fn snapshot_root(self, paths: &ironclaw_config::RebornStoragePaths) -> PathBuf {
-        let source = match self {
-            Self::LocalDev => "local-dev",
-            Self::HostedSingleTenant => "hosted-single-tenant",
-            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
-            Self::BareHome => "bare-home",
-        };
-        paths
-            .runtime_root()
-            .join("layout-adoption")
-            .join("snapshot")
-            .join(source)
-    }
-}
-
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalFilesystem {
         paths: ironclaw_config::RebornStoragePaths,
-        legacy_skill_snapshot_source: Option<LegacySkillSnapshotSource>,
+        legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
         #[cfg(any(test, feature = "test-support"))]
         workspace_root_for_test: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
     },
     HostedSingleTenantPostgres {
         paths: ironclaw_config::RebornStoragePaths,
-        legacy_skill_snapshot_source: Option<LegacySkillSnapshotSource>,
+        legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
         #[cfg(any(test, feature = "test-support"))]
         workspace_root_for_test: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
@@ -584,7 +552,10 @@ impl RebornHostBindings {
     /// Attach the one fixed snapshot source admitted by the CLI's completed
     /// layout-adoption journal. The value is an enum instead of a path so this
     /// public input cannot be used to import active or arbitrary host content.
-    pub fn with_legacy_skill_snapshot_source(mut self, source: LegacySkillSnapshotSource) -> Self {
+    pub fn with_legacy_skill_snapshot_source(
+        mut self,
+        source: ironclaw_config::LegacyStorageSource,
+    ) -> Self {
         match &mut self.storage {
             RebornStorageInput::LocalFilesystem {
                 legacy_skill_snapshot_source,

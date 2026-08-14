@@ -63,6 +63,7 @@ pub use retired_sections::{RetiredSectionError, RetiredSections, retired_config_
 pub use secrets_guard::{InlineSecretError, reject_inline_secret};
 pub use storage_layout::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
-    ProfileTransitionAdmission, RebornStoragePaths, StateLayoutVersion, TenancyModel,
-    WorkspaceAccessFloor, canonical_memory_provider_app_id, legacy_memory_provider_app_id,
+    LegacyStorageSource, ProfileTransitionAdmission, RebornStoragePaths, StateLayoutVersion,
+    TenancyModel, WorkspaceAccessFloor, canonical_memory_provider_app_id,
+    legacy_memory_provider_app_id,
 };

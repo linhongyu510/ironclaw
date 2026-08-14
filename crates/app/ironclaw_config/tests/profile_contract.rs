@@ -2,10 +2,91 @@ use std::{ffi::OsString, str::FromStr};
 
 use ironclaw_config::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
-    ProfileTransitionAdmission, REBORN_PROFILE_ENV, RebornBootConfig, RebornConfigError,
-    RebornHome, RebornProfile, RebornStoragePaths, StateLayoutVersion, TenancyModel,
-    WorkspaceAccessFloor,
+    LegacyStorageSource, ProfileTransitionAdmission, REBORN_PROFILE_ENV, RebornBootConfig,
+    RebornConfigError, RebornHome, RebornProfile, RebornStoragePaths, StateLayoutVersion,
+    TenancyModel, WorkspaceAccessFloor,
 };
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LegacySourceRecord {
+    source: LegacyStorageSource,
+}
+
+#[test]
+fn legacy_storage_sources_preserve_journal_wire_values_and_snapshot_paths() {
+    struct Case {
+        source: LegacyStorageSource,
+        wire_value: &'static str,
+        profile_directory: Option<&'static str>,
+        requirement: LayoutRequirement,
+    }
+
+    let cases = [
+        Case {
+            source: LegacyStorageSource::LocalDev,
+            wire_value: "local-dev",
+            profile_directory: Some("local-dev"),
+            requirement: layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                TenancyModel::SingleUser,
+                WorkspaceAccessFloor::SingleTrustedOperator,
+            ),
+        },
+        Case {
+            source: LegacyStorageSource::HostedSingleTenant,
+            wire_value: "hosted-single-tenant",
+            profile_directory: Some("hosted-single-tenant"),
+            requirement: layout_requirement(
+                DurableStateKind::ExternalPostgres,
+                TenancyModel::SingleUser,
+                WorkspaceAccessFloor::SingleTrustedOperator,
+            ),
+        },
+        Case {
+            source: LegacyStorageSource::HostedSingleTenantVolume,
+            wire_value: "hosted-single-tenant-volume",
+            profile_directory: Some("hosted-single-tenant-volume"),
+            requirement: layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                TenancyModel::MultiUser,
+                WorkspaceAccessFloor::PerCallerIsolated,
+            ),
+        },
+        Case {
+            source: LegacyStorageSource::BareHome,
+            wire_value: "bare-home",
+            profile_directory: None,
+            requirement: layout_requirement(
+                DurableStateKind::EmbeddedLibSql,
+                TenancyModel::SingleUser,
+                WorkspaceAccessFloor::SingleTrustedOperator,
+            ),
+        },
+    ];
+    let paths = RebornStoragePaths::from_installation_root("/stable-reborn-home");
+
+    for case in cases {
+        let record = LegacySourceRecord {
+            source: case.source,
+        };
+        let encoded = toml::to_string(&record).expect("serialize source record");
+        assert_eq!(encoded, format!("source = \"{}\"\n", case.wire_value));
+        assert_eq!(
+            toml::from_str::<LegacySourceRecord>(&encoded).expect("deserialize source record"),
+            record
+        );
+        assert_eq!(case.source.profile_directory(), case.profile_directory);
+        assert_eq!(
+            case.source.snapshot_root(&paths),
+            paths
+                .runtime_root()
+                .join("layout-adoption/snapshot")
+                .join(case.wire_value)
+        );
+        assert_eq!(case.source.requirement(), case.requirement);
+    }
+}
 
 #[test]
 fn profile_wire_values_are_stable() {

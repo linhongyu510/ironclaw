@@ -1960,6 +1960,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypted_record_verification_rejects_one_over_the_configured_limit() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");
+        let store = SecretStore::new(scoped, test_crypto());
+        let scope = sample_scope("test", "test");
+        for handle in ["first", "second", "third"] {
+            store
+                .put(
+                    scope.clone(),
+                    SecretHandle::new(handle).expect("secret handle"),
+                    SecretMaterial::from(format!("encrypted-{handle}")),
+                    None,
+                )
+                .await
+                .expect("seed encrypted record");
+        }
+
+        let error = verify_existing_encrypted_records_with_limit(
+            backend.as_ref(),
+            test_crypto().as_ref(),
+            2,
+        )
+        .await
+        .expect_err("limit plus one encrypted records must fail closed");
+        assert!(
+            error.to_string().contains("exceeded its bounded scan"),
+            "limit-plus-one failure must retain the bounded-scan classification: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn encrypted_record_verification_checks_every_credential_account_record() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = build_scoped_fs(Arc::clone(&backend), "/tenants/test/users/test/secrets");

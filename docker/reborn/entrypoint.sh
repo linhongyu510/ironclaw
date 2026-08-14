@@ -242,13 +242,17 @@ then
 fi
 
 # Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
-# Otherwise the process must bind all container interfaces so either Railway
-# ingress or a Docker-published port can reach it. Local access stays bounded by
-# the host-side publish address (for example `-p 127.0.0.1:3000:3000`).
+# Railway needs all interfaces for platform ingress. Off Railway, preserve the
+# fail-closed loopback default: publishing a host port does not prevent sibling
+# containers on the same bridge network from reaching a wildcard-bound process.
+# Local Docker operators who want a published port must opt in explicitly with
+# IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 and should publish it on 127.0.0.1.
 if [ -n "${IRONCLAW_REBORN_SERVE_HOST:-}" ]; then
   host="${IRONCLAW_REBORN_SERVE_HOST}"
-else
+elif railway_runtime_detected; then
   host="0.0.0.0"
+else
+  host="127.0.0.1"
 fi
 port="${PORT:-${IRONCLAW_REBORN_SERVE_PORT:-3000}}"
 

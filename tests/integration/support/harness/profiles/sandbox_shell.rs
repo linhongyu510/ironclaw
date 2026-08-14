@@ -4,9 +4,9 @@ use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};
 use ironclaw_host_api::{
     capability::EffectKind,
-    ids::{AgentId, CapabilityId, TenantId, TenantUserWorkspaceKey, UserId},
-    mount::{MountGrant, MountPermissions, MountView},
-    path::{MountAlias, VirtualPath},
+    ids::{AgentId, CapabilityId, InvocationId, TenantId, UserId},
+    mount::{MountPermissions, MountView},
+    resource::ResourceScope,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 
@@ -41,16 +41,22 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
 }
 
 fn caller_workspace_mounts(tenant_id: &TenantId, user_id: &UserId) -> HarnessResult<MountView> {
-    let key = TenantUserWorkspaceKey::from_tenant_user(tenant_id, user_id);
-    Ok(MountView::new(vec![MountGrant::new(
-        MountAlias::new("/workspace")?,
-        VirtualPath::new(format!(
-            "/projects/workspace/users/{}",
-            key.digest_segment()
-        ))?,
-        MountPermissions {
-            execute: true,
-            ..MountPermissions::read_write_list_delete()
-        },
-    )])?)
+    let scope = ResourceScope {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    Ok(
+        ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
+            &scope,
+            MountPermissions {
+                execute: true,
+                ..MountPermissions::read_write_list_delete()
+            },
+        )?,
+    )
 }

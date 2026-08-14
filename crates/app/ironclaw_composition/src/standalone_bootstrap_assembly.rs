@@ -1,11 +1,15 @@
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 
 use crate::RebornBuildError;
 use crate::root::default_system_prompt::seed_default_system_prompt;
 
 const DEFAULT_SYSTEM_PROMPT_PATH: &str = "prompts/default-system.md";
+const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
 #[cfg(all(test, unix))]
 pub(crate) use ironclaw_extension_host::bundled_skills::LEGACY_SKILLS_BACKFILL_MARKER;
 const STANDALONE_LEGACY_SKILL_TENANTS: [&str; 2] = ["default", "reborn-cli"];
@@ -48,35 +52,26 @@ pub(crate) fn backfill_legacy_user_skills(
 /// Copies rather than moves, so a downgrade is not destructive, and an existing database entry
 /// always wins.
 ///
-/// Runs once PER SKILL, gated on a marker under [`SKILL_DISK_IMPORT_MARKER_ROOT`]. "Existing entry
-/// wins" is not enough on its own: the disk copy stays behind, so a skill the user REMOVED would be
-/// absent at the next boot and get copied straight back. A marker makes this a migration rather than
-/// a standing sync.
-///
-/// Keyed per skill, not once for the whole store. A single store-wide marker made the import a
-/// one-time event, so a skill dropped into the store after the first boot was never copied across —
-/// and since skills read only from the database, it stayed invisible permanently, the marker
-/// outliving every restart. Per skill, one that appears later is picked up on the next boot while
-/// migrated ones stay migrated.
+/// Per-skill markers under [`SKILL_DISK_IMPORT_MARKER_ROOT`] make interruption
+/// recovery idempotent and prevent deleted skills from being resurrected. A
+/// versioned snapshot-complete marker then makes normal startup O(1): layout
+/// adoption snapshots are immutable, so a completed snapshot must never be
+/// rescanned for files that could only have appeared through out-of-band
+/// mutation.
 ///
 /// Markers live under `/system/settings`, database-backed on every shape, so they travel with the
 /// store rather than the boot directory.
 const SKILL_DISK_IMPORT_MARKER_ROOT: &str = "/system/settings/skill-disk-import";
+const SKILL_DISK_IMPORT_COMPLETE_MARKER: &str = "/system/settings/skill-disk-import-v1-complete";
 
-/// Record that one disk skill has been migrated. Never fatal: a missing marker costs one repeated
-/// import attempt, which "existing entry wins" already absorbs; a failed boot costs the runtime.
 async fn record_skill_disk_import(
     filesystem: &ironclaw_filesystem::CompositeRootFilesystem,
     marker: &ironclaw_host_api::path::VirtualPath,
-) {
+) -> Result<(), RebornBuildError> {
     use ironclaw_filesystem::RootFilesystem;
-    if let Err(error) = RootFilesystem::write_file(filesystem, marker, b"1").await {
-        tracing::debug!(
-            %error,
-            marker = marker.as_str(),
-            "could not record a skill disk-import marker; the import will be retried next boot"
-        );
-    }
+    RootFilesystem::write_file(filesystem, marker, b"1")
+        .await
+        .map_err(RebornBuildError::Filesystem)
 }
 
 pub(crate) async fn import_host_disk_skills_into_database(
@@ -87,6 +82,13 @@ pub(crate) async fn import_host_disk_skills_into_database(
     use ironclaw_filesystem::RootFilesystem;
     use ironclaw_host_api::path::VirtualPath;
 
+    let complete_marker = VirtualPath::new(SKILL_DISK_IMPORT_COMPLETE_MARKER)?;
+    match RootFilesystem::stat(filesystem.as_ref(), &complete_marker).await {
+        Ok(_) => return Ok(()),
+        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+        Err(error) => return Err(RebornBuildError::Filesystem(error)),
+    }
+
     validate_legacy_skill_snapshot_tree(storage_root)?;
     let tenants_root = storage_root.join("tenants");
     let mut skill_files = disk_skill_files(&tenants_root)?;
@@ -96,30 +98,26 @@ pub(crate) async fn import_host_disk_skills_into_database(
         let target = VirtualPath::new(&virtual_path)?;
         let marker = VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
         // Already migrated. Re-reading the disk copy here resurrects a skill the user has deleted.
-        if RootFilesystem::stat(filesystem.as_ref(), &marker)
-            .await
-            .is_ok()
-        {
-            continue;
+        match RootFilesystem::stat(filesystem.as_ref(), &marker).await {
+            Ok(_) => continue,
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+            Err(error) => return Err(RebornBuildError::Filesystem(error)),
         }
         // A database entry wins: it is either newer or the product of a previous import.
-        if RootFilesystem::stat(filesystem.as_ref(), &target)
-            .await
-            .is_ok()
-        {
-            record_skill_disk_import(filesystem, &marker).await;
-            continue;
+        match RootFilesystem::stat(filesystem.as_ref(), &target).await {
+            Ok(_) => {
+                record_skill_disk_import(filesystem, &marker).await?;
+                continue;
+            }
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+            Err(error) => return Err(RebornBuildError::Filesystem(error)),
         }
-        let Ok(bytes) = std::fs::read(&host_path) else {
-            continue;
-        };
-        if RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes)
-            .await
-            .is_ok()
-        {
-            record_skill_disk_import(filesystem, &marker).await;
-            imported += 1;
-        }
+        let bytes = std::fs::read(&host_path).map_err(|error| {
+            snapshot_io_error("read legacy skill snapshot file", &host_path, error)
+        })?;
+        RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
+        record_skill_disk_import(filesystem, &marker).await?;
+        imported += 1;
     }
     if imported > 0 {
         tracing::info!(
@@ -127,6 +125,7 @@ pub(crate) async fn import_host_disk_skills_into_database(
             "imported host-disk skills into the database-backed skill tree"
         );
     }
+    record_skill_disk_import(filesystem, &complete_marker).await?;
     Ok(())
 }
 
@@ -381,12 +380,75 @@ pub(crate) async fn bootstrap_standalone_host(
             reason: error.to_string(),
         }
     })?;
-    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_at_system_skills_root(
-        &system_root.join("skills"),
+    let filesystem = standalone_system_skills_filesystem(&system_root.join("skills"))?;
+    let system_skills_root = VirtualPath::new(SYSTEM_SKILLS_ROOT)?;
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        &filesystem,
+        &system_skills_root,
     )
     .await?;
 
     Ok(default_system_prompt_path)
+}
+
+/// Builds the narrowly scoped host-disk filesystem used only to seed standalone system skills.
+///
+/// The exact host root is validated before it is mounted so bundle installation cannot follow a
+/// symlink outside the standalone system tree.
+fn standalone_system_skills_filesystem(
+    system_skills_root: &Path,
+) -> Result<DiskFilesystem, RebornBuildError> {
+    let system_skills_root =
+        prepare_disk_skill_storage_root(system_skills_root, "standalone system skills root")?;
+    let virtual_system_skills_root = VirtualPath::new(SYSTEM_SKILLS_ROOT)?;
+    let mut filesystem = DiskFilesystem::new();
+    filesystem
+        .mount_local(
+            virtual_system_skills_root,
+            HostPath::from_path_buf(system_skills_root),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    Ok(filesystem)
+}
+
+fn prepare_disk_skill_storage_root(
+    storage_root: &Path,
+    label: &str,
+) -> Result<PathBuf, RebornBuildError> {
+    reject_existing_symlink(storage_root, label)?;
+    std::fs::create_dir_all(storage_root).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    reject_existing_symlink(storage_root, label)?;
+    let metadata =
+        std::fs::metadata(storage_root).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    if !metadata.is_dir() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} is not a directory: {}", storage_root.display()),
+        });
+    }
+    storage_root
+        .canonicalize()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })
+}
+
+fn reject_existing_symlink(path: &Path, label: &str) -> Result<(), RebornBuildError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RebornBuildError::InvalidConfig {
+            reason: format!("{label} must not be a symlink: {}", path.display()),
+        }),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +476,31 @@ mod bootstrap_tests {
         assert!(
             !system_root.join("system").exists(),
             "an exact system root must never be interpreted as an installation root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bundled_skills_reject_a_symlinked_system_skills_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let system_root = root.path().join("system");
+        let outside_root = root.path().join("outside-skills");
+        let owner = UserId::new("bootstrap-owner").expect("valid owner");
+        std::fs::create_dir_all(system_root.join("prompts"))
+            .expect("host-access system prompt root");
+        std::fs::create_dir_all(&outside_root).expect("outside skills root");
+        symlink(&outside_root, system_root.join("skills")).expect("symlink system skills root");
+
+        let error = bootstrap_standalone_host(&system_root, &owner)
+            .await
+            .expect_err("standalone bootstrap must not follow a symlinked skills root");
+
+        assert!(error.to_string().contains("must not be a symlink"));
+        assert!(
+            !outside_root.join("code-review").exists(),
+            "a rejected skills-root symlink must not receive bundled content"
         );
     }
 }
@@ -500,13 +587,11 @@ mod skill_disk_import_tests {
         .expect("database root filesystem builds")
     }
 
-    /// A skill dropped into the store AFTER the first boot must still be imported.
-    ///
-    /// The import was gated on one marker for the whole store, so it ran exactly once ever. Since
-    /// skills now read only from the database, anything that appeared on disk later was never
-    /// copied across and stayed invisible — permanently, because the marker survives restarts.
+    /// A completed immutable adoption snapshot is never rescanned on later
+    /// starts. Out-of-band mutation cannot become a standing synchronization
+    /// channel from host disk back into authoritative database state.
     #[tokio::test]
-    async fn a_skill_appearing_on_disk_after_the_first_import_is_still_imported() {
+    async fn a_skill_appearing_after_snapshot_completion_is_not_imported() {
         let storage = tempfile::tempdir().expect("temp storage root");
         let filesystem = database_filesystem();
 
@@ -523,9 +608,8 @@ mod skill_disk_import_tests {
         assert!(
             RootFilesystem::stat(filesystem.as_ref(), &virtual_skill_path("second"))
                 .await
-                .is_ok(),
-            "a skill added to the store after the first import must be imported on the next boot; \
-             leaving it on disk makes it unreachable, because skills are read only from the database"
+                .is_err(),
+            "completed adoption snapshots are immutable and must not be rescanned on every startup"
         );
     }
 
