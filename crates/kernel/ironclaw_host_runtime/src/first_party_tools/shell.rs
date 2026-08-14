@@ -318,6 +318,50 @@ mod tests {
     }
 
     #[test]
+    fn the_manifest_tells_the_model_how_to_call_the_tool_not_only_what_it_does() {
+        // Regression: the description used to state only what the tool does,
+        // so the model treated it as one-primitive-per-call and paid a round
+        // trip per `ls`/`cat` (~2.2x the tool calls of harnesses whose shell
+        // description carries calling guidance, for the same work).
+        let description = manifest().expect("shell manifest builds").description;
+        assert!(
+            description.contains("full shell command line"),
+            "description must say one call takes a whole command line: {description}"
+        );
+        assert!(
+            description.contains("workdir"),
+            "description must point at the per-call workdir parameter instead of a leading cd: \
+             {description}"
+        );
+    }
+
+    #[test]
+    fn the_command_forms_the_description_recommends_actually_validate() {
+        // The description tells the model to batch with `&&`, loops, and
+        // heredocs, and to pass `workdir`. If validation is ever tightened to
+        // reject composition, that advice becomes a lie the model cannot
+        // discover except by burning a rejected call — so pin the forms here.
+        for command in [
+            "ls -la && cat notes.md",
+            "for id in 1 2 3; do curl -s \"http://svc.test/items/$id\"; done",
+            "sh <<'EOF'\nls -la\ncat notes.md\nEOF",
+            "grep -r needle . | head -20",
+        ] {
+            assert!(
+                shell_core::validate_command(command, false).is_ok(),
+                "description recommends this form, so it must validate: {command}"
+            );
+        }
+
+        let request = shell_core::parse_shell_request(&serde_json::json!({
+            "command": "cat notes.md",
+            "workdir": "/workspace/sub",
+        }))
+        .expect("workdir is a per-call parameter");
+        assert_eq!(request.workdir.as_deref(), Some("/workspace/sub"));
+    }
+
+    #[test]
     fn shell_error_carries_the_invalid_parameter_reason() {
         // The model must see WHY its shell call was rejected (e.g. which
         // parameter was missing); a bare input-encode category leaves it
