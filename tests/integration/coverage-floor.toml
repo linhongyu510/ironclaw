@@ -576,11 +576,18 @@ captured_date = "2026-08-14"
 rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
 
+# The telegram percent dropped from ~90% to ~57% when #7464 merged: the
+# linked-device half (~2.7k lines: MTProto login, session pool, transport,
+# ops) is deliberately covered at the crate tier — its handshake needs a live
+# vendor conversation the integration harness cannot script — so it inflates
+# this crate's integration-tier denominator without integration-tier hits.
+# The bot/channel half this floor was created to protect remains covered; the
+# floor guards against regression from today's observed reality.
 [[crate]]
 name = "telegram"
-floor_percent = 87.46
-floor_covered_lines = 1200
-captured_total_lines = 1372
+floor_percent = 56.63
+floor_covered_lines = 2410
+captured_total_lines = 4256
 captured_date = "2026-08-14"
 rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
