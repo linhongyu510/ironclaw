@@ -53,6 +53,45 @@ pub trait PostSubmitDeliveryHook: Send + Sync {
     async fn on_trigger_failed_before_submit(&self, _event: TriggerFailedFireSettlement) {}
 }
 
+/// Fans accepted runs out to an optional delivery hook and one independent
+/// observer. Pre-submit failures remain delivery-only because no run exists.
+pub struct PostSubmitHookFanout<Delivery, Observer> {
+    delivery: Option<Delivery>,
+    observer: Observer,
+}
+
+impl<Delivery, Observer> PostSubmitHookFanout<Delivery, Observer> {
+    pub fn new(delivery: Option<Delivery>, observer: Observer) -> Self {
+        Self { delivery, observer }
+    }
+}
+
+#[async_trait]
+impl<Delivery, Observer> PostSubmitDeliveryHook for PostSubmitHookFanout<Delivery, Observer>
+where
+    Delivery: PostSubmitDeliveryHook,
+    Observer: PostSubmitDeliveryHook,
+{
+    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+        if let Some(delivery) = &self.delivery {
+            tokio::join!(
+                delivery.on_trigger_submitted(fire.clone(), run_id, scope.clone()),
+                self.observer.on_trigger_submitted(fire, run_id, scope),
+            );
+        } else {
+            self.observer
+                .on_trigger_submitted(fire, run_id, scope)
+                .await;
+        }
+    }
+
+    async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
+        if let Some(delivery) = &self.delivery {
+            delivery.on_trigger_failed_before_submit(event).await;
+        }
+    }
+}
+
 /// The generic post-submit delivery hook: hands each settled trigger fire to
 /// the background-run notifier.
 pub struct GenericTriggeredRunDeliveryHook {

@@ -4322,52 +4322,46 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // Channel notification and semantic assessment are sibling post-submit
     // consumers. Semantic evaluation remains active even when no channel host
     // is composed; delivery is optional and independent.
-    let delivery_hook: Option<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>> =
-        if let (Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
-            channel_host_assembly.as_ref(),
-            channel_workflow_factory.as_ref(),
-            local_runtime,
-        ) {
-            let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-            // ONE background-run notifier for every channel extension, built by
-            // the SAME product-side workflow factory the channel host graphs are
-            // built by (§12.11 D-A). It decodes each stored notification target
-            // through the assembly's LIVE codec view, so a channel activated
-            // after boot still decodes its own targets.
-            let notifier = workflow_factory.background_run_notifier(Arc::new(
+    let delivery_hook = if let (Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
+        channel_host_assembly.as_ref(),
+        channel_workflow_factory.as_ref(),
+        local_runtime,
+    ) {
+        let triggered_run_delivery = &local_runtime.triggered_run_delivery;
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated
+        // after boot still decodes its own targets.
+        let notifier = workflow_factory.background_run_notifier(Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
                 Arc::clone(assembly),
             ),
         ));
 
-            let hook: Arc<
-            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
-        > = Arc::new(
+        Some(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
                 notifier,
                 Arc::clone(triggered_run_delivery),
             ),
-        );
-            Some(hook)
-        } else {
-            None
-        };
+        )
+    } else {
+        None
+    };
     if let Some(slot) = runtime_post_submit_hook_slot.as_ref() {
-        let semantic_evaluator = Arc::new(ironclaw_assistant::SemanticRunEvaluator::new(
+        let semantic_evaluator = ironclaw_assistant::SemanticRunEvaluator::new(
             Arc::clone(&trigger_repository),
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             semantic_evaluation_inference,
             validated_identity.agent_id.clone(),
-        ));
-        let post_submit_hook: Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook> =
-            Arc::new(
-                crate::automation::trigger_poller::CompositePostSubmitHook::new(
-                    delivery_hook,
-                    semantic_evaluator,
-                ),
+        );
+        let post_submit_hook =
+            ironclaw_extension_host::channel_triggered_delivery::PostSubmitHookFanout::new(
+                delivery_hook,
+                crate::automation::trigger_poller::SemanticEvaluationHook::new(semantic_evaluator),
             );
-        if slot.set(post_submit_hook).is_err() {
+        if slot.set(Arc::new(post_submit_hook)).is_err() {
             tracing::debug!(
                 "post-submit trigger hook slot was already occupied; keeping the first hook"
             );
