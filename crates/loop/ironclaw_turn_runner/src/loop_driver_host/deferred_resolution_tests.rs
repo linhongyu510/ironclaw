@@ -1,4 +1,5 @@
 //! Production host-build coverage for deferred provider-call resolution.
+#![cfg(test)]
 
 use super::*;
 
