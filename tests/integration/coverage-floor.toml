@@ -569,19 +569,19 @@ issue = "https://github.com/nearai/ironclaw/issues/7083"
 
 [[crate]]
 name = "slack"
-floor_percent = 93.95
-floor_covered_lines = 3697
-captured_total_lines = 3935
-captured_date = "2026-08-04"
+floor_percent = 93.57
+floor_covered_lines = 3666
+captured_total_lines = 3918
+captured_date = "2026-08-14"
 rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
 
 [[crate]]
 name = "telegram"
-floor_percent = 90.31
-floor_covered_lines = 1435
-captured_total_lines = 1589
-captured_date = "2026-08-04"
+floor_percent = 87.46
+floor_covered_lines = 1200
+captured_total_lines = 1372
+captured_date = "2026-08-14"
 rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
 
