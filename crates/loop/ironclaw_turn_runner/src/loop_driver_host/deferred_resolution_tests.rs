@@ -46,7 +46,7 @@ impl LoopCapabilityPort for DeferredResolverPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        assert_eq!(tool_call.name, self.definition.name);
+        assert_eq!(tool_call.name, self.definition.name); // safety: test-only fixture assertion.
         Ok(ProviderToolCallCapabilityIds::single(
             self.capability_id.clone(),
         ))
@@ -56,14 +56,14 @@ impl LoopCapabilityPort for DeferredResolverPort {
         &self,
         _request: LoopRequest,
     ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
-        unreachable!("this test only resolves provider tool calls")
+        unreachable!("this test only resolves provider tool calls") // safety: test-only stub.
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
-        unreachable!("this test only resolves provider tool calls")
+        unreachable!("this test only resolves provider tool calls") // safety: test-only stub.
     }
 
     async fn visible_capabilities(
@@ -72,7 +72,7 @@ impl LoopCapabilityPort for DeferredResolverPort {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new("deferred-resolution-surface")
-                .expect("valid surface version"),
+                .expect("valid surface version"), // safety: test-only literal.
             descriptors: Vec::new(),
             callable_capability_ids: None,
         })
@@ -181,9 +181,9 @@ fn claimed_run_matching(
             turn_id: run_context.turn_id,
             run_id: run_context.run_id,
             status: TurnStatus::Running,
-            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-            source_binding_ref: SourceBindingRef::new("source-web").expect("valid"),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").expect("valid"),
+            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"), // safety: test-only literal.
+            source_binding_ref: SourceBindingRef::new("source-web").expect("valid"), // safety: test-only literal.
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").expect("valid"), // safety: test-only literal.
             resolved_run_profile_id: persisted_profile_id(
                 &run_context.resolved_run_profile.profile_id,
             ),
