@@ -182,6 +182,30 @@ async fn binder_preserves_the_auth_gate_payload_across_the_tool_abi() {
     }
 }
 
+#[test]
+fn binder_preserves_the_raw_auth_diagnostic_across_the_tool_abi() {
+    let diagnostic =
+        "provider error code: github_api_error_status_401; provider message: Bad credentials";
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("github.list_issues").unwrap(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+            model_visible_cause: Some(ironclaw_host_api::dispatch::RawAuthCause::new(diagnostic)),
+        },
+    );
+
+    let ToolError::AuthRequired {
+        model_visible_cause: Some(cause),
+        ..
+    } = error
+    else {
+        panic!("binder must preserve the auth diagnostic");
+    };
+    assert_eq!(cause.as_str(), diagnostic);
+    assert!(!format!("{cause:?}").contains("Bad credentials"));
+}
+
 #[tokio::test]
 async fn binder_fails_typed_for_an_unconfigured_lane() {
     // No MCP runtime configured: binding an MCP-runtime package fails with

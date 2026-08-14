@@ -467,6 +467,7 @@ where
                     capability: request.capability_id.clone(),
                     required_secrets,
                     credential_requirements,
+                    model_visible_cause: None,
                 },
                 error => DispatchError::Mcp {
                     kind: mcp_error_kind(&error),
@@ -764,6 +765,7 @@ where
                         capability: request.capability_id.clone(),
                         required_secrets,
                         credential_requirements,
+                        model_visible_cause: None,
                     }),
                     FirstPartyCapabilityError::Dispatch {
                         kind,

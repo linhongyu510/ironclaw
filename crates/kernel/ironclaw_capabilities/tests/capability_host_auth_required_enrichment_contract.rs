@@ -170,6 +170,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
                 requester_extension: ExtensionId::new("mcp_ext").unwrap(),
                 provider_scopes: Vec::new(),
             }],
+            model_visible_cause: None,
         })
     });
     let handler = PassthroughObligationHandler;
@@ -419,6 +420,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
             capability: request.invocation.capability.clone(),
             required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         })
     });
     let handler = PassthroughObligationHandler;

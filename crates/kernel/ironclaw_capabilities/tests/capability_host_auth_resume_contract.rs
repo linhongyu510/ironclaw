@@ -802,6 +802,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
                 capability: request.invocation.capability.clone(),
                 required_secrets: vec![],
                 credential_requirements: vec![],
+                model_visible_cause: None,
             })
         } else {
             // Second dispatch (from auth_resume_json): succeed.
@@ -1007,6 +1008,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             capability: capability_id(),
             required_secrets: vec![],
             credential_requirements: vec![],
+            model_visible_cause: None,
         }),
         // Second call (from auth_resume_json): terminal failure.
         Err(DispatchError::UnknownCapability {
@@ -1846,6 +1848,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
                     capability,
                     required_secrets: vec![],
                     credential_requirements: vec![],
+                    model_visible_cause: None,
                 });
             }
             // Winner's call: signal we're in dispatch, then wait for release.

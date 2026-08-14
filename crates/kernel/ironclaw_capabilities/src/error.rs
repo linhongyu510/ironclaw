@@ -1,7 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
-    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind, RawAuthCause},
     error::HostApiError,
     ids::{CapabilityId, SecretHandle},
 };
@@ -52,6 +52,7 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        model_visible_cause: Option<RawAuthCause>,
     },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
@@ -140,10 +141,12 @@ impl From<DispatchError> for CapabilityInvocationError {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             } => Self::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             },
             other @ (DispatchError::UnknownCapability { .. }
             | DispatchError::UnknownProvider { .. }
@@ -390,12 +393,14 @@ mod tests {
                 capability: cap(),
                 required_secrets: secrets.clone(),
                 credential_requirements: Vec::new(),
+                model_visible_cause: None,
             });
             match err {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
                     capability,
                     required_secrets,
                     credential_requirements,
+                    ..
                 } => {
                     assert_eq!(capability, cap(), "handles: {handles:?}");
                     assert_eq!(required_secrets, secrets, "handles: {handles:?}");
@@ -420,6 +425,7 @@ mod tests {
             capability: cap(),
             required_secrets: Vec::new(),
             credential_requirements: vec![requirement.clone()],
+            model_visible_cause: Some(RawAuthCause::new("Bad credentials")),
         });
 
         match err {
@@ -427,10 +433,16 @@ mod tests {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             } => {
                 assert_eq!(capability, cap());
                 assert!(required_secrets.is_empty());
                 assert_eq!(credential_requirements, vec![requirement]);
+                assert_eq!(
+                    model_visible_cause.as_ref().map(RawAuthCause::as_str),
+                    Some("Bad credentials")
+                );
+                assert!(!format!("{model_visible_cause:?}").contains("Bad credentials"));
             }
             other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }

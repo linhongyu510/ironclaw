@@ -24,6 +24,7 @@ fn auth_required_empty(cap: &str) -> DispatchError {
         capability: CapabilityId::new(cap).unwrap(),
         required_secrets: Vec::new(),
         credential_requirements: Vec::new(),
+        model_visible_cause: None,
     }
 }
 
@@ -32,6 +33,7 @@ fn auth_required_with_secrets(cap: &str) -> DispatchError {
         capability: CapabilityId::new(cap).unwrap(),
         required_secrets: vec![SecretHandle::new("raw_secret").unwrap()],
         credential_requirements: Vec::new(),
+        model_visible_cause: None,
     }
 }
 
@@ -46,6 +48,7 @@ fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
             requester_extension: ExtensionId::new(provider).unwrap(),
             provider_scopes: Vec::new(),
         }],
+        model_visible_cause: None,
     }
 }
 

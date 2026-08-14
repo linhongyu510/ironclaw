@@ -433,6 +433,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: required_secrets.clone(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -443,6 +444,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -1785,6 +1787,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
             capability: cap(),
             required_secrets: vec![handle],
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         }
         .event_kind(),
         "auth_required"
@@ -1795,6 +1798,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
             capability: cap(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         }
         .event_kind(),
         "auth_required"
@@ -1834,8 +1838,15 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: vec![handle],
         credential_requirements: Vec::new(),
+        model_visible_cause: Some(ironclaw_host_api::dispatch::RawAuthCause::new(
+            "Bad credentials",
+        )),
     };
     let debug = format!("{error:?}");
+    assert!(
+        !debug.contains("Bad credentials"),
+        "raw auth cause must not appear in Debug output; got: {debug}"
+    );
     assert!(
         !debug.contains("google-access-token"),
         "handle name must not appear in Debug output; got: {debug}"
@@ -1849,6 +1860,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: Vec::new(),
         credential_requirements: Vec::new(),
+        model_visible_cause: None,
     };
     let debug_empty = format!("{empty:?}");
     assert!(
@@ -1867,6 +1879,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: Vec::new(),
         credential_requirements: vec![requirement],
+        model_visible_cause: None,
     };
     let debug_with_requirement = format!("{with_requirement:?}");
     assert!(

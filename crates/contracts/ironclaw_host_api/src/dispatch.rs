@@ -24,6 +24,38 @@ use crate::{
     runtime::RuntimeKind,
 };
 
+/// Raw provider authentication rejection retained only for the downstream
+/// model-diagnostic scrub/fence seam.
+///
+/// The value is deliberately redacted from `Debug` and must not be logged,
+/// persisted, or rendered directly.
+#[derive(Clone)]
+pub struct RawAuthCause(String);
+
+impl RawAuthCause {
+    pub fn new(value: impl Into<String>) -> Self {
+        let mut value = value.into();
+        if value.len() > crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES {
+            let mut end = crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES;
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+        }
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RawAuthCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<raw auth cause redacted>")
+    }
+}
+
 /// Internal adapter request produced after a sealed [`Authorized`] witness is
 /// consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq)]
@@ -458,6 +490,7 @@ pub enum DispatchError {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        model_visible_cause: Option<RawAuthCause>,
     },
     /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
     /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
@@ -550,6 +583,7 @@ impl fmt::Debug for DispatchError {
                 capability,
                 required_secrets,
                 credential_requirements,
+                ..
             } => f
                 .debug_struct("AuthRequired")
                 .field("capability", capability)
@@ -686,5 +720,17 @@ mod tests {
             issue.schema_path.as_deref(),
             Some("/properties/schedule/oneOf/0/properties/kind")
         );
+    }
+
+    #[test]
+    fn raw_auth_cause_is_redacted_and_utf8_byte_bounded() {
+        let cause = RawAuthCause::new(format!(
+            "a{}",
+            "é".repeat(crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES)
+        ));
+
+        assert!(cause.as_str().len() <= crate::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(cause.as_str().is_char_boundary(cause.as_str().len()));
+        assert!(!format!("{cause:?}").contains('é'));
     }
 }

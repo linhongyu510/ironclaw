@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail, RawAuthCause},
     ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
     result_meta::{FailureFate, FailureKind},
@@ -410,14 +410,68 @@ pub struct RuntimeApprovalGate {
 }
 
 /// Auth/credential suspension state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RuntimeAuthGate {
     pub gate_id: RuntimeGateId,
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    model_visible_cause: Option<RawAuthCause>,
 }
+
+impl RuntimeAuthGate {
+    pub fn new(
+        gate_id: RuntimeGateId,
+        capability_id: CapabilityId,
+        reason: RuntimeBlockedReason,
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Self {
+        Self {
+            gate_id,
+            capability_id,
+            reason,
+            required_secrets,
+            credential_requirements,
+            model_visible_cause: None,
+        }
+    }
+
+    pub fn with_model_visible_cause(mut self, cause: Option<RawAuthCause>) -> Self {
+        self.model_visible_cause = cause;
+        self
+    }
+
+    pub fn model_visible_cause(&self) -> Option<&str> {
+        self.model_visible_cause.as_ref().map(RawAuthCause::as_str)
+    }
+}
+
+impl fmt::Debug for RuntimeAuthGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeAuthGate")
+            .field("gate_id", &self.gate_id)
+            .field("capability_id", &self.capability_id)
+            .field("reason", &self.reason)
+            .field("required_secrets", &self.required_secrets)
+            .field("credential_requirements", &self.credential_requirements)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeAuthGate {
+    fn eq(&self, other: &Self) -> bool {
+        self.gate_id == other.gate_id
+            && self.capability_id == other.capability_id
+            && self.reason == other.reason
+            && self.required_secrets == other.required_secrets
+            && self.credential_requirements == other.credential_requirements
+    }
+}
+
+impl Eq for RuntimeAuthGate {}
 
 /// Resource suspension state.
 #[derive(Debug, Clone, PartialEq, Eq)]

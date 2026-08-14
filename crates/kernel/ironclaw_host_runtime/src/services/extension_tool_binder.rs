@@ -187,15 +187,17 @@ where
 /// Map a lane failure onto the tool ABI. Lane errors are already redacted to
 /// stable kinds; `AuthRequired` keeps its gate payload so the generic re-auth
 /// flow is preserved end to end.
-fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
+pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
     match error {
         DispatchError::AuthRequired {
             required_secrets,
             credential_requirements,
+            model_visible_cause,
             ..
         } => ToolError::AuthRequired {
             required_secrets,
             credential_requirements,
+            model_visible_cause,
         },
         DispatchError::Wasm {
             kind,
