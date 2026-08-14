@@ -4351,7 +4351,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
     if let Some(slot) = runtime_post_submit_hook_slot.as_ref() {
         let semantic_evaluator = ironclaw_assistant::SemanticRunEvaluator::new(
             Arc::clone(&trigger_repository),
-            Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             semantic_evaluation_inference,
             validated_identity.agent_id.clone(),

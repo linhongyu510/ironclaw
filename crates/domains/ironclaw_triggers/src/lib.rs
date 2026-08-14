@@ -5,6 +5,8 @@
 //! lifecycle wiring, first-party capabilities, and outbound delivery are owned
 //! by later slices.
 
+// arch-exempt: large_file, trigger contracts stay centralized with their domain owner, plan #6815
+
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -758,6 +760,56 @@ pub struct TriggerSemanticEvaluation {
     pub reason: String,
     pub evaluated_at: Timestamp,
 }
+
+/// Unique ownership token for one semantic-evaluation lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TriggerSemanticEvaluationClaimId(Ulid);
+
+impl TriggerSemanticEvaluationClaimId {
+    pub fn new() -> Self {
+        Self(Ulid::generate())
+    }
+}
+
+impl Default for TriggerSemanticEvaluationClaimId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for TriggerSemanticEvaluationClaimId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// One completed structured run awaiting semantic evaluation. Repository
+/// implementations derive this only from durable trigger/run state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTriggerSemanticEvaluation {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+    pub thread_id: ThreadId,
+    pub creator_user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub execution_spec: TriggerExecutionSpec,
+}
+
+/// Atomic lease request for one completed structured run awaiting semantic
+/// evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimTriggerSemanticEvaluationRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+    pub claim_id: TriggerSemanticEvaluationClaimId,
+    pub claimed_at: Timestamp,
+    pub stale_before: Timestamp,
+}
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
@@ -1318,29 +1370,53 @@ pub trait TriggerRepository: Send + Sync {
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
-    /// Atomically reserves semantic evaluation for one accepted run. Returns
-    /// `false` when this run was already reserved or evaluated.
-    async fn claim_semantic_evaluation(
+    /// Lists completed structured runs that still require semantic evaluation.
+    /// This is trusted background-work plumbing and must not be exposed as a
+    /// user-scoped capability.
+    async fn list_pending_semantic_evaluations(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<PendingTriggerSemanticEvaluation>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "pending semantic evaluation listing is not implemented by this repository"
+                .to_string(),
+        })
+    }
+
+    /// Reads the retained semantic result independently of prunable run
+    /// history. This is the source of truth used to project recent history.
+    async fn get_semantic_evaluation(
         &self,
         _tenant_id: TenantId,
         _trigger_id: TriggerId,
         _fire_slot: Timestamp,
         _run_id: TurnRunId,
-        _claimed_at: Timestamp,
+    ) -> Result<Option<TriggerSemanticEvaluation>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "semantic evaluation lookup is not implemented by this repository".to_string(),
+        })
+    }
+
+    /// Atomically reserves semantic evaluation for one completed structured
+    /// run. An expired lease may be reclaimed with a new ownership token.
+    async fn claim_semantic_evaluation(
+        &self,
+        _request: ClaimTriggerSemanticEvaluationRequest,
     ) -> Result<bool, TriggerError> {
         Err(TriggerError::Backend {
             reason: "semantic evaluation claims are not implemented by this repository".to_string(),
         })
     }
 
-    /// Finalizes a previously claimed semantic evaluation. Returns `false`
-    /// when the run does not match the claim or was already finalized.
+    /// Finalizes a previously claimed semantic evaluation. Only the current
+    /// lease owner may complete it.
     async fn complete_semantic_evaluation(
         &self,
         _tenant_id: TenantId,
         _trigger_id: TriggerId,
         _fire_slot: Timestamp,
         _run_id: TurnRunId,
+        _claim_id: TriggerSemanticEvaluationClaimId,
         _evaluation: TriggerSemanticEvaluation,
     ) -> Result<bool, TriggerError> {
         Err(TriggerError::Backend {

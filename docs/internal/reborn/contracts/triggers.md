@@ -555,10 +555,21 @@ turn-run status and any delivery outcome:
 
 The record contains only the verdict, a bounded sanitized reason, and the
 evaluation timestamp. Legacy raw-prompt runs, non-completed runs, and runs
-without a structured execution spec have no semantic record. An atomic durable
-claim keyed by `(tenant_id, trigger_id, fire_slot, run_id)` prevents settlement
-replay from issuing a second judge call. Semantic evaluation does not deliver,
-retry, cancel, or change the run's execution status.
+without a structured execution spec have no semantic record. Evaluation output
+is retained separately from bounded run history and is projected onto recent
+run rows; pruning run history must never delete the model-produced reason.
+
+A single bounded reconciler discovers eligible completed runs from durable
+storage. It uses an atomic lease keyed by
+`(tenant_id, trigger_id, fire_slot, run_id)` and a unique claim token, so only
+the current owner may finalize an outcome. Failed repository or transcript
+reads remain discoverable, failed completion writes are retried, and an
+expired claim can be recovered after process loss. The durable backlog is the
+queue: a burst never creates one detached watcher per accepted fire and no
+eligible run is dropped because an in-memory queue is full. A judge call may be
+repeated after lease recovery, but exactly one retained outcome can be
+finalized. Semantic evaluation does not deliver, retry, cancel, or change the
+run's execution status.
 
 ---
 

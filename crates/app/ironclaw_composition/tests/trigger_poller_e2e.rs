@@ -1226,6 +1226,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     )
     .await;
 
+    let semantic_deadline = Instant::now() + Duration::from_secs(5);
     let semantic_evaluation = loop {
         let runs = repo
             .list_trigger_run_history(tenant_id.clone(), record.trigger_id, 1)
@@ -1235,7 +1236,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
             break evaluation;
         }
         assert!(
-            Instant::now() < deadline + Duration::from_secs(5),
+            Instant::now() < semantic_deadline,
             "semantic evaluation did not persist for completed structured run: {runs:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2200,6 +2201,14 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
             .await,
         0,
         "legacy raw-prompt runs must not invoke semantic evaluation"
+    );
+    let raw_runs = repo
+        .list_trigger_run_history(tenant_id.clone(), record.trigger_id, 1)
+        .await
+        .expect("list raw-prompt trigger run history");
+    assert!(
+        raw_runs.iter().all(|run| run.semantic_evaluation.is_none()),
+        "raw-prompt runs must not persist semantic evaluations: {raw_runs:?}"
     );
 }
 
