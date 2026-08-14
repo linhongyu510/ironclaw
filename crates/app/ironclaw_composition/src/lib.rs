@@ -99,6 +99,7 @@ pub use factory::production_first_party_trust_policy;
 pub use factory::verify_hosted_postgres_store_for_adoption;
 // consumer: `ironclaw_cli storage adopt` · pinned by: `ironclaw_cli/tests/storage_adoption.rs`
 pub use factory::prepare_standalone_store_for_adoption;
+// consumer: `ironclaw_cli storage adopt` · pinned by: `ironclaw_cli/tests/storage_adoption.rs`
 pub use factory::verify_standalone_secret_store_for_adoption;
 // consumer: `ironclaw_cli` onboard/master_key · pinned by: `ironclaw_cli` build (the outcome is the fn's return type; `factory` is private)
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
