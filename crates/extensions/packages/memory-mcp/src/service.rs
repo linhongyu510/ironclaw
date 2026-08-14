@@ -266,7 +266,9 @@ fn recorded_flag(response: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::{CorrelationId, TenantId, UserId};
-    use ironclaw_memory::{MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole};
+    use ironclaw_memory::{
+        MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole,
+    };
 
     use super::*;
     use crate::transport::MockMcpMemoryTransport;
@@ -389,7 +391,9 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_degrades_rather_than_failing_the_turn() {
         let service = McpMemoryService::new(
-            MockMcpMemoryTransport::always_err(McpMemoryTransportError::transport("connect timeout")),
+            MockMcpMemoryTransport::always_err(McpMemoryTransportError::transport(
+                "connect timeout",
+            )),
             McpMemoryConfig::new(),
         );
 
