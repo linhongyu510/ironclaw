@@ -959,6 +959,7 @@ mod tests {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: EventCursor(1),
                 accepted_message_ref: request.accepted_message_ref,
+                reply_target_binding_ref: request.reply_target_binding_ref,
             })
         }
 
@@ -1015,6 +1016,7 @@ mod tests {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: EventCursor(1),
                 accepted_message_ref: request.accepted_message_ref,
+                reply_target_binding_ref: request.reply_target_binding_ref,
             })
         }
 

@@ -72,6 +72,14 @@ async fn paired_actor_without_binding_creates_thread_binding_message_and_submits
         submitted.accepted_message_ref,
         response.accepted_message.message_ref
     );
+    assert_eq!(
+        submitted.source_binding_ref,
+        response.accepted_message.source_binding_ref
+    );
+    assert_eq!(
+        submitted.reply_target_binding_ref,
+        response.accepted_message.reply_target_binding_ref
+    );
 }
 
 #[tokio::test]
@@ -4046,6 +4054,8 @@ fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequ
         scope: submission.scope,
         actor: submission.actor,
         accepted_message_ref: submission.accepted_message_ref,
+        source_binding_ref: submission.source_binding_ref,
+        reply_target_binding_ref: submission.reply_target_binding_ref,
         requested_run_profile: submission.requested_run_profile,
         idempotency_key: submission.idempotency_key,
         received_at: submission.received_at,
@@ -4195,5 +4205,6 @@ fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
         resolved_run_profile_version: RunProfileVersion::new(1),
         event_cursor: ironclaw_host_api::turn::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
+        reply_target_binding_ref: request.reply_target_binding_ref,
     }
 }

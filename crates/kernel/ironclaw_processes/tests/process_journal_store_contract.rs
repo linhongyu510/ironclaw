@@ -2987,7 +2987,12 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
             checkpoint_ref: None,
             input: None,
             created_at: Utc::now(),
-            metadata: json!({ "agent_turn": {} }),
+            metadata: json!({
+                "agent_turn": {
+                    "source_binding_ref": "source:journal-contract",
+                    "reply_target_binding_ref": "reply:journal-contract"
+                }
+            }),
         })
         .await
         .expect("submit process");
@@ -3071,6 +3076,14 @@ async fn process_journal_store_owns_lifecycle_and_gate_projection() {
     assert_eq!(gates.len(), 1);
     assert_eq!(gates[0].process_id, process_id);
     assert_eq!(gates[0].suspension.gate_ref.as_ref(), Some(&gate_ref));
+    assert_eq!(
+        gates[0].resume_source_ref.as_deref(),
+        Some("source:journal-contract")
+    );
+    assert_eq!(
+        gates[0].reply_target_ref.as_deref(),
+        Some("reply:journal-contract")
+    );
 
     let mut owner_scope = scope.clone();
     owner_scope.project_id = None;

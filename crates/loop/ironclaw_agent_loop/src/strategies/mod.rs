@@ -49,8 +49,7 @@ pub(crate) use context::{
 };
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
-    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateNotSupportedStrategy,
-    GateOutcome, GateSummary,
+    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
 };
 pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
@@ -60,11 +59,10 @@ pub(crate) use recovery::{
 };
 pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
-    StructuredOutputReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
     CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy, StopKind,
-    StopOutcome, StructuredResultStopStrategy, TurnEndKind, TurnSummary,
+    StopOutcome, TurnEndKind, TurnSummary,
 };
 
 #[cfg(test)]

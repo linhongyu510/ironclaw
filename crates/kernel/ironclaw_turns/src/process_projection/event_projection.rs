@@ -72,15 +72,12 @@ pub(super) fn turn_scope_from_process_scope(scope: ResourceScope) -> Result<Turn
         });
     };
     if scope.user_id.as_str() == SYSTEM_RESERVED_ID {
-        // The `__system__` owner slot is where ownerless (unbound) runs
-        // physically live: reconstructing them as `Ownerless` keeps every
-        // downstream thread read on that same slot. Reconstructing as
-        // actor-fallback would re-point reads at `owners/<actor>` — a
-        // subtree the run never wrote.
-        let mut scope =
-            TurnScope::new(scope.tenant_id, scope.agent_id, scope.project_id, thread_id);
-        scope.thread_owner = ironclaw_host_api::turn::TurnThreadOwner::Ownerless;
-        Ok(scope)
+        Ok(TurnScope::new(
+            scope.tenant_id,
+            scope.agent_id,
+            scope.project_id,
+            thread_id,
+        ))
     } else {
         Ok(TurnScope::new_with_owner(
             scope.tenant_id,

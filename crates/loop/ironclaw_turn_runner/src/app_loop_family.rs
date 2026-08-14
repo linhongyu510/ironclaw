@@ -36,8 +36,6 @@ pub fn build_loop_family_registry_with_overrides(
         Arc::new(families::subagent_with_tool_batch_strategy(
             tool_batch_strategy,
         )),
-        Arc::new(families::unbound_default()),
-        Arc::new(families::unbound_structured()),
     ])
 }
 

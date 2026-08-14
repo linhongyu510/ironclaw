@@ -31,7 +31,8 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::turn::{
-    IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
@@ -2258,6 +2259,8 @@ impl RebornIntegrationHarness {
                 run_id,
                 gate_resolution_ref: gate_ref,
                 precondition,
+                source_binding_ref: SourceBindingRef::new("src:resume")?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key,
                 resume_disposition,
             })

@@ -880,6 +880,10 @@ pub struct ProcessGateRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<UserId>,
     pub suspension: ProcessSuspension,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_target_ref: Option<String>,
     pub historical: bool,
 }
 

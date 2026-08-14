@@ -517,13 +517,6 @@ impl ReplyAdmissionRejection {
             unmet_obligation_refs: Vec::new(),
         }
     }
-
-    pub fn structured_output_required() -> Self {
-        Self {
-            reason_code: ReplyAdmissionRejectionReason::StructuredOutputRequired,
-            unmet_obligation_refs: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -548,9 +541,6 @@ impl ObligationRef {
 #[serde(rename_all = "snake_case")]
 pub enum ReplyAdmissionRejectionReason {
     StopConditionNotMet,
-    /// The run's output contract is a JSON schema: plain-text finals are
-    /// rejected with a repair hint directing the model to the result tool.
-    StructuredOutputRequired,
 }
 
 /// Persistent state owned by `StopConditionStrategy`. Split from a previously
@@ -569,12 +559,6 @@ pub struct StopStrategyState {
     /// progress reported no new evidence/state.
     #[serde(default)]
     pub trailing_no_progress_results: u32,
-    /// Consecutive completed capability-batch turns in which EVERY invocation
-    /// failed (no completed-call signature was observed). Counted only by the
-    /// structured-result stop strategy, where a run of all-failed
-    /// batches is repeated invalid result-tool output.
-    #[serde(default)]
-    pub trailing_all_failed_batches: u32,
     /// Pending or rendered repeated-call warning that must be shown to the
     /// model before repeated calls can terminalize as no-progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
