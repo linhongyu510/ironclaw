@@ -24,14 +24,15 @@ use crate::{
     BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +44,7 @@ pub struct InMemorySessionThreadService {
 struct InMemoryState {
     threads: HashMap<ThreadId, StoredThread>,
     inbound_idempotency: HashMap<InboundIdempotencyKey, InboundIdempotencyRecord>,
+    prepared_contexts: HashMap<ThreadId, crate::PreparedContextRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ struct InboundIdempotencyKey {
 struct InboundIdempotencyRecord {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    replay_metadata: InboundMessageReplayMetadata,
 }
 
 impl InboundIdempotencyKey {
@@ -123,6 +126,18 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata::default(),
+        )
+        .await
+    }
+
+    async fn accept_inbound_message_with_replay_metadata(
+        &self,
+        request: AcceptInboundMessageRequest,
+        replay_metadata: InboundMessageReplayMetadata,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
         let mut state = self.state.lock().await;
         if let Some(key) = InboundIdempotencyKey::from_request(&request)
             && let Some(record) = state.inbound_idempotency.get(&key)
@@ -152,6 +167,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 message_id: record.message_id,
                 sequence: existing.sequence,
                 idempotent_replay: true,
+                replay_metadata: record.replay_metadata.clone(),
             });
         }
 
@@ -198,6 +214,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 InboundIdempotencyRecord {
                     thread_id: request.thread_id.clone(),
                     message_id,
+                    replay_metadata: replay_metadata.clone(),
                 },
             );
         }
@@ -207,7 +224,109 @@ impl SessionThreadService for InMemorySessionThreadService {
             message_id,
             sequence,
             idempotent_replay: false,
+            replay_metadata,
         })
+    }
+
+    async fn accept_prepared_context(
+        &self,
+        request: crate::PreparedContextRequest,
+    ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
+        crate::prepared_context::validate_prepared_context_request(&request)?;
+        let thread_id = crate::prepared_context::prepared_thread_id(&request)?;
+        let now = Utc::now();
+        let rows = crate::prepared_context::prepared_seed_rows(&request, &thread_id, now)?;
+
+        let mut state = self.state.lock().await;
+        if let Some(record) = state.prepared_contexts.get(&thread_id) {
+            let stored_scope_matches = state
+                .threads
+                .get(&thread_id)
+                .map(|stored| stored.record.scope == request.scope)
+                .unwrap_or(false);
+            if !stored_scope_matches {
+                return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+            }
+            return crate::prepared_context::replay_prepared_context(record, &request, &thread_id);
+        }
+
+        if let Some(existing) = state.threads.get(&thread_id)
+            && existing.record.scope != request.scope
+        {
+            return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+        }
+        let seeded_message_count = rows.len() as u64;
+        let last_message_id = rows.last().map(|row| row.message_id).ok_or_else(|| {
+            SessionThreadError::InvalidPreparedContext {
+                reason: "seeded rows must not be empty".to_string(),
+            }
+        })?;
+        let accepted_message_ref =
+            crate::prepared_context::accepted_prepared_message_ref(last_message_id)?;
+
+        let stored = state
+            .threads
+            .entry(thread_id.clone())
+            .or_insert_with(|| StoredThread {
+                record: SessionThreadRecord {
+                    scope: request.scope.clone(),
+                    thread_id: thread_id.clone(),
+                    created_by_actor_id: request.actor_id.clone(),
+                    title: request.title.clone(),
+                    metadata_json: request.metadata_json.clone(),
+                    goal: None,
+                    created_at: Some(now),
+                    updated_at: Some(now),
+                },
+                messages: Vec::new(),
+                summary_artifacts: Vec::new(),
+                tool_result_records: HashMap::new(),
+                next_sequence: 1,
+            });
+        for mut row in rows {
+            row.sequence = stored.next_sequence;
+            stored.next_sequence += 1;
+            stored.messages.push(row);
+        }
+        stored.record.updated_at = Some(now);
+
+        let record = crate::PreparedContextRecord {
+            schema_version: crate::PREPARED_CONTEXT_RECORD_SCHEMA_VERSION,
+            idempotency_key: request.idempotency_key.clone(),
+            actor_id: request.actor_id.clone(),
+            accepted_message_ref: accepted_message_ref.as_str().to_string(),
+            declarations: request.declarations.clone(),
+            seeded_message_count,
+            created_at: now,
+        };
+        state.prepared_contexts.insert(thread_id.clone(), record);
+
+        Ok(crate::AcceptedPreparedContext {
+            thread_id,
+            accepted_message_ref,
+            idempotent_replay: false,
+        })
+    }
+
+    async fn read_prepared_context(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<crate::PreparedContextRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let stored =
+            state
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+        if &stored.record.scope != scope {
+            return Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            });
+        }
+        Ok(state.prepared_contexts.get(thread_id).cloned())
     }
 
     async fn replay_accepted_inbound_message(
@@ -243,6 +362,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             source_binding_id: message.source_binding_id.clone(),
             reply_target_binding_id: message.reply_target_binding_id.clone(),
             turn_run_id: message.turn_run_id.clone(),
+            replay_metadata: record.replay_metadata.clone(),
         }))
     }
 

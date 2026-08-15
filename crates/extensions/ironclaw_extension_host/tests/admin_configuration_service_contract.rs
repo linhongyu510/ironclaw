@@ -42,6 +42,14 @@ async fn save_before_install_stages_secrets_and_returns_a_redacted_group_view() 
     assert_eq!(state.fields[0].value.as_deref(), Some("client-a"));
     assert!(state.fields[0].provided);
     assert_eq!(
+        state.fields[0].description, "The OAuth client identifier from the provider console.",
+        "the manifest-declared field help text must reach the redacted view"
+    );
+    assert!(
+        state.fields[1].description.is_empty(),
+        "a field without declared help text renders an empty description"
+    );
+    assert_eq!(
         state.fields[1].value, None,
         "secret material must be redacted"
     );
@@ -441,6 +449,7 @@ async fn host_managed_credential_handles_are_not_operator_configuration() {
                 label: "Generated signing key".to_string(),
                 secret: true,
                 required: false,
+                description: String::new(),
                 host_managed: true,
             },
             AdminConfigurationField {
@@ -448,6 +457,7 @@ async fn host_managed_credential_handles_are_not_operator_configuration() {
                 label: "Region".to_string(),
                 secret: false,
                 required: false,
+                description: String::new(),
                 host_managed: false,
             },
         ],
@@ -498,6 +508,7 @@ fn descriptor() -> ExtensionAdminConfigurationDescriptor {
                 label: "Client ID".to_string(),
                 secret: false,
                 required: true,
+                description: "The OAuth client identifier from the provider console.".to_string(),
                 host_managed: false,
             },
             AdminConfigurationField {
@@ -505,6 +516,7 @@ fn descriptor() -> ExtensionAdminConfigurationDescriptor {
                 label: "Client secret".to_string(),
                 secret: true,
                 required: true,
+                description: String::new(),
                 host_managed: false,
             },
         ],
@@ -575,6 +587,27 @@ impl SecretStorePort for WriteThenFailSecretStore {
         Err(SecretStoreError::StoreUnavailable {
             reason: "injected ambiguous failure".to_string(),
         })
+    }
+
+    async fn put_versioned(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+        expires_at: Option<Timestamp>,
+        expected: ironclaw_secrets::SecretCasExpectation,
+    ) -> Result<ironclaw_secrets::SecretCasWriteOutcome, SecretStoreError> {
+        self.inner
+            .put_versioned(scope, handle, material, expires_at, expected)
+            .await
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<ironclaw_secrets::VersionedSecretMaterial>, SecretStoreError> {
+        self.inner.read_versioned(scope, handle).await
     }
 
     async fn put_if_absent(

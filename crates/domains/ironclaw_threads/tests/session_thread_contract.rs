@@ -10,10 +10,11 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
     EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, InMemorySessionThreadService,
-    ListThreadsForScopeRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
@@ -1072,6 +1073,75 @@ async fn duplicate_external_event_returns_same_message_without_duplicate_history
         .unwrap();
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].content.as_deref(), Some("hello once"));
+}
+
+#[tokio::test]
+async fn accepted_inbound_replay_preserves_resolved_model_metadata() {
+    let service = InMemorySessionThreadService::default();
+    let request_scope = scope("model-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let request = AcceptInboundMessageRequest {
+        scope: request_scope.clone(),
+        thread_id: thread.thread_id,
+        actor_id: "actor-a".into(),
+        source_binding_id: Some("source-model-replay".into()),
+        reply_target_binding_id: Some("reply-model-replay".into()),
+        external_event_id: Some("event-model-replay".into()),
+        content: user_message("hello"),
+    };
+
+    let accepted = service
+        .accept_inbound_message_with_replay_metadata(
+            request.clone(),
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let duplicate = service
+        .accept_inbound_message_with_replay_metadata(
+            request,
+            InboundMessageReplayMetadata {
+                resolved_model: Some("model-b".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.idempotent_replay);
+    assert_eq!(
+        duplicate.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
+
+    let replay = service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            scope: request_scope,
+            actor_id: "actor-a".into(),
+            source_binding_id: "source-model-replay".into(),
+            external_event_id: "event-model-replay".into(),
+        })
+        .await
+        .unwrap()
+        .expect("accepted replay");
+    assert_eq!(
+        replay.replay_metadata.resolved_model.as_deref(),
+        Some("model-a")
+    );
 }
 
 #[tokio::test]
@@ -4307,4 +4377,232 @@ async fn accept_inbound_message_rejects_oversized_extracted_text() {
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+}
+
+/// Taxonomy baseline for unbound turns: a thread whose scope carries NO
+/// `owner_user_id` (the shape the prepared-context accept door mints) is structurally
+/// invisible to owner-scoped listings — the listing filter is exact-tuple
+/// scope equality, and the owner axis differs. The reverse holds too: an
+/// ownerless-scope enumeration never surfaces a user's own threads.
+#[tokio::test]
+async fn list_threads_for_scope_excludes_ownerless_threads_from_owner_scoped_listings() {
+    let service = InMemorySessionThreadService::default();
+    let owned_scope = scope("taxonomy");
+    let ownerless_scope = ThreadScope {
+        owner_user_id: None,
+        ..owned_scope.clone()
+    };
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owned_scope.clone(),
+            thread_id: Some(ThreadId::new("t-owned-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("owned".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: ownerless_scope.clone(),
+            thread_id: Some(ThreadId::new("t-ownerless-001").unwrap()),
+            created_by_actor_id: "actor-taxonomy".into(),
+            title: Some("ownerless".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let owner_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: owned_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let owner_ids: Vec<&str> = owner_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        owner_ids,
+        ["t-owned-001"],
+        "an owner-scoped listing must never surface ownerless threads"
+    );
+
+    let ownerless_view = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: ownerless_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ownerless_ids: Vec<&str> = ownerless_view
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ownerless_ids,
+        ["t-ownerless-001"],
+        "an ownerless-scope enumeration must never surface owner-scoped threads"
+    );
+}
+
+fn prepared_request(label: &str, key: &str) -> ironclaw_threads::PreparedContextRequest {
+    ironclaw_threads::PreparedContextRequest {
+        scope: ThreadScope {
+            owner_user_id: None,
+            ..scope(label)
+        },
+        actor_id: format!("user-{label}"),
+        system_prompt: "You are a background task.".to_string(),
+        messages: vec![ironclaw_llm::agent_message::AgentMessage {
+            role: ironclaw_llm::agent_message::AgentMessageRole::User,
+            content: vec![ironclaw_llm::agent_message::ContentPart::text(
+                "do the thing",
+            )],
+        }],
+        declarations: ironclaw_host_api::prepared_context::PreparedTurnDeclarations {
+            tools: Vec::new(),
+            output: ironclaw_host_api::prepared_context::OutputContract::JsonSchema {
+                schema: serde_json::json!({ "type": "object" }),
+            },
+            limits: ironclaw_host_api::prepared_context::TurnLimits {
+                max_model_calls: Some(4),
+                max_capability_invocations: None,
+            },
+        },
+        idempotency_key: key.to_string(),
+        thread_id: None,
+        title: None,
+        metadata_json: None,
+    }
+}
+
+/// The prepared-context accept door mints an unbound (ownerless) thread, seeds the
+/// caller's context as ordinary transcript rows in order, journals the
+/// declarations beside them, and pins the LAST seeded row as the accepted
+/// message ref.
+#[tokio::test]
+async fn accept_prepared_context_mints_seeds_and_journals() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound", "unbound-key-1");
+
+    let accepted = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("prepared-context accept succeeds");
+    assert!(!accepted.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+        })
+        .await
+        .expect("seeded thread history");
+    assert_eq!(
+        history.thread.scope.owner_user_id, None,
+        "thread is ownerless"
+    );
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].kind, MessageKind::System);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("You are a background task.")
+    );
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(history.messages[1].status, MessageStatus::Accepted);
+    assert_eq!(history.messages[1].sequence, 2);
+    assert_eq!(
+        accepted.accepted_message_ref.as_str(),
+        format!("msg:{}", history.messages[1].message_id),
+        "the accepted ref pins the last seeded row"
+    );
+
+    let record = service
+        .read_prepared_context(&request.scope, &accepted.thread_id)
+        .await
+        .expect("declarations read-back")
+        .expect("record present");
+    assert_eq!(record.declarations, request.declarations);
+    assert_eq!(record.seeded_message_count, 2);
+
+    // Seeded rows are model-visible through the same context path every
+    // conversation uses.
+    let window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request.scope.clone(),
+            thread_id: accepted.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .expect("context window over seeded thread");
+    assert_eq!(window.messages.len(), 2);
+    assert_eq!(window.messages[0].kind, MessageKind::System);
+    assert_eq!(window.messages[1].kind, MessageKind::User);
+}
+
+/// Replay discipline: the same request converges on the SAME prepared
+/// context (no orphan threads, no duplicate rows); a different key mints a
+/// separate thread; a non-unbound thread reads back `None` declarations.
+#[tokio::test]
+async fn accept_prepared_context_replays_idempotently_without_orphans() {
+    let service = InMemorySessionThreadService::default();
+    let request = prepared_request("unbound-replay", "unbound-key-replay");
+
+    let first = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("first accept");
+    let replay = service
+        .accept_prepared_context(request.clone())
+        .await
+        .expect("replay accept");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.thread_id, first.thread_id);
+    assert_eq!(replay.accepted_message_ref, first.accepted_message_ref);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: first.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2, "replay must not duplicate rows");
+
+    let mut second = prepared_request("unbound-replay", "unbound-key-other");
+    second.scope = request.scope.clone();
+    let other = service
+        .accept_prepared_context(second)
+        .await
+        .expect("second key accepts");
+    assert_ne!(other.thread_id, first.thread_id);
+
+    // An ordinary conversation thread is not a prepared context.
+    let plain_scope = scope("unbound-replay-plain");
+    let plain = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: plain_scope.clone(),
+            thread_id: Some(ThreadId::new("t-plain-001").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("plain thread");
+    assert!(
+        service
+            .read_prepared_context(&plain_scope, &plain.thread_id)
+            .await
+            .expect("read")
+            .is_none()
+    );
 }

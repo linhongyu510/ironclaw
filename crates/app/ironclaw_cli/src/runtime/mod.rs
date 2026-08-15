@@ -1673,6 +1673,10 @@ fn runner_settings(
             runner.max_concurrent_conversation_runs,
             settings.max_concurrent_conversation_runs,
         );
+        settings.max_concurrent_unbound_runs = resolve_concurrency_cap(
+            runner.max_concurrent_unbound_runs,
+            settings.max_concurrent_unbound_runs,
+        );
     }
 
     // Layer 1: environment-variable overrides (highest precedence, applied
@@ -1694,6 +1698,10 @@ fn runner_settings(
     apply_cap_env_override(
         "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
         &mut settings.max_concurrent_conversation_runs,
+    )?;
+    apply_cap_env_override(
+        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS",
+        &mut settings.max_concurrent_unbound_runs,
     )?;
 
     // Validate the final, fully-merged worker count once (env override has the

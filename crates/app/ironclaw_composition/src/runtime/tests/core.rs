@@ -720,8 +720,8 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, SanitizedCancelReason, TurnActor, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{
@@ -751,6 +751,9 @@ use ironclaw_loop_host::{
 use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
     ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigService, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
@@ -929,6 +932,109 @@ impl HostManagedModelGateway for RecordingGateway {
             self.reply.clone(),
         ))
     }
+}
+
+#[tokio::test]
+async fn standalone_cli_send_uses_saved_user_model_preference() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let standalone_root = root.path().join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    std::fs::write(
+        standalone_root.join(crate::factory::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        format!(
+            "{}\n",
+            ironclaw_secrets::keychain::generate_master_key_hex()
+        ),
+    )
+    .expect("seed standalone secrets master key");
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
+    let home = RebornHome::resolve_from_env_parts(
+        Some(config_home_dir.as_os_str().to_os_string()),
+        None,
+        None,
+    )
+    .expect("valid reborn home");
+    std::fs::write(
+        home.config_file_path(),
+        "[llm.default]\nprovider_id = \"ollama\"\nmodel = \"workspace-default\"\n",
+    )
+    .expect("write config.toml");
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let gateway = Arc::new(RecordingGateway {
+        reply: "preferred model reply".to_string(),
+        requests: Arc::clone(&requests),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input("runtime-cli-model-owner", standalone_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_boot_config(RebornBootConfig::new(home, RebornProfile::Standalone))
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-cli-model-tenant".to_string(),
+        agent_id: "runtime-cli-model-agent".to_string(),
+        source_binding_id: "runtime-cli-model-source".to_string(),
+        reply_target_binding_id: "runtime-cli-model-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-cli-model-tenant").expect("tenant"),
+        UserId::new("runtime-cli-model-owner").expect("user"),
+        Some(AgentId::new("runtime-cli-model-agent").expect("agent")),
+        None,
+    );
+    let llm_config = runtime
+        .llm_config_service
+        .as_ref()
+        .expect("boot config wires model selection");
+    llm_config
+        .set_user_model_policy(
+            caller.clone().with_operator_config(true),
+            SetUserModelPolicyRequest {
+                workspace_default: "workspace-default".to_string(),
+                allowed_models: vec![
+                    "workspace-default".to_string(),
+                    "preferred-model".to_string(),
+                ],
+            },
+        )
+        .await
+        .expect("model policy is stored");
+    llm_config
+        .set_user_model_preference(
+            caller,
+            SetUserModelPreferenceRequest {
+                model: Some("preferred-model".to_string()),
+            },
+        )
+        .await
+        .expect("model preference is stored");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .send_user_message(&conversation, "use my saved model")
+        .await
+        .expect("CLI message sends");
+
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1, "one model call should be made");
+        let request = &requests[0];
+        let route = request
+            .resolved_model_route
+            .as_ref()
+            .expect("saved preference should reach the model gateway");
+        assert!(route.is_advisory());
+        assert_eq!(route.model_id(), "preferred-model");
+    }
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[async_trait]
@@ -4123,8 +4229,6 @@ async fn cancel_run_propagates_to_subagent_children() {
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:cancel-parent").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-parent").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("cancel-parent").unwrap(),
             received_at: Utc::now(),
@@ -4156,8 +4260,6 @@ async fn cancel_run_propagates_to_subagent_children() {
                 child_scope: child_scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
-                source_binding_ref: SourceBindingRef::new("source:cancel-child").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-child").unwrap(),
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
                 received_at: Utc::now(),
@@ -5318,6 +5420,11 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
 
 #[tokio::test]
 async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
+    // This exercises a complete filesystem-backed runtime bootstrap. Under the
+    // crate's parallel test load that can exceed the short poll budget used by
+    // smaller scenarios, even though the model path itself completes promptly.
+    const INVALID_SKILL_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     seed_user_skill(
@@ -5349,7 +5456,7 @@ async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: INVALID_SKILL_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway);
 
@@ -6754,6 +6861,13 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     };
     use std::sync::OnceLock;
 
+    // This scenario performs a complete libSQL-backed runtime bootstrap and an
+    // extension lifecycle transition while the crate's other runtime tests run
+    // in parallel. Keep the timeout large enough to measure the behavior under
+    // test rather than host scheduling contention; the generic 10-second poll
+    // budget is intentionally tighter for smaller runtime scenarios.
+    const SURFACE_CHANGE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
         service: ironclaw_extension_manager::ExtensionHostLifecycleProductService,
@@ -6915,7 +7029,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: RUNTIME_POLL_TIMEOUT,
+        max_total: SURFACE_CHANGE_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway_for_runtime);
 
@@ -6937,7 +7051,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         .enable_global_auto_approve_for_test(&conversation)
         .await;
     let reply = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
+        SURFACE_CHANGE_TEST_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool twice"),
     )
     .await
@@ -7032,8 +7146,6 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
             received_at: Utc::now(),
@@ -7236,6 +7348,7 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         })

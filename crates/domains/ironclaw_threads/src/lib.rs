@@ -16,6 +16,7 @@ mod error;
 mod filesystem_service;
 mod identifiers;
 mod in_memory;
+mod prepared_context;
 mod service;
 mod stored_message;
 mod summary_artifacts;
@@ -43,20 +44,24 @@ pub use contract::{
     ContextImageAttachment, ContextMessage, ContextMessages, ContextWindow,
     ContextWindowTruncation, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
     EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, GOAL_STATEMENT_MAX_CHARS,
-    GoalStatement, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadRecord, SummaryArtifact, SummaryKind, SummaryModelContextPolicy,
-    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    GoalStatement, InboundMessageReplayMetadata, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
+    SummaryModelContextPolicy, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
     effective_tool_result_read_max_bytes,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
+pub use prepared_context::{
+    AcceptedPreparedContext, PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PreparedContextRecord,
+    PreparedContextRequest, ThreadServicePreparedContextSource, read_declarations_for_run_scope,
+};
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers
 // reach `AttachmentRef` through this crate without a direct `ironclaw_common`

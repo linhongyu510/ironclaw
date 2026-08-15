@@ -32,10 +32,7 @@ mod reply_admission;
 mod stop;
 
 pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
-pub(crate) use batch::{
-    BatchPolicy, BatchPolicyStrategy, BoundedParallelBatchPolicyStrategy,
-    CapabilityBatchExecutionMode, CapabilityCallSummary, DefaultBatchPolicyStrategy,
-};
+pub(crate) use batch::BatchPolicy;
 pub(crate) use budget::{BudgetStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{
@@ -49,7 +46,8 @@ pub(crate) use context::{
 };
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
-    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
+    DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateNotSupportedStrategy,
+    GateOutcome, GateSummary,
 };
 pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
@@ -59,10 +57,11 @@ pub(crate) use recovery::{
 };
 pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
+    StructuredOutputReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
     CapabilityBatchTurnSummary, DefaultStopConditionStrategy, StopConditionStrategy, StopKind,
-    StopOutcome, TurnEndKind, TurnSummary,
+    StopOutcome, StructuredResultStopStrategy, TurnEndKind, TurnSummary,
 };
 
 #[cfg(test)]
