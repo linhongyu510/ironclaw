@@ -47,7 +47,7 @@ async fn prompt_injection_content_is_passed_through_raw_and_untrusted() {
         .read_long_term(invocation(), request("anything", 4))
         .await
         .unwrap();
-    assert_eq!(snippets.len(), 2);
+    assert_eq!(snippets.len(), 1);
     assert_eq!(
         snippets[0].text, hostile,
         "text must reach the host raw so host admission can scan it"

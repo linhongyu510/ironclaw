@@ -124,38 +124,21 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
         if budget == 0 {
             return Ok(Vec::new());
         }
-        let knowledge_quota = budget.div_ceil(2);
-        let memory_quota = budget - knowledge_quota;
         let attribution = self.attribution_for(&invocation);
 
-        let knowledge = degrade_availability(
+        let memory = degrade_availability(
             self.query_lane(
-                MnesisLane::Knowledge,
-                "knowledge_search",
+                MnesisLane::Memory,
+                "memory_search",
                 &request.query,
-                knowledge_quota,
-                attribution.clone(),
+                budget,
+                attribution,
             )
             .await,
         )?;
-        let memory = if memory_quota > 0 {
-            degrade_availability(
-                self.query_lane(
-                    MnesisLane::Memory,
-                    "memory_search",
-                    &request.query,
-                    memory_quota,
-                    attribution,
-                )
-                .await,
-            )?
-        } else {
-            Vec::new()
-        };
 
-        let mut snippets: Vec<MemoryServiceContextSnippet> = knowledge
+        let mut snippets: Vec<MemoryServiceContextSnippet> = memory
             .into_iter()
-            .chain(memory)
             .filter_map(|result| result.into_snippet())
             .collect();
         snippets.truncate(budget);

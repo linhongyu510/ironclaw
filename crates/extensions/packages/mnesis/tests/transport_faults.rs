@@ -169,7 +169,7 @@ async fn an_undecodable_body_yields_no_snippets_rather_than_garbage() {
 }
 
 #[tokio::test]
-async fn the_snippet_budget_is_never_exceeded_and_is_split_across_both_lanes() {
+async fn the_snippet_budget_is_never_exceeded_and_the_lifecycle_reads_memory_only() {
     let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
         "results": (0..50)
             .map(|index| json!({
@@ -194,8 +194,12 @@ async fn the_snippet_budget_is_never_exceeded_and_is_split_across_both_lanes() {
     assert_eq!(snippets.len(), 6);
 
     let lanes = service_lanes(&service);
-    assert!(lanes.contains(&MnesisLane::Knowledge));
     assert!(lanes.contains(&MnesisLane::Memory));
+    assert!(
+        !lanes.contains(&MnesisLane::Knowledge),
+        "corpus evidence has no stored owner scope, so it must not be forced through \
+         the owner-scoped lifecycle snippet path; it reaches the model as a tool result"
+    );
 }
 
 #[tokio::test]
@@ -249,9 +253,11 @@ async fn every_read_carries_attribution_derived_from_the_trusted_scope() {
             .expect("every read must carry owner scope");
         assert!(attribution.starts_with("mpa1."), "{attribution}");
     }
-    assert_eq!(
-        recorded[0].attribution, recorded[1].attribution,
-        "both lanes must present the same owner scope for one invocation"
+    assert!(
+        recorded
+            .iter()
+            .all(|entry| entry.attribution == recorded[0].attribution),
+        "one invocation must present one owner scope to every lane it touches"
     );
 }
 
