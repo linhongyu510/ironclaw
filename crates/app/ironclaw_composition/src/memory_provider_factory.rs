@@ -38,9 +38,16 @@ use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 use ironclaw_memory_mem0::MEM0_MEMORY_EXTENSION_ID;
 #[cfg(feature = "memory-mem0")]
 use ironclaw_memory_mem0::{Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport};
+#[cfg(all(test, feature = "memory-mnesis"))]
+use ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID;
+#[cfg(feature = "memory-mnesis")]
+use ironclaw_memory_mnesis::{
+    EndpointProfile, MnesisConfig, MnesisHttpTransport, MnesisLimits, MnesisMemoryService,
+    SecretHandle,
+};
 #[cfg(test)]
 use ironclaw_memory_native::NativeMemoryService;
-#[cfg(feature = "memory-mem0")]
+#[cfg(any(feature = "memory-mem0", feature = "memory-mnesis"))]
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
 
@@ -104,6 +111,26 @@ pub struct MemoryProviderDeps {
     /// mem0 transport type to hold when `memory-mem0` is not compiled in.
     #[cfg(feature = "memory-mem0")]
     pub mem0_transport_override: Option<Arc<dyn Mem0Transport>>,
+    /// Mnesis connection settings for the mnesis arm.
+    pub mnesis: MnesisConnectionConfig,
+}
+
+/// Mnesis connection settings. Carries secret handles plus the resolved bearer
+/// material the host injects at the mediated boundary; neither endpoint nor
+/// credential has a default, so a bound-but-unset Mnesis fails closed.
+#[derive(Default)]
+pub struct MnesisConnectionConfig {
+    pub knowledge_endpoint: Option<String>,
+    pub memory_endpoint: Option<String>,
+    #[cfg(feature = "memory-mnesis")]
+    pub knowledge_credential: Option<SecretHandle>,
+    #[cfg(feature = "memory-mnesis")]
+    pub memory_credential: Option<SecretHandle>,
+    pub knowledge_bearer: Option<SecretString>,
+    pub memory_bearer: Option<SecretString>,
+    pub host_allowlist: Vec<String>,
+    #[cfg(feature = "memory-mnesis")]
+    pub profile: EndpointProfile,
 }
 
 impl MemoryProviderDeps {
@@ -116,7 +143,13 @@ impl MemoryProviderDeps {
             mem0,
             #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
+            mnesis: MnesisConnectionConfig::default(),
         }
+    }
+
+    pub fn with_mnesis(mut self, mnesis: MnesisConnectionConfig) -> Self {
+        self.mnesis = mnesis;
+        self
     }
 }
 
@@ -159,6 +192,10 @@ fn create_third_party_provider(
     if extension_id == MEM0_MEMORY_EXTENSION_ID {
         return create_mem0_provider(deps).map(|provider| provider as Arc<dyn MemoryService>);
     }
+    #[cfg(feature = "memory-mnesis")]
+    if extension_id == MNESIS_MEMORY_EXTENSION_ID {
+        return create_mnesis_provider(deps).map(|provider| provider as Arc<dyn MemoryService>);
+    }
     // No provider is registered for this third-party id — or the `memory-mem0`
     // feature is not compiled in — so the memory binding fails closed.
     #[cfg(not(feature = "memory-mem0"))]
@@ -169,6 +206,70 @@ fn create_third_party_provider(
         "no memory provider is registered for this third-party extension id (or the `memory-mem0` feature is not compiled in); the memory binding fails closed"
     );
     None
+}
+
+#[cfg(feature = "memory-mnesis")]
+fn create_mnesis_provider(
+    deps: &MemoryProviderDeps,
+) -> Option<Arc<MnesisMemoryService<MnesisHttpTransport>>> {
+    let settings = &deps.mnesis;
+    let (Some(knowledge_endpoint), Some(memory_endpoint)) = (
+        settings.knowledge_endpoint.as_deref(),
+        settings.memory_endpoint.as_deref(),
+    ) else {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "mnesis memory binding selected but an endpoint is unset; failing closed"
+        );
+        return None;
+    };
+    let (Some(knowledge_bearer), Some(memory_bearer)) = (
+        settings.knowledge_bearer.as_ref(),
+        settings.memory_bearer.as_ref(),
+    ) else {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "mnesis memory binding selected but a lane credential is unset; failing closed"
+        );
+        return None;
+    };
+
+    let (Some(knowledge_credential), Some(memory_credential)) = (
+        settings.knowledge_credential.clone(),
+        settings.memory_credential.clone(),
+    ) else {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "mnesis memory binding selected but a credential handle is unset; failing closed"
+        );
+        return None;
+    };
+
+    let config = MnesisConfig {
+        knowledge_endpoint: knowledge_endpoint.to_string(),
+        memory_endpoint: memory_endpoint.to_string(),
+        knowledge_credential,
+        memory_credential,
+        host_allowlist: settings.host_allowlist.clone(),
+        profile: settings.profile,
+        limits: MnesisLimits::default(),
+    };
+
+    match MnesisHttpTransport::new(
+        &config,
+        knowledge_bearer.expose_secret(),
+        memory_bearer.expose_secret(),
+    ) {
+        Ok(transport) => Some(Arc::new(MnesisMemoryService::new(transport))),
+        Err(error) => {
+            tracing::warn!(
+                target: LOG_TARGET,
+                %error,
+                "failed to build the mnesis transport (rejected endpoint or credential); failing closed"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(feature = "memory-mem0")]
@@ -324,6 +425,31 @@ pub fn resolve_memory_provider(
                     }
                     // create_mem0_provider already logged why; fail closed —
                     // no tools registered, no lifecycle hooks called.
+                    None => ResolvedMemoryProvider::unbound(resolver),
+                });
+            }
+            #[cfg(feature = "memory-mnesis")]
+            if extension_id.as_str() == memory_extension::MNESIS_MEMORY_EXTENSION_ID {
+                return Ok(match create_mnesis_provider(deps) {
+                    Some(provider) => {
+                        let bundle = memory_extension::mnesis_memory_provider_bundle(
+                            ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
+                            ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
+                        )
+                        .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                            reason: format!("mnesis memory provider package is invalid: {error}"),
+                        })?;
+                        ResolvedMemoryProvider {
+                            resolver: resolver.with_third_party_provider(
+                                extension_id.as_str(),
+                                provider as Arc<dyn MemoryService>,
+                            ),
+                            package: Some(bundle.package),
+                            lifecycle: bundle.lifecycle,
+                            tool_handler: None,
+                            guidance: bundle.guidance,
+                        }
+                    }
                     None => ResolvedMemoryProvider::unbound(resolver),
                 });
             }
@@ -524,6 +650,7 @@ mod tests {
             mem0: Mem0ConnectionConfig::default(),
             #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
+            mnesis: MnesisConnectionConfig::default(),
         };
         assert!(create_provider(&MemoryProviderBinding::Native, &deps).is_some());
     }

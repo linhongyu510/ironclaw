@@ -106,6 +106,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
+    "mnesis.knowledge.search",
     "builtin.read_file",
     "builtin.list_dir",
     "builtin.glob",
@@ -218,8 +219,8 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
     }
     assert_eq!(
         EXPECTED_UNGATED_SEED.len(),
-        17,
-        "the reviewed S5 seed is 17 ids; a size change is a reviewed diff"
+        18,
+        "the reviewed S5 seed is 18 ids; a size change is a reviewed diff"
     );
 }
 

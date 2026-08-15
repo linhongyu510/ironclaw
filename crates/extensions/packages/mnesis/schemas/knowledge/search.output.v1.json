@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mnesis knowledge search output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engine", "generation", "results"],
+  "properties": {
+    "engine": {
+      "const": "rar",
+      "description": "Lane identity. Corpus evidence, not personal memory, and never merged with the memory lane."
+    },
+    "generation": {
+      "type": "string",
+      "description": "Immutable index generation the results were served from."
+    },
+    "scoreSemanticsId": { "type": "string" },
+    "policyEpoch": { "type": ["integer", "null"] },
+    "feedbackId": { "type": ["integer", "null"] },
+    "results": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recordId", "relativePath", "content", "score", "authorization"],
+        "properties": {
+          "recordId": { "type": "string" },
+          "relativePath": { "type": "string" },
+          "content": { "type": "string" },
+          "score": { "type": "number" },
+          "truncated": { "type": "boolean" },
+          "authorization": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "accessScope"],
+            "properties": {
+              "kind": { "const": "access-scope" },
+              "accessScope": { "type": "string" }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "kind": { "const": "rar" },
+              "sourceUri": { "type": "string" },
+              "title": { "type": ["string", "null"] },
+              "corpusGeneration": { "type": ["string", "null"] },
+              "chunkIndex": { "type": ["integer", "null"] },
+              "retrievalStages": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "attestationReference": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

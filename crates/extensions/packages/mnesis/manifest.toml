@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v3"
 id = "mnesis.hosted.memory"
 name = "Mnesis Memory"
 version = "0.1.0"
-description = "Mnesis backend for the always-on memory adapter, reached over a published hosted-MCP boundary. A compose-time [memory] binding can select this provider in place of the native filesystem backend. Mnesis exposes two separately authorized lanes: retrieval (knowledge_search) and memory (memory_search). Off by default; fails closed unless a deployment binds it and supplies both endpoints plus a host-owned bearer credential handle."
+description = "Mnesis backend for the always-on memory adapter, reached over a published hosted-MCP boundary. A compose-time [memory] binding can select this provider in place of the native filesystem backend. Mnesis exposes two separately authorized lanes with non-comparable score semantics: retrieval over an indexed corpus, and memory over prior experience. Off by default; fails closed unless a deployment binds it and supplies both endpoints plus host-owned bearer credential handles."
 trust = "first_party_requested"
 
 [runtime]
@@ -14,11 +14,20 @@ lifecycle = ["read_long_term"]
 
 [[tools]]
 id = "ironclaw.memory.search"
-description = "Search Mnesis for prior context relevant to the current turn, across the retrieval and memory lanes."
+description = "Search prior experience recorded for the current tenant, user, agent, and project. Returns personal memory, not corpus evidence. Scope comes from the trusted invocation and cannot be supplied or widened by the model."
 effects = ["read_filesystem"]
 default_permission = "allow"
 visibility = "model"
 origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/search.input.v1.json"
 output_schema_ref = "schemas/memory/search.output.v1.json"
-prompt_doc_ref = "prompts/mnesis/search.md"
+
+[[tools]]
+id = "mnesis.knowledge.search"
+description = "Search the Mnesis indexed corpus for evidence relevant to the current question. Returns document evidence with source provenance and an index generation, not personal memory, and its scores are not comparable with memory scores. Scope comes from the trusted invocation and cannot be supplied or widened by the model."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/knowledge/search.input.v1.json"
+output_schema_ref = "schemas/knowledge/search.output.v1.json"

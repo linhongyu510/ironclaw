@@ -165,6 +165,7 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
+    "mnesis.knowledge.search",
     "builtin.read_file",
     "builtin.list_dir",
     "builtin.glob",

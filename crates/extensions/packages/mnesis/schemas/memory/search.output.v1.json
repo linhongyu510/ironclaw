@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mnesis memory search output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engine", "results"],
+  "properties": {
+    "engine": {
+      "const": "memory",
+      "description": "Lane identity. Never merged with the knowledge lane, whose scores are not comparable."
+    },
+    "scoreSemanticsId": {
+      "type": "string",
+      "description": "Identifies how score is computed for this lane, so scores are never compared across engines."
+    },
+    "policyEpoch": {
+      "type": ["integer", "null"]
+    },
+    "results": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recordId", "relativePath", "content", "score", "authorization"],
+        "properties": {
+          "recordId": { "type": "string" },
+          "relativePath": { "type": "string" },
+          "content": { "type": "string" },
+          "score": { "type": "number" },
+          "authorization": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "ownerScope"],
+            "properties": {
+              "kind": { "const": "owner-scope" },
+              "ownerScope": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["tenantId", "principalId"],
+                "properties": {
+                  "recordClass": { "type": "string" },
+                  "tenantId": { "type": "string" },
+                  "principalId": { "type": "string" },
+                  "agentId": { "type": ["string", "null"] },
+                  "projectId": { "type": ["string", "null"] },
+                  "threadId": { "type": ["string", "null"] }
+                }
+              }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "properties": {
+              "kind": { "const": "memory" },
+              "memoryType": { "type": "string" },
+              "temporalValidity": { "type": ["string", "null"] },
+              "importance": { "type": ["number", "null"] },
+              "correctionOf": { "type": ["string", "null"] },
+              "supersededBy": { "type": ["string", "null"] },
+              "sourceUri": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

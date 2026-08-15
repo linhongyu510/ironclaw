@@ -32,6 +32,9 @@ eula = false
 memory-mem0 = [
     "ironclaw_composition/memory-mem0",
 ]
+memory-mnesis = [
+    "ironclaw_composition/memory-mnesis",
+]
 # Feature bar 4 (dev-only seam): compile the loopback-only OAuth provider
 # endpoint constructor used by hermetic standalone E2E tests. Activation also
 # requires a debug build plus paired endpoint env vars; release builds fail

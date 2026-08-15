@@ -122,13 +122,7 @@ fn a_credential_that_cannot_be_a_header_is_refused_without_echoing_it() {
 
 #[tokio::test]
 async fn a_lane_denial_and_a_lane_outage_map_to_different_host_error_kinds() {
-    for (status, expected) in [
-        (401, MemoryServiceErrorKind::Operation),
-        (403, MemoryServiceErrorKind::Operation),
-        (429, MemoryServiceErrorKind::Operation),
-        (500, MemoryServiceErrorKind::Unavailable),
-        (503, MemoryServiceErrorKind::Unavailable),
-    ] {
+    for status in [401, 403, 429] {
         let service =
             MnesisMemoryService::new(MockMnesisTransport::new(Box::new(move |_request| {
                 Some(MnesisResponse {
@@ -140,7 +134,26 @@ async fn a_lane_denial_and_a_lane_outage_map_to_different_host_error_kinds() {
             .read_long_term(invocation(), request("anything", 4))
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), expected, "status {status}");
+        assert_eq!(
+            error.kind(),
+            MemoryServiceErrorKind::Operation,
+            "status {status} is a policy failure and must stay visible"
+        );
+    }
+
+    for status in [500, 503] {
+        let service =
+            MnesisMemoryService::new(MockMnesisTransport::new(Box::new(move |_request| {
+                Some(MnesisResponse {
+                    status,
+                    body: Value::Null,
+                })
+            })));
+        let snippets = service
+            .read_long_term(invocation(), request("anything", 4))
+            .await
+            .unwrap_or_else(|error| panic!("status {status} must degrade, got {error}"));
+        assert!(snippets.is_empty(), "status {status}");
     }
 }
 
@@ -159,7 +172,19 @@ async fn an_undecodable_body_yields_no_snippets_rather_than_garbage() {
 async fn the_snippet_budget_is_never_exceeded_and_is_split_across_both_lanes() {
     let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
         "results": (0..50)
-            .map(|index| json!({"relativePath": format!("{index}.md"), "content": "x"}))
+            .map(|index| json!({
+                "relativePath": format!("{index}.md"),
+                "content": "x",
+                "authorization": {
+                    "kind": "owner-scope",
+                    "ownerScope": {
+                        "tenantId": "tenant-mnesis",
+                        "principalId": "user-mnesis",
+                        "agentId": "agent-mnesis",
+                        "projectId": "project-mnesis"
+                    }
+                }
+            }))
             .collect::<Vec<_>>()
     })));
     let snippets = service
@@ -171,6 +196,21 @@ async fn the_snippet_budget_is_never_exceeded_and_is_split_across_both_lanes() {
     let lanes = service_lanes(&service);
     assert!(lanes.contains(&MnesisLane::Knowledge));
     assert!(lanes.contains(&MnesisLane::Memory));
+}
+
+#[tokio::test]
+async fn a_result_mnesis_did_not_owner_scope_is_dropped_rather_than_labelled() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
+        "results": [{"relativePath": "a.md", "content": "alpha"}]
+    })));
+    let snippets = service
+        .read_long_term(invocation(), request("anything", 6))
+        .await
+        .unwrap();
+    assert!(
+        snippets.is_empty(),
+        "an unscoped result must never be labelled with the caller's scope"
+    );
 }
 
 #[tokio::test]
@@ -192,6 +232,44 @@ async fn a_disabled_context_profile_never_reaches_the_transport() {
     let snippets = service.read_long_term(invocation(), context).await.unwrap();
     assert!(snippets.is_empty());
     assert_eq!(service_lanes(&service).len(), 0);
+}
+
+#[tokio::test]
+async fn every_read_carries_attribution_derived_from_the_trusted_scope() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(Value::Null));
+    let _ = service
+        .read_long_term(invocation(), request("anything", 4))
+        .await;
+    let recorded = service.transport().recorded();
+    assert!(!recorded.is_empty());
+    for entry in &recorded {
+        let attribution = entry
+            .attribution
+            .as_ref()
+            .expect("every read must carry owner scope");
+        assert!(attribution.starts_with("mpa1."), "{attribution}");
+    }
+    assert_eq!(
+        recorded[0].attribution, recorded[1].attribution,
+        "both lanes must present the same owner scope for one invocation"
+    );
+}
+
+#[tokio::test]
+async fn attribution_is_never_taken_from_the_request_body() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(Value::Null));
+    let _ = service
+        .read_long_term(invocation(), request("anything", 4))
+        .await;
+    for entry in service.transport().recorded() {
+        let body = entry.body.as_object().expect("a JSON object body");
+        for forbidden in ["ownerScope", "tenantId", "userId", "principalId", "scope"] {
+            assert!(
+                !body.contains_key(forbidden),
+                "{forbidden} must ride attribution, not the body"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -241,6 +319,7 @@ async fn live_canary_reaches_both_published_lanes() {
                     }
                 }),
                 idempotent: true,
+                attribution: Some(canary_attribution()),
             })
             .await
             .unwrap_or_else(|error| panic!("{operation} transport failed: {error}"));
@@ -250,6 +329,31 @@ async fn live_canary_reaches_both_published_lanes() {
             "{operation} was denied: check the bearer credential"
         );
     }
+}
+
+fn canary_attribution() -> String {
+    use ironclaw_memory_mnesis::{OwnerScope, ProviderAttribution};
+    let deadline_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after the epoch")
+        .as_millis() as i64
+        + 30_000;
+    ProviderAttribution {
+        owner_scope: OwnerScope::narrowest(
+            std::env::var("MNESIS_CANARY_TENANT").unwrap_or_else(|_| "ironclaw-lab".to_string()),
+            std::env::var("MNESIS_CANARY_PRINCIPAL")
+                .unwrap_or_else(|_| "ironclaw-integration-reader".to_string()),
+            None,
+            None,
+            None,
+        ),
+        mission_id: None,
+        invocation_id: "11111111-2222-4333-8444-555555555555".to_string(),
+        correlation_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),
+        deadline_at_ms,
+    }
+    .encode()
+    .expect("the canary attribution encodes")
 }
 
 fn invocation() -> ironclaw_memory::MemoryInvocation {

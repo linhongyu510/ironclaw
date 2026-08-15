@@ -120,6 +120,14 @@ pub const MEM0_MEMORY_PROVIDER_SERVICE: &str = "mem0_memory_provider";
 pub const MEM0_MEMORY_MANIFEST_TOML: &str =
     include_str!("../../../extensions/packages/mem0/manifest.toml");
 
+/// Reserved (host-bundled) extension id for the Mnesis memory backend. Mirrors
+/// `ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID`.
+pub const MNESIS_MEMORY_EXTENSION_ID: &str = "mnesis.hosted.memory";
+
+/// Host service identity declared by the Mnesis backend manifest.
+pub const MNESIS_MEMORY_PROVIDER_SERVICE: &str = "mnesis_memory_provider";
+
+
 /// Parse the bundled `ironclaw.memory` manifest into the internal manifest
 /// model. Fail-closed: the reserved id, `first_party` runtime, `[memory]`
 /// surface, schema refs, and provider-prefixed tool ids are validated by the
@@ -161,6 +169,7 @@ fn memory_manifest_record(
 
 /// Virtual package root for the bundled mem0 memory backend.
 const MEM0_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/mem0.local.memory";
+const MNESIS_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/mnesis.hosted.memory";
 
 /// A bundled memory provider's registrable package plus the lifecycle hooks
 /// its manifest declares — exactly what composition consumes when this
@@ -207,6 +216,22 @@ pub fn mem0_memory_provider_bundle(
         MEM0_MEMORY_MANIFEST_TOML,
         MEM0_MEMORY_PACKAGE_ROOT,
         "mem0",
+        guidance_assets,
+    )
+}
+
+/// Build the registrable provider bundle for the bundled Mnesis memory backend,
+/// used when the compose-time `[memory]` binding selects Mnesis AND the provider
+/// is actually constructible. `guidance_assets` is passed in by composition for
+/// the same reason as the mem0 bundle.
+pub fn mnesis_memory_provider_bundle(
+    manifest_toml: &str,
+    guidance_assets: &'static [(&'static str, &'static str)],
+) -> Result<BundledMemoryProvider, ExtensionError> {
+    memory_provider_bundle(
+        manifest_toml,
+        MNESIS_MEMORY_PACKAGE_ROOT,
+        "mnesis",
         guidance_assets,
     )
 }

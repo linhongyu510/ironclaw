@@ -131,6 +131,7 @@ fn deps_over_mock(transport: Arc<MockMem0Transport>) -> MemoryProviderDeps {
         prompt_write_safety_sink: None,
         mem0: Mem0ConnectionConfig::default(),
         mem0_transport_override: Some(transport as Arc<dyn Mem0Transport>),
+        mnesis: Default::default(),
     }
 }
 

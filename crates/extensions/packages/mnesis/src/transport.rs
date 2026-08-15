@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::attribution::PROVIDER_ATTRIBUTION_HEADER;
 use crate::config::{MnesisConfig, MnesisLimits};
 use crate::error::MnesisError;
 use crate::url_check::{EndpointProfile, check_endpoint};
@@ -18,6 +19,7 @@ pub struct MnesisRequest {
     pub operation: &'static str,
     pub body: Value,
     pub idempotent: bool,
+    pub attribution: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,20 +281,17 @@ impl MnesisTransport for MnesisHttpTransport {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let outcome = self
-                .client
-                .post(endpoint)
-                .header(
-                    reqwest::header::AUTHORIZATION,
-                    self.authorization(request.lane).clone(),
-                )
-                .json(&request.body)
-                .send()
-                .await
-                .map_err(|error| {
-                    let retryable = error.is_timeout() || error.is_connect() || error.is_request();
-                    MnesisTransportError::with_source("the Mnesis request failed", retryable, error)
-                });
+            let mut builder = self.client.post(endpoint).header(
+                reqwest::header::AUTHORIZATION,
+                self.authorization(request.lane).clone(),
+            );
+            if let Some(attribution) = &request.attribution {
+                builder = builder.header(PROVIDER_ATTRIBUTION_HEADER, attribution);
+            }
+            let outcome = builder.json(&request.body).send().await.map_err(|error| {
+                let retryable = error.is_timeout() || error.is_connect() || error.is_request();
+                MnesisTransportError::with_source("the Mnesis request failed", retryable, error)
+            });
 
             let error = match outcome {
                 Ok(response) => {
@@ -506,6 +505,7 @@ mod tests {
                 operation: "knowledge_search",
                 body: Value::Null,
                 idempotent: true,
+                attribution: None,
             })
             .await
             .unwrap();
@@ -517,6 +517,7 @@ mod tests {
                 operation: "record_interaction",
                 body: Value::Null,
                 idempotent: false,
+                attribution: None,
             })
             .await
             .unwrap();
