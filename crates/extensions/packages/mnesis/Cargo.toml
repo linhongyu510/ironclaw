@@ -1,0 +1,51 @@
+[package]
+name = "ironclaw_memory_mnesis"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Mnesis-backed memory provider adapter for IronClaw Reborn (hosted MCP retrieval + memory lanes)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[features]
+default = []
+# Dev-only seam (AGENTS.md: features are a last resort; `test-support` is the
+# sanctioned name). Exposes the in-memory `MockMnesisTransport` so downstream
+# crates can drive the provider without a live Mnesis endpoint. Off by default
+# so the mock never reaches the production surface; the mock is panic-free, so
+# it is safe to compile outside `cfg(test)`.
+test-support = []
+
+[dependencies]
+# Internal IronClaw crates: the neutral memory contract + the host-api id/scope
+# substrate ONLY, matching `ironclaw_memory_mem0`'s boundary. Enforced by
+# `reborn_dependency_boundaries` / `reborn_extension_specificity`.
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", version = "0.1.0" }
+async-trait = "0.1"
+# `stream` is required to bound the response body *before* full deserialization
+# (P4: stream and bound responses). `gzip`/`brotli`/`deflate` are deliberately
+# absent so reqwest performs no automatic decompression: a compressed body
+# cannot expand past the byte ceiling after the cap is applied.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-native-roots",
+    "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# `time` only: the transport sleeps between bounded retries. No runtime is
+# started here; the host owns the runtime.
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+ironclaw_memory_mnesis = { path = ".", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

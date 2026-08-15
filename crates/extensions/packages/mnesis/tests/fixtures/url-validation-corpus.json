@@ -1,0 +1,46 @@
+{
+  "description": "Endpoint validation corpus for the Mnesis provider. Each case states the profile it is evaluated under and whether the transport must accept it. Verified continuously by tests/url_corpus.rs rather than captured once, so the corpus cannot drift from the code it documents.",
+  "cases": [
+    { "url": "https://mnesis.example.com/rar/mcp", "profile": "production", "accepted": true, "why": "ordinary TLS endpoint" },
+    { "url": "https://mnesis.example.com:8443/memory/mcp", "profile": "production", "accepted": true, "why": "non-default TLS port is fine" },
+    { "url": "https://127.0.0.1:3443", "profile": "production", "accepted": true, "why": "loopback over TLS needs no development profile" },
+    { "url": "https://[::1]:3443", "profile": "production", "accepted": true, "why": "IPv6 loopback over TLS" },
+
+    { "url": "http://127.0.0.1:3443", "profile": "loopback_development", "accepted": true, "why": "loopback http, development profile only" },
+    { "url": "http://localhost:3443", "profile": "loopback_development", "accepted": true, "why": "loopback by name" },
+    { "url": "http://[::1]:3443", "profile": "loopback_development", "accepted": true, "why": "IPv6 loopback" },
+    { "url": "http://127.0.0.1:3443", "profile": "production", "accepted": false, "why": "a development override must not survive into production" },
+    { "url": "http://localhost:3443", "profile": "production", "accepted": false, "why": "same, by name" },
+
+    { "url": "http://mnesis.example.com", "profile": "production", "accepted": false, "why": "the bearer credential rides the request; never plaintext to a remote host" },
+    { "url": "http://mnesis.example.com", "profile": "loopback_development", "accepted": false, "why": "the development profile relaxes loopback only, not remote plaintext" },
+    { "url": "http://10.0.0.5:3443", "profile": "loopback_development", "accepted": false, "why": "RFC1918 is remote, not loopback" },
+    { "url": "http://192.168.1.50:3443", "profile": "loopback_development", "accepted": false, "why": "RFC1918 is remote, not loopback" },
+    { "url": "http://172.16.0.1:3443", "profile": "loopback_development", "accepted": false, "why": "RFC1918 is remote, not loopback" },
+
+    { "url": "https://169.254.169.254", "profile": "production", "accepted": false, "why": "cloud metadata" },
+    { "url": "https://169.254.169.254", "profile": "loopback_development", "accepted": false, "why": "cloud metadata, blocked under every profile" },
+    { "url": "https://[::ffff:169.254.169.254]", "profile": "production", "accepted": false, "why": "IPv4-mapped IPv6 metadata" },
+    { "url": "https://169.254.1.1", "profile": "production", "accepted": false, "why": "link-local IPv4" },
+    { "url": "https://[fe80::1]", "profile": "production", "accepted": false, "why": "link-local IPv6" },
+    { "url": "https://224.0.0.1", "profile": "production", "accepted": false, "why": "multicast IPv4" },
+    { "url": "https://[ff02::1]", "profile": "production", "accepted": false, "why": "multicast IPv6" },
+    { "url": "https://0.0.0.0", "profile": "production", "accepted": false, "why": "unspecified IPv4" },
+    { "url": "https://[::]", "profile": "production", "accepted": false, "why": "unspecified IPv6" },
+
+    { "url": "file:///etc/passwd", "profile": "production", "accepted": false, "why": "non-http scheme" },
+    { "url": "ftp://mnesis.example.com", "profile": "production", "accepted": false, "why": "non-http scheme" },
+    { "url": "gopher://mnesis.example.com", "profile": "production", "accepted": false, "why": "non-http scheme" },
+    { "url": "https://operator:secret@mnesis.example.com", "profile": "production", "accepted": false, "why": "userinfo; credentials belong in the host-owned secret" },
+    { "url": "https://operator@mnesis.example.com", "profile": "production", "accepted": false, "why": "username-only userinfo" },
+    { "url": "https://mnesis.example.com/rar/mcp#fragment", "profile": "production", "accepted": false, "why": "fragments are never meaningful to the server" },
+
+    { "url": "https://2130706433", "profile": "production", "accepted": true, "why": "decimal encoding of 127.0.0.1; the URL parser normalizes it, so it is evaluated as loopback and permitted over TLS" },
+    { "url": "https://0177.0.0.1", "profile": "production", "accepted": true, "why": "octal encoding of 127.0.0.1, normalized the same way" },
+    { "url": "https://0x7f000001", "profile": "production", "accepted": true, "why": "hex encoding of 127.0.0.1, normalized the same way" },
+    { "url": "http://2130706433", "profile": "production", "accepted": false, "why": "still loopback http, refused under the production profile" },
+    { "url": "http://2130706433", "profile": "loopback_development", "accepted": true, "why": "denotes 127.0.0.1, so the loopback http exemption applies" },
+    { "url": "https://2852039166", "profile": "production", "accepted": false, "why": "decimal encoding of 169.254.169.254; normalization means the metadata block catches it" },
+    { "url": "https://0251.0376.0251.0376", "profile": "production", "accepted": false, "why": "octal encoding of 169.254.169.254; blocked for the same reason" }
+  ]
+}

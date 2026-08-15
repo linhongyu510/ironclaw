@@ -309,6 +309,9 @@ crates/
 │       │                               filesystem backend (moved from domains/, amended 2026-07-29)
 │       ├── mem0/                     ▣ ironclaw_memory_mem0 [products] — [memory] provider surface, external
 │       │                               mem0 REST backend (moved from domains/, amended 2026-07-29)
+│       ├── mnesis/                   ▣ ironclaw_memory_mnesis [substrates] — [memory] provider surface,
+│       │                               hosted-MCP Mnesis backend over published retrieval + memory
+│       │                               lanes (added 2026-08-15)
 │       ├── web-app/                 ▣ ironclaw_web_app_extension [products] — outbound-only browser-push
 │       │                               ChannelAdapter + codec + target provider (added 2026-08-08)
 │       └── <ext>/                    ▢ data-only packages (github, gmail, google-*, web-access, notion-mcp,

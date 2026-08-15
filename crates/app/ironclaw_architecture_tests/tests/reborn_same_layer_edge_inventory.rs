@@ -538,6 +538,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS2",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_memory_mnesis",
+        dependency_name: "ironclaw_memory",
+        layer: "substrates",
+        owner: "extensions/packages/mnesis/",
+        decided_in: "WS2",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_memory_native",
         dependency_name: "ironclaw_filesystem",
         layer: "substrates",
@@ -807,6 +814,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_mcp", "runtimes"),
     ("ironclaw_memory", "substrates"),
     ("ironclaw_memory_mem0", "substrates"),
+    ("ironclaw_memory_mnesis", "substrates"),
     ("ironclaw_memory_native", "substrates"),
     ("ironclaw_network", "substrates"),
     ("ironclaw_observability", "substrates"),

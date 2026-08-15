@@ -130,7 +130,16 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// are likewise protocol infrastructure, not vendor vocabulary — and generic
 /// code does not hardcode them anyway: the enrollment allowlist is read from
 /// the resolved manifest at composition.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-app"];
+/// `mnesis` joined 2026-08-15 as the third `[memory]` provider package. It is
+/// excluded for exactly the reason `mem0` is: its tool ids are the
+/// provider-neutral `ironclaw.memory.*` contract, and the separate rule that no
+/// crate outside the provider packages and the binary may name a memory
+/// provider is enforced by
+/// `reborn_dependency_boundaries.rs::only_the_sanctioned_residue_names_a_memory_provider`
+/// with its own shrink-only residue. Folding it in here would flag the
+/// package's own source for naming itself.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] =
+    &["memory-native", "mem0", "mnesis", "web-app"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
