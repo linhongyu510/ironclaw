@@ -19,8 +19,8 @@ use std::time::SystemTime;
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::artifact::{
-    ARTIFACT_INLINE_PREVIEW_MAX_BYTES, ArtifactAccessError, ArtifactByteRange, ArtifactLineRange,
-    ArtifactReadTarget, ArtifactRef, ArtifactSelector,
+    ArtifactAccessError, ArtifactByteRange, ArtifactLineRange, ArtifactReadTarget, ArtifactRef,
+    ArtifactSelector,
 };
 use serde_json::Value;
 
@@ -40,10 +40,6 @@ use super::{
 const DEFAULT_MAX_LINES: u64 = 3000;
 /// Pinned `DEFAULT_MAX_BYTES` (session/streaming-output.ts: 50KB).
 const DEFAULT_MAX_BYTES: usize = 50 * 1024;
-/// Artifact continuations must fit below the host's inline-result threshold.
-/// Otherwise reading one artifact produces another artifact reference instead
-/// of exposing the selected content to the model.
-const ARTIFACT_READ_MAX_BYTES: usize = ARTIFACT_INLINE_PREVIEW_MAX_BYTES / 8;
 /// `read.defaultLimit` for the issue #7392 target context: the rendered
 /// read prompt pins `DEFAULT_LIMIT: "3000"` (read.defaultLimit unset ->
 /// DEFAULT_MAX_LINES).
@@ -370,21 +366,42 @@ async fn read_artifact(
         ));
     }
     let ranges = match &parsed {
-        ParsedSelector::Lines { ranges, .. } => ranges
-            .iter()
-            .map(|range| ArtifactLineRange {
-                start: range.start_line,
-                end: range.end_line.unwrap_or(u64::MAX),
-            })
-            .collect::<Vec<_>>(),
+        ParsedSelector::Lines { ranges, .. } => {
+            let mut remaining = DEFAULT_MAX_LINES;
+            ranges
+                .iter()
+                .filter_map(|range| {
+                    if remaining == 0 {
+                        return None;
+                    }
+                    let requested_end = range.end_line.unwrap_or_else(|| {
+                        range
+                            .start_line
+                            .saturating_add(DEFAULT_LIMIT.saturating_sub(1))
+                    });
+                    let end = requested_end
+                        .min(range.start_line.saturating_add(remaining.saturating_sub(1)));
+                    remaining = remaining
+                        .saturating_sub(end.saturating_sub(range.start_line).saturating_add(1));
+                    Some(ArtifactLineRange {
+                        start: range.start_line,
+                        end,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
         _ => Vec::new(),
     };
     let selector = match (byte_range, &parsed, ranges.as_slice()) {
         (Some(range), _, _) => ArtifactSelector::Bytes(range),
+        (_, ParsedSelector::Raw, _) => ArtifactSelector::Full,
         (_, ParsedSelector::Lines { raw: true, .. }, [range]) => ArtifactSelector::RawLines(*range),
         (_, ParsedSelector::Lines { .. }, [range]) => ArtifactSelector::Lines(*range),
         (_, ParsedSelector::Lines { .. }, ranges) => ArtifactSelector::MultiLines(ranges.to_vec()),
-        _ => ArtifactSelector::Full,
+        _ => ArtifactSelector::Lines(ArtifactLineRange {
+            start: 1,
+            end: DEFAULT_LIMIT,
+        }),
     };
     let reader = ctx.artifact_reader.as_ref().ok_or_else(|| {
         coding_error(
@@ -392,17 +409,46 @@ async fn read_artifact(
             "No session - artifacts unavailable".to_string(),
         )
     })?;
+    // Selector-aware byte budget, mirroring the pinned `#readArtifactFile`:
+    // line-oriented reads budget `max(DEFAULT_MAX_BYTES, lines * 512)` so the
+    // requested line count actually fits. Bare reads become a bounded
+    // 3000-line range; unbounded raw reads retain the upstream 50 KiB guard.
+    let max_output_bytes = match &selector {
+        ArtifactSelector::Bytes(range) => range.end.saturating_sub(range.start).saturating_add(1),
+        ArtifactSelector::Lines(range) | ArtifactSelector::RawLines(range) => {
+            let span = range.end.saturating_sub(range.start).saturating_add(1);
+            (DEFAULT_MAX_BYTES as u64).max(span * BYTES_PER_LINE_BUDGET as u64)
+        }
+        ArtifactSelector::MultiLines(ranges) => {
+            let span = ranges
+                .iter()
+                .map(|range| range.end.saturating_sub(range.start).saturating_add(1))
+                .sum::<u64>();
+            (DEFAULT_MAX_BYTES as u64).max(span * BYTES_PER_LINE_BUDGET as u64)
+        }
+        ArtifactSelector::Full if matches!(parsed, ParsedSelector::Raw) => DEFAULT_MAX_BYTES as u64,
+        ArtifactSelector::Full => {
+            (DEFAULT_MAX_BYTES as u64).max(DEFAULT_MAX_LINES * BYTES_PER_LINE_BUDGET as u64)
+        }
+        _ => (DEFAULT_MAX_BYTES as u64).max(DEFAULT_MAX_LINES * BYTES_PER_LINE_BUDGET as u64),
+    };
     let chunk = reader
         .read(ArtifactReadTarget {
             artifact_id: artifact_ref.id(),
             selector,
-            max_output_bytes: ARTIFACT_READ_MAX_BYTES as u64,
+            max_output_bytes,
         })
         .await
         .map_err(|error| {
-            let message = if error == ArtifactAccessError::OversizedUnsliced {
+            let message = if error == ArtifactAccessError::OversizedUnsliced
+                && matches!(parsed, ParsedSelector::Raw)
+            {
                 format!(
-                    "Artifact {} exceeds the read limit. Use bounded byte selectors such as artifact://{}:bytes:0-3071, then continue with the next byte range.",
+                    "Unbounded raw read blocked for {artifact_url}. Reading the whole artifact verbatim can exhaust memory. Use {artifact_url}:raw:1-3000 for bounded verbatim chunks or {artifact_url}:1-3000 for numbered exploration."
+                )
+            } else if error == ArtifactAccessError::OversizedUnsliced {
+                format!(
+                    "Artifact {} exceeds the read limit. Use bounded selectors such as artifact://{}:1-100, :raw:1-100, or :bytes:0-3071, then continue.",
                     artifact_ref.id().get(),
                     artifact_ref.id().get(),
                 )
@@ -430,8 +476,12 @@ async fn read_artifact(
         return Ok(text);
     }
 
-    let lines = text.strip_suffix('\n').unwrap_or(&text).split('\n');
-    let line_numbers = match &parsed {
+    let lines: Vec<&str> = text
+        .strip_suffix('\n')
+        .unwrap_or(&text)
+        .split('\n')
+        .collect();
+    let line_numbers: Vec<u64> = match &parsed {
         ParsedSelector::Lines { ranges, .. } => ranges
             .iter()
             .flat_map(|range| {
@@ -439,14 +489,39 @@ async fn read_artifact(
                 range.start_line..=end
             })
             .take(DEFAULT_MAX_LINES as usize)
-            .collect::<Vec<_>>(),
-        _ => (1..=DEFAULT_MAX_LINES).collect::<Vec<_>>(),
+            .collect(),
+        _ => (1..=DEFAULT_MAX_LINES).collect(),
     };
-    Ok(lines
-        .zip(line_numbers)
-        .map(|(line, number)| format_numbered_line(number, line))
-        .collect::<Vec<_>>()
-        .join("\n"))
+    let rendered: Vec<String> = lines
+        .iter()
+        .zip(line_numbers.iter())
+        .map(|(line, number)| format_numbered_line(*number, line))
+        .collect();
+    let rendered_lines = rendered.len() as u64;
+    if rendered.is_empty() {
+        return Ok(String::new());
+    }
+    let mut output = rendered.join("\n");
+    // Elision footer mirrors the pinned file-read path: when the artifact has
+    // more lines than the rendered span, tell the model how to continue.
+    let total_lines = chunk.total_lines.unwrap_or(0);
+    let start_line = line_numbers[0];
+    let end_line = line_numbers[rendered_lines as usize - 1];
+    if total_lines > end_line {
+        let remaining = total_lines - end_line;
+        output.push_str(&format!(
+            "\n\n[{remaining} more lines in artifact. Use {artifact_url}:{} to continue]",
+            end_line + 1
+        ));
+    } else if start_line > 1 && chunk.total_lines.is_none() {
+        // Reader did not report total lines; only note continuation when a
+        // bounded selector was used (the model may page further).
+        output.push_str(&format!(
+            "\n\n[Use {artifact_url}:{} to continue]",
+            end_line + 1
+        ));
+    }
+    Ok(output)
 }
 
 fn parse_artifact_byte_range(range: &str) -> Result<ArtifactByteRange, CodingEngineError> {

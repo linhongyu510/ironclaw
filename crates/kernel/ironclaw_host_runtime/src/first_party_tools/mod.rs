@@ -56,9 +56,9 @@ pub(crate) use self::schemas::{
 
 use coding::coding_manifests;
 pub use coding::{
-    CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID, CODING_GREP_CAPABILITY_ID,
-    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools, coding_package,
-    insert_coding_handlers,
+    CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
+    CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools,
+    coding_package, insert_coding_handlers,
 };
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
@@ -137,11 +137,12 @@ pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<Extensi
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 
-// `builtin.shell` is the only built-in first-party handler that directly
-// requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
-// SpawnProcess as an authorization effect, but child-run scheduling is governed
-// by runtime-policy planning rather than this process-port capability list.
-const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] = &[SHELL_CAPABILITY_ID];
+// `builtin.shell` and the pinned `builtin.bash` are the built-in first-party
+// handlers that directly require a RuntimeProcessPort. `builtin.spawn_subagent`
+// declares SpawnProcess as an authorization effect, but child-run scheduling is
+// governed by runtime-policy planning rather than this process-port capability list.
+const PROCESS_PORT_BACKED_BUILTIN_CAPABILITY_IDS: &[&str] =
+    &[SHELL_CAPABILITY_ID, coding::CODING_BASH_CAPABILITY_ID];
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -229,6 +230,7 @@ fn restrict_package_for_process_backend(
             EffectKind::Network,
         ] {
             remove_builtin_capability_effect(package, SHELL_CAPABILITY_ID, effect)?;
+            remove_builtin_capability_effect(package, coding::CODING_BASH_CAPABILITY_ID, effect)?;
         }
     }
     Ok(())

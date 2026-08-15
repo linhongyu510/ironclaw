@@ -864,6 +864,9 @@ fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
         "schemas/builtin/coding.grep.input.v1.json" => {
             ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_SCHEMA
         }
+        "schemas/builtin/coding.bash.input.v1.json" => {
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_SCHEMA
+        }
         _ => return None,
     };
     // silent-ok: these are compile-embedded assets validated by the coding

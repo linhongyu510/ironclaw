@@ -1,11 +1,11 @@
 //! Test-only support for the pinned core-tool contract snapshot.
 //!
 //! The snapshot at `tests/fixtures/pinned_coding_contract/` pins the exact
-//! model-visible contract of the seven pinned core coding tools (`read`,
-//! `write`, `edit`, `glob`, `grep`, `ast_grep`, `ast_edit`) at upstream commit
-//! [`PINNED_COMMIT`] of `can1357/oh-my-pi`:
+//! model-visible contract of the eight pinned core coding tools (`read`,
+//! `write`, `edit`, `glob`, `grep`, `bash`, `ast_grep`, `ast_edit`) at upstream
+//! commit [`PINNED_COMMIT`] of `can1357/oh-my-pi`:
 //!
-//! - `manifest.json` — the seven-tool inventory and per-tool contract mapping
+//! - `manifest.json` — the eight-tool inventory and per-tool contract mapping
 //!   (schema, prompt, grammar, selector/error/output fixtures, exact required
 //!   case-ID inventories, the rendered read prompt record).
 //! - `provenance.json` — the pinned commit, MIT license record, and a
@@ -45,9 +45,9 @@ use sha2::{Digest, Sha256};
 /// The reviewed upstream commit this snapshot is pinned to (issue #7392).
 pub const PINNED_COMMIT: &str = "08819b279cf02ae2545e69dad7111ab48d91d35e";
 
-/// The exact seven-tool inventory, in canonical order.
-pub const EXPECTED_TOOL_NAMES: [&str; 7] = [
-    "read", "write", "edit", "glob", "grep", "ast_grep", "ast_edit",
+/// The exact eight-tool inventory, in canonical order.
+pub const EXPECTED_TOOL_NAMES: [&str; 8] = [
+    "read", "write", "edit", "glob", "grep", "bash", "ast_grep", "ast_edit",
 ];
 
 /// Absolute path of the checked-in snapshot fixture tree.

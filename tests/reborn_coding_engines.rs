@@ -135,6 +135,49 @@ fn registered_read_description_only_advertises_supported_sources() {
     assert!(!path_description.contains("memory://"));
 }
 
+#[test]
+fn registered_bash_contract_preserves_the_supported_omp_subset() {
+    use ironclaw_extension_support::coding::pinned::pinned_assets;
+
+    let mut upstream: Value = serde_json::from_str(include_str!(
+        "fixtures/pinned_coding_contract/schemas/bash.json"
+    ))
+    .expect("pinned upstream bash schema is valid JSON");
+    let mut registered: Value = serde_json::from_str(pinned_assets::CODING_BASH_SCHEMA)
+        .expect("registered bash schema is valid JSON");
+
+    upstream["properties"]
+        .as_object_mut()
+        .expect("upstream bash properties")
+        .remove("pty");
+    assert_eq!(
+        registered["properties"], upstream["properties"],
+        "supported bash fields and their descriptions must stay pinned to OMP"
+    );
+    assert_eq!(registered["required"], upstream["required"]);
+    assert_eq!(
+        registered["additionalProperties"],
+        upstream["additionalProperties"]
+    );
+    assert!(
+        registered["properties"]
+            .as_object_mut()
+            .expect("registered bash properties")
+            .keys()
+            .all(|name| !matches!(name.as_str(), "pty" | "async"))
+    );
+
+    let description = pinned_assets::CODING_BASH_DESCRIPTION;
+    assert!(description.contains("Runs commands in a shell."));
+    assert!(description.contains("output is captured, truncated, and linked as `artifact://<id>`"));
+    for unsupported in ["persistent shell", "`pty: true`", "`async: true`"] {
+        assert!(
+            !description.contains(unsupported),
+            "registered bash description advertises unsupported behavior {unsupported:?}"
+        );
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
         Self::with_permissions(MountPermissions::read_write_list_delete())
@@ -175,6 +218,7 @@ impl Fixture {
             scope: self.scope.clone(),
             run_id: self.run_id,
             snapshots: self.snapshots.clone(),
+            process: None,
         }
     }
 
@@ -186,6 +230,7 @@ impl Fixture {
             scope: self.scope.clone(),
             run_id,
             snapshots: self.snapshots.clone(),
+            process: None,
         }
     }
 
@@ -294,8 +339,8 @@ impl ScopedArtifactReader for FixedArtifactReader {
         );
         assert_eq!(
             target.max_output_bytes,
-            3 * 1024,
-            "artifact reads must stay inline instead of spilling into another artifact"
+            50 * 1024,
+            "artifact line reads budget max(DEFAULT_MAX_BYTES, lines * 512) so selected lines fit"
         );
         Ok(Some(ArtifactReadChunk {
             content: b"beta\ngamma\n".to_vec(),
@@ -323,9 +368,8 @@ impl ScopedArtifactReader for ByteRangeArtifactReader {
             })
         );
         assert_eq!(
-            target.max_output_bytes,
-            3 * 1024,
-            "artifact byte ranges must stay inline instead of spilling into another artifact"
+            target.max_output_bytes, 128,
+            "explicit artifact byte ranges are bound by their own width"
         );
         Ok(Some(ArtifactReadChunk {
             content: vec![b'x'; 128],
@@ -463,14 +507,14 @@ async fn read_artifact_uri_uses_scoped_reader_and_inline_selector() {
     let mut context = fixture.ctx();
     context.artifact_reader = Some(Arc::new(FixedArtifactReader));
 
-    let output = ironclaw_extension_support::coding::pinned::read(
+    let result = ironclaw_extension_support::coding::pinned::read(
         &context,
         json!({ "path": "artifact://7:2-3" }),
     )
     .await
     .expect("artifact selector reads");
 
-    assert_eq!(output["output"], "2:beta\n3:gamma");
+    assert_eq!(result["output"], "2:beta\n3:gamma");
 }
 
 #[tokio::test]
@@ -479,15 +523,262 @@ async fn read_artifact_byte_selector_reaches_compact_large_results() {
     let mut context = fixture.ctx();
     context.artifact_reader = Some(Arc::new(ByteRangeArtifactReader));
 
-    let output = ironclaw_extension_support::coding::pinned::read(
+    let result = ironclaw_extension_support::coding::pinned::read(
         &context,
         json!({ "path": "artifact://7:bytes:60000-60127" }),
     )
     .await
     .expect("artifact byte selector reads");
 
-    assert_eq!(output["output"], "x".repeat(128));
+    assert_eq!(result["output"], "x".repeat(128));
 }
+
+struct FullArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for FullArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Lines(ArtifactLineRange {
+                start: 1,
+                end: 3000,
+            }),
+            "bare artifact reads request the default bounded line window"
+        );
+        assert_eq!(
+            target.max_output_bytes,
+            3000 * 512,
+            "bare artifact reads budget the default 3000-line window (max(50 KiB, lines * 512))"
+        );
+        // 10 lines; the caller renders all of them and adds no elision footer.
+        let content: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        let byte_len = content.len() as u64;
+        Ok(Some(ArtifactReadChunk {
+            content: content.into_bytes(),
+            content_type: "application/json".to_string(),
+            total_bytes: byte_len,
+            total_lines: Some(10),
+            complete: true,
+        }))
+    }
+}
+
+struct TruncatedArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for TruncatedArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Lines(ArtifactLineRange {
+                start: 1,
+                end: 3000,
+            })
+        );
+        // The reader returns only the selected 3000-line window while total
+        // metadata reports two more lines for the continuation footer.
+        let content = "x\n".repeat(3000);
+        Ok(Some(ArtifactReadChunk {
+            content: content.into_bytes(),
+            content_type: "application/json".to_string(),
+            total_bytes: 3002 * 2,
+            total_lines: Some(3002),
+            complete: false,
+        }))
+    }
+}
+
+/// Regression: a bare `artifact://N` read (no selector) must not fail with
+/// the old 3 KiB cap — the model follows the spilled `artifact_ref` exactly.
+#[tokio::test]
+async fn read_artifact_bare_read_uses_3000_line_budget() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(FullArtifactReader));
+
+    let result = ironclaw_extension_support::coding::pinned::read(
+        &context,
+        json!({ "path": "artifact://7" }),
+    )
+    .await
+    .expect("bare artifact reads");
+
+    let text = output(result.clone());
+    assert!(text.starts_with("1:line 1"), "numbered lines: {text}");
+    assert!(text.contains("10:line 10"));
+    assert!(
+        !text.contains("more lines"),
+        "no footer when all lines fit: {text}"
+    );
+}
+
+/// Regression: a bare read of an artifact with more than 3000 lines renders
+/// the first 3000 and tells the model how to continue.
+#[tokio::test]
+async fn read_artifact_bare_read_elides_past_3000_lines() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(TruncatedArtifactReader));
+
+    let result = ironclaw_extension_support::coding::pinned::read(
+        &context,
+        json!({ "path": "artifact://7" }),
+    )
+    .await
+    .expect("bare artifact reads");
+
+    let text = output(result.clone());
+    let numbered = text
+        .lines()
+        .filter(|line| {
+            line.chars().next().is_some_and(|c| c.is_ascii_digit()) && line.contains(':')
+        })
+        .count();
+    assert_eq!(
+        numbered, 3000,
+        "exactly the default line window is rendered"
+    );
+    assert!(
+        text.ends_with("[2 more lines in artifact. Use artifact://7:3001 to continue]"),
+        "elision footer: {text}"
+    );
+}
+
+struct WideLineArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for WideLineArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Lines(ArtifactLineRange { start: 1, end: 200 })
+        );
+        // 200 lines at ~100 B each = 20 KB; the line budget
+        // max(50 KiB, 200 * 512) must admit this, the old 3 KiB cap rejected it.
+        assert_eq!(
+            target.max_output_bytes,
+            200 * 512,
+            "wide line selectors scale the budget with the line count (max(50 KiB, lines * 512))"
+        );
+        let content: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        let byte_len = content.len() as u64;
+        Ok(Some(ArtifactReadChunk {
+            content: content.into_bytes(),
+            content_type: "application/json".to_string(),
+            total_bytes: byte_len,
+            total_lines: Some(200),
+            complete: false,
+        }))
+    }
+}
+
+/// Regression: `artifact://N:1-200` (line selector) must not hit the old
+/// 3 KiB cap that rejected every line read of a large artifact.
+#[tokio::test]
+async fn read_artifact_wide_line_selector_gets_scaled_budget() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(WideLineArtifactReader));
+
+    let result = ironclaw_extension_support::coding::pinned::read(
+        &context,
+        json!({ "path": "artifact://7:1-200" }),
+    )
+    .await
+    .expect("wide artifact line selector reads");
+
+    let text = output(result.clone());
+    assert!(text.starts_with("1:line 1"), "numbered lines: {text}");
+    assert!(text.contains("200:line 200"));
+}
+
+struct OpenEndedArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for OpenEndedArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Lines(ArtifactLineRange {
+                start: 50,
+                end: 3049,
+            }),
+            "open-ended selectors are bounded to the default 3000-line window"
+        );
+        assert_eq!(target.max_output_bytes, 3000 * 512);
+        Ok(Some(ArtifactReadChunk {
+            content: b"line 50\n".to_vec(),
+            content_type: "text/plain".to_string(),
+            total_bytes: 8,
+            total_lines: Some(50),
+            complete: false,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn read_artifact_open_ended_selector_is_bounded() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(OpenEndedArtifactReader));
+
+    ironclaw_extension_support::coding::pinned::read(
+        &context,
+        json!({ "path": "artifact://7:50-" }),
+    )
+    .await
+    .expect("open-ended artifact selector reads");
+}
+
+struct OversizedRawArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for OversizedRawArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(target.selector, ArtifactSelector::Full);
+        assert_eq!(
+            target.max_output_bytes,
+            50 * 1024,
+            "unbounded raw reads retain the upstream 50 KiB guard"
+        );
+        Err(ArtifactAccessError::OversizedUnsliced)
+    }
+}
+
+#[tokio::test]
+async fn read_artifact_rejects_oversized_unbounded_raw_reads() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(OversizedRawArtifactReader));
+
+    let error = ironclaw_extension_support::coding::pinned::read(
+        &context,
+        json!({ "path": "artifact://7:raw" }),
+    )
+    .await
+    .expect_err("oversized unbounded raw read must be rejected");
+
+    let message = error_message(&error);
+    assert!(message.contains("Unbounded raw read blocked"), "{message}");
+    assert!(message.contains("artifact://7:raw:1-3000"), "{message}");
+}
+
 #[tokio::test]
 async fn read_multi_range_elision_footer() {
     let fixture = Fixture::new();
@@ -1515,6 +1806,154 @@ async fn read_in_one_run_never_authorizes_edit_in_another() {
     );
     assert!(
         error_message(&error).contains(&format!("hash #{tag} is not from this session.")),
+        "{}",
+        error_message(&error)
+    );
+}
+
+// ─── Pinned bash engine ────────────────────────────────────────────────────
+
+/// Scripted placement-neutral command executor for the pinned bash engine.
+struct ScriptedExecutor {
+    script: std::collections::HashMap<String, Result<(String, i64), String>>,
+}
+
+#[async_trait]
+impl ironclaw_host_api::process::CommandExecutor for ScriptedExecutor {
+    async fn run_command(
+        &self,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
+    > {
+        let outcome = self.script.get(&request.command).cloned().ok_or_else(|| {
+            ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(format!(
+                "unscripted command: {}",
+                request.command
+            ))
+        })?;
+        match outcome {
+            Ok((output, exit_code)) => Ok(ironclaw_host_api::process::CommandExecutionOutput {
+                output,
+                saved_output: None,
+                exit_code,
+                sandboxed: false,
+                duration: std::time::Duration::from_millis(1500),
+            }),
+            Err(reason) => {
+                Err(ironclaw_host_api::process::RuntimeProcessError::ExecutionFailed(reason))
+            }
+        }
+    }
+}
+
+fn bash_ctx(executor: ScriptedExecutor) -> CodingEngineContext {
+    let mut ctx = Fixture::new().ctx();
+    ctx.process = Some(Arc::new(executor));
+    ctx
+}
+
+#[tokio::test]
+async fn bash_runs_command_and_renders_omp_notices() {
+    let mut script = std::collections::HashMap::new();
+    script.insert("echo hello".to_string(), Ok(("hello".to_string(), 0)));
+    let result = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor { script }),
+        json!({ "command": "echo hello" }),
+    )
+    .await
+    .expect("bash runs");
+
+    assert_eq!(output(result.clone()), "hello\n\nWall time: 1.50 seconds");
+}
+
+#[tokio::test]
+async fn bash_renders_failed_exit_notice() {
+    let mut script = std::collections::HashMap::new();
+    script.insert("false".to_string(), Ok(("".to_string(), 1)));
+    let result = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor { script }),
+        json!({ "command": "false" }),
+    )
+    .await
+    .expect("bash runs");
+
+    assert_eq!(
+        output(result.clone()),
+        "(no output)\n\nWall time: 1.50 seconds\n\nCommand exited with code 1"
+    );
+}
+
+#[tokio::test]
+async fn bash_denies_critical_patterns_before_execution() {
+    let mut script = std::collections::HashMap::new();
+    script.insert("rm -rf /".to_string(), Ok(("".to_string(), 0)));
+    let error = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor { script }),
+        json!({ "command": "rm -rf /" }),
+    )
+    .await
+    .expect_err("critical pattern denied");
+
+    assert_eq!(error.kind(), CodingEngineErrorKind::Input);
+    assert!(
+        error_message(&error).contains("Blocked by bash pattern"),
+        "{}",
+        error_message(&error)
+    );
+}
+
+#[tokio::test]
+async fn bash_passes_env_timeout_and_cwd() {
+    let mut script = std::collections::HashMap::new();
+    script.insert("env".to_string(), Ok(("FOO=bar".to_string(), 0)));
+    let result = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor { script }),
+        json!({
+            "command": "env",
+            "env": { "FOO": "bar" },
+            "timeout": 30,
+            "cwd": "/workspace"
+        }),
+    )
+    .await
+    .expect("bash runs");
+
+    assert!(output(result.clone()).contains("FOO=bar"));
+}
+
+#[tokio::test]
+async fn bash_rejects_invalid_env_names() {
+    let error = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor {
+            script: std::collections::HashMap::new(),
+        }),
+        json!({ "command": "echo hi", "env": { "BAD-NAME": "x" } }),
+    )
+    .await
+    .expect_err("invalid env name rejected");
+
+    assert!(
+        error_message(&error).contains("Invalid bash env name"),
+        "{}",
+        error_message(&error)
+    );
+}
+
+#[tokio::test]
+async fn bash_requires_command() {
+    let error = ironclaw_extension_support::coding::pinned::bash(
+        &bash_ctx(ScriptedExecutor {
+            script: std::collections::HashMap::new(),
+        }),
+        json!({}),
+    )
+    .await
+    .expect_err("missing command rejected");
+
+    assert!(
+        error_message(&error).contains("requires a string `command`"),
         "{}",
         error_message(&error)
     );

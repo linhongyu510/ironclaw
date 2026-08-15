@@ -1,7 +1,7 @@
 //! Pinned coding engines (issue #7392).
 //!
-//! These engines implement the model-visible contract of the five pinned
-//! coding tools (`read`, `write`, `edit`, `glob`, `grep`) at upstream commit
+//! These engines implement the model-visible contract of six pinned coding
+//! tools (`read`, `write`, `edit`, `glob`, `grep`, `bash`) at upstream commit
 //! `08819b279cf02ae2545e69dad7111ab48d91d35e` of `can1357/oh-my-pi`, backed by
 //! [`RootFilesystem`] and the host's scoped artifact reader. The always-on
 //! first-party package wires them through normal production dispatch. Contract
@@ -22,6 +22,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ids::RunId, mount::MountView, resource::ResourceScope};
 use serde_json::{Value, json};
 
+mod bash;
 mod glob;
 mod grep;
 mod hashline;
@@ -137,8 +138,10 @@ impl std::error::Error for CodingEngineError {}
 
 /// Shared engine context: the backing filesystem, the mount view that
 /// authorizes scoped paths, the caller scope (mirrors `coding/state.rs`
-/// scope dimensions), the loop run identity, and the bounded snapshot
-/// registry that binds hashline edit tags to reads from the SAME run.
+/// scope dimensions), the loop run identity, the bounded snapshot
+/// registry that binds hashline edit tags to reads from the SAME run, and
+/// the placement-neutral command executor used by the pinned `bash` engine
+/// (absent when the composition selected no process backend).
 #[derive(Clone)]
 pub struct CodingEngineContext {
     pub filesystem: Arc<dyn RootFilesystem>,
@@ -147,6 +150,7 @@ pub struct CodingEngineContext {
     pub scope: ResourceScope,
     pub run_id: Option<RunId>,
     pub snapshots: Arc<CodingSnapshotRegistry>,
+    pub process: Option<Arc<dyn ironclaw_host_api::process::CommandExecutor>>,
 }
 
 /// A resolved engine target: the canonical virtual path on the backend and
@@ -166,7 +170,7 @@ impl ResolvedCodingPath {
     }
 }
 
-/// The five pinned engine entry points. Each returns the exact model-visible
+/// The six pinned engine entry points. Each returns the exact model-visible
 /// output as JSON (`{"output": "<text>"}`) or the exact pinned error
 /// text in [`CodingEngineError`].
 pub async fn read(ctx: &CodingEngineContext, input: Value) -> Result<Value, CodingEngineError> {
@@ -205,6 +209,14 @@ pub async fn glob(ctx: &CodingEngineContext, input: Value) -> Result<Value, Codi
 
 pub async fn grep(ctx: &CodingEngineContext, input: Value) -> Result<Value, CodingEngineError> {
     let output = grep::grep(ctx, input).await?;
+    Ok(json!({ "output": output }))
+}
+
+/// The pinned `bash` engine. Output is a plain text render (OMP notices
+/// included); the host adapter attaches exit-code metadata and artifact
+/// spillage, mirroring the other coding engines' `{"output": ...}` shape.
+pub async fn bash(ctx: &CodingEngineContext, input: Value) -> Result<Value, CodingEngineError> {
+    let output = bash::bash(ctx, input).await?;
     Ok(json!({ "output": output }))
 }
 

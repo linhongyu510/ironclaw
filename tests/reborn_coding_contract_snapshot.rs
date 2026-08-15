@@ -5,8 +5,8 @@
 //!
 //! - the snapshot is pinned to the reviewed upstream commit with MIT provenance
 //!   (full license text vendored and integrity-tested),
-//! - the inventory is exactly the seven pinned core coding tools
-//!   (`read`, `write`, `edit`, `glob`, `grep`, `ast_grep`, `ast_edit`),
+//! - the inventory is exactly the eight pinned core coding tools
+//!   (`read`, `write`, `edit`, `glob`, `grep`, `bash`, `ast_grep`, `ast_edit`),
 //! - every vendored and derived file plus `manifest.json` matches its recorded
 //!   SHA-256 checksum and byte count (unsnapshotted upstream records are
 //!   capture-time pins, not byte-verified offline),
@@ -106,7 +106,7 @@ fn snapshot_is_pinned_to_the_reviewed_upstream_commit() {
 }
 
 #[test]
-fn snapshot_inventory_is_exactly_the_seven_core_tools() {
+fn snapshot_inventory_is_exactly_the_eight_core_tools() {
     let manifest = load_manifest();
 
     assert_eq!(manifest.tool_names, EXPECTED_TOOL_NAMES.to_vec());
@@ -217,6 +217,19 @@ fn schemas_pin_the_default_model_visible_contract() {
     assert_eq!(
         grep["properties"]["skip"]["type"],
         json!(["number", "null"])
+    );
+
+    let bash = tool_schema("bash");
+    assert_eq!(bash["required"], json!(["command"]));
+    assert_eq!(
+        bash["properties"]["timeout"]["description"],
+        json!(
+            "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
+        )
+    );
+    assert_eq!(
+        bash["properties"]["pty"]["description"],
+        json!("run in pty mode")
     );
 
     let ast_grep = tool_schema("ast_grep");

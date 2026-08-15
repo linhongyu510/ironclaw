@@ -13,8 +13,8 @@
   "ironclaw_modifications": "None. All snapshotted prompt/grammar/source bytes are verbatim upstream copies; the rendered schema JSON files are derived output of the pinned upstream schema definitions through the pinned upstream rendering pipeline, and the golden error/output fixtures transcribe upstream templates verbatim with representative example values.",
   "manifest": {
     "path": "manifest.json",
-    "sha256": "584381b441641af0b4fb12e75dd8f0c41ff1541cebc188fd95a8f1948b3f0036",
-    "bytes": 11795,
+    "sha256": "028ea7bdf6442df8cccea948194560b6becf1913a7678145bd199f5feda5ff6e",
+    "bytes": 13073,
     "role": "manifest",
     "note": "Snapshot inventory checksummed here so the manifest itself is covered by the offline integrity test; provenance.json is the only self-exempt metadata file."
   },
@@ -44,6 +44,13 @@
       "path": "packages/coding-agent/src/tools/grep.ts",
       "sha256": "fb776546ba31d1b99a268bb0930a2f68787b8ce192ed1cfea8547c739e91fc30",
       "bytes": 74480,
+      "role": "tool-definition",
+      "snapshotted": false
+    },
+    {
+      "path": "packages/coding-agent/src/tools/bash.ts",
+      "sha256": "3d5a426ed89078da75e8c161b28c4247b799f7fe6a738be4c80807f26f7feb1e",
+      "bytes": 69858,
       "role": "tool-definition",
       "snapshotted": false
     },
@@ -99,6 +106,14 @@
       "role": "prompt",
       "snapshotted": true,
       "snapshot_path": "prompts/grep.md"
+    },
+    {
+      "path": "packages/coding-agent/src/prompts/tools/bash.md",
+      "sha256": "feb4077f6c712c4add5eb47cd96f60b18a49c450c89b9d7ac4397a2c2cd100cc",
+      "bytes": 1881,
+      "role": "prompt",
+      "snapshotted": true,
+      "snapshot_path": "prompts/bash.md"
     },
     {
       "path": "packages/coding-agent/src/prompts/tools/ast-grep.md",
@@ -501,6 +516,13 @@
       "note": "Representative grep error shapes; templates verbatim from cited upstream sources"
     },
     {
+      "path": "golden/errors/bash.json",
+      "sha256": "2efc46e45741acac2c3a04c1cf655f67c812374d0efa3b52ccdd608510c864f6",
+      "bytes": 1168,
+      "role": "error-golden",
+      "note": "Representative bash error shapes; templates verbatim from the cited upstream source"
+    },
+    {
       "path": "golden/errors/read.json",
       "sha256": "dd70b1de1af27f21f29cb4b72e8b6c57d7c9ab79a27c6106e4cfb1a212b1d3a8",
       "bytes": 2884,
@@ -583,6 +605,13 @@
       "bytes": 837,
       "role": "rendered-schema",
       "note": "Rendered from searchSchema (grep.ts:74-88) through the pinned pi-ai toolWireSchema pipeline"
+    },
+    {
+      "path": "schemas/bash.json",
+      "sha256": "b8b3fd978be410427764dae9d20ed6ec42aa7f1524e5628e840c085d80ebccf6",
+      "bytes": 681,
+      "role": "rendered-schema",
+      "note": "Rendered from bashSchemaBase (bash.ts:305-311) through the pinned pi-ai toolWireSchema pipeline"
     },
     {
       "path": "schemas/read.json",

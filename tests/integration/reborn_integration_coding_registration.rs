@@ -53,22 +53,28 @@ use serde_json::json;
 use std::future::Future;
 use support::pinned_coding_contract::{tool_prompt, tool_schema};
 
-/// The five pinned coding tools and their provider names (must match the
+/// The six pinned coding tools and their provider names (must match the
 /// fixture manifest's `tool_names` subset for `read`/`write`/`edit`/`glob`/
-/// `grep`).
-const PINNED_CODING_TOOLS: [(&str, &str); 5] = [
+/// `grep`; `bash` is the OMP-ported process tool with an IronClaw-narrowed
+/// schema and description).
+const PINNED_CODING_TOOLS: [(&str, &str); 6] = [
     ("builtin.read", "read"),
     ("builtin.write", "write"),
     ("builtin.edit", "edit"),
     ("builtin.glob", "glob"),
     ("builtin.grep", "grep"),
+    ("builtin.bash", "bash"),
 ];
 
 /// The model-visible description for `tool`. `read` intentionally advertises
 /// only the IronClaw-implemented subset; the others use pinned prompt bytes.
+/// `bash` uses the OMP template rendered with IronClaw's surface flags.
 fn pinned_description(tool: &str) -> String {
     if tool == "read" {
         ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_DESCRIPTION
+            .to_string()
+    } else if tool == "bash" {
+        ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_DESCRIPTION
             .to_string()
     } else {
         tool_prompt(tool)
@@ -81,6 +87,11 @@ fn coding_schema(tool: &str) -> serde_json::Value {
             ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_SCHEMA,
         )
         .expect("IronClaw read schema is valid JSON")
+    } else if tool == "bash" {
+        serde_json::from_str(
+            ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_SCHEMA,
+        )
+        .expect("IronClaw bash schema is valid JSON")
     } else {
         tool_schema(tool)
     }
@@ -145,7 +156,7 @@ fn coding_surface_advertises_exact_names_schemas_and_descriptions() {
                 }
             }
 
-            // The five pinned coding names are advertised EXACTLY once each.
+            // The six pinned coding names are advertised EXACTLY once each.
             for (_, pinned_name) in PINNED_CODING_TOOLS {
                 assert_eq!(
                     seen.get(pinned_name),
@@ -175,6 +186,48 @@ fn coding_surface_advertises_exact_names_schemas_and_descriptions() {
             }
         },
     );
+}
+
+/// The pinned `bash` tool executes through the selected local-host process
+/// port, and its OMP-shaped output reaches the model through normal capability
+/// dispatch rather than the legacy shell handler.
+#[test]
+fn coding_bash_executes_through_the_process_port() {
+    run_async_test_with_stack("coding_bash_executes_through_the_process_port", || async {
+        let h = RebornIntegrationHarness::test_default()
+            .with_coding_tools()
+            .script([
+                RebornScriptedReply::tool_call(
+                    "bash",
+                    json!({ "command": "printf 'bash-port-ok'" }),
+                ),
+                RebornScriptedReply::text("command complete"),
+            ])
+            .build()
+            .await
+            .expect("harness builds");
+
+        h.submit_turn("run the bash command")
+            .await
+            .expect("turn completes");
+        h.assert_tool_invoked("builtin.bash")
+            .await
+            .expect("bash dispatches through the capability port");
+
+        let bash_output = output_text(
+            &h.tool_result_output("builtin.bash")
+                .await
+                .expect("bash result"),
+        );
+        assert!(
+            bash_output.starts_with("bash-port-ok\n\nWall time: "),
+            "bash result preserves command output and the OMP wall-time notice: {bash_output}"
+        );
+        assert!(
+            bash_output.ends_with(" seconds"),
+            "bash wall-time notice includes seconds: {bash_output}"
+        );
+    });
 }
 
 /// A scripted `read` → `edit` (anchored on the read's hashline tag) → `read`
@@ -267,54 +320,27 @@ fn coding_read_edit_read_chain_flows_exact_shapes() {
 
 /// The derived spelling of an overridden capability (`builtin__read`) does
 /// NOT resolve after the clean cutover — the exact advertised name `read` is
-/// the only resolvable spelling, and a model that insists on the derived
-/// encoding fails the turn with the unknown-tool category instead of
-/// dispatching the pinned coding engine.
+/// the only resolvable spelling. The invalid call does not dispatch
+/// `builtin.read`, and the model can recover on its next response.
 #[test]
 fn coding_derived_spelling_does_not_resolve() {
     run_async_test_with_stack("coding_derived_spelling_does_not_resolve", || async {
         let h = RebornIntegrationHarness::test_default()
             .with_coding_tools()
-            .with_turn_event_sink()
             .script([
                 RebornScriptedReply::tool_call("builtin__read", json!({ "path": "foo.txt" })),
-                RebornScriptedReply::tool_call("builtin__read", json!({ "path": "foo.txt" })),
+                RebornScriptedReply::text("the encoded spelling is unavailable"),
             ])
             .build()
             .await
             .expect("harness builds");
-        let run_id = h
-            .submit_turn_async("read the file by its encoded name")
+
+        h.submit_turn("read the file by its encoded name")
             .await
-            .expect("turn submitted");
-        let state = h
-            .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+            .expect("the model recovers after the outside-surface result");
+        h.assert_tool_not_invoked("builtin.read")
             .await
-            .expect("the unresolvable derived spelling fails the turn");
-        let failure = state
-            .failure
-            .as_ref()
-            .expect("failed run carries a durable failure");
-        assert_eq!(
-            failure.category(),
-            "model_invalid_output",
-            "the derived spelling must fail as invalid model output, not resolve: {failure:?}"
-        );
-        assert!(
-            failure.detail().is_some_and(|detail| {
-                detail.contains("outside the advertised capability surface")
-            }),
-            "the durable failure names the outside-surface rejection: {failure:?}"
-        );
-        h.assert_failed_turn_event(
-            "model_invalid_output",
-            "outside the advertised capability surface",
-        )
-        .await
-        .expect("durable failed event carries the unknown-tool category and detail");
-        h.assert_no_turn_event_recorded(ironclaw_turns::TurnEventKind::Completed)
-            .await
-            .expect("no completion while the derived spelling is unresolvable");
+            .expect("the derived spelling must not dispatch the pinned read engine");
     });
 }
 

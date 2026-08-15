@@ -52,6 +52,8 @@ pub const CODING_EDIT_CAPABILITY_ID: &str = "builtin.edit";
 pub const CODING_GLOB_CAPABILITY_ID: &str = GLOB_CAPABILITY_ID;
 /// Canonical capability id of the pinned `grep` engine.
 pub const CODING_GREP_CAPABILITY_ID: &str = GREP_CAPABILITY_ID;
+/// Canonical capability id of the pinned `bash` engine.
+pub const CODING_BASH_CAPABILITY_ID: &str = "builtin.bash";
 
 const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 8 * 1024;
 /// A 10 MiB source read can grow when rendered with Hashline anchors. Keep
@@ -65,11 +67,13 @@ const CODING_WRITE_PROVIDER_TOOL_NAME: &str = "write";
 const CODING_EDIT_PROVIDER_TOOL_NAME: &str = "edit";
 const CODING_GLOB_PROVIDER_TOOL_NAME: &str = "glob";
 const CODING_GREP_PROVIDER_TOOL_NAME: &str = "grep";
+const CODING_BASH_PROVIDER_TOOL_NAME: &str = "bash";
 
 /// Model-visible descriptions. `read` uses the IronClaw-supported subset of
 /// the upstream prompt; the others use the verbatim pinned prompt files (`write.md`, `hashline.md`,
 /// `glob.md`, `grep.md` — upstream renders `write`/`edit` with an empty
-/// context and the fixture pins the `glob`/`grep` templates raw).
+/// context and the fixture pins the `glob`/`grep` templates raw). `bash`
+/// uses the pinned `bash.md` template rendered with IronClaw's surface flags.
 const CODING_READ_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_DESCRIPTION;
 const CODING_WRITE_DESCRIPTION: &str =
@@ -80,6 +84,8 @@ const CODING_GLOB_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GLOB_DESCRIPTION;
 const CODING_GREP_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_DESCRIPTION;
+const CODING_BASH_DESCRIPTION: &str =
+    ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_DESCRIPTION;
 
 /// Schema refs resolving through `super::schemas::resolve_builtin_input_schema_ref`
 /// to the coding schema assets. `read` is narrowed to IronClaw's implemented
@@ -89,6 +95,7 @@ const CODING_WRITE_SCHEMA_REF: &str = "schemas/builtin/coding.write.input.v1.jso
 const CODING_EDIT_SCHEMA_REF: &str = "schemas/builtin/coding.edit.input.v1.json";
 const CODING_GLOB_SCHEMA_REF: &str = "schemas/builtin/coding.glob.input.v1.json";
 const CODING_GREP_SCHEMA_REF: &str = "schemas/builtin/coding.grep.input.v1.json";
+const CODING_BASH_SCHEMA_REF: &str = "schemas/builtin/coding.bash.input.v1.json";
 
 #[derive(Debug, Clone, Copy)]
 struct CodingCapabilityMetadata {
@@ -145,9 +152,24 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
         schema_ref: CODING_GREP_SCHEMA_REF,
     },
+    CodingCapabilityMetadata {
+        id: CODING_BASH_CAPABILITY_ID,
+        provider_tool_name: CODING_BASH_PROVIDER_TOOL_NAME,
+        description: CODING_BASH_DESCRIPTION,
+        effects: &[
+            EffectKind::DispatchCapability,
+            EffectKind::SpawnProcess,
+            EffectKind::ExecuteCode,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+        schema_ref: CODING_BASH_SCHEMA_REF,
+    },
 ];
 
-/// The canonical always-on first-party package with the five pinned coding
+/// The canonical always-on first-party package with the six pinned coding
 /// capabilities, restricted for the selected process backend.
 pub fn coding_package(
     process_backend: ProcessBackendKind,
@@ -182,7 +204,11 @@ fn coding_capability_manifest(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         max_egress_bytes: None,
-        resource_profile: coding_resource_profile(),
+        resource_profile: if metadata.id == CODING_BASH_CAPABILITY_ID {
+            bash_resource_profile()
+        } else {
+            coding_resource_profile()
+        },
         origin_gate_matrix: Some(super::first_party_origin_gate_matrix(metadata.id)),
         provider_tool_name: Some(ProviderToolName::new(metadata.provider_tool_name)?),
     })
@@ -204,7 +230,28 @@ fn coding_resource_profile() -> Option<ResourceProfile> {
     })
 }
 
-/// Register handlers for the five canonical pinned coding capabilities.
+/// Resource profile for the process-backed `bash` engine. Mirrors the OMP
+/// bash timeout contract (default 300s, ceiling 3600s) rather than the
+/// file-tool coding profile's 5s ceiling.
+fn bash_resource_profile() -> Option<ResourceProfile> {
+    const BASH_DEFAULT_WALL_CLOCK_MS: u64 = 300 * 1000;
+    const BASH_MAX_WALL_CLOCK_MS: u64 = 3600 * 1000;
+    Some(ResourceProfile {
+        default_estimate: ResourceEstimate::default()
+            .set_wall_clock_ms(BASH_DEFAULT_WALL_CLOCK_MS)
+            .set_output_bytes(super::FIRST_PARTY_DEFAULT_OUTPUT_BYTES),
+        hard_ceiling: Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: Some(BASH_MAX_WALL_CLOCK_MS),
+            max_output_bytes: Some(CODING_MAX_OUTPUT_BYTES),
+            sandbox: None,
+        }),
+    })
+}
+
+/// Register handlers for the six canonical pinned coding capabilities.
 pub fn insert_coding_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
 ) -> Result<(), HostApiError> {
@@ -217,7 +264,7 @@ pub fn insert_coding_handlers(
     Ok(())
 }
 
-/// First-party handler adapter translating the five coding capability ids to the
+/// First-party handler adapter translating the six coding capability ids to the
 /// `coding::pinned` engines.
 ///
 /// Mirrors the stock coding path's resource discipline: bounded input size,
@@ -262,6 +309,9 @@ impl FirstPartyCapabilityHandler for CodingTools {
             scope: request.scope.clone(),
             run_id: request.run_id,
             snapshots: Arc::clone(&self.snapshots),
+            process: Some(Arc::new(crate::process_port::RuntimeProcessPortExecutor(
+                Arc::clone(&request.services.process),
+            ))),
         };
         let mut output = match request.capability_id.as_str() {
             CODING_READ_CAPABILITY_ID => {
@@ -284,6 +334,10 @@ impl FirstPartyCapabilityHandler for CodingTools {
                 ironclaw_extension_support::coding::pinned::grep(&context, request.input.clone())
                     .await
             }
+            CODING_BASH_CAPABILITY_ID => {
+                ironclaw_extension_support::coding::pinned::bash(&context, request.input.clone())
+                    .await
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -292,6 +346,10 @@ impl FirstPartyCapabilityHandler for CodingTools {
         }
         .map_err(coding_error)?;
         let mut process_count = 0;
+        if request.capability_id.as_str() == CODING_BASH_CAPABILITY_ID {
+            // The bash engine runs one command through the process port.
+            process_count = 1;
+        }
         if matches!(
             request.capability_id.as_str(),
             CODING_WRITE_CAPABILITY_ID | CODING_EDIT_CAPABILITY_ID

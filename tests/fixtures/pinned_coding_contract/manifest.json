@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
   "pinned_commit": "08819b279cf02ae2545e69dad7111ab48d91d35e",
-  "scope": "Exactly the seven model-visible pinned core coding tools. Test-only contract snapshot; no production registration.",
+  "scope": "Exactly the eight model-visible pinned core coding tools. Test-only contract snapshot; no production registration.",
   "tool_names": [
     "read",
     "write",
     "edit",
     "glob",
     "grep",
+    "bash",
     "ast_grep",
     "ast_edit"
   ],
@@ -232,6 +233,44 @@
         "strict=true; approval 'read' ('exec' when any path targets ssh); loadMode 'discoverable'.",
         "DEFAULT_FILE_LIMIT=20; per-file match cap; skip paginates; <file>:<lines> selectors supported.",
         "Match line format pinned in sources/match-line-format.ts + golden/output/grep.json."
+      ]
+    },
+    "bash": {
+      "name": "bash",
+      "label": "Bash",
+      "schema": "schemas/bash.json",
+      "schema_dsl": {
+        "source": "packages/coding-agent/src/tools/bash.ts",
+        "lines": "303-320",
+        "variant": "bashSchemaBase (async mode disabled)"
+      },
+      "prompt": "prompts/bash.md",
+      "prompt_render_context": [
+        "asyncEnabled",
+        "autoBackgroundEnabled",
+        "autoBackgroundThresholdSeconds",
+        "hasEval",
+        "hasGlob",
+        "hasGrep",
+        "hasLaunch",
+        "hasRead",
+        "hasShellBuiltins",
+        "isWindows"
+      ],
+      "grammar": null,
+      "selectors_source": null,
+      "errors_fixture": "golden/errors/bash.json",
+      "errors_case_ids": [
+        "invalid_env_name",
+        "working_directory_missing",
+        "missing_exit_status"
+      ],
+      "output_fixture": null,
+      "output_case_ids": null,
+      "notes": [
+        "strict=true; approval 'exec' (critical patterns force exec approval); loadMode 'essential'.",
+        "Base schema exposes command, env, timeout, cwd, and pty. Async is added only when the session enables async execution.",
+        "Timeout defaults to 300 seconds; 0 disables the deadline; nonzero values clamp to 1-3600 seconds."
       ]
     },
     "ast_grep": {

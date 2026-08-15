@@ -112,9 +112,9 @@ pub use first_party_tools::{
     register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
 };
 pub use first_party_tools::{
-    CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID, CODING_GREP_CAPABILITY_ID,
-    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools, coding_package,
-    insert_coding_handlers,
+    CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
+    CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools,
+    coding_package, insert_coding_handlers,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
