@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use ironclaw_memory::{
-    MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
-    MemoryServiceError, MemoryServiceErrorKind, memory_context_disabled,
+    MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation, MemoryService,
+    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
+    MemoryServiceErrorKind, MemoryServiceRecordRequest, MemoryServiceRecordResponse,
+    memory_context_disabled,
 };
 use serde_json::{Value, json};
 
 use crate::attribution::{OwnerScope, ProviderAttribution};
+use crate::idempotency::{WriteIdentity, assert_interaction_bounds, operation_id};
 use crate::transport::{MnesisLane, MnesisRequest, MnesisTransport};
 
 const MAX_SNIPPETS: usize = 20;
@@ -102,6 +105,68 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
 
         Ok(decode_results(&response.body, limit))
     }
+
+    async fn record_lane(
+        &self,
+        body: Value,
+        attribution: Option<String>,
+    ) -> Result<(), MemoryServiceError> {
+        let response = self
+            .transport
+            .execute(MnesisRequest {
+                lane: MnesisLane::Memory,
+                operation: "record_interaction",
+                body,
+                idempotent: true,
+                attribution,
+            })
+            .await
+            .map_err(MemoryServiceError::unavailable_from)?;
+
+        if response.is_success() {
+            return Ok(());
+        }
+        Err(if (500..600).contains(&response.status) {
+            MemoryServiceError::unavailable()
+        } else {
+            MemoryServiceError::operation()
+        })
+    }
+}
+
+fn interaction_body(
+    messages: &[MemoryInteractionMessage],
+    session_id: &str,
+    turn_run_id: Option<&str>,
+    operation: &str,
+) -> Value {
+    let rendered: Vec<Value> = messages
+        .iter()
+        .map(|message| {
+            let mut entry = json!({
+                "role": match message.role {
+                    MemoryInteractionRole::User => "user",
+                    MemoryInteractionRole::Assistant => "assistant",
+                    MemoryInteractionRole::Tool => "tool",
+                    MemoryInteractionRole::System => "system",
+                },
+                "content": message.content,
+            });
+            if let Some(name) = message.name.as_deref() {
+                entry["name"] = Value::String(name.to_string());
+            }
+            entry
+        })
+        .collect();
+    let mut body = json!({
+        "session_id": session_id,
+        "messages": rendered,
+        "operation_id": operation,
+    });
+    if let Some(run) = turn_run_id {
+        body["turn_run_id"] = Value::String(run.to_string());
+    }
+    body
 }
 
 #[async_trait]
@@ -143,6 +208,65 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
             .collect();
         snippets.truncate(budget);
         Ok(snippets)
+    }
+
+    async fn record_interaction(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceRecordRequest,
+    ) -> Result<MemoryServiceRecordResponse, MemoryServiceError> {
+        if request.messages.is_empty() {
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        }
+
+        let identity = WriteIdentity {
+            tenant_id: invocation.scope.tenant_id.as_str().to_string(),
+            principal_id: invocation.scope.user_id.as_str().to_string(),
+            invocation_id: invocation.scope.invocation_id.to_string(),
+            turn_run_id: request.turn_run_id.clone(),
+        };
+        let operation = operation_id(&identity).map_err(|error| {
+            tracing::debug!(
+                target: "ironclaw_memory_mnesis",
+                "record_interaction refused: {error}"
+            );
+            MemoryServiceError::input()
+        })?;
+
+        let largest = request
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .max()
+            .unwrap_or(0);
+        let aggregate: usize = request
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum();
+        let metadata_entries = request
+            .metadata
+            .as_object()
+            .map(|entries| entries.len())
+            .unwrap_or(0);
+        assert_interaction_bounds(request.messages.len(), largest, aggregate, metadata_entries)
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "ironclaw_memory_mnesis",
+                    "record_interaction refused: {error}"
+                );
+                MemoryServiceError::input()
+            })?;
+
+        let body = interaction_body(
+            &request.messages,
+            &operation,
+            request.turn_run_id.as_deref(),
+            &operation,
+        );
+        self.record_lane(body, self.attribution_for(&invocation))
+            .await?;
+        Ok(MemoryServiceRecordResponse { recorded: true })
     }
 
     async fn read_short_term(

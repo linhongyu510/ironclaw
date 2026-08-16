@@ -127,7 +127,6 @@ pub const MNESIS_MEMORY_EXTENSION_ID: &str = "mnesis.hosted.memory";
 /// Host service identity declared by the Mnesis backend manifest.
 pub const MNESIS_MEMORY_PROVIDER_SERVICE: &str = "mnesis_memory_provider";
 
-
 /// Parse the bundled `ironclaw.memory` manifest into the internal manifest
 /// model. Fail-closed: the reserved id, `first_party` runtime, `[memory]`
 /// surface, schema refs, and provider-prefixed tool ids are validated by the

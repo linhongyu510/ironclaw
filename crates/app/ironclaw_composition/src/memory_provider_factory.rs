@@ -436,8 +436,12 @@ pub fn resolve_memory_provider(
                             ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
                             ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
                         )
-                        .map_err(|error| crate::RebornBuildError::InvalidConfig {
-                            reason: format!("mnesis memory provider package is invalid: {error}"),
+                        .map_err(|error| {
+                            crate::RebornBuildError::InvalidConfig {
+                                reason: format!(
+                                    "mnesis memory provider package is invalid: {error}"
+                                ),
+                            }
                         })?;
                         ResolvedMemoryProvider {
                             resolver: resolver.with_third_party_provider(

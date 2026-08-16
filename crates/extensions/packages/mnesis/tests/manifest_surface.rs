@@ -58,18 +58,28 @@ fn the_tool_inventory_carries_no_administrative_capability() {
 }
 
 #[test]
-fn no_tool_declares_a_write_effect_while_the_write_path_is_undeclared() {
+fn the_write_path_is_host_driven_and_never_model_visible() {
     let lowered = MANIFEST.to_ascii_lowercase();
-    for effect in ["write_filesystem", "network", "record_interaction"] {
+    assert!(
+        lowered.contains("lifecycle = [\"read_long_term\", \"record_interaction\"]"),
+        "the recording lane is declared now that the idempotency proofs have landed"
+    );
+    for effect in ["write_filesystem", "network"] {
         assert!(
             !lowered.contains(effect),
-            "the read-only provider must not declare {effect}"
+            "no declared tool may carry the {effect} effect"
         );
     }
-    assert!(
-        lowered.contains("lifecycle = [\"read_long_term\"]"),
-        "only the long-term lane may be declared until the server proofs land"
-    );
+    // `record_interaction` is a host-driven lifecycle hook, never a capability the
+    // model can call: it must appear only under [memory], not as a tool id.
+    for line in MANIFEST.lines() {
+        if line.trim_start().starts_with("id = ") {
+            assert!(
+                !line.contains("record_interaction"),
+                "recording must not be exposed as a model-callable tool: {line}"
+            );
+        }
+    }
 }
 
 #[test]
