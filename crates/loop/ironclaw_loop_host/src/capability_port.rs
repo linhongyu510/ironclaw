@@ -69,9 +69,9 @@ use self::surface_snapshot::{
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 
-/// Observes a capability invocation's resolved input (arguments) as the host
-/// loop executes it, for trajectory capture by downstream consumers (benchmark
-/// harnesses, debuggers, UI). `call_id` is the capability input ref.
+/// Observes a run's trajectory as the host loop executes it, for capture by
+/// downstream consumers (benchmark harnesses, debuggers, UI). `call_id` is the
+/// capability input ref.
 ///
 /// The capability port emits input events. Result-writer implementations may
 /// emit the matching result event through [`Self::on_capability_result`].
@@ -102,6 +102,17 @@ pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
         _call_id: &str,
         _capability_id: &str,
         _output: &serde_json::Value,
+    ) {
+    }
+
+    /// Host-initiated recall, run on the host's own schedule rather than called
+    /// by the model. Defaulted so existing observers stay source-compatible.
+    fn on_lifecycle_retrieval(
+        &self,
+        _retrieval_id: &str,
+        _operation_id: &str,
+        _query: &serde_json::Value,
+        _results: &serde_json::Value,
     ) {
     }
 }

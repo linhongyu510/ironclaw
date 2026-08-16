@@ -1438,6 +1438,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),
         memory_context_service: None,
+        lifecycle_trajectory_observer: None,
         after_turn_memory_writer: None,
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),

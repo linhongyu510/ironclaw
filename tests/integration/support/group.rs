@@ -1352,6 +1352,7 @@ impl RebornIntegrationGroupBuilder {
             memory_context_service: memory_consumers
                 .as_ref()
                 .and_then(|consumers| consumers.memory_context_service.clone()),
+            lifecycle_trajectory_observer: None,
             after_turn_memory_writer: memory_consumers
                 .as_ref()
                 .and_then(|consumers| consumers.after_turn_memory_writer.clone()),

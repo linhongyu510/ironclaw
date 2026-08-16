@@ -27,14 +27,15 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityResolveError,
-    CapabilitySurfacePolicyFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, StructuredOutputLoopPromptPort, SubagentLoopPromptPort,
-    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
-    ThreadContextWindowCache, active_task_compaction_prompt_id,
+    CapabilitySurfacePolicyFilter, CapabilitySurfaceProfileResolver, CapabilityTrajectoryObserver,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, GuardedSystemInferencePort,
+    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    StructuredOutputLoopPromptPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -1113,6 +1114,7 @@ where
     /// `EmptyUserProfileSource` — this is a genuine `Option`.)
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    lifecycle_trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1182,6 +1184,7 @@ where
             identity_context_source: None,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
+            lifecycle_trajectory_observer: None,
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1498,6 +1501,14 @@ where
         self
     }
 
+    pub fn with_lifecycle_trajectory_observer(
+        mut self,
+        observer: Arc<dyn CapabilityTrajectoryObserver>,
+    ) -> Self {
+        self.lifecycle_trajectory_observer = Some(observer);
+        self
+    }
+
     pub fn with_communication_context_provider(
         mut self,
         provider: Arc<dyn CommunicationContextProvider>,
@@ -1663,6 +1674,9 @@ where
         }
         if !unbound_run && let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
+        }
+        if let Some(observer) = self.lifecycle_trajectory_observer.as_ref() {
+            context_adapter = context_adapter.with_lifecycle_trajectory_observer(observer.clone());
         }
         // Channel-origin runs carry host-fetched conversation history on the
         // persisted product context; the port renders it as one framed

@@ -15,6 +15,9 @@ use crate::ThreadBackedLoopContextPort;
 /// small per-lane request fills the budget without over-fetching the provider.
 const MEMORY_PROMPT_CONTEXT_MAX_SNIPPETS: usize = 8;
 
+/// Wire-stable: downstream trajectory consumers match on this id.
+const MEMORY_LIFECYCLE_RETRIEVAL_OPERATION_ID: &str = "ironclaw.memory.lifecycle.memory_search";
+
 impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
@@ -74,8 +77,12 @@ where
         let load = self
             .memory_snippets_cache
             .get_or_init(|| async {
+                let query = request.query.clone();
                 match service.load_memory_snippets(request).await {
-                    Ok(load) => load,
+                    Ok(load) => {
+                        self.report_lifecycle_retrieval(&query, &load.snippets);
+                        load
+                    }
                     Err(error) => {
                         tracing::debug!(
                             kind = ?error.kind,
@@ -181,6 +188,43 @@ where
             }
             in_flight.store(false, Ordering::Release);
         });
+    }
+
+    /// Fires from inside the per-run cache init, so a cache hit reports nothing.
+    fn report_lifecycle_retrieval(&self, query: &str, snippets: &[LoopContextSnippet]) {
+        let Some(observer) = self.lifecycle_trajectory_observer.as_deref() else {
+            return;
+        };
+        if snippets.is_empty() {
+            return;
+        }
+        let retrieval_id = format!("lifecycle:memory:{}", self.run_context.run_id);
+        let results = serde_json::json!({
+            "snippets": snippets
+                .iter()
+                .map(|snippet| {
+                    serde_json::json!({
+                        "snippet_ref": snippet.snippet_ref,
+                        "content": snippet.model_content,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        });
+        // A panicking observer must never unwind the memory read.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            observer.on_lifecycle_retrieval(
+                &retrieval_id,
+                MEMORY_LIFECYCLE_RETRIEVAL_OPERATION_ID,
+                &serde_json::json!({ "query": query }),
+                &results,
+            );
+        }));
+        if caught.is_err() {
+            tracing::warn!(
+                operation_id = MEMORY_LIFECYCLE_RETRIEVAL_OPERATION_ID,
+                "trajectory observer on_lifecycle_retrieval panicked; dropping event"
+            );
+        }
     }
 
     /// Build the memory request from the run context. Returns `None` (no memory

@@ -16,21 +16,23 @@ use ironclaw_llm::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-    CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
-    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionMaterializationStore,
-    InstructionSafetyContext, LoopCapabilityPort, LoopContextPort, LoopContextRequest,
-    LoopContextSnippet, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
-    LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-    LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
-    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    CapabilitySurfaceVersion, EmptyMemoryPromptContextService,
+    EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
+    LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
+    LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+    LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRuntimeContext,
+    MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId, ParentLoopOutput,
+    PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
     RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
 };
 use ironclaw_loop_host::{
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
+    CapabilityTrajectoryObserver, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelRouteSnapshot, HostManagedModelStreamSink, HostManagedToolResultContent,
+    ThreadBackedLoopContextPort,
 };
 use ironclaw_loop_host::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -4212,30 +4214,57 @@ impl MemoryPromptContextService for CountingMemoryContextService {
     }
 }
 
+/// Captures lifecycle-retrieval callbacks for the tests below.
+#[derive(Debug, Default)]
+struct RecordingLifecycleObserver {
+    events: Mutex<Vec<(String, String, serde_json::Value, serde_json::Value)>>,
+}
+
+impl CapabilityTrajectoryObserver for RecordingLifecycleObserver {
+    fn on_capability_input(&self, _: &str, _: &str, _: &serde_json::Value) {}
+
+    fn on_lifecycle_retrieval(
+        &self,
+        retrieval_id: &str,
+        operation_id: &str,
+        query: &serde_json::Value,
+        results: &serde_json::Value,
+    ) {
+        self.events.lock().unwrap().push((
+            retrieval_id.to_string(),
+            operation_id.to_string(),
+            query.clone(),
+            results.clone(),
+        ));
+    }
+}
+
 /// Caller-level coverage (`.claude/rules/testing.md` — `load_loop_context` gates
 /// whether memory reaches the model): a `ThreadBackedLoopContextPort` wired with
 /// a memory source must return NON-empty `memory_snippets`, derive the query from
 /// the latest user message, and fetch exactly once per run — a second
-/// `load_loop_context` reuses the per-run cache (fetch count stays 1).
+/// `load_loop_context` reuses the per-run cache (fetch count stays 1). The wired
+/// trajectory observer must see that one real read and nothing on the cache hit.
 #[tokio::test]
 async fn load_loop_context_surfaces_memory_and_fetches_once_per_run() {
     let fixture = ThreadFixture::new().await;
     let memory_service = Arc::new(CountingMemoryContextService::default());
+    let observer = Arc::new(RecordingLifecycleObserver::default());
     // Production run contexts carry the authenticated actor; memory is keyed to
     // that user, so the port needs an actor to scope a request.
     let run_context = fixture.run_context.clone().with_actor(TurnActor::new(
         UserId::new("user-production-gateway").unwrap(),
     ));
-    let context_port =
-        ThreadBackedLoopContextPort::new(
-            Arc::clone(&fixture.thread_service),
-            fixture.thread_scope.clone(),
-            run_context,
-            16,
-        )
-        .with_memory_context_service(
-            Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>
-        );
+    let context_port = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>)
+    .with_lifecycle_trajectory_observer(
+        Arc::clone(&observer) as Arc<dyn CapabilityTrajectoryObserver>
+    );
 
     let request = LoopContextRequest {
         after: None,
@@ -4270,6 +4299,62 @@ async fn load_loop_context_surfaces_memory_and_fetches_once_per_run() {
         memory_service.fetches.load(Ordering::SeqCst),
         1,
         "memory is fetched once per run; later prompt builds reuse the cache"
+    );
+
+    let events = observer.events.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "the memory read reports once per run, never again on a cache hit"
+    );
+    let (retrieval_id, operation_id, query, results) = &events[0];
+    assert_eq!(operation_id, "ironclaw.memory.lifecycle.memory_search");
+    assert!(
+        retrieval_id.starts_with("lifecycle:memory:"),
+        "retrieval id must name the lane it came from, got {retrieval_id}"
+    );
+    assert_eq!(
+        query["query"], "hello production gateway",
+        "the reported query must be the one the host actually issued"
+    );
+    assert_eq!(
+        results["snippets"][0]["content"], "Untrusted memory content: hello production gateway",
+        "the reported results must carry the content that entered the prompt"
+    );
+}
+
+/// A run that retrieves nothing reports nothing.
+#[tokio::test]
+async fn empty_memory_retrieval_reports_no_lifecycle_event() {
+    let fixture = ThreadFixture::new().await;
+    let observer = Arc::new(RecordingLifecycleObserver::default());
+    let run_context = fixture.run_context.clone().with_actor(TurnActor::new(
+        UserId::new("user-production-gateway").unwrap(),
+    ));
+    let context_port = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::new(EmptyMemoryPromptContextService))
+    .with_lifecycle_trajectory_observer(
+        Arc::clone(&observer) as Arc<dyn CapabilityTrajectoryObserver>
+    );
+
+    let bundle = context_port
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .expect("prompt build should succeed with an empty memory service");
+
+    assert!(bundle.memory_snippets.is_empty());
+    assert!(
+        observer.events.lock().unwrap().is_empty(),
+        "a run that retrieved nothing must not report a retrieval"
     );
 }
 

@@ -12,8 +12,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
+    CapabilitySurfaceProfileResolver, CapabilityTrajectoryObserver, CompositeTurnRunWakeNotifier,
+    HostIdentityContextSource, HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway,
     HostManagedPromptDiagnosticSink, HostSkillContextSource, HostUserProfileSource,
     LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ModelRouteResolver, ProductLiveCancellationReadiness,
@@ -395,6 +395,7 @@ where
     /// memory rather than failing the turn, the same optionality as
     /// `user_profile_source`.
     pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    pub lifecycle_trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW bound memory
     /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
     /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
@@ -896,6 +897,9 @@ where
     host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
     if let Some(service) = parts.memory_context_service {
         host_factory = host_factory.with_memory_context_service(service);
+    }
+    if let Some(observer) = parts.lifecycle_trajectory_observer {
+        host_factory = host_factory.with_lifecycle_trajectory_observer(observer);
     }
     let host_factory = Arc::new(host_factory);
 

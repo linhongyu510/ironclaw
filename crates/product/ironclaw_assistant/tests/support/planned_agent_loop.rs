@@ -432,6 +432,7 @@ impl ProductLiveAgentLoopHarness {
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
+            lifecycle_trajectory_observer: None,
             after_turn_memory_writer: None,
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),

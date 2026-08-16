@@ -364,6 +364,7 @@ where
     /// context). Rendered as ONE framed system-context block per prompt
     /// build; `None` everywhere else.
     channel_conversation_context: Option<String>,
+    lifecycle_trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
 }
 
 struct IdentityCandidateCache {
@@ -436,7 +437,16 @@ where
             memory_degradation_note_emitted: Arc::new(OnceCell::new()),
             memory_degradation_note_in_flight: Arc::new(AtomicBool::new(false)),
             channel_conversation_context: None,
+            lifecycle_trajectory_observer: None,
         }
+    }
+
+    pub fn with_lifecycle_trajectory_observer(
+        mut self,
+        observer: Arc<dyn CapabilityTrajectoryObserver>,
+    ) -> Self {
+        self.lifecycle_trajectory_observer = Some(observer);
+        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {

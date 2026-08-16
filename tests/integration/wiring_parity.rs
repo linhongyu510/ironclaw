@@ -72,8 +72,11 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         input_queue: true, // steering/follow-up host input queue — always wired (InMemory or Filesystem)
         input_queue_reconcile: true, // terminal reclamation surface of the same queue — wired alongside it
         memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
+        // Opt-in only: `RebornRuntimeInput::with_trajectory_observer` leaves it
+        // None by default, so both production and the harness carry None here.
+        lifecycle_trajectory_observer: false,
         after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
-        model_policy_guard: false,   // hardcoded None
+        model_policy_guard: false,      // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
         // scripted `TraceLlm` path, and any test build), `llm_cost_table` is
@@ -163,6 +166,9 @@ fn mask(
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
         "memory_context_service" => shape.memory_context_service = from.memory_context_service,
+        "lifecycle_trajectory_observer" => {
+            shape.lifecycle_trajectory_observer = from.lifecycle_trajectory_observer
+        }
         "after_turn_memory_writer" => {
             shape.after_turn_memory_writer = from.after_turn_memory_writer
         }

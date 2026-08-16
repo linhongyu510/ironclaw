@@ -3498,6 +3498,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         model_gateway,
         builtin_capability_policy,
         display_previews,
+        lifecycle_trajectory_observer,
     ) = if local_runtime.is_some() {
         let builtin_capability_policy = Arc::clone(&services.capability_policy);
         let tool_diagnostic_sink = Arc::new(
@@ -3509,6 +3510,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?,
         )
             as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
+        let lifecycle_trajectory_observer = trajectory_observer
+            .clone()
+            .map(crate::observability::trajectory_observer::as_capability_observer);
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -3531,6 +3535,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_host.model_gateway,
             Some(builtin_capability_policy),
             Some(capability_host.display_previews),
+            lifecycle_trajectory_observer,
         )
     } else {
         // The trajectory observer is wired only through the capability-host capability
@@ -3556,6 +3561,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_result_writer,
             Arc::new(EmptyCapabilitySurfaceResolver) as Arc<dyn CapabilitySurfaceProfileResolver>,
             model_gateway,
+            None,
             None,
             None,
         )
@@ -3988,6 +3994,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // `None` — degrading to no memory rather than silently reading native
         // (issue #5013).
         memory_context_service: wired_memory_context_service,
+        lifecycle_trajectory_observer,
         // After-turn memory recording (#3537 / mem0 `add`): the RAW bound
         // provider — the SAME resolved provider the profile source and prompt-context
         // lane use, NOT wrapped in `ProductionMemoryPromptContextService`. The

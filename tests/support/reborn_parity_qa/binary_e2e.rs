@@ -907,6 +907,7 @@ impl RebornBinaryE2EHarness {
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
+            lifecycle_trajectory_observer: None,
             after_turn_memory_writer: None,
             model_policy_guard: None,
             model_budget_accountant: None,

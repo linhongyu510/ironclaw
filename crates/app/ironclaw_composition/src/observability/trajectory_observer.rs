@@ -223,6 +223,20 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
         self.inner
             .on_capability_result(call_id, capability_id, output);
     }
+
+    /// Projected as one input/result pair so existing consumers see the read.
+    fn on_lifecycle_retrieval(
+        &self,
+        retrieval_id: &str,
+        operation_id: &str,
+        query: &serde_json::Value,
+        results: &serde_json::Value,
+    ) {
+        self.inner
+            .on_capability_input(retrieval_id, operation_id, query);
+        self.inner
+            .on_capability_result(retrieval_id, operation_id, results);
+    }
 }
 
 /// Adapt a composition observer to the substrate observer shared by loop-host
