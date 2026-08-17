@@ -45,8 +45,8 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -67,6 +67,101 @@ fn provider_call_reference(call_id: &str) -> ProviderToolCallReferenceEnvelope {
 }
 
 #[tokio::test]
+async fn filesystem_history_preserves_typed_intrinsic_outcome_without_provider_metadata() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-provider-evidence", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-provider-evidence");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-provider-evidence").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: Some(ToolResultIntrinsicOutcome::NothingToReport),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:provider-evidence".into(),
+            safe_summary: ToolResultSafeSummary::new("structured result recorded").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let thread_after_first = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    drop(service);
+    let scoped = scoped_threads_fs_at(backend, "tenant-provider-evidence", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: Some(ToolResultIntrinsicOutcome::NothingToReport),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:provider-evidence".into(),
+            safe_summary: ToolResultSafeSummary::new("retry ignored").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let thread_after_duplicate = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first, duplicate, "atomic replay must be side-effect free");
+    assert_eq!(
+        thread_after_first.updated_at, thread_after_duplicate.updated_at,
+        "atomic replay must not move thread activity ordering"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.tool_result_provider_call.is_none()),
+        "ordinary history must keep host-only provider metadata redacted"
+    );
+
+    let envelope = history
+        .messages
+        .first()
+        .and_then(|message| message.content.as_deref())
+        .map(ToolResultReferenceEnvelope::from_json_str)
+        .transpose()
+        .unwrap()
+        .expect("history contains the result envelope");
+    assert_eq!(
+        envelope.intrinsic_outcome,
+        Some(ToolResultIntrinsicOutcome::NothingToReport),
+        "host-validated intrinsic evidence must survive the redacted history projection"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-exact-result-update", "alice");
@@ -84,6 +179,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
         .unwrap();
     let spawn = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -96,6 +192,7 @@ async fn filesystem_tool_result_update_targets_the_exact_provider_call_row() {
         .unwrap();
     let page = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -157,6 +254,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
 
     let first = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -169,6 +267,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
         .unwrap();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -181,6 +280,7 @@ async fn filesystem_tool_result_dedup_keys_distinct_provider_calls_sharing_a_res
         .unwrap();
     let second = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
@@ -465,6 +565,7 @@ async fn filesystem_redaction_retains_durable_tool_result_record() {
     let result_ref = "result:fs-redacted-tool".to_string();
     let result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: scope.clone(),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-fs-tool-redaction".into(),
@@ -1926,6 +2027,7 @@ async fn filesystem_context_limit_counts_only_model_visible_messages() {
             .unwrap();
         service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: scope.clone(),
                 thread_id: thread.thread_id.clone(),
                 turn_run_id: "run-visible-window".into(),
