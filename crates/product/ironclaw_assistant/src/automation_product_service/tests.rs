@@ -42,8 +42,8 @@ use ironclaw_triggers::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunEvidenceScope, TriggerRunEvidenceSource,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
@@ -282,6 +282,47 @@ async fn automation_list_projects_required_capability_success_from_runtime_evide
     assert_eq!(
         assessment.capabilities[0].status,
         crate::RebornAutomationCapabilityEvidenceStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn projected_run_evidence_fails_closed_when_projection_output_is_saturated() {
+    let c = caller();
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    for _ in 0..ironclaw_event_projections::MAX_PROJECTION_PAGE_LIMIT {
+        let scope = ResourceScope {
+            tenant_id: c.tenant_id.clone(),
+            user_id: c.user_id.clone(),
+            agent_id: Some(c.agent_id.clone()),
+            project_id: c.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let mut requested =
+            RuntimeEvent::capability_activity_requested(scope, capability_id.clone());
+        requested.parent_invocation_id = Some(InvocationId::new());
+        log.append(requested).await.expect("append requested");
+    }
+    let source = super::ProjectedTriggerRunEvidenceSource::new(Arc::new(
+        ReplayEventProjectionService::new(log),
+    ));
+    let evidence_scope = TriggerRunEvidenceScope {
+        tenant_id: c.tenant_id,
+        user_id: c.user_id,
+        agent_id: Some(c.agent_id),
+        project_id: c.project_id,
+    };
+
+    let result = source.list_capability_evidence(&evidence_scope).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(ironclaw_triggers::TriggerRunEvidenceError::Unavailable)
+        ),
+        "a saturated projection cannot prove that older run evidence is absent"
     );
 }
 

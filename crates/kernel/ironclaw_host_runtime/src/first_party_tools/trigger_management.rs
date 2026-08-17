@@ -589,10 +589,19 @@ async fn list_triggers(
             .is_some_and(|spec| !spec.required_capability_ids.is_empty())
     }) {
         let evidence_scope = TriggerRunEvidenceScope::from_resource_scope(scope);
-        match run_evidence.list_capability_evidence(&evidence_scope).await {
-            Ok(evidence) => Some(evidence),
-            Err(error) => {
+        match tokio::time::timeout(
+            ACTIVE_HOLD_LOOKUP_TIMEOUT,
+            run_evidence.list_capability_evidence(&evidence_scope),
+        )
+        .await
+        {
+            Ok(Ok(evidence)) => Some(evidence),
+            Ok(Err(error)) => {
                 tracing::warn!(%error, "trigger list capability evidence unavailable");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("trigger list capability evidence lookup timed out");
                 None
             }
         }

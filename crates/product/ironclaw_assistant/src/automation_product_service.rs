@@ -659,6 +659,12 @@ impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
             })
             .await
             .map_err(|_| TriggerRunEvidenceError::Unavailable)?;
+        // Capability activities are output-bounded independently of the
+        // timeline cursor. At the bound, the projection cannot prove whether
+        // older evidence was omitted, so never turn absence into `Missing`.
+        if snapshot.capability_activities.len() >= MAX_PROJECTION_PAGE_LIMIT {
+            return Err(TriggerRunEvidenceError::Unavailable);
+        }
         Ok(snapshot
             .capability_activities
             .into_iter()

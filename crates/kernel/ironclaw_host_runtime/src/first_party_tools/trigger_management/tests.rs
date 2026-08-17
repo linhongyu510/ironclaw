@@ -52,6 +52,19 @@ impl TriggerRunEvidenceSource for StaticRunEvidenceSource {
     }
 }
 
+struct PendingRunEvidenceSource;
+
+#[async_trait::async_trait]
+impl TriggerRunEvidenceSource for PendingRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        _scope: &TriggerRunEvidenceScope,
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
+    {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn trigger_list_exposes_deterministic_required_action_assessment() {
     use ironclaw_triggers::ClearActiveFireRequest;
@@ -137,6 +150,81 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
     assert_eq!(observed_scope.user_id, scope.user_id);
     assert_eq!(observed_scope.agent_id, scope.agent_id);
     assert_eq!(observed_scope.project_id, scope.project_id);
+}
+
+#[tokio::test]
+async fn trigger_list_returns_unverified_when_capability_evidence_stalls() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("stalled-evidence-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: vec![capability_id],
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(PendingRunEvidenceSource),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = tokio::time::timeout(
+        ACTIVE_HOLD_LOOKUP_TIMEOUT + std::time::Duration::from_secs(1),
+        handler.dispatch(request),
+    )
+    .await
+    .expect("trigger list must bound a stalled evidence read")
+    .expect("list routines despite stalled evidence");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("unverified"));
+    assert_eq!(
+        assessment["capabilities"][0]["status"],
+        json!("unavailable")
+    );
 }
 
 /// Delivery is now a step the structured contract owns, not a stored routing field: a
