@@ -10,6 +10,12 @@
 # Setup / usage docs:
 # https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
 #
+# The suite name is validated against `suites/*.toml` on nearai/benchmarks main, so a new
+# suite is dispatchable as soon as it lands there — no allowlist to update here. Two worth
+# knowing about for reborn's integration/automation behaviour:
+#   /benchmark qa-automation-preview   10 routine tasks; the axis that separates harnesses
+#   /benchmark qa-preview              the full 38-task QA corpus
+#
 # nearai/benchmarks is a PRIVATE repo (since 2026-07-22, PR #291). A
 # cross-repo reusable-workflow `uses:` call (the previous approach here) is
 # structurally incapable of working for a public caller -> private callee:
