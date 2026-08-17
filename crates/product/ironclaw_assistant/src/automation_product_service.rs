@@ -10,8 +10,7 @@ use crate::{
     TriggerRunThreadScope,
 };
 use ironclaw_event_projections::{
-    CapabilityActivityStatus, EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest,
-    ProjectionScope,
+    CapabilityActivityStatus, EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionScope,
 };
 use ironclaw_host_api::{
     Timestamp,
@@ -124,6 +123,7 @@ impl RebornAutomationProductService {
         &self,
         caller: &ProductAgentBoundCaller,
         records: &[TriggerRecord],
+        runs_by_trigger: &HashMap<TriggerId, Vec<TriggerRunRecord>>,
         deadline: tokio::time::Instant,
     ) -> Option<Vec<TriggerCapabilityExecutionEvidence>> {
         let evidence_required = records.iter().any(|record| {
@@ -135,6 +135,25 @@ impl RebornAutomationProductService {
         if !evidence_required {
             return Some(Vec::new());
         }
+        let run_ids = records
+            .iter()
+            .filter(|record| {
+                record
+                    .execution_spec
+                    .as_ref()
+                    .is_some_and(|spec| !spec.required_capability_ids.is_empty())
+            })
+            .flat_map(|record| {
+                runs_by_trigger
+                    .get(&record.trigger_id)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|run| run.run_id)
+            .collect::<Vec<_>>();
+        if run_ids.is_empty() {
+            return Some(Vec::new());
+        }
         let resource_scope = TriggerRunEvidenceScope {
             tenant_id: caller.tenant_id.clone(),
             user_id: caller.user_id.clone(),
@@ -143,7 +162,8 @@ impl RebornAutomationProductService {
         };
         match tokio::time::timeout_at(
             deadline,
-            self.run_evidence.list_capability_evidence(&resource_scope),
+            self.run_evidence
+                .list_capability_evidence(&resource_scope, &run_ids),
         )
         .await
         {
@@ -228,7 +248,7 @@ impl AutomationProductService for RebornAutomationProductService {
             };
 
         let evidence_by_run = self
-            .capability_evidence_by_run(&caller, &records, deadline)
+            .capability_evidence_by_run(&caller, &records, &runs_by_trigger, deadline)
             .await;
 
         let mut holds = self
@@ -641,11 +661,16 @@ impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
         scope: &TriggerRunEvidenceScope,
+        run_ids: &[TurnRunId],
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError> {
-        let snapshot = self
+        let run_ids = run_ids
+            .iter()
+            .map(|run_id| InvocationId::from_uuid(run_id.as_uuid()))
+            .collect::<Vec<_>>();
+        let window = self
             .projection
-            .snapshot(ProjectionRequest {
-                scope: ProjectionScope::from_resource_scope(&ResourceScope {
+            .capability_activities_for_runs(
+                ProjectionScope::from_resource_scope(&ResourceScope {
                     tenant_id: scope.tenant_id.clone(),
                     user_id: scope.user_id.clone(),
                     agent_id: scope.agent_id.clone(),
@@ -654,19 +679,16 @@ impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
                     thread_id: None,
                     invocation_id: InvocationId::new(),
                 }),
-                after: None,
-                limit: MAX_PROJECTION_PAGE_LIMIT,
-            })
+                &run_ids,
+                MAX_PROJECTION_PAGE_LIMIT,
+            )
             .await
             .map_err(|_| TriggerRunEvidenceError::Unavailable)?;
-        // Capability activities are output-bounded independently of the
-        // timeline cursor. At the bound, the projection cannot prove whether
-        // older evidence was omitted, so never turn absence into `Missing`.
-        if snapshot.capability_activities.len() >= MAX_PROJECTION_PAGE_LIMIT {
+        if window.truncated {
             return Err(TriggerRunEvidenceError::Unavailable);
         }
-        Ok(snapshot
-            .capability_activities
+        Ok(window
+            .activities
             .into_iter()
             .filter_map(|activity| {
                 let run_id = activity.run_id?;

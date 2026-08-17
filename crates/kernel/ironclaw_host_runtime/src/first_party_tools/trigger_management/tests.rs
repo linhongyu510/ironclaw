@@ -39,6 +39,7 @@ fn execution_contract(goal: impl Into<String>) -> Value {
 struct StaticRunEvidenceSource {
     evidence: Vec<TriggerCapabilityExecutionEvidence>,
     observed_scope: Arc<std::sync::Mutex<Option<TriggerRunEvidenceScope>>>,
+    observed_run_ids: Arc<std::sync::Mutex<Vec<TurnRunId>>>,
 }
 
 #[async_trait::async_trait]
@@ -46,9 +47,11 @@ impl TriggerRunEvidenceSource for StaticRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
         scope: &TriggerRunEvidenceScope,
+        run_ids: &[TurnRunId],
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
     {
         *self.observed_scope.lock().expect("scope capture lock") = Some(scope.clone());
+        *self.observed_run_ids.lock().expect("run id capture lock") = run_ids.to_vec();
         Ok(self.evidence.clone())
     }
 }
@@ -60,6 +63,7 @@ impl TriggerRunEvidenceSource for PendingRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
         _scope: &TriggerRunEvidenceScope,
+        _run_ids: &[TurnRunId],
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
     {
         std::future::pending().await
@@ -120,6 +124,7 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
         error_kind: None,
     }];
     let observed_scope = Arc::new(std::sync::Mutex::new(None));
+    let observed_run_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
     let handler = TriggerManagementToolHandler {
         repository,
         create_hook: Arc::new(NoopTriggerCreateHook),
@@ -128,6 +133,7 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
         run_evidence: Arc::new(StaticRunEvidenceSource {
             evidence,
             observed_scope: Arc::clone(&observed_scope),
+            observed_run_ids: Arc::clone(&observed_run_ids),
         }),
     };
     let request = FirstPartyCapabilityRequest::request_for_test(
@@ -151,6 +157,10 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
     assert_eq!(observed_scope.user_id, scope.user_id);
     assert_eq!(observed_scope.agent_id, scope.agent_id);
     assert_eq!(observed_scope.project_id, scope.project_id);
+    assert_eq!(
+        *observed_run_ids.lock().expect("run id capture lock"),
+        vec![run_id]
+    );
 }
 
 #[tokio::test]

@@ -92,6 +92,7 @@ pub trait TriggerRunEvidenceSource: Send + Sync {
     async fn list_capability_evidence(
         &self,
         scope: &TriggerRunEvidenceScope,
+        run_ids: &[TurnRunId],
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError>;
 }
 
@@ -103,6 +104,7 @@ impl TriggerRunEvidenceSource for MissingTriggerRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
         _scope: &TriggerRunEvidenceScope,
+        _run_ids: &[TurnRunId],
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError> {
         Err(TriggerRunEvidenceError::Unavailable)
     }

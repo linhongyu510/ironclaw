@@ -603,6 +603,22 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    let evidence_run_ids = records
+        .iter()
+        .filter(|record| {
+            record
+                .execution_spec
+                .as_ref()
+                .is_some_and(|spec| !spec.required_capability_ids.is_empty())
+        })
+        .flat_map(|record| {
+            runs_by_trigger
+                .get(&record.trigger_id)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|run| run.run_id)
+        .collect::<Vec<_>>();
     let evidence = if records.iter().any(|record| {
         record
             .execution_spec
@@ -612,7 +628,7 @@ async fn list_triggers(
         let evidence_scope = TriggerRunEvidenceScope::from_resource_scope(scope);
         match tokio::time::timeout(
             ACTIVE_HOLD_LOOKUP_TIMEOUT,
-            run_evidence.list_capability_evidence(&evidence_scope),
+            run_evidence.list_capability_evidence(&evidence_scope, &evidence_run_ids),
         )
         .await
         {
