@@ -33,7 +33,7 @@ pub use event::{
     BroadcastBudgetEventSink, BudgetEvent, BudgetEventSink, CompositeBudgetEventSink,
     InMemoryBudgetEventSink, NoOpBudgetEventSink,
 };
-pub use filesystem_governor::FilesystemResourceGovernor;
+pub use filesystem_governor::{FilesystemResourceGovernor, ReservationDurability};
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
     BudgetGateStorePort,
@@ -2224,6 +2224,73 @@ pub(crate) fn reconcile_in_state(
     };
     state.reservations.insert(reservation_id, record);
     Ok(receipt)
+}
+
+/// Apply an already-incurred spend for `reservation_id` in one step.
+///
+/// This is the replay half of the collapsed reserve+reconcile journal record
+/// (issue #7701): the live governor admitted the reservation against its
+/// in-memory ledger, then journaled one `Spend` delta carrying both the
+/// original estimate and the provider-reported actual.
+///
+/// Deliberately does **not** re-run the limit cascade. The money was already
+/// spent by the time this record was written; re-denying it during replay
+/// would poison durable recovery instead of recording the truth. Admission
+/// control lives in [`reserve_with_outcome_in_state`], which still runs on
+/// every live reservation.
+pub(crate) fn spend_in_state(
+    state: &mut ResourceState,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    reservation_id: ResourceReservationId,
+    actual: ResourceUsage,
+    now: DateTime<Utc>,
+) -> Result<(), ResourceError> {
+    validate_usage(&actual)?;
+    let accounts = ResourceAccount::cascade(&scope);
+
+    // A journal that mixes durable-reservation records with collapsed spend
+    // records (a deployment that flipped `ReservationDurability`) can already
+    // hold an active hold for this id. Drop it before recording the spend so
+    // the hold is not double-counted.
+    if let Some(existing) = state.reservations.remove(&reservation_id)
+        && existing.status == ReservationStatus::Active
+    {
+        for account in &existing.accounts {
+            state
+                .reserved_by_account
+                .entry(account.clone())
+                .or_default()
+                .sub_assign(&existing.tally);
+        }
+    }
+
+    let spent = ResourceTally::from_usage(&actual);
+    for account in &accounts {
+        advance_period_if_rolled_over(state, account, now);
+        state
+            .usage_by_account
+            .entry(account.clone())
+            .or_default()
+            .add_assign(&spent);
+    }
+
+    let tally = ResourceTally::from_estimate(&estimate);
+    state.reservations.insert(
+        reservation_id,
+        ReservationRecord {
+            reservation: ResourceReservation {
+                id: reservation_id,
+                scope,
+                estimate,
+            },
+            accounts,
+            tally,
+            status: ReservationStatus::Reconciled,
+            actual: Some(actual),
+        },
+    );
+    Ok(())
 }
 
 fn validate_reservation_in_state(

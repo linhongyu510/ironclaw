@@ -15,6 +15,14 @@
 //! compaction only. Hot reserve/reconcile/release paths update per-account
 //! shards in memory, enqueue one delta, and ack the caller after the group
 //! commit flusher durably appends that delta.
+//!
+//! Because that authority is process-global, the reservation half of a model
+//! call needs no durable record of its own: admission is decided against the
+//! in-memory ledger either way. The default
+//! [`ReservationDurability::ProcessLocal`] therefore journals one `Spend`
+//! record after the call instead of a `Reserve` before it and a `Reconcile`
+//! after it — halving durable writes on the hot path (issue #7701). Spend
+//! itself stays durable and replayable.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -52,6 +60,34 @@ use journal::{
 
 const DEFAULT_COMPACTION_INTERVAL: usize = 1024;
 
+/// How much durability the *reservation* half of budget accounting gets.
+///
+/// Spend is money and is always durable. A reservation is coordination: it
+/// exists so concurrent runs in this process cannot overshoot a limit. Because
+/// the filesystem governor is already the single process-global quota
+/// authority (see the module docs), that coordination is sound entirely in
+/// memory — journaling it costs a second durable record per model call and
+/// buys back only crash-time exactness.
+///
+/// Worst-case cost of [`ProcessLocal`](Self::ProcessLocal): a process that
+/// dies with model calls in flight loses those holds, so the durable ledger
+/// can under-record by
+/// `in_flight_model_calls x per_call_estimate_usd` **per crash**. There is no
+/// overshoot at all while the process is alive — admission still runs against
+/// the same in-memory ledger it always did. Deployments that need the holds to
+/// survive a crash select [`Durable`](Self::Durable) and pay two durable
+/// records per model call again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReservationDurability {
+    /// Default. Reservations are in-memory only; one durable `Spend` record is
+    /// written after the call completes.
+    #[default]
+    ProcessLocal,
+    /// Journal the reservation before the call and the reconciliation after
+    /// it: two durable records per model call, crash-exact holds.
+    Durable,
+}
+
 enum AuthorityLifecycle {
     Vacant,
     Ready(Arc<ResourceAuthority>),
@@ -73,6 +109,7 @@ where
     workers: AsyncStorageWorkerPoolCell,
     clock: Arc<dyn Clock>,
     event_sink: Arc<dyn BudgetEventSink>,
+    reservation_durability: ReservationDurability,
     compaction_interval: usize,
     deltas_since_compaction: AtomicUsize,
     compaction_in_flight: Arc<AtomicBool>,
@@ -93,6 +130,7 @@ where
             workers: new_worker_pool_cell(),
             clock: Arc::new(SystemClock),
             event_sink: Arc::new(NoOpBudgetEventSink),
+            reservation_durability: ReservationDurability::default(),
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
             deltas_since_compaction: AtomicUsize::new(0),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
@@ -108,6 +146,13 @@ where
 
     pub fn with_event_sink(mut self, sink: Arc<dyn BudgetEventSink>) -> Self {
         self.event_sink = sink;
+        self
+    }
+
+    /// Select how durable the reservation half of accounting is. See
+    /// [`ReservationDurability`] for the overshoot bound each option accepts.
+    pub fn with_reservation_durability(mut self, durability: ReservationDurability) -> Self {
+        self.reservation_durability = durability;
         self
     }
 
@@ -487,15 +532,23 @@ where
             }
             match result {
                 Ok(outcome) => {
-                    let delta = ResourceGovernorDelta::Reserve {
-                        scope,
-                        estimate,
-                        reservation_id,
-                        at: now,
-                    };
-                    let pending = match self.enqueue_delta(&authority, delta) {
-                        Ok(pending) => pending,
-                        Err(error) => return self.invalidate_authority(&authority, error),
+                    // Under `ProcessLocal` the admitted hold lives only in the
+                    // in-memory ledger above — the single durable record for
+                    // this model call is written by `reconcile` (#7701).
+                    let pending = match self.reservation_durability {
+                        ReservationDurability::ProcessLocal => None,
+                        ReservationDurability::Durable => {
+                            let delta = ResourceGovernorDelta::Reserve {
+                                scope,
+                                estimate,
+                                reservation_id,
+                                at: now,
+                            };
+                            match self.enqueue_delta(&authority, delta) {
+                                Ok(pending) => Some(pending),
+                                Err(error) => return self.invalidate_authority(&authority, error),
+                            }
+                        }
                     };
                     (outcome, pending)
                 }
@@ -506,7 +559,9 @@ where
                 }
             }
         };
-        if let Err(error) = self.finish_delta(&authority, pending) {
+        if let Some(pending) = pending
+            && let Err(error) = self.finish_delta(&authority, pending)
+        {
             return self.invalidate_authority(&authority, error);
         }
         let result = Ok(outcome);
@@ -536,6 +591,7 @@ where
                 return Err(ResourceError::UnknownReservation { id: reservation_id });
             };
             let mut locked = authority.lock_accounts(&accounts)?;
+            let reserved = record.reservation.clone();
             let mut reservation_subset = HashMap::new();
             reservation_subset.insert(reservation_id, record);
             let mut state = locked.state_for_accounts(&accounts, reservation_subset);
@@ -555,10 +611,22 @@ where
                 }
             }
             let receipt = result?;
-            let delta = ResourceGovernorDelta::Reconcile {
-                reservation_id,
-                actual,
-                at: now,
+            // `ProcessLocal` journaled no `Reserve` record for this id, so the
+            // spend record must be self-contained: it carries the scope and
+            // estimate replay needs to rebuild the reservation in one step.
+            let delta = match self.reservation_durability {
+                ReservationDurability::Durable => ResourceGovernorDelta::Reconcile {
+                    reservation_id,
+                    actual,
+                    at: now,
+                },
+                ReservationDurability::ProcessLocal => ResourceGovernorDelta::Spend {
+                    scope: reserved.scope,
+                    estimate: reserved.estimate,
+                    reservation_id,
+                    actual,
+                    at: now,
+                },
             };
             let pending = match self.enqueue_delta(&authority, delta) {
                 Ok(pending) => pending,
@@ -639,17 +707,27 @@ where
                 }
             }
             let receipt = result?;
-            let delta = ResourceGovernorDelta::Release {
-                reservation_id,
-                at: now,
-            };
-            let pending = match self.enqueue_delta(&authority, delta) {
-                Ok(pending) => pending,
-                Err(error) => return self.invalidate_authority(&authority, error),
+            // A released reservation spent nothing. Under `ProcessLocal` its
+            // hold was never journaled, so there is nothing durable to undo —
+            // dropping the in-memory hold above is the whole release.
+            let pending = match self.reservation_durability {
+                ReservationDurability::ProcessLocal => None,
+                ReservationDurability::Durable => {
+                    let delta = ResourceGovernorDelta::Release {
+                        reservation_id,
+                        at: now,
+                    };
+                    match self.enqueue_delta(&authority, delta) {
+                        Ok(pending) => Some(pending),
+                        Err(error) => return self.invalidate_authority(&authority, error),
+                    }
+                }
             };
             (receipt, pending)
         };
-        if let Err(error) = self.finish_delta(&authority, pending) {
+        if let Some(pending) = pending
+            && let Err(error) = self.finish_delta(&authority, pending)
+        {
             return self.invalidate_authority(&authority, error);
         }
         self.event_sink.emit(BudgetEvent::Released {
@@ -908,7 +986,10 @@ mod tests {
 
     #[test]
     fn durably_acked_reservation_is_not_retroactively_failed_by_generation_poison() {
+        // Durable mode: this test is about the reservation's *own* durable
+        // ack, which only exists when the reservation is journaled.
         let governor = FilesystemResourceGovernor::new(scoped_resources_fs())
+            .with_reservation_durability(ReservationDurability::Durable)
             .with_post_commit_hook(Arc::new(|authority| {
                 authority.poison(ResourceError::Storage {
                     reason: "later journal generation failure".to_string(),
@@ -934,8 +1015,10 @@ mod tests {
         let scoped = scoped_resources_fs();
         let scope = sample_scope();
         let account = ResourceAccount::tenant(scope.tenant_id.clone());
+        // Two durable records: the limit, then the collapsed spend. The
+        // reservation itself is process-local and journals nothing (#7701).
         let governor =
-            FilesystemResourceGovernor::new(Arc::clone(&scoped)).with_compaction_interval(3);
+            FilesystemResourceGovernor::new(Arc::clone(&scoped)).with_compaction_interval(2);
 
         governor
             .set_limit(
@@ -969,7 +1052,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = store.inspect(|snapshot| Ok(snapshot.clone())).unwrap();
-            if snapshot.journal_seq >= 3 {
+            if snapshot.journal_seq >= 2 {
                 break;
             }
             assert!(
@@ -997,7 +1080,9 @@ mod tests {
         let account = ResourceAccount::tenant(scope.tenant_id.clone());
         let governor = FilesystemResourceGovernor::new(Arc::clone(&scoped))
             .with_clock(Arc::new(clock.clone()))
-            .with_compaction_interval(4);
+            // Three durable records: limit, collapsed spend, rolled-over
+            // account snapshot. The reservation journals nothing (#7701).
+            .with_compaction_interval(3);
 
         governor
             .set_limit(
@@ -1036,7 +1121,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = store.inspect(|snapshot| Ok(snapshot.clone())).unwrap();
-            if snapshot.journal_seq >= 4 {
+            if snapshot.journal_seq >= 3 {
                 break;
             }
             assert!(

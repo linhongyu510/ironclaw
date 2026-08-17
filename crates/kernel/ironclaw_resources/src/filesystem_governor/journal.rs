@@ -16,7 +16,7 @@ use crate::{
     ResourceAccount, ResourceError, ResourceEstimate, ResourceGovernorStore,
     ResourceGovernorStorePort, ResourceLimits, ResourceState, ResourceUsage,
     account_snapshot_in_state, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
-    set_limit_in_state,
+    set_limit_in_state, spend_in_state,
 };
 
 use super::{fs_error, storage_error};
@@ -62,6 +62,17 @@ pub(super) enum ResourceGovernorDelta {
         actual: ResourceUsage,
         at: DateTime<Utc>,
     },
+    /// Collapsed reserve+reconcile: the single durable record a model call
+    /// writes under [`ReservationDurability::ProcessLocal`](super::ReservationDurability)
+    /// (issue #7701). Self-contained, so replay never depends on a separate
+    /// `Reserve` record having been journaled first.
+    Spend {
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+        at: DateTime<Utc>,
+    },
     Release {
         reservation_id: ResourceReservationId,
         at: DateTime<Utc>,
@@ -95,6 +106,13 @@ impl ResourceGovernorDelta {
                 actual,
                 at,
             } => reconcile_in_state(state, reservation_id, actual, at).map(|_| ()),
+            Self::Spend {
+                scope,
+                estimate,
+                reservation_id,
+                actual,
+                at,
+            } => spend_in_state(state, scope, estimate, reservation_id, actual, at),
             Self::Release { reservation_id, at } => {
                 release_in_state(state, reservation_id, at).map(|_| ())
             }
