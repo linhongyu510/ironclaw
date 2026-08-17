@@ -569,21 +569,21 @@ issue = "https://github.com/nearai/ironclaw/issues/7083"
 
 [[crate]]
 name = "slack"
-floor_percent = 93.95
-floor_covered_lines = 3697
-captured_total_lines = 3935
-captured_date = "2026-08-04"
-rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
-issue = "https://github.com/nearai/ironclaw/issues/7083"
+floor_percent = 93.57
+floor_covered_lines = 3666
+captured_total_lines = 3918
+captured_date = "2026-08-18"
+rationale = "Recaptured after #7515 expanded the standard messaging operations and the channel refactor changed the instrumented Slack source shape."
+issue = "https://github.com/nearai/ironclaw/pull/7515"
 
 [[crate]]
 name = "telegram"
-floor_percent = 90.31
-floor_covered_lines = 1435
-captured_total_lines = 1589
-captured_date = "2026-08-04"
-rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
-issue = "https://github.com/nearai/ironclaw/issues/7083"
+floor_percent = 56.64
+floor_covered_lines = 2411
+captured_total_lines = 4257
+captured_date = "2026-08-18"
+rationale = "Recaptured after #7464 added the linked-device login, session, transport, mapping, and standard-operation surface with corresponding tests."
+issue = "https://github.com/nearai/ironclaw/pull/7464"
 
 [[crate]]
 name = "memory-native"
