@@ -72,7 +72,7 @@ The driver-facing variants are fixed for the MVP:
 - `Completed` requires at least one durable reply-message ref or result ref, and the host/runner must verify those refs exist before mapping to a trusted completed outcome. Raw reply text is rejected by the wire shape and by strict loop-ref grammar.
 - `Completed.completion_kind` distinguishes the completion artifact: `FinalReply` is backed by reply-message refs, `ResultOnly` is backed by result refs without a finalized assistant reply, `DelegatedResult` is backed by delegated subtask result refs, and `NoReply` remains profile-gated for exits without durable reply/result refs.
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
-- `Blocked` requires all of: blocked kind, durable `gate_ref`, `checkpoint_id`, and opaque `state_ref`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
+- `Blocked` requires all of: blocked kind, durable `gate_ref`, `checkpoint_id`, and opaque `state_ref`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind was limited to approval, auth, and resource for MVP; as of 2026-08-13 the vocabulary also carries `await_dependent_run` (subagent parents parked on child completion) and `external_tool` (client-executed tool calls), and unbound run profiles abort the approval/auth/resource/dependent-run kinds with the typed `gate_not_supported` failure instead of parking.
 - `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy. Host-initiated cancellation may preempt the driver before a final checkpoint exists, so cancellation validation does not require a missing final checkpoint to become a protocol violation. During application, terminal cancellation is still gated by durable run state in one transition-port operation: if the run is already `CancelRequested`, it becomes `Cancelled`; if an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.
 - `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`, and the host/runner must verify the failure evidence is safe to terminalize before mapping to a trusted failed outcome. Failed exits may also carry bounded `explanation_message_refs` and an optional sanitized `safe_summary`; validated failed outcomes surface only host-verified explanation refs, prefer `safe_summary` over the generic failure kind, and carry a resume checkpoint id only when the checkpoint policy admits it.
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
@@ -96,12 +96,23 @@ start a new run and the operator to inspect checkpoint storage and run-profile
 compatibility.
 
 This contract is pinned by
+`executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation` in
+`crates/loop/ironclaw_turn_runner/src/planned_driver.rs` (a rejected
+checkpoint maps to the bounded host-authored terminal explanation) and by
+`retry_rejects_checkpoint_rejection_without_creating_a_process` in
+`crates/kernel/ironclaw_turns/src/process_projection/tests.rs` (the rejection
+stays terminal after projection into the process journal and cannot create a
+retry process; that selector is also mapped into
+`scripts/reborn-e2e-rust.sh`). The former `loop_driver_host`
+integration-test target and its
 `turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/loop/ironclaw_turn_runner/tests/loop_driver_host.rs`:
+test were deleted in #6696, not moved:
 
 ```bash
-cargo test -p ironclaw_turn_runner --test loop_driver_host \
-  turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
+cargo test -p ironclaw_turn_runner --lib \
+  executor_checkpoint_rejection_maps_to_host_authored_terminal_explanation
+cargo test -p ironclaw_turns --lib \
+  retry_rejects_checkpoint_rejection_without_creating_a_process
 ```
 
 ---

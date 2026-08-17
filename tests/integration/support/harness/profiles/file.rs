@@ -32,6 +32,25 @@ fn file_tools_with_runtime_policy(
     })
 }
 
+/// [`file_tools_profile`] plus the document capabilities (#6898 item 3), for
+/// journeys that read a .docx/.xlsx/.pptx structurally, edit it into a new
+/// file, or render HTML to PDF. Auto-approve is on so the journey exercises the
+/// document path rather than gate mechanics.
+pub(crate) fn document_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = file_tools_profile()?;
+    profile
+        .capability_ids
+        .push(CapabilityId::new(DOCUMENT_EDIT_CAPABILITY_ID)?);
+    profile
+        .capability_ids
+        .push(CapabilityId::new(HTML_TO_PDF_CAPABILITY_ID)?);
+    Ok(profile)
+}
+
+pub(crate) async fn document_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    document_tools_profile()?.build().await
+}
+
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(file_tools_with_runtime_policy(Some(
         ironclaw_composition::standalone_unrestricted_runtime_policy(true)?,

@@ -35,10 +35,10 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
-    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ConcurrencyHint,
-    ContentDigest, LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind,
-    LoopHostMilestoneSink, LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext,
-    LoopSafeSummary, ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
+    CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken, ContentDigest,
+    LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopProcessRef, LoopRequest, LoopRequestBatch, LoopRunContext, LoopSafeSummary,
+    ModelVisibleToolObservation, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
     resolution::{self, GatedResolution},
@@ -1791,7 +1791,7 @@ impl HostRuntimeLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
-    fn requires_ordered_batch_invocation(&self) -> bool {
+    fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
         false
     }
 
@@ -1889,7 +1889,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
                     description_trust: capability.description_trust,
-                    concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
                 })
             })
@@ -1933,8 +1932,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // (rather than up front) keeps dispatch's own resume identity/activity
         // validation the FIRST error a malformed resume surfaces — a missing/stale
         // resume payload must not pre-empt an `InvalidInvocation` activity mismatch.
-        let gated = self.invoke_capability_dispatch(request.clone()).await?;
-        self.persist_gate_record_for_mapped(&request, gated).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let gated = Box::pin(self.invoke_capability_dispatch(request.clone())).await?;
+        Box::pin(self.persist_gate_record_for_mapped(&request, gated)).await
     }
 
     async fn invoke_capability_batch(
@@ -1946,7 +1948,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         for invocation in request.invocations {
             // `invoke_capability` (the trait method above) persists each gate
             // record at the seam, so the batch inherits per-outcome persistence.
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // `parks()`, not `is_suspension()` (H1): a re-entrant gate (`Blocked`)
             // stops the batch too — nothing after a gated invocation can proceed
             // until it is resolved, exactly as parked work does.
@@ -2353,11 +2358,14 @@ impl HostRuntimeLoopCapabilityPort {
         })
         .await?;
 
-        let outcome = match dispatch_runtime_capability_auth_decline(
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let outcome = match Box::pin(dispatch_runtime_capability_auth_decline(
             self.runtime.as_ref(),
             invocation_context,
             request.capability_id,
-        )
+        ))
         .await
         {
             Ok(outcome) => outcome,
@@ -2431,8 +2439,10 @@ impl HostRuntimeLoopCapabilityPort {
                     "auth denial",
                 )?;
             }
-            return self
-                .invoke_auth_decline_dispatch(request, requested_invocation_id)
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.invoke_auth_decline_dispatch(request, requested_invocation_id))
                 .await;
         }
         // Normalize resume mode and validate token/activity identity before
@@ -2505,7 +2515,10 @@ impl HostRuntimeLoopCapabilityPort {
         let resume_payload = match &resume_mode {
             ResolvedResumeMode::Approval { invocation_id, .. }
             | ResolvedResumeMode::Auth { invocation_id, .. } => {
-                Some(self.replay_payload_for_resume(*invocation_id).await?)
+                // Chain-boxing: each port delegation is boxed so the stacked
+                // decorator chain never compiles into a single oversized poll
+                // frame (see reborn_integration_model_recovery stack-overflow).
+                Some(Box::pin(self.replay_payload_for_resume(*invocation_id)).await?)
             }
             ResolvedResumeMode::None => Option::None,
         };
@@ -2784,10 +2797,15 @@ impl HostRuntimeLoopCapabilityPort {
             effective_input_ref,
         );
         let capability_activity_id = CapabilityActivityId::from_uuid(invocation_id.as_uuid());
-        self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
-            activity_id: capability_activity_id,
-            capability_id: request.capability_id.clone(),
-        })
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(
+            self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id: capability_activity_id,
+                capability_id: request.capability_id.clone(),
+            }),
+        )
         .await?;
         // Only a FRESH dispatch mints a replay payload; an approval/auth resume
         // reuses the invocation id and its already-persisted payload (write-once),
@@ -2796,14 +2814,17 @@ impl HostRuntimeLoopCapabilityPort {
         let is_fresh_dispatch = matches!(resume_mode, ResolvedResumeMode::None);
         let outcome = match resume_mode {
             ResolvedResumeMode::Approval { resume, .. } => {
-                dispatch_runtime_capability_resume(
+                // Chain-boxing: each port delegation is boxed so the stacked
+                // decorator chain never compiles into a single oversized poll
+                // frame (see reborn_integration_model_recovery stack-overflow).
+                Box::pin(dispatch_runtime_capability_resume(
                     self.runtime.as_ref(),
                     invocation_context,
                     resume.approval_request_id,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                )
+                ))
                 .await
             }
             ResolvedResumeMode::Auth {
@@ -2820,24 +2841,30 @@ impl HostRuntimeLoopCapabilityPort {
                     approval_request_id = prior_approval_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
                     "capability auth-resume re-dispatch with preserved invocation identity"
                 );
-                dispatch_runtime_capability_auth_resume(
+                // Chain-boxing: each port delegation is boxed so the stacked
+                // decorator chain never compiles into a single oversized poll
+                // frame (see reborn_integration_model_recovery stack-overflow).
+                Box::pin(dispatch_runtime_capability_auth_resume(
                     self.runtime.as_ref(),
                     invocation_context,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
                     prior_approval_id,
-                )
+                ))
                 .await
             }
             ResolvedResumeMode::None => {
-                dispatch_runtime_capability(
+                // Chain-boxing: each port delegation is boxed so the stacked
+                // decorator chain never compiles into a single oversized poll
+                // frame (see reborn_integration_model_recovery stack-overflow).
+                Box::pin(dispatch_runtime_capability(
                     self.runtime.as_ref(),
                     invocation_context,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                )
+                ))
                 .await
             }
         };
@@ -3204,20 +3231,6 @@ fn provider_tool_name_base(capability_id: &str) -> String {
         "tool".to_string()
     } else {
         name
-    }
-}
-
-pub fn concurrency_hint_from_effects(effects: &[EffectKind]) -> ConcurrencyHint {
-    if effects.is_empty() {
-        return ConcurrencyHint::Exclusive;
-    }
-    if effects
-        .iter()
-        .all(|effect| matches!(effect, EffectKind::ReadFilesystem | EffectKind::UseSecret))
-    {
-        ConcurrencyHint::SafeForParallel
-    } else {
-        ConcurrencyHint::Exclusive
     }
 }
 
@@ -4223,49 +4236,6 @@ mod tests {
     use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
-
-    #[test]
-    fn concurrency_hint_treats_empty_effects_as_exclusive() {
-        assert_eq!(
-            concurrency_hint_from_effects(&[]),
-            ConcurrencyHint::Exclusive
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_read_and_secret_effects_as_parallel_safe() {
-        let effects = vec![EffectKind::ReadFilesystem, EffectKind::UseSecret];
-
-        assert_eq!(
-            concurrency_hint_from_effects(&effects),
-            ConcurrencyHint::SafeForParallel
-        );
-    }
-
-    #[test]
-    fn concurrency_hint_treats_any_mutating_effect_as_exclusive() {
-        let exclusive_effects = [
-            EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem,
-            EffectKind::Network,
-            EffectKind::ExecuteCode,
-            EffectKind::SpawnProcess,
-            EffectKind::DispatchCapability,
-            EffectKind::ModifyExtension,
-            EffectKind::ModifyApproval,
-            EffectKind::ModifyBudget,
-            EffectKind::ExternalWrite,
-            EffectKind::Financial,
-        ];
-
-        for effect in exclusive_effects {
-            assert_eq!(
-                concurrency_hint_from_effects(&[effect]),
-                ConcurrencyHint::Exclusive,
-                "{effect:?}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn decorating_factory_with_no_decorators_delegates_to_inner() {

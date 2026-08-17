@@ -593,13 +593,6 @@ pub struct RebornRuntime {
     >,
     /// Sibling rebindable slot for the trigger delivery-target service; the
     /// test-support repoint seam swaps both slots together.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state:
-        Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -782,6 +775,9 @@ pub(crate) type ComposedSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
 type ComposedSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<CompositeRootFilesystem>>;
+
+mod trigger_execution_preflight;
+use trigger_execution_preflight::StructuredTriggerExecutionPreflight;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(
@@ -2292,8 +2288,6 @@ impl RebornRuntime {
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
-                source_binding_ref: self.source_binding_ref.clone(),
-                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 requested_run_profile: None,
                 idempotency_key,
                 received_at: Utc::now(),
@@ -3113,6 +3107,12 @@ async fn build_runtime_with_resource_governor_inner(
             limit.get(),
         );
     }
+    if let Some(limit) = runner.max_concurrent_unbound_runs {
+        max_running_by_class.insert(
+            ProcessConcurrencyClass::from_trusted("unbound"),
+            limit.get(),
+        );
+    }
     services_input = services_input.with_process_concurrency_limits(ProcessConcurrencyLimits {
         max_running_per_owner: runner
             .max_concurrent_runs_per_user
@@ -3856,7 +3856,6 @@ async fn build_runtime_with_resource_governor_inner(
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
-            parallel_tool_batch: default_runtime_config.parallel_tool_batch,
             tool_disclosure_profile_pins: default_runtime_config.tool_disclosure_profile_pins,
             planned_default_iteration_limit: optional_nonzero_u32_env(
                 "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
@@ -3980,6 +3979,19 @@ async fn build_runtime_with_resource_governor_inner(
         .await
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("could not resolve default run profile: {error}"),
+        })?;
+    services
+        .trigger_create_hook
+        .bind_execution_preflight(Arc::new(StructuredTriggerExecutionPreflight::new(
+            Arc::clone(&services.shared_extension_registry),
+            skill_activation_source.clone(),
+            default_resolved_run_profile.clone(),
+            // Mirrors the runner's decorator-attach condition: bridge ids only
+            // exist on fired runs when disclosure is enabled.
+            resolved_tool_disclosure.is_enabled(),
+        )))
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("structured trigger preflight could not be bound: {error}"),
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let failure_explanation_thread_id =
@@ -4478,8 +4490,6 @@ async fn build_runtime_with_resource_governor_inner(
         trigger_repository: trigger_repository.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
-        #[cfg(any(test, feature = "test-support"))]
-        trigger_source_turn_state: Arc::clone(&services.trigger_source_turn_state),
         broadcast_budget_event_sink,
         external_tool_catalog: services.external_tool_catalog.clone(),
         persistent_approval_policies: Arc::clone(&services.persistent_approval_policies),

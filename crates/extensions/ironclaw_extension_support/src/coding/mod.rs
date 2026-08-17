@@ -8,6 +8,7 @@
 //! grant permission check (`paths`).
 
 mod config;
+
 mod paths;
 
 /// Pinned coding engines (issue #7392); wired to production
