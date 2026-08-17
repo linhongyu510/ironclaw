@@ -410,6 +410,7 @@ mod tests {
             capability: capability(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         };
         let transition = error
             .invocation_state_transition()
