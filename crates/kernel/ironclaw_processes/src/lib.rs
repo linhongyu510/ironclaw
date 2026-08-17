@@ -43,7 +43,6 @@ pub use invocation_state::{
     ProcessInvocationError, ProcessInvocationRecord, ProcessInvocationStart,
     ProcessInvocationStatePort, ProcessInvocationStatus, ProcessInvocationStore,
 };
-pub(crate) use journal::SettleProcessDependencyRequest;
 pub use journal::{
     CancelProcessRequest, ClaimProcessDependencySettlementRequest, ClaimProcessesRequest,
     ClaimedProcess, CloseProcessDependencyRequest, CompleteProcessDependencySettlementRequest,
@@ -65,11 +64,12 @@ pub use journal::{
     ProcessLifecycleLookupBatchRequest, ProcessLifecycleLookupRequest,
     ProcessLifecycleLookupResult, ProcessLifecycleLookupSource, ProcessLifecycleStatus,
     ProcessOperationId, ProcessOutcome, ProcessSnapshotSource, ProcessStateTransitionRequest,
-    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTerminalEvidence,
-    ProcessTransitionPort, ProcessTreePort, ProcessTreeReservation, ProcessWorkerId,
-    PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    ProcessSubmissionEdge, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
+    ProcessTerminalEvidence, ProcessTransitionPort, ProcessTreePort, ProcessTreeReservation,
+    ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
-    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest, StopProcessRequest,
+    ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
     SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 pub use journal_store::{
