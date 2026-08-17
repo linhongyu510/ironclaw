@@ -184,6 +184,10 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.list_notifications` | GET | `/api/webchat/v2/notifications` (`?limit&cursor`) | — | `ProductSurface` |
+| `webui.v2.mark_notification_read` | POST | `/api/webchat/v2/notifications/{notification_id}/read` | — | `ProductSurface` |
+| `webui.v2.mark_all_notifications_read` | POST | `/api/webchat/v2/notifications/read-all` | — | `ProductSurface` |
+| `webui.v2.archive_notification` | POST | `/api/webchat/v2/notifications/{notification_id}/archive` | — | `ProductSurface` |
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
 | `webui.v2.session_channel_message` | POST | `/api/webchat/v2/channels/{extension_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
