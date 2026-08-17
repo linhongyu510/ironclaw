@@ -69,6 +69,7 @@ fn execution_contract(goal: impl Into<String>) -> Value {
         "success_criteria": ["Complete the requested routine task"],
         "output_instructions": "Return a concise result",
         "no_result_text": "No result",
+        "required_capability_ids": [],
         "policy": { "result_delivery": "deliver" }
     })
 }
