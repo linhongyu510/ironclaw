@@ -1,7 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
-    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind, ProviderDiagnostic},
     error::HostApiError,
     ids::{CapabilityId, SecretHandle},
 };
@@ -52,6 +52,7 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        model_visible_cause: Option<Box<ProviderDiagnostic>>,
     },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
@@ -140,10 +141,12 @@ impl From<DispatchError> for CapabilityInvocationError {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             } => Self::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             },
             other @ (DispatchError::UnknownCapability { .. }
             | DispatchError::UnknownProvider { .. }
@@ -153,6 +156,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::MissingAuthorization { .. }
             | DispatchError::AuthorizationExpired { .. }
             | DispatchError::MissingProcessAuthorization { .. }
+            | DispatchError::Rejected { .. }
             | DispatchError::Mcp { .. }
             | DispatchError::Script { .. }
             | DispatchError::Wasm { .. }
@@ -171,6 +175,9 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 
 fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     match error {
+        DispatchError::Rejected { diagnostic, .. } => diagnostic
+            .as_ref()
+            .and_then(provider_diagnostic_model_cause),
         DispatchError::Mcp {
             model_visible_cause,
             ..
@@ -203,9 +210,24 @@ fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
     }
 }
 
+fn provider_diagnostic_model_cause(
+    diagnostic: &ironclaw_host_api::dispatch::ProviderDiagnostic,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(code) = &diagnostic.code {
+        parts.push(format!("provider error code: {}", code.as_str()));
+    }
+    if let Some(message) = &diagnostic.message {
+        parts.push(format!("provider message: {}", message.as_str()));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
 fn dispatch_error_detail(error: &DispatchError) -> Option<DispatchFailureDetail> {
     match error {
-        DispatchError::FirstParty { detail, .. } => detail.clone(),
+        DispatchError::FirstParty { detail, .. } | DispatchError::Rejected { detail, .. } => {
+            detail.clone()
+        }
         _ => None,
     }
 }
@@ -288,6 +310,42 @@ mod tests {
         assert_eq!(
             dispatch_error_model_visible_cause(&error).as_deref(),
             Some("MCP request failed at /tmp/{socket}")
+        );
+    }
+
+    #[test]
+    fn provider_rejection_preserves_typed_diagnostic_for_model_projection() {
+        let error = CapabilityInvocationError::from(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Mcp),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+            diagnostic: Some(ProviderDiagnostic {
+                code: Some(ironclaw_host_api::dispatch::ProviderErrorCode::new(
+                    "mcp_tool_rejected",
+                )),
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "token lacks repo scope",
+                )),
+                retry_after: None,
+            }),
+            detail: None,
+            attempt: None,
+        });
+
+        let CapabilityInvocationError::Dispatch {
+            kind, safe_summary, ..
+        } = error
+        else {
+            panic!("provider rejection must remain a recoverable dispatch failure");
+        };
+        assert_eq!(
+            kind,
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
+        );
+        assert_eq!(
+            safe_summary.as_deref(),
+            Some(
+                "provider error code: mcp_tool_rejected; provider message: token lacks repo scope"
+            )
         );
     }
 
@@ -390,12 +448,14 @@ mod tests {
                 capability: cap(),
                 required_secrets: secrets.clone(),
                 credential_requirements: Vec::new(),
+                model_visible_cause: None,
             });
             match err {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
                     capability,
                     required_secrets,
                     credential_requirements,
+                    ..
                 } => {
                     assert_eq!(capability, cap(), "handles: {handles:?}");
                     assert_eq!(required_secrets, secrets, "handles: {handles:?}");
@@ -420,6 +480,13 @@ mod tests {
             capability: cap(),
             required_secrets: Vec::new(),
             credential_requirements: vec![requirement.clone()],
+            model_visible_cause: Some(Box::new(ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            })),
         });
 
         match err {
@@ -427,10 +494,19 @@ mod tests {
                 capability,
                 required_secrets,
                 credential_requirements,
+                model_visible_cause,
             } => {
                 assert_eq!(capability, cap());
                 assert!(required_secrets.is_empty());
                 assert_eq!(credential_requirements, vec![requirement]);
+                assert_eq!(
+                    model_visible_cause
+                        .as_ref()
+                        .and_then(|diagnostic| diagnostic.message.as_ref())
+                        .map(|message| message.as_str()),
+                    Some("Bad credentials")
+                );
+                assert!(!format!("{model_visible_cause:?}").contains("Bad credentials"));
             }
             other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }

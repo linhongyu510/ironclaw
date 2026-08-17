@@ -18,6 +18,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     action::NetworkMethod,
+    dispatch::{ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage},
     http::CapabilityHostHttpRequest,
     ids::{CapabilityId, ExtensionId},
     resource::{ResourceScope, ResourceUsage},
@@ -282,15 +283,28 @@ where
                     if challenge.www_authenticate_metadata.is_empty()
                         && challenge.protected_resource_metadata.is_empty()
                     {
-                        McpClientError::AuthRequired
+                        McpClientError::AuthRequired {
+                            usage: usage.clone(),
+                        }
                     } else {
-                        McpClientError::AuthChallenge { challenge }
+                        McpClientError::AuthChallenge {
+                            challenge,
+                            usage: usage.clone(),
+                        }
                     },
                 );
             }
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::HttpStatus(response.status),
-            )));
+            return Err(McpClientError::ProviderRejected {
+                diagnostic: Box::new(ProviderDiagnostic {
+                    code: Some(ProviderErrorCode::new(format!(
+                        "mcp_http_status_{}",
+                        response.status
+                    ))),
+                    message: None,
+                    retry_after: None,
+                }),
+                usage,
+            });
         }
         let session_id = mcp_session_id_from_response(&response).map_err(McpClientError::client)?;
 
@@ -372,12 +386,10 @@ where
             .await?;
         accumulate_usage(&mut usage, initialize.usage);
         if let Some(error) = initialize.response.error {
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError {
-                    code: error.code,
-                    message: error.message,
-                },
-            )));
+            return Err(McpClientError::ProviderRejected {
+                diagnostic: Box::new(json_rpc_provider_diagnostic(error.code, error.message)),
+                usage,
+            });
         }
         self.store_session(
             session_key,
@@ -400,12 +412,10 @@ where
         accumulate_usage(&mut usage, initialized.usage);
         self.update_session_id(session_key, initialized.session_id.clone())?;
         if let Some(error) = initialized.response.error {
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError {
-                    code: error.code,
-                    message: error.message,
-                },
-            )));
+            return Err(McpClientError::ProviderRejected {
+                diagnostic: Box::new(json_rpc_provider_diagnostic(error.code, error.message)),
+                usage,
+            });
         }
         Ok(usage)
     }
@@ -461,16 +471,20 @@ where
         accumulate_usage(&mut usage, call.usage);
         self.update_session_id(&session_key, call.session_id.clone())?;
         if let Some(error) = call.response.error {
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError {
-                    code: error.code,
-                    message: error.message,
-                },
-            )));
+            return Err(McpClientError::ProviderRejected {
+                diagnostic: Box::new(json_rpc_provider_diagnostic(error.code, error.message)),
+                usage,
+            });
         }
         let output = call.response.result.ok_or_else(|| {
             McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
         })?;
+        let provider_rejection =
+            call_tool_rejection_message(&output).map(|message| ProviderDiagnostic {
+                code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
+                message: Some(UntrustedProviderMessage::new(message)),
+                retry_after: None,
+            });
         let output_bytes = serde_json::to_vec(&output)
             .map(|bytes| bytes.len() as u64)
             .map_err(|err| {
@@ -484,6 +498,7 @@ where
             output,
             usage,
             output_bytes: Some(output_bytes),
+            provider_rejection,
         })
     }
 
@@ -602,6 +617,36 @@ where
             tools: discovered,
             usage,
         })
+    }
+}
+
+fn call_tool_rejection_message(result: &Value) -> Option<String> {
+    if result.get("isError").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if text.is_empty() {
+        Some("MCP server rejected the tool call".to_string())
+    } else {
+        Some(text)
+    }
+}
+
+fn json_rpc_provider_diagnostic(code: Option<i64>, message: Option<String>) -> ProviderDiagnostic {
+    ProviderDiagnostic {
+        code: code.map(|code| ProviderErrorCode::new(format!("mcp_jsonrpc_error_{code}"))),
+        message: message.map(UntrustedProviderMessage::new),
+        retry_after: None,
     }
 }
 

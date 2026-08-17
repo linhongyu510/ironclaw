@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IronClaw Capability Response Normalization</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f3f0e8, #101311);
+      --surface: light-dark(#fffdf8, #191d1a);
+      --surface-2: light-dark(#ebe6da, #222822);
+      --ink: light-dark(#17201b, #eef4ec);
+      --muted: light-dark(#59665e, #a8b5aa);
+      --line: light-dark(#c9c3b6, #3a443b);
+      --green: light-dark(#176b4b, #55d69b);
+      --green-soft: light-dark(#dcefe5, #173d2d);
+      --amber: light-dark(#936300, #f5bd4e);
+      --amber-soft: light-dark(#faedca, #493713);
+      --red: light-dark(#a43c36, #ff8c83);
+      --red-soft: light-dark(#f7dfdc, #48201d);
+      --blue: light-dark(#285b9c, #84b7ff);
+      --blue-soft: light-dark(#dfeaf8, #1c304a);
+      --shadow: 0 16px 40px color-mix(in srgb, #000 12%, transparent);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--green) 9%, transparent), transparent 28rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 80px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      color: var(--green);
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 850px;
+      margin: 6px 0 10px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2.15rem, 5vw, 4.6rem);
+      font-weight: 500;
+      letter-spacing: -0.045em;
+      line-height: 0.98;
+    }
+
+    .lede {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .status {
+      align-self: start;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
+    nav {
+      position: sticky;
+      top: 12px;
+      z-index: 10;
+      display: flex;
+      gap: 6px;
+      width: fit-content;
+      max-width: 100%;
+      margin: 0 0 28px;
+      padding: 6px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+
+    nav button {
+      border: 0;
+      border-radius: 9px;
+      padding: 9px 13px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.86rem;
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    nav button[aria-selected="true"] {
+      background: var(--ink);
+      color: var(--bg);
+    }
+
+    section[hidden] { display: none; }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(280px, 1.2fr);
+      gap: 28px;
+      align-items: end;
+      margin: 18px 0 24px;
+    }
+
+    h2 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(1.75rem, 3.2vw, 3rem);
+      font-weight: 500;
+      letter-spacing: -0.035em;
+      line-height: 1;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 15px 18px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .flow {
+      display: grid;
+      gap: 11px;
+      padding: 20px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 11px;
+      align-items: stretch;
+    }
+
+    .node {
+      position: relative;
+      min-height: 84px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-2);
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 0.92rem;
+    }
+
+    .node span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.77rem;
+      line-height: 1.35;
+    }
+
+    .node.problem { border-color: var(--red); background: var(--red-soft); }
+    .node.warn { border-color: var(--amber); background: var(--amber-soft); }
+    .node.good { border-color: var(--green); background: var(--green-soft); }
+    .node.boundary { border-color: var(--blue); background: var(--blue-soft); }
+
+    .arrow {
+      display: grid;
+      place-items: center;
+      height: 22px;
+      color: var(--muted);
+      font-size: 1.15rem;
+    }
+
+    .lane-grid,
+    .compare,
+    .journeys,
+    .phase-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .lane-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .compare { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .journeys { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .phase-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .lane,
+    .compare article,
+    .journey,
+    .phase {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+
+    .lane h3,
+    .compare h3,
+    .journey h3,
+    .phase h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+
+    .lane p,
+    .compare p,
+    .journey p,
+    .phase p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .tag {
+      display: inline-block;
+      margin-bottom: 10px;
+      color: var(--green);
+      font-size: 0.69rem;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .tag.red { color: var(--red); }
+    .tag.amber { color: var(--amber); }
+    .tag.blue { color: var(--blue); }
+
+    .contract {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 12px;
+      align-items: center;
+      padding: 24px;
+    }
+
+    .contract .arrow-right {
+      color: var(--muted);
+      font-size: 1.4rem;
+    }
+
+    .code {
+      margin: 16px 0 0;
+      padding: 18px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: light-dark(#242922, #090b09);
+      color: light-dark(#f4f7f1, #dce7dc);
+      font: 0.82rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      white-space: pre;
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 0;
+      margin-top: 18px;
+      padding-left: 28px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 9px;
+      top: 14px;
+      bottom: 18px;
+      width: 2px;
+      background: var(--line);
+    }
+
+    .step {
+      position: relative;
+      padding: 0 0 22px 10px;
+    }
+
+    .step::before {
+      content: "";
+      position: absolute;
+      left: -25px;
+      top: 5px;
+      width: 10px;
+      height: 10px;
+      border: 3px solid var(--surface);
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 1px var(--green);
+    }
+
+    .step strong { display: block; font-size: 0.91rem; }
+    .step span { color: var(--muted); font-size: 0.81rem; }
+
+    .decision {
+      margin-top: 18px;
+      padding: 16px 18px;
+      border-left: 4px solid var(--green);
+      background: var(--green-soft);
+      color: var(--ink);
+    }
+
+    .decision strong { display: block; margin-bottom: 4px; }
+    .decision p { margin: 0; color: var(--muted); }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 0.76rem;
+    }
+
+    .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 6px;
+      border-radius: 3px;
+      background: var(--line);
+    }
+
+    .legend .l-problem::before { background: var(--red); }
+    .legend .l-boundary::before { background: var(--blue); }
+    .legend .l-good::before { background: var(--green); }
+    .legend .l-warn::before { background: var(--amber); }
+
+    footer {
+      margin-top: 34px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    footer a { color: var(--green); }
+
+    @media (max-width: 840px) {
+      header, .section-head { grid-template-columns: 1fr; }
+      .status { justify-self: start; }
+      .flow-row, .lane-grid, .journeys { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .contract { grid-template-columns: 1fr; }
+      .contract .arrow-right { transform: rotate(90deg); justify-self: center; }
+    }
+
+    @media (max-width: 560px) {
+      main { width: min(100% - 20px, 1180px); padding-top: 26px; }
+      .flow-row, .lane-grid, .compare, .journeys, .phase-grid { grid-template-columns: 1fr; }
+      nav { width: 100%; }
+      h1 { font-size: 2.35rem; }
+    }
+
+    @media print {
+      nav { display: none; }
+      section[hidden] { display: block; }
+      section { break-before: page; }
+      section:first-of-type { break-before: auto; }
+      .panel, .lane, .compare article, .journey, .phase { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">IronClaw architecture proposal</div>
+        <h1>Capability response normalization</h1>
+        <p class="lede">One existing runtime outcome, one central processor, fewer wrappers, safe protocol defaults, and additive persistence—without credential probing or new lifecycle states.</p>
+      </div>
+      <div class="status">Proposed · 2026-08-14</div>
+    </header>
+
+    <nav role="tablist" aria-label="Architecture views">
+      <button type="button" role="tab" aria-selected="true" aria-controls="current" id="tab-current">Current flow</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="proposed" id="tab-proposed">Proposed flow</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="experience" id="tab-experience">User experience</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="persistence" id="tab-persistence">Persistence &amp; patterns</button>
+      <button type="button" role="tab" aria-selected="false" aria-controls="rollout" id="tab-rollout">Implementation</button>
+    </nav>
+
+    <section id="current" role="tabpanel" aria-labelledby="tab-current">
+      <div class="section-head">
+        <h2>One response is transformed too many times</h2>
+        <p>Transport is already mediated and final model output is already hardened. The unnecessary complexity is the chain of wrappers and repeated matches between dispatch and the runtime outcome.</p>
+      </div>
+
+      <pre class="code">RuntimeAdapterResult / DispatchError
+                    │
+                    ▼
+        CapabilityDispatchResult
+                    │
+                    ▼
+CapabilityInvocationResult / CapabilityInvocationError
+                    │
+                    ▼
+ completion helpers / translation helper / resume-specific matches
+                    │
+                    ▼
+        RuntimeCapabilityOutcome</pre>
+
+      <div class="panel">
+        <div class="panel-title"><span>Current execution path</span><span>Red marks information loss</span></div>
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node boundary"><strong>Capability call</strong><span>Authorized, approved, and resource-scoped</span></div>
+            <div class="node boundary"><strong>Credential presence</strong><span>Missing credentials raise a preflight auth gate</span></div>
+            <div class="node boundary"><strong>Runtime selection</strong><span>WASM · MCP · first-party · ToolAdapter</span></div>
+            <div class="node boundary"><strong>Mediated transport</strong><span>Bounded egress with host-side credential injection</span></div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="flow-row">
+            <div class="node problem"><strong>WASM convention</strong><span>Guest returns optional output/error strings; host reparses JSON hidden in the error string</span></div>
+            <div class="node problem"><strong>MCP blind spot</strong><span>JSON-RPC result is success even when CallToolResult.isError is true</span></div>
+            <div class="node warn"><strong>First-party mapping</strong><span>Each handler maps status, body, auth, and diagnostic independently</span></div>
+            <div class="node warn"><strong>ToolAdapter mapping</strong><span>Typed result/error, but auth and ordinary failure carry different diagnostic shapes</span></div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="flow-row">
+            <div class="node good"><strong>Shared success path</strong><span>RuntimeAdapterResult, resource accounting, output obligations</span></div>
+            <div class="node problem"><strong>Parallel failure paths</strong><span>DispatchError mixes provider outcomes with runtime failures</span></div>
+            <div class="node good"><strong>Runtime outcome</strong><span>Completed, Failed, AuthRequired, or another gate</span></div>
+            <div class="node good"><strong>Model projection</strong><span>Secret scrub, control normalization, injection fence</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span class="l-problem">Incorrect or lossy seam</span>
+        <span class="l-warn">Duplicated interpretation</span>
+        <span class="l-boundary">Existing trusted boundary</span>
+        <span class="l-good">Existing shared behavior</span>
+      </div>
+
+      <div class="lane-grid" style="margin-top: 22px">
+        <article class="lane"><span class="tag red">WASM</span><h3>Weak final ABI</h3><p>Provider packages encode structured errors into strings because the WIT response has no typed outcome.</p></article>
+        <article class="lane"><span class="tag red">MCP</span><h3>Protocol error as success</h3><p>The JSON-RPC envelope is parsed, but the semantic CallToolResult error bit is not.</p></article>
+        <article class="lane"><span class="tag amber">First-party</span><h3>Per-handler policy</h3><p>Useful details depend on which helper or handler happened to map the response.</p></article>
+        <article class="lane"><span class="tag amber">ToolAdapter</span><h3>Closest existing shape</h3><p>Typed errors exist, but provider rejection, auth, and infrastructure are still not one semantic vocabulary.</p></article>
+      </div>
+
+      <div class="decision">
+        <strong>Root cause</strong>
+        <p>IronClaw already has the right runtime-neutral outcome. The defect is that no single owner constructs it, so success, auth, and failure are repeatedly renamed and reclassified.</p>
+      </div>
+    </section>
+
+    <section id="proposed" role="tabpanel" aria-labelledby="tab-proposed" hidden>
+      <div class="section-head">
+        <h2>Reuse the outcome we already have</h2>
+        <p>The protocol default handles conventional behavior. Provider code overrides only decoding; after trusted dispatch and CapabilityHost lifecycle work, one processor produces the existing RuntimeCapabilityOutcome.</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title"><span>Target path</span><span>One semantic processor</span></div>
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node warn"><strong>Runtime adapter</strong><span>Default protocol decoder or provider override returns the shared dispatch contract</span></div>
+            <div class="node boundary"><strong>Trusted dispatcher</strong><span>Adds authoritative capability, provider, and runtime identity</span></div>
+            <div class="node boundary"><strong>CapabilityHost</strong><span>Authorization, obligations, leases, accounting, and lifecycle</span></div>
+            <div class="node good"><strong>Response processor</strong><span>The only constructor path for inline RuntimeCapabilityOutcome values</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="compare" style="margin-top: 18px">
+        <article>
+          <span class="tag red">Delete or fold</span>
+          <h3>Meaningless intermediaries</h3>
+          <p>CapabilityInvocationResult, completion helper chains, duplicated resume matches, lane-named provider failures, and the synthetic-only Unknown runtime outcome.</p>
+        </article>
+        <article>
+          <span class="tag blue">Keep</span>
+          <h3>Real trust boundaries</h3>
+          <p>Runtime protocol adaptation, trusted dispatch identity, CapabilityHost authority and obligations, and loop-owned persistence/model safety.</p>
+        </article>
+      </div>
+
+      <pre class="code">Result&lt;CapabilityDispatchResult, CapabilityInvocationError&gt;
+                    │
+                    ▼
+       CapabilityResponseProcessor
+                    │
+                    ▼
+        RuntimeCapabilityOutcome
+        ├── Completed(...)
+        ├── Failed(... + ProviderDiagnostic)
+        ├── AuthRequired(... + ProviderDiagnostic)
+        └── ApprovalRequired(...)
+
+Other host orchestration paths retain
+ResourceBlocked(...) and SpawnedProcess(...)
+
+ProviderDiagnostic
+├── code: Option&lt;ProviderErrorCode&gt;
+├── message: Option&lt;UntrustedProviderMessage&gt;
+└── retry_after: Option&lt;Duration&gt;
+
+DispatchAttemptAccounting
+├── usage: ResourceUsage
+└── receipt: ResourceReceipt</pre>
+
+      <div class="panel" style="margin-top: 18px">
+        <div class="panel-title"><span>Provider-observed authentication</span><span>Host enriches; lanes do not guess</span></div>
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node warn"><strong>Adapter observation</strong><span>Decoder reports pre-operation auth semantics, diagnostic, and measured usage—never a receipt</span></div>
+            <div class="node boundary"><strong>Dispatcher settlement</strong><span>The single reservation owner reconciles exactly once and attaches attempt accounting</span></div>
+            <div class="node boundary"><strong>CapabilityHost join</strong><span>Derives the prompt from prepared obligations; ambiguity uses existing SecretDenied plus detail</span></div>
+            <div class="node good"><strong>Processor lift</strong><span>Fully enriched AuthorizationRequiresAuth becomes the existing runtime auth gate</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lane-grid" style="margin-top: 18px">
+        <article class="lane"><span class="tag">HTTP default</span><h3>Conventional APIs</h3><p>2xx success; attributable provider 401 auth; 403 permission; 429 retry; proxy or redirect 401 stays a rejection.</p></article>
+        <article class="lane"><span class="tag">MCP default</span><h3>Protocol-aware</h3><p>JSON-RPC errors and CallToolResult.isError become rejections; malformed protocol is an execution fault.</p></article>
+        <article class="lane"><span class="tag amber">Extension override</span><h3>Provider semantics</h3><p>Slack ok:false, GraphQL errors, GitHub validation, Google envelopes, side-effect evidence.</p></article>
+        <article class="lane"><span class="tag blue">Host facade</span><h3>Always enforced</h3><p>One concrete processor applies policy and returns the existing runtime outcome; no override bypasses host safety.</p></article>
+      </div>
+
+      <div class="decision">
+        <strong>Abstraction rule</strong>
+        <p>The processor is a concrete host-runtime module, not a trait. Add a decoder strategy trait only when two production implementations actually meet at one selection boundary.</p>
+      </div>
+    </section>
+
+    <section id="experience" role="tabpanel" aria-labelledby="tab-experience" hidden>
+      <div class="section-head">
+        <h2>Truthful without continuous probing</h2>
+        <p>Active means configured for use. A provider rejection becomes new evidence during execution, not a reason to delete the stored credential.</p>
+      </div>
+
+      <div class="journeys">
+        <article class="journey">
+          <span class="tag blue">1 · Save</span>
+          <h3>User enters a credential</h3>
+          <div class="timeline">
+            <div class="step"><strong>Validate local shape</strong><span>Bounds and required fields only</span></div>
+            <div class="step"><strong>Store securely</strong><span>No provider probe is required</span></div>
+            <div class="step"><strong>Project active</strong><span>All declared setup requirements are present</span></div>
+          </div>
+        </article>
+
+        <article class="journey">
+          <span class="tag">2 · Accepted</span>
+          <h3>Provider accepts the call</h3>
+          <div class="timeline">
+            <div class="step"><strong>Completed outcome</strong><span>Structured output and effect evidence</span></div>
+            <div class="step"><strong>Host validation</strong><span>Obligations and output schema</span></div>
+            <div class="step"><strong>Model sees success</strong><span>Durably written observation</span></div>
+          </div>
+        </article>
+
+        <article class="journey">
+          <span class="tag red">3 · Rejected</span>
+          <h3>Provider rejects authentication</h3>
+          <div class="timeline">
+            <div class="step"><strong>Auth signal</strong><span>Decoder proves a pre-operation authentication rejection</span></div>
+            <div class="step"><strong>Host enrichment</strong><span>CapabilityHost derives the one applicable credential requirement</span></div>
+            <div class="step"><strong>Attempt accounted</strong><span>Usage is reconciled even though the provider rejected the call</span></div>
+            <div class="step"><strong>Credential retained</strong><span>User may replace it or add scopes</span></div>
+            <div class="step"><strong>Safe auth resume</strong><span>Same fingerprint and approval identity re-enter the full canonical path</span></div>
+          </div>
+        </article>
+      </div>
+
+      <div class="panel" style="margin-top: 18px">
+        <div class="panel-title"><span>Public state remains simple</span><span>No fourth state</span></div>
+        <div class="contract">
+          <div class="node"><strong>Uninstalled</strong><span>No caller membership</span></div>
+          <div class="arrow-right">→</div>
+          <div class="node warn"><strong>Setup needed</strong><span>Missing setup—or optionally an unresolved caller auth gate</span></div>
+          <div class="arrow-right">→</div>
+          <div class="node good"><strong>Active</strong><span>Installed and caller requirements are present</span></div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <strong>State recommendation</strong>
+        <p>Do not move the host checkpoint back to Configured and do not clear credentials. Unknown commit state or ambiguous credential attribution must fail without a resumable auth gate. If the card must react, fold only a valid unresolved caller-scoped auth gate into setup_needed.</p>
+      </div>
+    </section>
+
+    <section id="persistence" role="tabpanel" aria-labelledby="tab-persistence" hidden>
+      <div class="section-head">
+        <h2>Evolve records without routine migrations</h2>
+        <p>The runtime enum stays in memory. Existing durable gate, resolution, event, and projection records use additive Serde fields and fail-closed required authority.</p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title"><span>Persistence boundary</span><span>Stable records, flexible metadata</span></div>
+        <div class="contract">
+          <div class="node boundary"><strong>RuntimeCapabilityOutcome</strong><span>In-memory host decision; not the durable wire schema</span></div>
+          <div class="arrow-right">→</div>
+          <div class="node good"><strong>Existing durable record</strong><span>Gate · resolution · event · result reference</span></div>
+          <div class="arrow-right">→</div>
+          <div class="node good"><strong>Serde bytes</strong><span>Additive optional metadata; explicit stable tags</span></div>
+        </div>
+      </div>
+
+      <div class="compare" style="margin-top: 18px">
+        <article>
+          <span class="tag">Naturally evolvable</span>
+          <h3>Optional diagnostics</h3>
+          <p>New fields default to None, are omitted when absent, tolerate unknown fields, and are covered by old/new golden fixtures.</p>
+        </article>
+        <article>
+          <span class="tag red">Must fail closed</span>
+          <h3>Authority and identity</h3>
+          <p>Tenant, user, invocation, gate, credential authority, authorization evidence, and side-effect proof remain required.</p>
+        </article>
+      </div>
+
+      <pre class="code">#[derive(Serialize, Deserialize)]
+struct PersistedAuthGate {
+    gate_id: RuntimeGateId,              // required
+    capability_id: CapabilityId,         // required
+    credential_requirements: Vec&lt;...&gt;,  // required
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_diagnostic: Option&lt;ModelDiagnostic&gt;,
+}</pre>
+
+      <div class="lane-grid" style="margin-top: 18px">
+        <article class="lane"><span class="tag blue">Adapter</span><h3>Protocol boundary</h3><p>WASM, MCP, first-party, and native responses adapt to the same dispatch contract.</p></article>
+        <article class="lane"><span class="tag">Facade</span><h3>One semantic entry</h3><p>A concrete processor constructs inline runtime outcomes and hides no alternate execution path.</p></article>
+        <article class="lane"><span class="tag amber">Optional Strategy</span><h3>Decoder choice only</h3><p>Use existing adapter selection; add a trait only when two production decoders require dynamic selection.</p></article>
+        <article class="lane"><span class="tag red">No pattern ceremony</span><h3>Plain functions</h3><p>The fixed call sequence and ordered message extraction do not need Template Method or responsibility-chain hierarchies.</p></article>
+      </div>
+
+      <div class="decision">
+        <strong>Migration rule</strong>
+        <p>Adding optional provider context does not justify a migration. Before deleting the in-memory Unknown outcome, a legacy persisted-resolution fixture must prove unknown failure tags still project as bounded Unclassified failures without becoming success.</p>
+      </div>
+    </section>
+
+    <section id="rollout" role="tabpanel" aria-labelledby="tab-rollout" hidden>
+      <div class="section-head">
+        <h2>Four independently reviewable changes</h2>
+        <p>Each phase starts with caller-level regression coverage and leaves a reversible compatibility boundary.</p>
+      </div>
+
+      <div class="phase-grid">
+        <article class="phase">
+          <span class="tag blue">PR 1</span>
+          <h3>Centralize and simplify</h3>
+          <p>Pin all invocation modes, add the concrete processor, remove CapabilityInvocationResult, prove legacy persisted-tag replay, then remove Unknown across host-runtime, loop-host, and composition.</p>
+        </article>
+        <article class="phase">
+          <span class="tag blue">PR 2</span>
+          <h3>Diagnostics and defaults</h3>
+          <p>Shared diagnostics, host-owned credential enrichment, existing-kind ambiguity failures, dispatcher-owned attempt settlement, default HTTP/MCP decoding, and safe auth resume.</p>
+        </article>
+        <article class="phase">
+          <span class="tag amber">PR 3</span>
+          <h3>Typed WASM outcome</h3>
+          <p>WIT variant, legacy compatibility, six bundled guest migrations, artifact rebuilds, and transitive freshness coverage.</p>
+        </article>
+        <article class="phase">
+          <span class="tag">PR 4</span>
+          <h3>Product projection and cleanup</h3>
+          <p>Optional setup_needed overlay, removal of string-error parsing, removal of parallel diagnostics, and additive persistence verification.</p>
+        </article>
+      </div>
+
+      <div class="panel" style="margin-top: 18px">
+        <div class="panel-title"><span>Migration safety</span><span>Required gates</span></div>
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node good"><strong>Compatibility</strong><span>Host accepts legacy and typed WASM outcomes during one explicit window</span></div>
+            <div class="node good"><strong>Security</strong><span>Provider diagnostics bounded, Debug-redacted, scrubbed, and fenced</span></div>
+            <div class="node good"><strong>Correctness</strong><span>No write retry without durable or provider-issued evidence</span></div>
+            <div class="node good"><strong>Architecture</strong><span>No vendor names in generic crates; no behavior in composition</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="decision">
+        <strong>Done means convergence, not coexistence</strong>
+        <p>The migration is not complete while legacy WASM string parsing, MCP isError-as-success, or separate auth diagnostic plumbing remains.</p>
+      </div>
+    </section>
+
+    <footer>Full implementation detail: <a href="./capability-response-normalization-plan.md">capability-response-normalization-plan.md</a> · Related issue #7627 · Closed exploratory PR #7668</footer>
+  </main>
+
+  <script>
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+
+    function activateTab(tab) {
+      tabs.forEach((candidate) => {
+        candidate.setAttribute('aria-selected', String(candidate === tab));
+      });
+      panels.forEach((panel) => {
+        panel.hidden = panel.id !== tab.getAttribute('aria-controls');
+      });
+      tab.focus({ preventScroll: true });
+    }
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => activateTab(tab));
+      tab.addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        event.preventDefault();
+        const offset = event.key === 'ArrowRight' ? 1 : -1;
+        activateTab(tabs[(index + offset + tabs.length) % tabs.length]);
+      });
+    });
+  </script>
+</body>
+</html>

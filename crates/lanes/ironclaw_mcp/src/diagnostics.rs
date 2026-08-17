@@ -47,6 +47,8 @@ pub(crate) enum McpRequestDeniedCause {
     DeniedCredentialSource,
     /// The in-memory session map lock was poisoned.
     SessionStatePoisoned,
+    /// A completed provider response reached a pre-transport failure branch.
+    AccountingInvariant,
 }
 
 impl McpRequestDeniedCause {
@@ -62,6 +64,7 @@ impl McpRequestDeniedCause {
             Self::UnsupportedTransport => "mcp_unsupported_transport".to_string(),
             Self::DeniedCredentialSource => "mcp_denied_credential_source".to_string(),
             Self::SessionStatePoisoned => "mcp_session_state_poisoned".to_string(),
+            Self::AccountingInvariant => "mcp_accounting_invariant".to_string(),
         }
     }
 }
@@ -71,8 +74,6 @@ impl McpRequestDeniedCause {
 /// parse-failure cause) for the private model-visible cause channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum McpResponseErrorCause {
-    /// Non-2xx HTTP status from the MCP endpoint.
-    HttpStatus(u16),
     /// JSON-RPC `error` object with code and bounded message.
     JsonRpcError {
         code: Option<i64>,
@@ -129,7 +130,6 @@ impl McpInvalidToolListCause {
 impl McpResponseErrorCause {
     fn into_reason(self) -> String {
         match self {
-            Self::HttpStatus(status) => format!("mcp_http_status_{status}"),
             Self::JsonRpcError { code, message } => {
                 let mut reason = String::from("mcp_jsonrpc_error");
                 if let Some(code) = code {

@@ -795,7 +795,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // obligations that were previously prose in a design doc no
         // implementor reads. Enforcement of all of it stays where it was.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 10_512),
+        // 10_512 -> 10_681 (2026-08-14, capability response normalization):
+        // ToolAdapter auth errors carry the neutral bounded provider diagnostic
+        // through the extension ABI. Parsing and model-safety behavior remain
+        // in runtime lanes and loop_host.
+        ("ironclaw_extension_contracts", 10_681),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -863,7 +867,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // trigger ingress and the runner. Resolution, activation, and
         // capability enforcement remain in their owning implementation crates.
         // Count read from this test's own failure message after the merge.
-        ("ironclaw_host_api", 19_718),
+        // 19_718 -> 19_909 (2026-08-14, capability response normalization):
+        // provider diagnostic and rejected-attempt accounting are neutral
+        // dispatch DTOs. Protocol decoding and settlement stay in their owning
+        // runtime crates.
+        ("ironclaw_host_api", 19_909),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

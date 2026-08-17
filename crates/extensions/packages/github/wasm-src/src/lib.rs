@@ -46,11 +46,24 @@ impl exports::near::agent::tool::Guest for GitHubTool {
 }
 
 fn guest_error_payload(code: &str) -> String {
-    serde_json::json!({
-        "code": code,
-        "kind": guest_error_kind(code),
-    })
-    .to_string()
+    let parsed = serde_json::from_str::<serde_json::Value>(code).ok();
+    let stable_code = parsed
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(code);
+    let message = parsed
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str);
+    let mut payload = serde_json::json!({
+        "code": stable_code,
+        "kind": guest_error_kind(stable_code),
+    });
+    if let Some(message) = message {
+        payload["message"] = serde_json::Value::String(message.to_string());
+    }
+    payload.to_string()
 }
 
 fn guest_error_kind(code: &str) -> &'static str {
@@ -108,7 +121,7 @@ export!(GitHubTool);
 
 #[cfg(test)]
 mod tests {
-    use super::guest_error_kind;
+    use super::{guest_error_kind, guest_error_payload};
     use super::GitHubTool;
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
@@ -319,6 +332,21 @@ mod tests {
             guest_error_kind("github_api_error_status_422"),
             "operation_failed"
         );
+    }
+
+    #[test]
+    fn guest_error_payload_preserves_bounded_provider_message_with_stable_code() {
+        let error = serde_json::json!({
+            "code": "github_api_error_status_401",
+            "message": "Bad credentials",
+        })
+        .to_string();
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&guest_error_payload(&error)).expect("structured guest error");
+        assert_eq!(payload["code"], "github_api_error_status_401");
+        assert_eq!(payload["kind"], "auth_required");
+        assert_eq!(payload["message"], "Bad credentials");
     }
 
     #[test]

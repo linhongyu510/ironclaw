@@ -4,6 +4,7 @@ const GITHUB_API_ROOT: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 #[cfg(not(test))]
 const HTTP_TIMEOUT_MS: u32 = 10_000;
+const MAX_GITHUB_ERROR_MESSAGE_BYTES: usize = 256;
 
 #[cfg(not(test))]
 pub(crate) fn github_request(
@@ -38,11 +39,7 @@ pub(crate) fn github_request(
         return Ok(body);
     }
 
-    if response.status == 422 && is_github_validation_error_body(&response.body) {
-        return Err("github_api_error_status_422_validation".to_string());
-    }
-
-    Err(format!("github_api_error_status_{}", response.status))
+    Err(github_api_error(response.status, &response.body))
 }
 
 #[cfg(test)]
@@ -94,6 +91,58 @@ fn is_github_validation_error_body(body: &[u8]) -> bool {
         .is_some_and(|errors| !errors.is_empty());
 
     message_is_validation && has_validation_errors
+}
+
+fn github_api_error(status: u16, body: &[u8]) -> String {
+    let code = if status == 422 && is_github_validation_error_body(body) {
+        "github_api_error_status_422_validation".to_string()
+    } else {
+        format!("github_api_error_status_{status}")
+    };
+    let message = bounded_github_error_message(body);
+    serde_json::json!({
+        "code": code,
+        "message": message,
+    })
+    .to_string()
+}
+
+fn bounded_github_error_message(body: &[u8]) -> Option<String> {
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let message = parsed.get("message")?.as_str()?.trim();
+    if message.is_empty() {
+        return None;
+    }
+
+    let mut bounded = String::new();
+    for character in message.chars() {
+        if bounded.len() + character.len_utf8() > MAX_GITHUB_ERROR_MESSAGE_BYTES {
+            break;
+        }
+        bounded.push(character);
+    }
+    (!bounded.is_empty()).then_some(bounded)
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::{MAX_GITHUB_ERROR_MESSAGE_BYTES, github_api_error};
+
+    #[test]
+    fn github_api_error_keeps_stable_code_and_bounded_json_message() {
+        let error = github_api_error(
+            401,
+            serde_json::json!({ "message": "x".repeat(1024) })
+                .to_string()
+                .as_bytes(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&error).expect("structured error");
+        assert_eq!(parsed["code"], "github_api_error_status_401");
+        assert_eq!(
+            parsed["message"].as_str().expect("provider message").len(),
+            MAX_GITHUB_ERROR_MESSAGE_BYTES
+        );
+    }
 }
 
 #[cfg(test)]

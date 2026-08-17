@@ -16,7 +16,12 @@ use super::{
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
     RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
+use ironclaw_host_api::dispatch::{
+    ProviderDiagnostic, ProviderErrorCode, UntrustedProviderMessage,
+};
 use ironclaw_host_api::resource::ResourceReceipt;
+
+const MAX_WASM_GUEST_MESSAGE_BYTES: usize = 256;
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -293,12 +298,11 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             capability: capability.clone(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: wasm_guest_provider_diagnostic(error).map(Box::new),
         },
         WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
             kind,
-            model_visible_cause: wasm_guest_error_code(error)
-                .map(|code| format!("provider error code: {code}"))
-                .or_else(|| Some(error.to_string())),
+            model_visible_cause: wasm_guest_error_cause(error).or_else(|| Some(error.to_string())),
         },
     }
 }
@@ -324,6 +328,40 @@ fn wasm_guest_error_code(error: &str) -> Option<String> {
     (!code.is_empty()).then_some(code)
 }
 
+fn wasm_guest_error_cause(error: &str) -> Option<String> {
+    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
+    let code = wasm_guest_error_code(error)?;
+    let stable_cause = format!("provider error code: {code}");
+    let message = bounded_wasm_guest_message(payload.message.as_deref().unwrap_or_default().trim());
+    if message.is_empty() {
+        return Some(stable_cause);
+    }
+    Some(format!("{stable_cause}; provider message: {message}"))
+}
+
+fn wasm_guest_provider_diagnostic(error: &str) -> Option<ProviderDiagnostic> {
+    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
+    let code = wasm_guest_error_code(error).map(ProviderErrorCode::new);
+    let message = bounded_wasm_guest_message(payload.message.as_deref().unwrap_or_default().trim());
+    let message = (!message.is_empty()).then(|| UntrustedProviderMessage::new(message));
+    (code.is_some() || message.is_some()).then_some(ProviderDiagnostic {
+        code,
+        message,
+        retry_after: None,
+    })
+}
+
+fn bounded_wasm_guest_message(message: &str) -> String {
+    let mut bounded = String::new();
+    for character in message.chars() {
+        if bounded.len() + character.len_utf8() > MAX_WASM_GUEST_MESSAGE_BYTES {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WasmGuestErrorKind {
     AuthRequired,
@@ -346,6 +384,8 @@ enum StructuredWasmGuestErrorKind {
 struct StructuredWasmGuestError {
     code: String,
     kind: StructuredWasmGuestErrorKind,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {

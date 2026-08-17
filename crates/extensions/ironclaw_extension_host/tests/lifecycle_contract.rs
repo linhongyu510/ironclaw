@@ -587,7 +587,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
     };
     use ironclaw_host_api::{
-        dispatch::DispatchError,
+        dispatch::{DispatchError, ProviderDiagnostic, UntrustedProviderMessage},
         ids::{CapabilityId, SecretHandle},
     };
 
@@ -603,6 +603,13 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             Err(ToolError::AuthRequired {
                 required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
                 credential_requirements: Vec::new(),
+                model_visible_cause: Some(ProviderDiagnostic {
+                    code: None,
+                    message: Some(UntrustedProviderMessage::new(
+                        "provider error code: github_api_error_status_401; provider message: Bad credentials",
+                    )),
+                    retry_after: None,
+                }),
             })
         }
     }
@@ -649,10 +656,20 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         DispatchError::AuthRequired {
             capability,
             required_secrets,
+            model_visible_cause,
             ..
         } => {
             assert_eq!(capability.as_str(), "acme.ping");
             assert_eq!(required_secrets.len(), 1);
+            assert_eq!(
+                model_visible_cause
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.message.as_ref())
+                    .map(|message| message.as_str()),
+                Some(
+                    "provider error code: github_api_error_status_401; provider message: Bad credentials"
+                )
+            );
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
