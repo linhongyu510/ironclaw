@@ -16,9 +16,10 @@ use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
     MissingTriggerActiveRunLookup, MissingTriggerRunEvidenceSource, TriggerActiveRunLookup,
     TriggerCapabilityExecutionEvidence, TriggerError, TriggerExecutionSpec, TriggerId,
-    TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunEvidenceSource,
-    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind,
-    TriggerSourceKind, TriggerState, active_holds_for_records, assess_trigger_run,
+    TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunEvidenceScope,
+    TriggerRunEvidenceSource, TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule,
+    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
+    assess_trigger_run,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -587,7 +588,8 @@ async fn list_triggers(
             .as_ref()
             .is_some_and(|spec| !spec.required_capability_ids.is_empty())
     }) {
-        match run_evidence.list_capability_evidence(scope).await {
+        let evidence_scope = TriggerRunEvidenceScope::from_resource_scope(scope);
+        match run_evidence.list_capability_evidence(&evidence_scope).await {
             Ok(evidence) => Some(evidence),
             Err(error) => {
                 tracing::warn!(%error, "trigger list capability evidence unavailable");

@@ -1,5 +1,9 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope, turn::TurnRunId};
+use ironclaw_host_api::{
+    ids::{AgentId, CapabilityId, ProjectId, TenantId, UserId},
+    resource::ResourceScope,
+    turn::TurnRunId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::TriggerRunHistoryStatus;
@@ -18,6 +22,31 @@ pub struct TriggerCapabilityExecutionEvidence {
     pub capability_id: CapabilityId,
     pub status: TriggerCapabilityExecutionStatus,
     pub error_kind: Option<String>,
+}
+
+/// Owner scope for reading trigger-run evidence.
+///
+/// Trigger runs may execute in threads other than the conversation that asks
+/// for their status. Keeping thread, mission, and invocation identity out of
+/// this type prevents a caller conversation from accidentally filtering away
+/// the scheduled run's evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerRunEvidenceScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+}
+
+impl TriggerRunEvidenceScope {
+    pub fn from_resource_scope(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +91,7 @@ pub enum TriggerRunEvidenceError {
 pub trait TriggerRunEvidenceSource: Send + Sync {
     async fn list_capability_evidence(
         &self,
-        scope: &ResourceScope,
+        scope: &TriggerRunEvidenceScope,
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError>;
 }
 
@@ -73,7 +102,7 @@ pub struct MissingTriggerRunEvidenceSource;
 impl TriggerRunEvidenceSource for MissingTriggerRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
-        _scope: &ResourceScope,
+        _scope: &TriggerRunEvidenceScope,
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError> {
         Err(TriggerRunEvidenceError::Unavailable)
     }

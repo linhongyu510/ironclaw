@@ -115,7 +115,10 @@ an empty list.
 Terminal structured runs receive a deterministic assessment when read through
 the WebUI automation service or `trigger_list`. The assessment folds the run's
 terminal state and the canonical runtime capability projection for the exact
-`TurnRunId`; it never infers an action from final-answer prose. A required
+`TurnRunId`. Evidence reads are scoped by trigger owner, agent, and project;
+they must not inherit the thread, mission, or invocation identity of the
+conversation that asks for status, because each scheduled run executes in its
+own thread. The assessment never infers an action from final-answer prose. A required
 capability that failed yields `needs_attention`, a missing/incomplete or
 unavailable fact yields `unverified`, and a completed run whose requirements
 all report success yields `appears_successful`. The latter is deliberately not

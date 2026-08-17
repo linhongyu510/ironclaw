@@ -27,8 +27,9 @@ use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, MissingTriggerRunEvidenceSource,
     TriggerActiveRunLookup, TriggerCapabilityExecutionEvidence, TriggerCapabilityExecutionStatus,
     TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunEvidenceError,
-    TriggerRunEvidenceSource, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records, assess_trigger_run,
+    TriggerRunEvidenceScope, TriggerRunEvidenceSource, TriggerRunHistoryStatus, TriggerRunRecord,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
+    assess_trigger_run,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -134,14 +135,11 @@ impl RebornAutomationProductService {
         if !evidence_required {
             return Some(Vec::new());
         }
-        let resource_scope = ResourceScope {
+        let resource_scope = TriggerRunEvidenceScope {
             tenant_id: caller.tenant_id.clone(),
             user_id: caller.user_id.clone(),
             agent_id: Some(caller.agent_id.clone()),
             project_id: caller.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
         };
         match tokio::time::timeout_at(
             deadline,
@@ -642,12 +640,20 @@ impl ProjectedTriggerRunEvidenceSource {
 impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
-        scope: &ResourceScope,
+        scope: &TriggerRunEvidenceScope,
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError> {
         let snapshot = self
             .projection
             .snapshot(ProjectionRequest {
-                scope: ProjectionScope::from_resource_scope(scope),
+                scope: ProjectionScope::from_resource_scope(&ResourceScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: scope.user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                }),
                 after: None,
                 limit: MAX_PROJECTION_PAGE_LIMIT,
             })

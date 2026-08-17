@@ -35,16 +35,20 @@ fn execution_contract(goal: impl Into<String>) -> Value {
     })
 }
 
-struct StaticRunEvidenceSource(Vec<TriggerCapabilityExecutionEvidence>);
+struct StaticRunEvidenceSource {
+    evidence: Vec<TriggerCapabilityExecutionEvidence>,
+    observed_scope: Arc<std::sync::Mutex<Option<TriggerRunEvidenceScope>>>,
+}
 
 #[async_trait::async_trait]
 impl TriggerRunEvidenceSource for StaticRunEvidenceSource {
     async fn list_capability_evidence(
         &self,
-        _scope: &ResourceScope,
+        scope: &TriggerRunEvidenceScope,
     ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
     {
-        Ok(self.0.clone())
+        *self.observed_scope.lock().expect("scope capture lock") = Some(scope.clone());
+        Ok(self.evidence.clone())
     }
 }
 
@@ -53,11 +57,13 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
     use ironclaw_triggers::ClearActiveFireRequest;
 
     let repository = Arc::new(InMemoryTriggerRepository::default());
-    let scope = ResourceScope::local_default(
+    let mut scope = ResourceScope::local_default(
         UserId::new("evidence-status-user").expect("user"),
         InvocationId::new(),
     )
     .expect("scope");
+    scope.thread_id =
+        Some(ironclaw_host_api::ids::ThreadId::new("evidence-status-thread").expect("thread id"));
     let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
     let fire_slot = Utc::now() - chrono::Duration::minutes(1);
     let run_id = TurnRunId::new();
@@ -99,16 +105,20 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
         status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
         error_kind: None,
     }];
+    let observed_scope = Arc::new(std::sync::Mutex::new(None));
     let handler = TriggerManagementToolHandler {
         repository,
         create_hook: Arc::new(NoopTriggerCreateHook),
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
-        run_evidence: Arc::new(StaticRunEvidenceSource(evidence)),
+        run_evidence: Arc::new(StaticRunEvidenceSource {
+            evidence,
+            observed_scope: Arc::clone(&observed_scope),
+        }),
     };
     let request = FirstPartyCapabilityRequest::request_for_test(
         CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
-        scope,
+        scope.clone(),
         json!({"run_limit": 1}),
         None,
     );
@@ -118,6 +128,15 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
 
     assert_eq!(assessment["status"], json!("appears_successful"));
     assert_eq!(assessment["capabilities"][0]["status"], json!("succeeded"));
+    let observed_scope = observed_scope
+        .lock()
+        .expect("scope capture lock")
+        .clone()
+        .expect("evidence lookup scope");
+    assert_eq!(observed_scope.tenant_id, scope.tenant_id);
+    assert_eq!(observed_scope.user_id, scope.user_id);
+    assert_eq!(observed_scope.agent_id, scope.agent_id);
+    assert_eq!(observed_scope.project_id, scope.project_id);
 }
 
 /// Delivery is now a step the structured contract owns, not a stored routing field: a

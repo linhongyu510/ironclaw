@@ -45,7 +45,7 @@ pub use evidence::{
     MissingTriggerRunEvidenceSource, TriggerCapabilityExecutionEvidence,
     TriggerCapabilityExecutionStatus, TriggerCapabilityRequirementAssessment,
     TriggerCapabilityRequirementStatus, TriggerRunAssessment, TriggerRunAssessmentStatus,
-    TriggerRunEvidenceError, TriggerRunEvidenceSource, assess_trigger_run,
+    TriggerRunEvidenceError, TriggerRunEvidenceScope, TriggerRunEvidenceSource, assess_trigger_run,
 };
 pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
