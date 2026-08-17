@@ -1819,6 +1819,7 @@ mod tests {
             kind,
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         }
     }
 
@@ -2264,6 +2265,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         assert_eq!(
@@ -2285,6 +2287,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
@@ -2319,6 +2322,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("trigger_create input failed validation".to_string()),
             detail: None,
+            provider_diagnostic: None,
         };
         assert_eq!(
             sanitized_failure_message(&clean).as_deref(),
@@ -2341,6 +2345,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2374,6 +2379,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2415,6 +2421,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2441,6 +2448,7 @@ mod tests {
                     issues: vec![issue.clone()],
                 },
             ),
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(
@@ -3040,6 +3048,7 @@ output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Network),
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         };
 
         for (capability_id, expect_retry) in [
