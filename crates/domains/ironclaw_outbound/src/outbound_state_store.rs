@@ -925,6 +925,10 @@ impl<F> OutboundStateStorePort for OutboundStateStore<F>
 where
     F: RootFilesystem,
 {
+    fn notification_inbox(&self) -> &dyn NotificationInboxStorePort {
+        self
+    }
+
     async fn put_run_delivery_cleanup(
         &self,
         record: RunDeliveryCleanupRecord,

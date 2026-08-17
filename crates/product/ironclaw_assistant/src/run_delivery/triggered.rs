@@ -561,10 +561,12 @@ async fn notify_background_run(
     .await
     {
         Ok(resolved) => resolved,
-        Err(_error) => {
-            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
-            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-            return outcome;
+        Err(error) => {
+            tracing::warn!(target: TRACE_TARGET, %run_id, %error, "notification target lookup failed; continuing with the web inbox");
+            ResolvedNotificationTargets {
+                targets: Vec::new(),
+                lookup_failed: true,
+            }
         }
     };
     let ResolvedNotificationTargets {
@@ -735,7 +737,13 @@ async fn notify_background_run(
                                 let fan =
                                     fan_out_plan(services, &notification_context, &plan, &targets)
                                         .await;
-                                let outcome = delivery_outcome_for_fan(&fan);
+                                let outcome = if web_inbox_only {
+                                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                                } else if lookup_failed_without_targets {
+                                    TriggeredRunDeliveryOutcomeKind::Failed
+                                } else {
+                                    delivery_outcome_for_fan(&fan)
+                                };
                                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                                 return outcome;
                             }
@@ -770,7 +778,13 @@ async fn notify_background_run(
                 };
                 let fan =
                     fan_out_plan(services, &notification_context, &timeout_plan, &targets).await;
-                let outcome = delivery_outcome_for_fan(&fan);
+                let outcome = if web_inbox_only {
+                    TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                } else if lookup_failed_without_targets {
+                    TriggeredRunDeliveryOutcomeKind::Failed
+                } else {
+                    delivery_outcome_for_fan(&fan)
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
