@@ -956,8 +956,7 @@ def build_plan(
         # path on purpose: the rest of the `llm_traces/` tree stays unmapped
         # until each subtree is decided (`reborn_qa/` has its own arm below).
         if (
-            path.startswith("tests/support/")
-            or path == "tests/support_unit_tests.rs"
+            path == "tests/support_unit_tests.rs"
             or path == "tests/fixtures/llm_traces/README.md"
         ):
             root_partitions.add(0)
@@ -965,11 +964,12 @@ def build_plan(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
-        if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
+        if path.startswith("tests/support/"):
             # Direct shared root-test support (tests/support/mod.rs and the
             # modules it declares). The integration group targets also compile
             # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
-            # representative lane of each tier.
+            # representative lane of each tier. Exact integration support
+            # owners returned above with their owning lane.
             root_partitions.add(0)
             integration_lanes.add(0)
             reasons.append(
