@@ -826,19 +826,15 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     assert_eq!(failed[0].fire_slot, fire_slot);
     assert_eq!(failed[0].run_id, run_id);
     assert!(
-        observer.run_success_events().is_empty(),
-        "a failed terminal fire must not fire the success hook"
-    );
-    assert!(
         observer.events().is_empty(),
         "a failed terminal fire never fires on_accepted_fire_settled"
     );
 }
 
-/// A terminal-`Ok` active fire emits one success settlement after its durable
-/// run-history status has changed to `Ok`, and never emits the failure hook.
+/// A terminal-`Ok` active fire clears but must NOT fire `on_run_failure_settled`
+/// — the hook is failure-only.
 #[tokio::test]
-async fn tick_surfaces_successful_terminal_active_fire_once_after_settlement() {
+async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -866,12 +862,6 @@ async fn tick_surfaces_successful_terminal_active_fire_once_after_settlement() {
         observer.run_failure_events().is_empty(),
         "a successful terminal fire must not fire the failure hook"
     );
-    let succeeded = observer.run_success_events();
-    assert_eq!(succeeded.len(), 1, "exactly one successful-run settlement");
-    assert_eq!(succeeded[0].tenant_id, tenant("tenant-a"));
-    assert_eq!(succeeded[0].trigger_id, trigger_id);
-    assert_eq!(succeeded[0].fire_slot, fire_slot);
-    assert_eq!(succeeded[0].run_id, run_id);
 }
 
 #[tokio::test]
@@ -3126,7 +3116,6 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
     failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
-    run_success_events: Mutex<Vec<TriggerRunSuccessSettlement>>,
     run_failure_events: Mutex<Vec<TriggerRunFailureSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
@@ -3152,7 +3141,6 @@ impl RecordingSettlementObserver {
         Self {
             events: Mutex::new(Vec::new()),
             failed_events: Mutex::new(Vec::new()),
-            run_success_events: Mutex::new(Vec::new()),
             run_failure_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
@@ -3180,13 +3168,6 @@ impl RecordingSettlementObserver {
         self.run_failure_events
             .lock()
             .expect("run failure events lock")
-            .clone()
-    }
-
-    fn run_success_events(&self) -> Vec<TriggerRunSuccessSettlement> {
-        self.run_success_events
-            .lock()
-            .expect("run success events lock")
             .clone()
     }
 }
@@ -3231,13 +3212,6 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
         self.run_failure_events
             .lock()
             .expect("run failure events lock")
-            .push(event);
-    }
-
-    async fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
-        self.run_success_events
-            .lock()
-            .expect("run success events lock")
             .push(event);
     }
 }

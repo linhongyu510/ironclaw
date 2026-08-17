@@ -21,8 +21,8 @@ use ironclaw_turns::TurnError;
 pub(crate) struct TriggerPollerServices {
     pub(crate) materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-    pub(crate) settlement_hook_slot:
-        Arc<OnceLock<Arc<dyn crate::automation::trigger_poller::TriggerSettlementHook>>>,
+    pub(crate) post_submit_hook_slot:
+        Arc<OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>>,
     pub(crate) pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
 
@@ -62,7 +62,7 @@ where
     let services = TriggerPollerServices {
         materializer,
         trusted_submitter,
-        settlement_hook_slot: Arc::new(OnceLock::new()),
+        post_submit_hook_slot: Arc::new(OnceLock::new()),
         pairing_service,
     };
     #[cfg(not(any(test, feature = "test-support")))]

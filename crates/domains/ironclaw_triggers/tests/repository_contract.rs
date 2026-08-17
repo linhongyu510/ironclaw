@@ -11,11 +11,9 @@ use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClaimTriggerSemanticEvaluationRequest, ClearActiveFireRequest,
-    InMemoryTriggerRepository, TriggerDeliveryTargetId, TriggerError, TriggerExecutionSpec,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSemanticEvaluation, TriggerSemanticEvaluationClaimId, TriggerSemanticVerdict,
-    TriggerSourceKind, TriggerState,
+    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
+    TriggerDeliveryTargetId, TriggerError, TriggerExecutionSpec, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
@@ -83,6 +81,7 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
         success_criteria: vec!["Include every unread message".to_string()],
         output_instructions: "Return concise Markdown".to_string(),
         no_result_text: "There is no unread mail.".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             allowed_capability_ids: None,
             required_skills: vec![RequiredSkill::new("mail-summary").expect("skill")],
@@ -3441,17 +3440,7 @@ mod fire_claim_contract {
         let fire_slot = ts(1_704_067_200);
         let claim_now = ts(1_704_067_203);
         let submitted_at = ts(1_704_067_205);
-        let mut record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-        let execution_spec = TriggerExecutionSpec {
-            version: 1,
-            goal: "Produce the scheduled report".to_string(),
-            success_criteria: vec!["Include every required section".to_string()],
-            output_instructions: "Return concise Markdown".to_string(),
-            no_result_text: "No result".to_string(),
-            policy: Default::default(),
-        };
-        record.prompt = execution_spec.render_prompt();
-        record.execution_spec = Some(execution_spec);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
         let expected_next_run_at = record
             .schedule
             .next_slot_after(fire_slot)
@@ -3539,164 +3528,6 @@ mod fire_claim_contract {
         assert_eq!(runs[0].status, TriggerRunHistoryStatus::Ok);
         assert_eq!(runs[0].submitted_at, submitted_at);
         assert!(runs[0].completed_at.is_some());
-        assert_eq!(runs[0].semantic_evaluation, None);
-        let pending = repo
-            .list_pending_semantic_evaluations(10)
-            .await
-            .expect("list pending semantic evaluations");
-        assert!(
-            pending.iter().any(|candidate| {
-                candidate.tenant_id == tenant_id
-                    && candidate.trigger_id == trigger_id
-                    && candidate.fire_slot == fire_slot
-                    && candidate.run_id == run_id
-                    && candidate.thread_id == canonical_thread_id
-            }),
-            "completed structured run must enter the durable evaluation backlog: {pending:?}"
-        );
-        let exact_pending = repo
-            .get_pending_semantic_evaluation(tenant_id.clone(), trigger_id, fire_slot, run_id)
-            .await
-            .expect("load exact pending semantic evaluation")
-            .expect("successful structured run must be directly addressable");
-        assert_eq!(exact_pending.run_id, run_id);
-        assert_eq!(exact_pending.thread_id, canonical_thread_id);
-        assert!(
-            repo.get_pending_semantic_evaluation(
-                tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                TurnRunId::new(),
-            )
-            .await
-            .expect("mismatched run lookup")
-            .is_none(),
-            "terminal callback lookup must not select a different run"
-        );
-
-        let first_claim_id = TriggerSemanticEvaluationClaimId::new();
-        let second_claim_id = TriggerSemanticEvaluationClaimId::new();
-        let (first_claim, second_claim) = tokio::join!(
-            repo.claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
-                tenant_id: tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                claim_id: first_claim_id,
-                claimed_at: ts(1_704_067_210),
-                stale_before: ts(1_704_067_100),
-            }),
-            repo.claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
-                tenant_id: tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                claim_id: second_claim_id,
-                claimed_at: ts(1_704_067_210),
-                stale_before: ts(1_704_067_100),
-            }),
-        );
-        let first_claim = first_claim.expect("first concurrent semantic evaluation claim");
-        let second_claim = second_claim.expect("second concurrent semantic evaluation claim");
-        assert_ne!(
-            first_claim, second_claim,
-            "exactly one concurrent claim must win"
-        );
-        let (winner_claim_id, loser_claim_id) = if first_claim {
-            (first_claim_id, second_claim_id)
-        } else {
-            (second_claim_id, first_claim_id)
-        };
-        let evaluation = TriggerSemanticEvaluation {
-            verdict: TriggerSemanticVerdict::Satisfied,
-            reason: "The answer includes every required section.".to_string(),
-            evaluated_at: ts(1_704_067_212),
-        };
-        assert!(
-            !repo
-                .complete_semantic_evaluation(
-                    tenant_id.clone(),
-                    trigger_id,
-                    fire_slot,
-                    run_id,
-                    loser_claim_id,
-                    evaluation.clone(),
-                )
-                .await
-                .expect("losing claim cannot complete semantic evaluation")
-        );
-        let recovery_claim_id = TriggerSemanticEvaluationClaimId::new();
-        assert!(
-            repo.claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
-                tenant_id: tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                claim_id: recovery_claim_id,
-                claimed_at: ts(1_704_067_220),
-                stale_before: ts(1_704_067_210),
-            })
-            .await
-            .expect("expired semantic evaluation claim can be recovered")
-        );
-        assert!(
-            !repo
-                .complete_semantic_evaluation(
-                    tenant_id.clone(),
-                    trigger_id,
-                    fire_slot,
-                    run_id,
-                    winner_claim_id,
-                    evaluation.clone(),
-                )
-                .await
-                .expect("expired claim owner cannot complete semantic evaluation")
-        );
-        assert!(
-            repo.complete_semantic_evaluation(
-                tenant_id.clone(),
-                trigger_id,
-                fire_slot,
-                run_id,
-                recovery_claim_id,
-                evaluation.clone(),
-            )
-            .await
-            .expect("complete semantic evaluation")
-        );
-        assert!(
-            !repo
-                .complete_semantic_evaluation(
-                    tenant_id.clone(),
-                    trigger_id,
-                    fire_slot,
-                    run_id,
-                    recovery_claim_id,
-                    evaluation.clone(),
-                )
-                .await
-                .expect("duplicate semantic evaluation completion")
-        );
-        let evaluated_runs = repo
-            .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
-            .await
-            .expect("list semantically evaluated run history");
-        assert_eq!(evaluated_runs[0].semantic_evaluation, Some(evaluation));
-        assert!(
-            repo.get_pending_semantic_evaluation(tenant_id.clone(), trigger_id, fire_slot, run_id,)
-                .await
-                .expect("load exact semantic evaluation after completion")
-                .is_none(),
-            "completed evaluations must not be returned to terminal callbacks"
-        );
-        assert!(
-            repo.list_pending_semantic_evaluations(10)
-                .await
-                .expect("list pending semantic evaluations after completion")
-                .iter()
-                .all(|candidate| candidate.run_id != run_id),
-            "completed semantic evaluation must leave the durable backlog"
-        );
 
         let empty_runs = repo
             .list_trigger_run_history(tenant_id.clone(), trigger_id, 0)
@@ -3942,32 +3773,14 @@ mod fire_claim_contract {
         let trigger_id = TriggerId::parse("01J00000000000000000000033").expect("ulid");
         let tenant_id = tenant("tenant-run-history-retention");
         let base_fire_slot = ts(1_704_067_200);
-        let retention_spec = TriggerExecutionSpec {
-            version: 1,
-            goal: "Retained evaluation".to_string(),
-            success_criteria: vec!["Retain the judge output".to_string()],
-            output_instructions: "Return concise text".to_string(),
-            no_result_text: "No result".to_string(),
-            policy: Default::default(),
-        };
-        let mut retention_record = sample_record(trigger_id, tenant_id.clone(), base_fire_slot);
-        retention_record.execution_spec = Some(retention_spec.clone());
-        repo.upsert_trigger(retention_record)
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), base_fire_slot))
             .await
             .expect("insert retention record");
-
-        let mut oldest_run_id = None;
-        let retained_evaluation = TriggerSemanticEvaluation {
-            verdict: TriggerSemanticVerdict::Satisfied,
-            reason: "This model-generated reason must outlive run-history pruning.".to_string(),
-            evaluated_at: base_fire_slot + chrono::Duration::seconds(30),
-        };
 
         for offset in 0..=500 {
             let fire_slot = base_fire_slot + chrono::Duration::minutes(offset);
             let run_id = TurnRunId::new();
             let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
-            active_record.execution_spec = Some(retention_spec.clone());
             active_record.active_fire_slot = Some(fire_slot);
             active_record.active_run_ref = Some(run_id);
             repo.upsert_trigger(active_record)
@@ -3983,39 +3796,10 @@ mod fire_claim_contract {
             .await
             .expect("clear retention fire")
             .expect("active fire should clear");
-            if offset == 0 {
-                let claim_id = TriggerSemanticEvaluationClaimId::new();
-                assert!(
-                    repo.claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
-                        tenant_id: tenant_id.clone(),
-                        trigger_id,
-                        fire_slot,
-                        run_id,
-                        claim_id,
-                        claimed_at: fire_slot + chrono::Duration::seconds(20),
-                        stale_before: fire_slot,
-                    })
-                    .await
-                    .expect("claim oldest semantic evaluation")
-                );
-                assert!(
-                    repo.complete_semantic_evaluation(
-                        tenant_id.clone(),
-                        trigger_id,
-                        fire_slot,
-                        run_id,
-                        claim_id,
-                        retained_evaluation.clone(),
-                    )
-                    .await
-                    .expect("complete oldest semantic evaluation")
-                );
-                oldest_run_id = Some(run_id);
-            }
         }
 
         let retained = repo
-            .list_trigger_run_history(tenant_id.clone(), trigger_id, 501)
+            .list_trigger_run_history(tenant_id, trigger_id, 501)
             .await
             .expect("list retained run history");
         assert_eq!(retained.len(), 500);
@@ -4026,14 +3810,6 @@ mod fire_claim_contract {
         assert_eq!(
             retained.last().expect("oldest retained").fire_slot,
             base_fire_slot + chrono::Duration::minutes(1)
-        );
-        let oldest_run_id = oldest_run_id.expect("oldest run id captured");
-        assert_eq!(
-            repo.get_semantic_evaluation(tenant_id, trigger_id, base_fire_slot, oldest_run_id,)
-                .await
-                .expect("read retained semantic evaluation after history pruning"),
-            Some(retained_evaluation),
-            "model-generated evaluation data must survive run-history pruning"
         );
     }
 

@@ -963,6 +963,11 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "minLength": 1,
                             "description": "Exact useful response when the task finds no result."
                         },
+                        "required_capability_ids": {
+                            "type": "array", "maxItems": 64,
+                            "description": "Capabilities that must complete successfully for the run to be evidence-backed. Derive these from actions the user requested; use an empty array for answer-only work. Every entry must also be allowed by policy.allowed_capability_ids when that allowlist is present.",
+                            "items": { "type": "string" }
+                        },
                         "policy": {
                             "type": "object",
                             "properties": {
@@ -978,7 +983,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "additionalProperties": false
                         }
                     },
-                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text"],
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "required_capability_ids"],
                     "additionalProperties": false
                 },
                 "schedule": {

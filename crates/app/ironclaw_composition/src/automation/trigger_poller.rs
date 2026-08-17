@@ -13,7 +13,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_triggers::{
     TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
-    TriggerRunFailureSettlement, TriggerRunSuccessSettlement,
+    TriggerRunFailureSettlement,
 };
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -24,22 +24,7 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-pub(crate) use ironclaw_extension_host::channel_triggered_delivery::TriggerSettlementHook;
-
-pub(crate) struct SemanticEvaluationHook(ironclaw_assistant::SemanticRunEvaluator);
-
-impl SemanticEvaluationHook {
-    pub(crate) fn new(evaluator: ironclaw_assistant::SemanticRunEvaluator) -> Self {
-        Self(evaluator)
-    }
-}
-
-#[async_trait]
-impl TriggerSettlementHook for SemanticEvaluationHook {
-    async fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
-        self.0.on_run_success_settled(event);
-    }
-}
+pub(crate) use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::{
@@ -88,8 +73,8 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
-    /// Late-binding slot for trigger settlement consumers.
-    pub(crate) settlement_hook_slot: Arc<OnceLock<Arc<dyn TriggerSettlementHook>>>,
+    /// Late-binding slot for the post-submit delivery hook.
+    pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
 
 pub(crate) fn spawn_trigger_poller(
@@ -102,7 +87,7 @@ pub(crate) fn spawn_trigger_poller(
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
     let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
-        TriggerSettlementHookObserver::new(deps.settlement_hook_slot, cancel.clone()),
+        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
     );
     let trusted_submitter = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
@@ -123,15 +108,14 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
-const SETTLEMENT_HOOK_PENDING_CAPACITY: usize = 256;
+const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
 
 enum TriggerFireSettlement {
     Accepted(TriggerAcceptedFireSettlement),
     Failed(TriggerFailedFireSettlement),
-    RunSucceeded(TriggerRunSuccessSettlement),
 }
 
-fn spawn_settlement_hook(hook: Arc<dyn TriggerSettlementHook>, event: TriggerFireSettlement) {
+fn spawn_post_submit_delivery(hook: Arc<dyn PostSubmitDeliveryHook>, event: TriggerFireSettlement) {
     tokio::spawn(async move {
         match event {
             TriggerFireSettlement::Accepted(event) => {
@@ -141,9 +125,6 @@ fn spawn_settlement_hook(hook: Arc<dyn TriggerSettlementHook>, event: TriggerFir
             TriggerFireSettlement::Failed(event) => {
                 hook.on_trigger_failed_before_submit(event).await;
             }
-            TriggerFireSettlement::RunSucceeded(event) => {
-                hook.on_run_success_settled(event).await;
-            }
         }
     });
 }
@@ -152,16 +133,16 @@ fn spawn_settlement_hook(hook: Arc<dyn TriggerSettlementHook>, event: TriggerFir
 /// channel delivery hook. Delivery is detached from the poller tick only after
 /// the worker has persisted either the accepted run/thread mapping or the
 /// permanent pre-submit failure.
-pub(crate) struct TriggerSettlementHookObserver {
-    pub(crate) hook_slot: Arc<OnceLock<Arc<dyn TriggerSettlementHook>>>,
+pub(crate) struct PostSubmitHookObserver {
+    pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
     pending: Arc<Mutex<VecDeque<TriggerFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
 }
 
-impl TriggerSettlementHookObserver {
+impl PostSubmitHookObserver {
     fn new(
-        hook_slot: Arc<OnceLock<Arc<dyn TriggerSettlementHook>>>,
+        hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -178,12 +159,12 @@ impl TriggerSettlementHookObserver {
                 .pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if pending.len() >= SETTLEMENT_HOOK_PENDING_CAPACITY {
+            if pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
                 pending.pop_front();
                 tracing::debug!(
                     target: "ironclaw::reborn::trigger_poller",
-                    pending_capacity = SETTLEMENT_HOOK_PENDING_CAPACITY,
-                    "trigger settlement hook startup buffer full; dropped oldest pending settlement"
+                    pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
+                    "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
                 );
             }
             pending.push_back(event);
@@ -214,7 +195,7 @@ impl TriggerSettlementHookObserver {
                         pending.drain(..).collect::<Vec<_>>()
                     };
                     for event in buffered {
-                        spawn_settlement_hook(Arc::clone(&hook), event);
+                        spawn_post_submit_delivery(Arc::clone(&hook), event);
                     }
                     drain_scheduled.store(false, Ordering::Release);
                     return;
@@ -232,29 +213,29 @@ impl TriggerSettlementHookObserver {
 }
 
 #[async_trait]
-impl TriggerFireSettlementObserver for TriggerSettlementHookObserver {
+impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(
                 target: "ironclaw::reborn::trigger_poller",
-                "trigger settlement hook not installed; buffering accepted settlement"
+                "post-submit hook not installed; buffering trigger settlement"
             );
             self.buffer_until_hook_installed(TriggerFireSettlement::Accepted(event));
             return;
         };
-        spawn_settlement_hook(hook, TriggerFireSettlement::Accepted(event));
+        spawn_post_submit_delivery(hook, TriggerFireSettlement::Accepted(event));
     }
 
     async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(
                 target: "ironclaw::reborn::trigger_poller",
-                "trigger settlement hook not installed; buffering failed settlement"
+                "post-submit hook not installed; buffering failed trigger settlement"
             );
             self.buffer_until_hook_installed(TriggerFireSettlement::Failed(event));
             return;
         };
-        spawn_settlement_hook(hook, TriggerFireSettlement::Failed(event));
+        spawn_post_submit_delivery(hook, TriggerFireSettlement::Failed(event));
     }
 
     async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
@@ -270,17 +251,6 @@ impl TriggerFireSettlementObserver for TriggerSettlementHookObserver {
             run_id = %event.run_id,
             "accepted trigger fire settled with a failed run"
         );
-    }
-
-    async fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
-        let Some(hook) = self.hook_slot.get().cloned() else {
-            self.buffer_until_hook_installed(TriggerFireSettlement::RunSucceeded(event));
-            return;
-        };
-        // Terminal observers must enqueue their work before the poller can be
-        // shut down. The hook contract is constant-time; the semantic consumer
-        // records its own runtime-owned task handle here.
-        hook.on_run_success_settled(event).await;
     }
 }
 
@@ -384,34 +354,33 @@ mod tests {
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
 
-    // ── TriggerSettlementHookObserver tests ────────────────────────────────────────
+    // ── PostSubmitHookObserver tests ────────────────────────────────────────
 
-    mod settlement_hook_observer {
+    mod post_submit_observer {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        use super::super::TriggerSettlementHook;
+        use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
         use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
         use ironclaw_triggers::{
             TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFire,
             TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
-            TriggerPollerFailureReason, TriggerRunFailureSettlement, TriggerRunSuccessSettlement,
+            TriggerPollerFailureReason, TriggerRunFailureSettlement,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
         use tokio_util::sync::CancellationToken;
         use tracing_test::traced_test;
 
-        use super::super::{SETTLEMENT_HOOK_PENDING_CAPACITY, TriggerSettlementHookObserver};
+        use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
 
         #[derive(Default)]
         struct RecordingHook {
             calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
             failed_calls: Mutex<Vec<TriggerFailedFireSettlement>>,
-            success_calls: Mutex<Vec<TriggerRunSuccessSettlement>>,
             notify: Notify,
         }
 
@@ -449,27 +418,10 @@ mod tests {
                     self.notify.notified().await;
                 }
             }
-
-            async fn wait_for_success_calls(
-                &self,
-                expected: usize,
-            ) -> Vec<TriggerRunSuccessSettlement> {
-                loop {
-                    let calls = self
-                        .success_calls
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .clone();
-                    if calls.len() >= expected {
-                        return calls;
-                    }
-                    self.notify.notified().await;
-                }
-            }
         }
 
         #[async_trait]
-        impl TriggerSettlementHook for RecordingHook {
+        impl PostSubmitDeliveryHook for RecordingHook {
             async fn on_trigger_submitted(
                 &self,
                 fire: TriggerFire,
@@ -490,14 +442,6 @@ mod tests {
                     .push(event);
                 self.notify.notify_one();
             }
-
-            async fn on_run_success_settled(&self, event: TriggerRunSuccessSettlement) {
-                self.success_calls
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(event);
-                self.notify.notify_one();
-            }
         }
 
         struct BlockingHook {
@@ -507,7 +451,7 @@ mod tests {
         }
 
         #[async_trait]
-        impl TriggerSettlementHook for BlockingHook {
+        impl PostSubmitDeliveryHook for BlockingHook {
             async fn on_trigger_submitted(
                 &self,
                 _fire: TriggerFire,
@@ -569,22 +513,12 @@ mod tests {
             }
         }
 
-        fn run_success_settlement_event(run_id: TurnRunId) -> TriggerRunSuccessSettlement {
-            TriggerRunSuccessSettlement {
-                tenant_id: observer_tenant(),
-                trigger_id: TriggerId::new(),
-                fire_slot: Utc::now(),
-                run_id,
-            }
-        }
-
         #[tokio::test]
         #[traced_test]
         async fn run_failure_settlement_emits_health_warning_without_delivery() {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
             let recording = Arc::new(RecordingHook::default());
-            let observer =
-                TriggerSettlementHookObserver::new(hook_slot.clone(), CancellationToken::new());
+            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
             hook_slot.set(recording.clone()).ok().expect("hook install");
 
             observer
@@ -617,10 +551,8 @@ mod tests {
         async fn uninstalled_hook_buffers_until_hook_is_installed() {
             let run_id = TurnRunId::new();
             let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer = TriggerSettlementHookObserver::new(
-                Arc::clone(&hook_slot),
-                CancellationToken::new(),
-            );
+            let observer =
+                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
             let recording = Arc::new(RecordingHook::default());
 
             observer
@@ -634,7 +566,7 @@ mod tests {
                 "settlement must be buffered while hook is not installed"
             );
             hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn TriggerSettlementHook>)
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("first hook install must succeed");
 
@@ -647,12 +579,10 @@ mod tests {
         #[tokio::test]
         async fn uninstalled_hook_buffer_drops_oldest_when_full() {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer = TriggerSettlementHookObserver::new(
-                Arc::clone(&hook_slot),
-                CancellationToken::new(),
-            );
+            let observer =
+                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
             let recording = Arc::new(RecordingHook::default());
-            let run_ids: Vec<_> = (0..=SETTLEMENT_HOOK_PENDING_CAPACITY)
+            let run_ids: Vec<_> = (0..=POST_SUBMIT_HOOK_PENDING_CAPACITY)
                 .map(|_| TurnRunId::new())
                 .collect();
 
@@ -663,13 +593,13 @@ mod tests {
             }
 
             hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn TriggerSettlementHook>)
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("first hook install must succeed");
 
             let calls = tokio::time::timeout(
                 Duration::from_secs(1),
-                recording.wait_for_calls(SETTLEMENT_HOOK_PENDING_CAPACITY),
+                recording.wait_for_calls(POST_SUBMIT_HOOK_PENDING_CAPACITY),
             )
             .await
             .expect("capped buffered settlements should be delivered after hook install");
@@ -679,7 +609,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 delivered_run_ids.len(),
-                SETTLEMENT_HOOK_PENDING_CAPACITY,
+                POST_SUBMIT_HOOK_PENDING_CAPACITY,
                 "startup buffer must deliver only the capped number of settlements"
             );
             assert!(
@@ -698,10 +628,10 @@ mod tests {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
             let recording = Arc::new(RecordingHook::default());
             hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn TriggerSettlementHook>)
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("hook install");
-            let observer = TriggerSettlementHookObserver::new(hook_slot, CancellationToken::new());
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
@@ -734,10 +664,10 @@ mod tests {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
             let recording = Arc::new(RecordingHook::default());
             hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn TriggerSettlementHook>)
+                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("hook install");
-            let observer = TriggerSettlementHookObserver::new(hook_slot, CancellationToken::new());
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
             let event = failed_settlement_event();
 
             observer.on_failed_fire_settled(event.clone()).await;
@@ -746,26 +676,6 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(1), recording.wait_for_failed_calls(1))
                     .await
                     .expect("failed settlement hook should be invoked asynchronously");
-            assert_eq!(calls, vec![event]);
-        }
-
-        #[tokio::test]
-        async fn terminal_success_settlement_reaches_outcome_observer() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let recording = Arc::new(RecordingHook::default());
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn TriggerSettlementHook>)
-                .ok()
-                .expect("hook install");
-            let observer = TriggerSettlementHookObserver::new(hook_slot, CancellationToken::new());
-            let event = run_success_settlement_event(TurnRunId::new());
-
-            observer.on_run_success_settled(event.clone()).await;
-
-            let calls =
-                tokio::time::timeout(Duration::from_secs(1), recording.wait_for_success_calls(1))
-                    .await
-                    .expect("terminal success must reach the semantic outcome observer");
             assert_eq!(calls, vec![event]);
         }
 
@@ -781,10 +691,10 @@ mod tests {
                     entered: Arc::clone(&entered),
                     release: Arc::clone(&release),
                     completed: Arc::clone(&completed),
-                }) as Arc<dyn TriggerSettlementHook>)
+                }) as Arc<dyn PostSubmitDeliveryHook>)
                 .ok()
                 .expect("hook install");
-            let observer = TriggerSettlementHookObserver::new(hook_slot, CancellationToken::new());
+            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
 
             observer
                 .on_accepted_fire_settled(settlement_event(run_id))
@@ -812,8 +722,7 @@ mod tests {
         async fn uninstalled_hook_drain_task_exits_when_cancelled() {
             let hook_slot = Arc::new(std::sync::OnceLock::new());
             let cancel = CancellationToken::new();
-            let observer =
-                TriggerSettlementHookObserver::new(Arc::clone(&hook_slot), cancel.clone());
+            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot), cancel.clone());
 
             observer
                 .on_accepted_fire_settled(settlement_event(TurnRunId::new()))

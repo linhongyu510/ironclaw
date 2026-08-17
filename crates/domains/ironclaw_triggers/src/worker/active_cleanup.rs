@@ -6,8 +6,7 @@ use crate::{
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
-    TriggerPollerWorker, TriggerRunFailureSettlement, TriggerRunSuccessSettlement,
-    failure::classify_failure,
+    TriggerPollerWorker, TriggerRunFailureSettlement, failure::classify_failure,
 };
 
 struct ActiveLookupItem {
@@ -162,40 +161,24 @@ impl TriggerPollerWorker {
                     // `RecoveryRequired`, cleared as `Error`) previously had no
                     // settlement failure hook — the active-cleanup sweep cleared
                     // the slot with no observability. Surface it to the
-                    // settlement observer so automation-health telemetry can
-                    // see post-accept failures (#6896). Successful settlement
-                    // is also surfaced here, after the durable `Ok` write, so
-                    // outcome consumers do not infer completion by polling.
-                    // Already-cleared fires emit neither event. The observer is
-                    // invoked inline and must detach any heavy work.
-                    if cleared {
-                        let tenant_id = record.tenant_id.clone();
-                        let trigger_id = record.trigger_id;
-                        match status {
-                            TriggerRunHistoryStatus::Ok => {
-                                self.deps
-                                    .fire_settlement_observer
-                                    .on_run_success_settled(TriggerRunSuccessSettlement {
-                                        tenant_id,
-                                        trigger_id,
-                                        fire_slot,
-                                        run_id,
-                                    })
-                                    .await;
-                            }
-                            TriggerRunHistoryStatus::Error => {
-                                self.deps
-                                    .fire_settlement_observer
-                                    .on_run_failure_settled(TriggerRunFailureSettlement {
-                                        tenant_id,
-                                        trigger_id,
-                                        fire_slot,
-                                        run_id,
-                                    })
-                                    .await;
-                            }
-                            TriggerRunHistoryStatus::Running => {}
-                        }
+                    // settlement observer so automation-health telemetry can see
+                    // post-accept failures (#6896). `Ok`/`Running` and
+                    // already-cleared fires do not fire the hook — the former
+                    // are not failures, and the latter already did (or never
+                    // reached terminal here). The observer is invoked inline
+                    // per the `TriggerFireSettlementObserver` contract: it
+                    // must be cheap and non-blocking, detaching any heavy
+                    // work internally.
+                    if cleared && status == TriggerRunHistoryStatus::Error {
+                        self.deps
+                            .fire_settlement_observer
+                            .on_run_failure_settled(TriggerRunFailureSettlement {
+                                tenant_id: record.tenant_id.clone(),
+                                trigger_id: record.trigger_id,
+                                fire_slot,
+                                run_id,
+                            })
+                            .await;
                     }
                     let outcome = if cleared {
                         cleared_outcome

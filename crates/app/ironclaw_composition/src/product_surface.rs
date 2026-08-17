@@ -6,7 +6,8 @@ use chrono::Utc;
 
 use async_trait::async_trait;
 use ironclaw_assistant::{
-    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
+    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader,
+    ProjectedTriggerRunEvidenceSource, RebornAutomationProductService,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
@@ -45,6 +46,7 @@ use ironclaw_assistant::{
     outbound_delivery_synthetic_provider,
 };
 use ironclaw_config::RebornBootConfig;
+use ironclaw_event_projections::ReplayEventProjectionService;
 use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
 use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
 use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
@@ -243,6 +245,11 @@ pub(crate) fn build_product_surface_with_channel_connection(
     );
     api = api.with_automation_product_service(Arc::new(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
+            .with_run_evidence(Arc::new(ProjectedTriggerRunEvidenceSource::new(Arc::new(
+                ReplayEventProjectionService::from_runtime_log(Arc::clone(
+                    &runtime.webui_event_log,
+                )),
+            ))))
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the

@@ -24,9 +24,6 @@ SQL exception.
 - `TriggerRepository` + implementations: `LibSqlTriggerRepository`,
   `PostgresTriggerRepository` (both ship; ADR 0003), and
   `InMemoryTriggerRepository` for tests.
-- Semantic-evaluation claims and results use a retained ledger separate from
-  bounded run history. Recent run rows project that ledger; pruning history
-  never deletes model-produced evaluation reasons.
 - The poller tick (`worker::`): evaluation over repository / materializer
   (`TriggerPromptMaterializer`) / submitter / state-lookup ports this crate
   defines.

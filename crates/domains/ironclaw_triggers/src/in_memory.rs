@@ -4,15 +4,6 @@ use super::*;
 pub(super) struct InMemoryTriggerRepositoryState {
     records: HashMap<TriggerRepositoryKey, TriggerRecord>,
     runs: HashMap<TriggerRunRepositoryKey, TriggerRunRecord>,
-    semantic_evaluations: HashMap<TriggerRunRepositoryKey, InMemorySemanticEvaluation>,
-}
-
-#[derive(Debug, Clone)]
-struct InMemorySemanticEvaluation {
-    run_id: TurnRunId,
-    claim_id: TriggerSemanticEvaluationClaimId,
-    claimed_at: Timestamp,
-    evaluation: Option<TriggerSemanticEvaluation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -591,182 +582,6 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(Some(record))
     }
 
-    async fn claim_semantic_evaluation(
-        &self,
-        request: ClaimTriggerSemanticEvaluationRequest,
-    ) -> Result<bool, TriggerError> {
-        let ClaimTriggerSemanticEvaluationRequest {
-            tenant_id,
-            trigger_id,
-            fire_slot,
-            run_id,
-            claim_id,
-            claimed_at,
-            stale_before,
-        } = request;
-        let mut state = self.lock_state()?;
-        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
-        let eligible = state.runs.get(&key).is_some_and(|run| {
-            run.run_id == Some(run_id) && run.status == TriggerRunHistoryStatus::Ok
-        }) && state
-            .records
-            .get(&TriggerRepositoryKey::new(&tenant_id, trigger_id))
-            .is_some_and(|record| record.execution_spec.is_some());
-        if !eligible {
-            return Ok(false);
-        }
-        match state.semantic_evaluations.get_mut(&key) {
-            Some(record)
-                if record.evaluation.is_none()
-                    && record.run_id == run_id
-                    && record.claimed_at <= stale_before =>
-            {
-                record.claim_id = claim_id;
-                record.claimed_at = claimed_at;
-            }
-            Some(_) => return Ok(false),
-            None => {
-                state.semantic_evaluations.insert(
-                    key,
-                    InMemorySemanticEvaluation {
-                        run_id,
-                        claim_id,
-                        claimed_at,
-                        evaluation: None,
-                    },
-                );
-            }
-        }
-        Ok(true)
-    }
-
-    async fn complete_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-        claim_id: TriggerSemanticEvaluationClaimId,
-        evaluation: TriggerSemanticEvaluation,
-    ) -> Result<bool, TriggerError> {
-        let mut state = self.lock_state()?;
-        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
-        let Some(record) = state.semantic_evaluations.get_mut(&key) else {
-            return Ok(false);
-        };
-        if record.run_id != run_id || record.claim_id != claim_id || record.evaluation.is_some() {
-            return Ok(false);
-        }
-        record.evaluation = Some(evaluation);
-        Ok(true)
-    }
-
-    async fn get_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-    ) -> Result<Option<TriggerSemanticEvaluation>, TriggerError> {
-        let state = self.lock_state()?;
-        Ok(state
-            .semantic_evaluations
-            .get(&TriggerRunRepositoryKey::new(
-                &tenant_id, trigger_id, fire_slot,
-            ))
-            .filter(|record| record.run_id == run_id)
-            .and_then(|record| record.evaluation.clone()))
-    }
-
-    async fn list_pending_semantic_evaluations(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<PendingTriggerSemanticEvaluation>, TriggerError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let state = self.lock_state()?;
-        let mut pending = state
-            .runs
-            .iter()
-            .filter_map(|(key, run)| {
-                if run.status != TriggerRunHistoryStatus::Ok
-                    || state
-                        .semantic_evaluations
-                        .get(key)
-                        .is_some_and(|record| record.evaluation.is_some())
-                {
-                    return None;
-                }
-                let run_id = run.run_id?;
-                let thread_id = run.thread_id.clone()?;
-                let trigger = state
-                    .records
-                    .get(&TriggerRepositoryKey::new(&key.tenant_id, key.trigger_id))?;
-                Some(PendingTriggerSemanticEvaluation {
-                    tenant_id: key.tenant_id.clone(),
-                    trigger_id: key.trigger_id,
-                    fire_slot: key.fire_slot,
-                    run_id,
-                    thread_id,
-                    creator_user_id: trigger.creator_user_id.clone(),
-                    agent_id: trigger.agent_id.clone(),
-                    project_id: trigger.project_id.clone(),
-                    execution_spec: trigger.execution_spec.clone()?,
-                })
-            })
-            .collect::<Vec<_>>();
-        pending.sort_by_key(|candidate| candidate.fire_slot);
-        pending.truncate(limit);
-        Ok(pending)
-    }
-
-    async fn get_pending_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
-        let state = self.lock_state()?;
-        let key = TriggerRunRepositoryKey::new(&tenant_id, trigger_id, fire_slot);
-        let Some(run) = state.runs.get(&key) else {
-            return Ok(None);
-        };
-        if run.status != TriggerRunHistoryStatus::Ok
-            || run.run_id != Some(run_id)
-            || state
-                .semantic_evaluations
-                .get(&key)
-                .is_some_and(|record| record.evaluation.is_some())
-        {
-            return Ok(None);
-        }
-        let Some(thread_id) = run.thread_id.clone() else {
-            return Ok(None);
-        };
-        let Some(trigger) = state
-            .records
-            .get(&TriggerRepositoryKey::new(&tenant_id, trigger_id))
-        else {
-            return Ok(None);
-        };
-        let Some(execution_spec) = trigger.execution_spec.clone() else {
-            return Ok(None);
-        };
-        Ok(Some(PendingTriggerSemanticEvaluation {
-            tenant_id,
-            trigger_id,
-            fire_slot,
-            run_id,
-            thread_id,
-            creator_user_id: trigger.creator_user_id.clone(),
-            agent_id: trigger.agent_id.clone(),
-            project_id: trigger.project_id.clone(),
-            execution_spec,
-        }))
-    }
-
     async fn find_trigger_run_by_thread_id(
         &self,
         tenant_id: TenantId,
@@ -779,15 +594,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         }) else {
             return Ok(None);
         };
-        let mut run = run.clone();
-        run.semantic_evaluation = state
-            .semantic_evaluations
-            .get(&TriggerRunRepositoryKey::new(
-                &tenant_id,
-                run.trigger_id,
-                run.fire_slot,
-            ))
-            .and_then(|record| record.evaluation.clone());
+        let run = run.clone();
         let trigger = state
             .records
             .get(&TriggerRepositoryKey::new(&tenant_id, run.trigger_id))
@@ -812,16 +619,6 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .filter(|run| run.tenant_id == tenant_id && run.trigger_id == trigger_id)
             .cloned()
             .collect::<Vec<_>>();
-        for run in &mut runs {
-            run.semantic_evaluation = state
-                .semantic_evaluations
-                .get(&TriggerRunRepositoryKey::new(
-                    &run.tenant_id,
-                    run.trigger_id,
-                    run.fire_slot,
-                ))
-                .and_then(|record| record.evaluation.clone());
-        }
         runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
         runs.truncate(limit);
         Ok(runs)
@@ -848,16 +645,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .values()
             .filter(|run| run.tenant_id == tenant_id && trigger_id_set.contains(&run.trigger_id))
         {
-            let mut run = run.clone();
-            run.semantic_evaluation = state
-                .semantic_evaluations
-                .get(&TriggerRunRepositoryKey::new(
-                    &run.tenant_id,
-                    run.trigger_id,
-                    run.fire_slot,
-                ))
-                .and_then(|record| record.evaluation.clone());
-            runs_by_trigger.entry(run.trigger_id).or_default().push(run);
+            runs_by_trigger
+                .entry(run.trigger_id)
+                .or_default()
+                .push(run.clone());
         }
         for runs in runs_by_trigger.values_mut() {
             runs.sort_by_key(|run| std::cmp::Reverse(run.fire_slot));
@@ -979,19 +770,6 @@ fn prune_run_history_locked(
         .collect::<Vec<_>>();
     keys.sort_by_key(|key| std::cmp::Reverse(key.fire_slot));
     for key in keys.into_iter().skip(MAX_TRIGGER_RUN_HISTORY_RETAINED) {
-        let is_pending_structured_evaluation =
-            state.runs.get(&key).is_some_and(|run| {
-                run.status == TriggerRunHistoryStatus::Ok && run.run_id.is_some()
-            }) && state
-                .records
-                .get(&TriggerRepositoryKey::new(&key.tenant_id, key.trigger_id))
-                .is_some_and(|record| record.execution_spec.is_some())
-                && state
-                    .semantic_evaluations
-                    .get(&key)
-                    .is_none_or(|record| record.evaluation.is_none());
-        if !is_pending_structured_evaluation {
-            state.runs.remove(&key);
-        }
+        state.runs.remove(&key);
     }
 }

@@ -215,10 +215,11 @@ use ironclaw_product_contracts::ironhub::{
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSemanticEvaluation, RebornAutomationSemanticVerdict, RebornAutomationSource,
+    RebornAutomationActiveHold, RebornAutomationAssessmentStatus,
+    RebornAutomationCapabilityEvidence, RebornAutomationCapabilityEvidenceStatus,
+    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunAssessment, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornCommandRejection, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExecuteProductCommandRequest, RebornExtensionActionResponse,

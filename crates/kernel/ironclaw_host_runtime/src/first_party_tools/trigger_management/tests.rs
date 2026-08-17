@@ -1,4 +1,5 @@
 use chrono::{Datelike, TimeZone};
+use ironclaw_host_api::turn::TurnRunId;
 
 use super::*;
 
@@ -29,8 +30,94 @@ fn execution_contract(goal: impl Into<String>) -> Value {
         "goal": goal,
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
-        "no_result_text": "No result"
+        "no_result_text": "No result",
+        "required_capability_ids": []
     })
+}
+
+struct StaticRunEvidenceSource(Vec<TriggerCapabilityExecutionEvidence>);
+
+#[async_trait::async_trait]
+impl TriggerRunEvidenceSource for StaticRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
+    {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn trigger_list_exposes_deterministic_required_action_assessment() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("evidence-status-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: vec![capability_id.clone()],
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let evidence = vec![TriggerCapabilityExecutionEvidence {
+        run_id,
+        capability_id,
+        status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
+        error_kind: None,
+    }];
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(StaticRunEvidenceSource(evidence)),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = handler.dispatch(request).await.expect("list routines");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("appears_successful"));
+    assert_eq!(assessment["capabilities"][0]["status"], json!("succeeded"));
 }
 
 /// Delivery is now a step the structured contract owns, not a stored routing field: a
@@ -527,7 +614,7 @@ fn active_hold_json_maps_claimed_but_unaccepted_to_other() {
 #[test]
 fn trigger_output_omits_active_hold_key_when_none() {
     let record = test_record(None);
-    let output = trigger_output(&record, &[], None);
+    let output = trigger_output(&record, &[], None, None);
     assert!(output.get("active_hold").is_none());
 }
 
@@ -535,7 +622,7 @@ fn trigger_output_omits_active_hold_key_when_none() {
 fn trigger_output_includes_active_hold_when_present() {
     let record = test_record(Some(Utc::now()));
     let hold = json!({"reason": "auth", "since": null, "elapsed_occurrences": null, "elapsed_occurrences_capped": false});
-    let output = trigger_output(&record, &[], Some(hold));
+    let output = trigger_output(&record, &[], Some(hold), None);
     assert_eq!(output["active_hold"]["reason"], "auth");
 }
 
@@ -580,6 +667,7 @@ fn origin_test_handler(create_hook: Arc<dyn TriggerCreateHook>) -> TriggerManage
         create_hook,
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(MissingTriggerRunEvidenceSource),
     }
 }
 
@@ -701,109 +789,6 @@ async fn scheduled_origin_may_still_list_routines() {
     assert!(
         result.output["triggers"].is_array(),
         "trigger_list must return a triggers array under a scheduled origin"
-    );
-}
-
-#[tokio::test]
-async fn trigger_list_exposes_persisted_semantic_evaluation_in_recent_runs() {
-    use ironclaw_triggers::{
-        ClaimTriggerSemanticEvaluationRequest, ClearActiveFireRequest, TriggerRunHistoryStatus,
-        TriggerSemanticEvaluation, TriggerSemanticEvaluationClaimId, TriggerSemanticVerdict,
-    };
-    use ironclaw_turns::TurnRunId;
-
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let scope = ResourceScope::local_default(
-        UserId::new("semantic-status-user").expect("user"),
-        InvocationId::new(),
-    )
-    .expect("scope");
-    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
-    let run_id = TurnRunId::new();
-    let mut record = test_record(Some(fire_slot));
-    record.tenant_id = scope.tenant_id.clone();
-    record.creator_user_id = scope.user_id.clone();
-    record.agent_id = scope.agent_id.clone();
-    record.project_id = scope.project_id.clone();
-    record.active_run_ref = Some(run_id);
-    let execution_spec = TriggerExecutionSpec {
-        version: 1,
-        goal: "Produce the scheduled report".to_string(),
-        success_criteria: vec!["Include the total".to_string()],
-        output_instructions: "Return a concise report".to_string(),
-        no_result_text: "No report data".to_string(),
-        policy: Default::default(),
-    };
-    record.prompt = execution_spec.render_prompt();
-    record.execution_spec = Some(execution_spec);
-    repository
-        .upsert_trigger(record.clone())
-        .await
-        .expect("seed structured trigger");
-    repository
-        .clear_active_fire(ClearActiveFireRequest {
-            tenant_id: scope.tenant_id.clone(),
-            trigger_id: record.trigger_id,
-            fire_slot,
-            run_id,
-            status: TriggerRunHistoryStatus::Ok,
-        })
-        .await
-        .expect("settle trigger run")
-        .expect("active run matches");
-
-    let claim_id = TriggerSemanticEvaluationClaimId::new();
-    repository
-        .claim_semantic_evaluation(ClaimTriggerSemanticEvaluationRequest {
-            tenant_id: scope.tenant_id.clone(),
-            trigger_id: record.trigger_id,
-            fire_slot,
-            run_id,
-            claim_id,
-            claimed_at: fire_slot + chrono::Duration::seconds(1),
-            stale_before: fire_slot,
-        })
-        .await
-        .expect("claim semantic evaluation");
-    let evaluated_at = fire_slot + chrono::Duration::seconds(2);
-    repository
-        .complete_semantic_evaluation(
-            scope.tenant_id.clone(),
-            record.trigger_id,
-            fire_slot,
-            run_id,
-            claim_id,
-            TriggerSemanticEvaluation {
-                verdict: TriggerSemanticVerdict::Satisfied,
-                reason: "The report includes the required total.".to_string(),
-                evaluated_at,
-            },
-        )
-        .await
-        .expect("complete semantic evaluation");
-
-    let handler = TriggerManagementToolHandler {
-        repository,
-        create_hook: Arc::new(NoopTriggerCreateHook),
-        clock: Arc::new(SystemTriggerManagementClock),
-        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
-    };
-    let request = FirstPartyCapabilityRequest::request_for_test(
-        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
-        scope,
-        json!({"run_limit": 1}),
-        None,
-    );
-    let result = handler.dispatch(request).await.expect("list routines");
-
-    assert_eq!(
-        result.output["triggers"][0]["recent_runs"][0]["semantic_evaluation"],
-        json!({
-            "verdict": "satisfied",
-            "reason": "The report includes the required total.",
-            "evaluated_at": evaluated_at,
-        }),
-        "the authoritative model-facing read must expose the persisted semantic outcome"
     );
 }
 

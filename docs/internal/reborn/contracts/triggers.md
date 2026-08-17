@@ -90,8 +90,9 @@ raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
 to execute their frozen prompt without interpretation or backfill.
 
 The v1 contract contains a goal, one or more success criteria, output
-instructions, no-result text, an optional capability allowlist, and required
-skill names. The trigger domain validates and renders this contract before
+instructions, no-result text, required capability evidence, an optional
+capability allowlist, and required skill names. The trigger domain validates
+and renders this contract before
 persistence. Production creation also resolves capability references against
 the current model-visible catalog and required skills through the normal skill
 selector before writing the trigger. The scheduler continues to submit the
@@ -104,6 +105,22 @@ narrow the surface. Global and scheduled-trigger denials still win. Required
 skills resolve through the normal skill activation catalog before model context
 is built; missing, ambiguous, untrusted, unready, or over-budget requirements
 fail closed and never widen capabilities.
+
+`required_capability_ids` is verification metadata, not authority. New create
+requests always provide the field, using an empty list for answer-only work.
+Every required capability must also belong to `allowed_capability_ids` when an
+allowlist is present. Legacy structured records deserialize a missing field as
+an empty list.
+
+Terminal structured runs receive a deterministic assessment when read through
+the WebUI automation service or `trigger_list`. The assessment folds the run's
+terminal state and the canonical runtime capability projection for the exact
+`TurnRunId`; it never infers an action from final-answer prose. A required
+capability that failed yields `needs_attention`, a missing/incomplete or
+unavailable fact yields `unverified`, and a completed run whose requirements
+all report success yields `appears_successful`. The latter is deliberately not
+a provider read-back guarantee, and textual criteria are not model-judged in
+this phase. Legacy raw-prompt and active runs have no assessment.
 
 ### 3.4 Trigger state
 
@@ -496,7 +513,8 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus
-  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
+  `last_status` and a bounded `recent_runs` projection, including deterministic
+  required-action assessments for terminal structured runs. Omitted `run_limit`
   defaults to 25 recent runs per trigger; callers that do not need embedded run
   history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.
@@ -539,37 +557,6 @@ Capability follow-ups before launch:
 - PostgreSQL scoped-list NULL handling is performance tuning, not a V1
   correctness gate. The schema owns a composite scoped-list index; add
   NULL-specific partial indexes only with `EXPLAIN` or benchmark evidence.
-
-### 8.1 Semantic execution outcomes
-
-After a structured automation run reaches `Completed`, a post-submit consumer
-reads that run's finalized assistant answer and performs one bounded,
-capability-free system inference against the stored goal and success criteria.
-The result is persisted on the run-history row independently from both the
-turn-run status and any delivery outcome:
-
-- `satisfied` — the answer provides evidence that every stored criterion was met;
-- `unsatisfied` — the answer is usable but does not meet every criterion;
-- `evaluation_failed` — the answer could not be read or the judge call/output
-  was unavailable or invalid.
-
-The record contains only the verdict, a bounded sanitized reason, and the
-evaluation timestamp. Legacy raw-prompt runs, non-completed runs, and runs
-without a structured execution spec have no semantic record. Evaluation output
-is retained separately from bounded run history and is projected onto recent
-run rows; pruning run history must never delete the model-produced reason.
-
-A single bounded reconciler discovers eligible completed runs from durable
-storage. It uses an atomic lease keyed by
-`(tenant_id, trigger_id, fire_slot, run_id)` and a unique claim token, so only
-the current owner may finalize an outcome. Failed repository or transcript
-reads remain discoverable, failed completion writes are retried, and an
-expired claim can be recovered after process loss. The durable backlog is the
-queue: a burst never creates one detached watcher per accepted fire and no
-eligible run is dropped because an in-memory queue is full. A judge call may be
-repeated after lease recovery, but exactly one retained outcome can be
-finalized. Semantic evaluation does not deliver, retry, cancel, or change the
-run's execution status.
 
 ---
 

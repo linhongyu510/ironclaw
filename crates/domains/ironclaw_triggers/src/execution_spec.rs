@@ -23,6 +23,12 @@ pub struct TriggerExecutionSpec {
     pub success_criteria: Vec<String>,
     pub output_instructions: String,
     pub no_result_text: String,
+    /// Capabilities whose successful completion is required before a run can
+    /// be presented as evidence-backed. This is verification metadata, not an
+    /// execution allowlist; `policy.allowed_capability_ids` remains the
+    /// authority boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capability_ids: Vec<ironclaw_host_api::ids::CapabilityId>,
     #[serde(default)]
     pub policy: TurnExecutionPolicy,
 }
@@ -64,6 +70,7 @@ impl TriggerExecutionSpec {
             &self.no_result_text,
             MAX_NO_RESULT_TEXT_BYTES,
         )?;
+        validate_required_capabilities(self)?;
         validate_policy(&self.policy)?;
         if self.render_prompt().len() > MAX_TRIGGER_PROMPT_BYTES {
             return invalid(format!(
@@ -90,6 +97,29 @@ impl TriggerExecutionSpec {
             ],
         )
     }
+}
+
+fn validate_required_capabilities(spec: &TriggerExecutionSpec) -> Result<(), TriggerError> {
+    if spec.required_capability_ids.len() > MAX_ALLOWED_CAPABILITIES {
+        return invalid(format!(
+            "required_capability_ids must contain at most {MAX_ALLOWED_CAPABILITIES} items"
+        ));
+    }
+    let unique = spec.required_capability_ids.iter().collect::<HashSet<_>>();
+    if unique.len() != spec.required_capability_ids.len() {
+        return invalid("required_capability_ids must not contain duplicates");
+    }
+    if let Some(allowed) = &spec.policy.allowed_capability_ids
+        && let Some(disallowed) = spec
+            .required_capability_ids
+            .iter()
+            .find(|capability| !allowed.contains(capability))
+    {
+        return invalid(format!(
+            "required_capability_ids contains `{disallowed}`, which is outside allowed_capability_ids"
+        ));
+    }
+    Ok(())
 }
 
 /// Substitutes every placeholder in one pass over the template, so text

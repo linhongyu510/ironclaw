@@ -2,21 +2,33 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     AutomationListRequest, AutomationProductService, ProductAgentBoundCaller,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSemanticEvaluation,
-    RebornAutomationSemanticVerdict, RebornAutomationSource, RebornAutomationState,
+    RebornAutomationActiveHold, RebornAutomationAssessmentStatus,
+    RebornAutomationCapabilityEvidence, RebornAutomationCapabilityEvidenceStatus,
+    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunAssessment,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     TriggerRunThreadScope,
 };
-use ironclaw_host_api::{Timestamp, ids::ThreadId};
+use ironclaw_event_projections::{
+    CapabilityActivityStatus, EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest,
+    ProjectionScope,
+};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{InvocationId, ThreadId},
+    resource::ResourceScope,
+    turn::TurnRunId,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::{
-    ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
+    ActiveHoldProjection, ActiveHoldReason, MissingTriggerRunEvidenceSource,
+    TriggerActiveRunLookup, TriggerCapabilityExecutionEvidence, TriggerCapabilityExecutionStatus,
+    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunEvidenceError,
+    TriggerRunEvidenceSource, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records, assess_trigger_run,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -41,6 +53,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RebornAutomationProductService {
     trigger_repository: Arc<dyn TriggerRepository>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn TriggerRunEvidenceSource>,
     backend_timeout: Duration,
     /// Whether the background trigger poller is running. Surfaced to the WebUI
     /// so the panel can warn that listed automations will not fire while
@@ -55,6 +68,7 @@ impl std::fmt::Debug for RebornAutomationProductService {
             .debug_struct("RebornAutomationProductService")
             .field("trigger_repository", &"Arc<dyn TriggerRepository>")
             .field("active_run_lookup", &"Arc<dyn TriggerActiveRunLookup>")
+            .field("run_evidence", &"Arc<dyn TriggerRunEvidenceSource>")
             .finish()
     }
 }
@@ -67,6 +81,7 @@ impl RebornAutomationProductService {
         Self {
             trigger_repository,
             active_run_lookup,
+            run_evidence: Arc::new(MissingTriggerRunEvidenceSource),
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
             scheduler_enabled: true,
         }
@@ -76,6 +91,11 @@ impl RebornAutomationProductService {
     /// by WebUI composition from runtime readiness.
     pub fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
         self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    pub fn with_run_evidence(mut self, run_evidence: Arc<dyn TriggerRunEvidenceSource>) -> Self {
+        self.run_evidence = run_evidence;
         self
     }
 
@@ -97,6 +117,48 @@ impl RebornAutomationProductService {
             .into_iter()
             .map(|(trigger_id, hold)| (trigger_id, wire_hold_from_projection(hold)))
             .collect()
+    }
+
+    async fn capability_evidence_by_run(
+        &self,
+        caller: &ProductAgentBoundCaller,
+        records: &[TriggerRecord],
+        deadline: tokio::time::Instant,
+    ) -> Option<Vec<TriggerCapabilityExecutionEvidence>> {
+        let evidence_required = records.iter().any(|record| {
+            record
+                .execution_spec
+                .as_ref()
+                .is_some_and(|spec| !spec.required_capability_ids.is_empty())
+        });
+        if !evidence_required {
+            return Some(Vec::new());
+        }
+        let resource_scope = ResourceScope {
+            tenant_id: caller.tenant_id.clone(),
+            user_id: caller.user_id.clone(),
+            agent_id: Some(caller.agent_id.clone()),
+            project_id: caller.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        match tokio::time::timeout_at(
+            deadline,
+            self.run_evidence.list_capability_evidence(&resource_scope),
+        )
+        .await
+        {
+            Ok(Ok(evidence)) => Some(evidence),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "automation capability evidence projection failed");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("automation capability evidence projection timed out");
+                None
+            }
+        }
     }
 }
 
@@ -167,6 +229,10 @@ impl AutomationProductService for RebornAutomationProductService {
                 .map_err(map_trigger_error)?
             };
 
+        let evidence_by_run = self
+            .capability_evidence_by_run(&caller, &records, deadline)
+            .await;
+
         let mut holds = self
             .active_holds_for_records(&records, deadline, chrono::Utc::now())
             .await;
@@ -178,7 +244,7 @@ impl AutomationProductService for RebornAutomationProductService {
                     .remove(&record.trigger_id)
                     .unwrap_or_default();
                 let hold = holds.remove(&record.trigger_id);
-                automation_info_from_record(record, &runs, hold)
+                automation_info_from_record(record, &runs, hold, evidence_by_run.as_deref())
             })
             .collect())
     }
@@ -225,7 +291,7 @@ impl AutomationProductService for RebornAutomationProductService {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            automation: record.map(|record| automation_info_from_record(record, &[], None, None)),
         })
     }
 
@@ -318,7 +384,7 @@ impl RebornAutomationProductService {
 
         Ok(RebornAutomationMutationResponse {
             updated: record.is_some(),
-            automation: record.map(|record| automation_info_from_record(record, &[], None)),
+            automation: record.map(|record| automation_info_from_record(record, &[], None, None)),
         })
     }
 }
@@ -372,6 +438,7 @@ fn automation_info_from_record(
     record: TriggerRecord,
     runs: &[TriggerRunRecord],
     active_hold: Option<RebornAutomationActiveHold>,
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
 ) -> RebornAutomationInfo {
     let source = automation_source_from_record(&record);
     let is_active = record.has_active_fire();
@@ -390,7 +457,10 @@ fn automation_info_from_record(
         next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status.map(map_trigger_run_status),
-        recent_runs: runs.iter().filter_map(map_recent_run).collect(),
+        recent_runs: runs
+            .iter()
+            .filter_map(|run| map_recent_run(run, record.execution_spec.as_ref(), evidence))
+            .collect(),
         is_active,
         created_at: Some(record.created_at),
         active_hold,
@@ -461,7 +531,11 @@ fn map_trigger_run_status(status: TriggerRunStatus) -> RebornAutomationRunStatus
     }
 }
 
-fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInfo> {
+fn map_recent_run(
+    run: &TriggerRunRecord,
+    execution_spec: Option<&ironclaw_triggers::TriggerExecutionSpec>,
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
+) -> Option<RebornAutomationRecentRunInfo> {
     let status = match run.status {
         TriggerRunHistoryStatus::Running => RebornAutomationRecentRunStatus::Running,
         TriggerRunHistoryStatus::Ok => RebornAutomationRecentRunStatus::Ok,
@@ -477,24 +551,133 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
         status,
         submitted_at: run.submitted_at,
         completed_at: run.completed_at,
-        semantic_evaluation: run.semantic_evaluation.as_ref().map(|evaluation| {
-            RebornAutomationSemanticEvaluation {
-                verdict: match evaluation.verdict {
-                    ironclaw_triggers::TriggerSemanticVerdict::Satisfied => {
-                        RebornAutomationSemanticVerdict::Satisfied
+        assessment: execution_spec
+            .filter(|_| run.status != TriggerRunHistoryStatus::Running)
+            .map(|spec| assess_run(run, &spec.required_capability_ids, evidence)),
+    })
+}
+
+pub(super) fn assess_run(
+    run: &TriggerRunRecord,
+    required_capabilities: &[ironclaw_host_api::ids::CapabilityId],
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
+) -> RebornAutomationRunAssessment {
+    let assessment = assess_trigger_run(run.status, run.run_id, required_capabilities, evidence);
+    let status = match assessment.status {
+        ironclaw_triggers::TriggerRunAssessmentStatus::AppearsSuccessful => {
+            RebornAutomationAssessmentStatus::AppearsSuccessful
+        }
+        ironclaw_triggers::TriggerRunAssessmentStatus::NeedsAttention => {
+            RebornAutomationAssessmentStatus::NeedsAttention
+        }
+        ironclaw_triggers::TriggerRunAssessmentStatus::Unverified => {
+            RebornAutomationAssessmentStatus::Unverified
+        }
+        ironclaw_triggers::TriggerRunAssessmentStatus::RunFailed => {
+            RebornAutomationAssessmentStatus::RunFailed
+        }
+    };
+    let summary = match status {
+        RebornAutomationAssessmentStatus::AppearsSuccessful if required_capabilities.is_empty() => {
+            "The run completed; textual quality was not evaluated."
+        }
+        RebornAutomationAssessmentStatus::AppearsSuccessful => {
+            "The run completed and every required capability reported success."
+        }
+        RebornAutomationAssessmentStatus::NeedsAttention => {
+            "The run completed, but a required capability failed."
+        }
+        RebornAutomationAssessmentStatus::Unverified => {
+            "The run completed, but required action evidence is incomplete."
+        }
+        RebornAutomationAssessmentStatus::RunFailed => {
+            "The automation run failed before its contract could be verified."
+        }
+    };
+    RebornAutomationRunAssessment {
+        status,
+        summary: summary.to_string(),
+        capabilities: assessment
+            .capabilities
+            .into_iter()
+            .map(|item| RebornAutomationCapabilityEvidence {
+                capability_id: item.capability_id,
+                status: match item.status {
+                    ironclaw_triggers::TriggerCapabilityRequirementStatus::Succeeded => {
+                        RebornAutomationCapabilityEvidenceStatus::Succeeded
                     }
-                    ironclaw_triggers::TriggerSemanticVerdict::Unsatisfied => {
-                        RebornAutomationSemanticVerdict::Unsatisfied
+                    ironclaw_triggers::TriggerCapabilityRequirementStatus::Failed => {
+                        RebornAutomationCapabilityEvidenceStatus::Failed
                     }
-                    ironclaw_triggers::TriggerSemanticVerdict::EvaluationFailed => {
-                        RebornAutomationSemanticVerdict::EvaluationFailed
+                    ironclaw_triggers::TriggerCapabilityRequirementStatus::Missing => {
+                        RebornAutomationCapabilityEvidenceStatus::Missing
+                    }
+                    ironclaw_triggers::TriggerCapabilityRequirementStatus::Incomplete => {
+                        RebornAutomationCapabilityEvidenceStatus::Incomplete
+                    }
+                    ironclaw_triggers::TriggerCapabilityRequirementStatus::Unavailable => {
+                        RebornAutomationCapabilityEvidenceStatus::Unavailable
                     }
                 },
-                reason: evaluation.reason.clone(),
-                evaluated_at: evaluation.evaluated_at,
-            }
-        }),
-    })
+                error_kind: item.error_kind,
+            })
+            .collect(),
+    }
+}
+
+/// Adapter from the canonical runtime-event projection to trigger-owned,
+/// content-free evidence facts. Both the WebUI service and the model-facing
+/// trigger tool consume this same port.
+pub struct ProjectedTriggerRunEvidenceSource {
+    projection: Arc<dyn EventProjectionService>,
+}
+
+impl ProjectedTriggerRunEvidenceSource {
+    pub fn new(projection: Arc<dyn EventProjectionService>) -> Self {
+        Self { projection }
+    }
+}
+
+#[async_trait::async_trait]
+impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, TriggerRunEvidenceError> {
+        let snapshot = self
+            .projection
+            .snapshot(ProjectionRequest {
+                scope: ProjectionScope::from_resource_scope(scope),
+                after: None,
+                limit: MAX_PROJECTION_PAGE_LIMIT,
+            })
+            .await
+            .map_err(|_| TriggerRunEvidenceError::Unavailable)?;
+        Ok(snapshot
+            .capability_activities
+            .into_iter()
+            .filter_map(|activity| {
+                let run_id = activity.run_id?;
+                let status = match activity.status {
+                    CapabilityActivityStatus::Completed => {
+                        TriggerCapabilityExecutionStatus::Succeeded
+                    }
+                    CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed => {
+                        TriggerCapabilityExecutionStatus::Failed
+                    }
+                    CapabilityActivityStatus::Started | CapabilityActivityStatus::Running => {
+                        TriggerCapabilityExecutionStatus::Incomplete
+                    }
+                };
+                Some(TriggerCapabilityExecutionEvidence {
+                    run_id: TurnRunId::from_uuid(run_id.as_uuid()),
+                    capability_id: activity.capability_id,
+                    status,
+                    error_kind: activity.error_kind,
+                })
+            })
+            .collect())
+    }
 }
 
 fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, ProductSurfaceError> {

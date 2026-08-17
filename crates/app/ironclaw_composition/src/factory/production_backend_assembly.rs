@@ -605,6 +605,13 @@ pub(super) async fn build_backend_production(
         Arc::clone(&trigger_repository),
         Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
         trigger_active_run_lookup,
+        Arc::new(ironclaw_assistant::ProjectedTriggerRunEvidenceSource::new(
+            Arc::new(
+                ironclaw_event_projections::ReplayEventProjectionService::from_runtime_log(
+                    Arc::clone(&event_log),
+                ),
+            ),
+        )),
         process_backend,
     )?;
     if let (Some(package), Some(handler)) = (

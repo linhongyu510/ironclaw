@@ -5,8 +5,6 @@
 //! lifecycle wiring, first-party capabilities, and outbound delivery are owned
 //! by later slices.
 
-// arch-exempt: large_file, trigger contracts stay centralized with their domain owner, plan #6815
-
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -28,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod evidence;
 mod execution_spec;
 mod fire_access;
 mod in_memory;
@@ -42,6 +41,12 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use evidence::{
+    MissingTriggerRunEvidenceSource, TriggerCapabilityExecutionEvidence,
+    TriggerCapabilityExecutionStatus, TriggerCapabilityRequirementAssessment,
+    TriggerCapabilityRequirementStatus, TriggerRunAssessment, TriggerRunAssessmentStatus,
+    TriggerRunEvidenceError, TriggerRunEvidenceSource, assess_trigger_run,
+};
 pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
 /// trigger-scope policy. The deployment *grant* value and the identity-directory
@@ -743,73 +748,6 @@ pub enum TriggerRunHistoryStatus {
     Ok,
     Error,
 }
-
-/// Semantic assessment of a completed structured automation run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriggerSemanticVerdict {
-    Satisfied,
-    Unsatisfied,
-    EvaluationFailed,
-}
-
-/// Durable semantic outcome, independent from execution and delivery status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TriggerSemanticEvaluation {
-    pub verdict: TriggerSemanticVerdict,
-    pub reason: String,
-    pub evaluated_at: Timestamp,
-}
-
-/// Unique ownership token for one semantic-evaluation lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TriggerSemanticEvaluationClaimId(Ulid);
-
-impl TriggerSemanticEvaluationClaimId {
-    pub fn new() -> Self {
-        Self(Ulid::generate())
-    }
-}
-
-impl Default for TriggerSemanticEvaluationClaimId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for TriggerSemanticEvaluationClaimId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-/// One completed structured run awaiting semantic evaluation. Repository
-/// implementations derive this only from durable trigger/run state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingTriggerSemanticEvaluation {
-    pub tenant_id: TenantId,
-    pub trigger_id: TriggerId,
-    pub fire_slot: Timestamp,
-    pub run_id: TurnRunId,
-    pub thread_id: ThreadId,
-    pub creator_user_id: UserId,
-    pub agent_id: Option<AgentId>,
-    pub project_id: Option<ProjectId>,
-    pub execution_spec: TriggerExecutionSpec,
-}
-
-/// Atomic lease request for one completed structured run awaiting semantic
-/// evaluation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimTriggerSemanticEvaluationRequest {
-    pub tenant_id: TenantId,
-    pub trigger_id: TriggerId,
-    pub fire_slot: Timestamp,
-    pub run_id: TurnRunId,
-    pub claim_id: TriggerSemanticEvaluationClaimId,
-    pub claimed_at: Timestamp,
-    pub stale_before: Timestamp,
-}
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
@@ -879,26 +817,6 @@ pub(crate) fn parse_run_history_status_codec(
     }
 }
 
-pub(crate) fn semantic_verdict_text(value: TriggerSemanticVerdict) -> &'static str {
-    match value {
-        TriggerSemanticVerdict::Satisfied => "satisfied",
-        TriggerSemanticVerdict::Unsatisfied => "unsatisfied",
-        TriggerSemanticVerdict::EvaluationFailed => "evaluation_failed",
-    }
-}
-
-pub(crate) fn parse_semantic_verdict(value: &str) -> Result<TriggerSemanticVerdict, TriggerError> {
-    match value {
-        "satisfied" => Ok(TriggerSemanticVerdict::Satisfied),
-        "unsatisfied" => Ok(TriggerSemanticVerdict::Unsatisfied),
-        "evaluation_failed" => Ok(TriggerSemanticVerdict::EvaluationFailed),
-        other => Err(TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::Other,
-            reason: format!("semantic_verdict: unsupported value `{other}`"),
-        }),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerRunRecord {
     pub tenant_id: TenantId,
@@ -918,8 +836,6 @@ pub struct TriggerRunRecord {
     pub status: TriggerRunHistoryStatus,
     pub submitted_at: Timestamp,
     pub completed_at: Option<Timestamp>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_evaluation: Option<TriggerSemanticEvaluation>,
 }
 
 impl TriggerRunRecord {
@@ -945,7 +861,6 @@ impl TriggerRunRecord {
             status: TriggerRunHistoryStatus::Running,
             submitted_at,
             completed_at: None,
-            semantic_evaluation: None,
         }
     }
 }
@@ -1370,77 +1285,6 @@ pub trait TriggerRepository: Send + Sync {
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
-    /// Lists completed structured runs that still require semantic evaluation.
-    /// This is trusted background-work plumbing and must not be exposed as a
-    /// user-scoped capability.
-    async fn list_pending_semantic_evaluations(
-        &self,
-        _limit: usize,
-    ) -> Result<Vec<PendingTriggerSemanticEvaluation>, TriggerError> {
-        Err(TriggerError::Backend {
-            reason: "pending semantic evaluation listing is not implemented by this repository"
-                .to_string(),
-        })
-    }
-
-    /// Loads one exact completed structured run when it still requires
-    /// semantic evaluation. Terminal-success observers use this instead of
-    /// scanning unrelated automation runs.
-    async fn get_pending_semantic_evaluation(
-        &self,
-        _tenant_id: TenantId,
-        _trigger_id: TriggerId,
-        _fire_slot: Timestamp,
-        _run_id: TurnRunId,
-    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
-        Err(TriggerError::Backend {
-            reason: "pending semantic evaluation lookup is not implemented by this repository"
-                .to_string(),
-        })
-    }
-
-    /// Reads the retained semantic result independently of prunable run
-    /// history. This is the source of truth used to project recent history.
-    async fn get_semantic_evaluation(
-        &self,
-        _tenant_id: TenantId,
-        _trigger_id: TriggerId,
-        _fire_slot: Timestamp,
-        _run_id: TurnRunId,
-    ) -> Result<Option<TriggerSemanticEvaluation>, TriggerError> {
-        Err(TriggerError::Backend {
-            reason: "semantic evaluation lookup is not implemented by this repository".to_string(),
-        })
-    }
-
-    /// Atomically reserves semantic evaluation for one completed structured
-    /// run. An expired lease may be reclaimed with a new ownership token.
-    async fn claim_semantic_evaluation(
-        &self,
-        _request: ClaimTriggerSemanticEvaluationRequest,
-    ) -> Result<bool, TriggerError> {
-        Err(TriggerError::Backend {
-            reason: "semantic evaluation claims are not implemented by this repository".to_string(),
-        })
-    }
-
-    /// Finalizes a previously claimed semantic evaluation. Only the current
-    /// lease owner may complete it.
-    async fn complete_semantic_evaluation(
-        &self,
-        _tenant_id: TenantId,
-        _trigger_id: TriggerId,
-        _fire_slot: Timestamp,
-        _run_id: TurnRunId,
-        _claim_id: TriggerSemanticEvaluationClaimId,
-        _evaluation: TriggerSemanticEvaluation,
-    ) -> Result<bool, TriggerError> {
-        Err(TriggerError::Backend {
-            reason: "semantic evaluation completion is not implemented by this repository"
-                .to_string(),
-        })
-    }
-
     /// Looks up the run-history row and its parent trigger by `thread_id`.
     ///
     /// Returns `Some((trigger_record, run_record))` when a run with the given
@@ -1528,8 +1372,8 @@ pub use worker::{
     TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
     TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
     TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRunFailureSettlement,
-    TriggerRunSuccessSettlement, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

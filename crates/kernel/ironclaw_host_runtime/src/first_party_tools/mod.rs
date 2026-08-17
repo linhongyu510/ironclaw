@@ -471,6 +471,25 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Production trigger handlers with the same runtime-evidence source used by
+/// product automation reads.
+pub fn builtin_first_party_handlers_with_trigger_create_hook_and_evidence(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_create_hook_and_evidence(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        run_evidence,
+    )?;
+    Ok(registry)
+}
+
 /// Replace the fail-closed default for the explicit model-delivery capability
 /// with the product-owned delivery service selected by composition.
 pub fn register_outbound_deliver_first_party_handler(
@@ -499,6 +518,25 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_create_hook_and_evidence_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_and_evidence(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        run_evidence,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;

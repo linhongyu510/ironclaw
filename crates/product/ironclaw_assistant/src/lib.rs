@@ -69,7 +69,6 @@ mod steering;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
-pub use run_delivery::SemanticRunEvaluator;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use admin_user_directory::{
@@ -110,7 +109,9 @@ pub use auth_interaction::{
 // auth's own vocabulary, and the extension host implements the challenge port.
 // No re-export here — consumers import from the owner
 // (`.claude/rules/type-placement.md`).
-pub use automation_product_service::RebornAutomationProductService;
+pub use automation_product_service::{
+    ProjectedTriggerRunEvidenceSource, RebornAutomationProductService,
+};
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
@@ -322,20 +323,21 @@ pub use reborn_services::{
     RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserRequest,
     RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
-    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
-    RebornAutomationRunStatus, RebornAutomationSemanticEvaluation, RebornAutomationSemanticVerdict,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCommandRejection,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
-    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornAutomationAssessmentStatus, RebornAutomationCapabilityEvidence,
+    RebornAutomationCapabilityEvidenceStatus, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunAssessment,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
+    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountInfo, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,

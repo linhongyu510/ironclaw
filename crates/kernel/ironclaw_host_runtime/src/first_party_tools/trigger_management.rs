@@ -14,10 +14,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerExecutionSpec,
-    TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord,
-    TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind, TriggerState,
-    active_holds_for_records,
+    MissingTriggerActiveRunLookup, MissingTriggerRunEvidenceSource, TriggerActiveRunLookup,
+    TriggerCapabilityExecutionEvidence, TriggerError, TriggerExecutionSpec, TriggerId,
+    TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunEvidenceSource,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind,
+    TriggerSourceKind, TriggerState, active_holds_for_records, assess_trigger_run,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -50,9 +51,9 @@ pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 /// check-before-assert rule tied to the exact claims the model must not
 /// fabricate, and bridges the user vocabulary ("automation", "routine") to
 /// this trigger capability.
-const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, each available semantic evaluation verdict and reason, and any active hold. A semantic verdict judges whether that run's answer met its execution contract; it is separate from execution and delivery status. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
+const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, deterministic required-action assessment, and any active hold. The assessment is grounded in runtime capability evidence and does not judge textual quality. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Put every capability whose successful execution is necessary to satisfy the user's requested actions in required_capability_ids; use an empty array for answer-only work. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -115,6 +116,22 @@ pub(super) fn insert_handlers_with_create_hook(
     create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_create_hook_and_evidence(
+        registry,
+        repository,
+        create_hook,
+        active_run_lookup,
+        Arc::new(MissingTriggerRunEvidenceSource),
+    )
+}
+
+pub(super) fn insert_handlers_with_create_hook_and_evidence(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn TriggerRunEvidenceSource>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
@@ -122,6 +139,7 @@ pub(super) fn insert_handlers_with_create_hook(
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
             active_run_lookup,
+            run_evidence,
         }),
     )
 }
@@ -139,6 +157,7 @@ pub(super) fn insert_handlers_with_clock(
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
             active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+            run_evidence: Arc::new(MissingTriggerRunEvidenceSource),
         }),
     )
 }
@@ -236,6 +255,7 @@ struct TriggerManagementToolHandler {
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn TriggerRunEvidenceSource>,
 }
 
 #[async_trait]
@@ -293,6 +313,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 list_triggers(
                     &*self.repository,
                     &*self.active_run_lookup,
+                    &*self.run_evidence,
                     &request.scope,
                     request.input,
                     self.clock.now(),
@@ -487,7 +508,7 @@ async fn create_trigger(
         return Err(hook_error);
     }
     Ok(json!({
-        "trigger": trigger_output(&record, &[], None),
+        "trigger": trigger_output(&record, &[], None, None),
     }))
 }
 
@@ -521,6 +542,7 @@ fn reject_forbidden_scheduled_capabilities(
 async fn list_triggers(
     repository: &dyn TriggerRepository,
     active_run_lookup: &dyn TriggerActiveRunLookup,
+    run_evidence: &dyn TriggerRunEvidenceSource,
     scope: &ResourceScope,
     input: Value,
     now: DateTime<Utc>,
@@ -559,6 +581,22 @@ async fn list_triggers(
         .list_trigger_run_history_batch(scope.tenant_id.clone(), &trigger_ids, run_limit)
         .await
         .map_err(|error| trigger_repository_error("list_trigger_run_history_batch", error))?;
+    let evidence = if records.iter().any(|record| {
+        record
+            .execution_spec
+            .as_ref()
+            .is_some_and(|spec| !spec.required_capability_ids.is_empty())
+    }) {
+        match run_evidence.list_capability_evidence(scope).await {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                tracing::warn!(%error, "trigger list capability evidence unavailable");
+                None
+            }
+        }
+    } else {
+        Some(Vec::new())
+    };
     // Reason/elapsed-occurrence derivation and lookup batching live in
     // `ironclaw_triggers::active_holds_for_records`, shared with the
     // automations service so both read surfaces stay in lockstep (#5886).
@@ -575,7 +613,7 @@ async fn list_triggers(
                 .remove(&record.trigger_id)
                 .unwrap_or_default();
             let hold = holds.remove(&record.trigger_id);
-            trigger_output(&record, &runs, hold)
+            trigger_output(&record, &runs, hold, evidence.as_deref())
         })
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": output }))
@@ -647,7 +685,7 @@ async fn set_trigger_state(
         .map_err(|error| trigger_repository_error("set_scoped_trigger_state", error))?;
     Ok(json!({
         "updated": updated.is_some(),
-        "trigger": updated.as_ref().map(|record| trigger_output(record, &[], None)),
+        "trigger": updated.as_ref().map(|record| trigger_output(record, &[], None, None)),
     }))
 }
 
@@ -655,6 +693,7 @@ fn trigger_output(
     record: &TriggerRecord,
     recent_runs: &[TriggerRunRecord],
     active_hold: Option<Value>,
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
 ) -> Value {
     let is_enabled = record.state == TriggerState::Scheduled;
     let has_active_fire = record.has_active_fire();
@@ -670,7 +709,10 @@ fn trigger_output(
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
         "last_status": record.last_status,
-        "recent_runs": recent_runs.iter().map(trigger_run_output).collect::<Vec<_>>(),
+        "recent_runs": recent_runs
+            .iter()
+            .map(|run| trigger_run_output(run, record.execution_spec.as_ref(), evidence))
+            .collect::<Vec<_>>(),
         // Model-facing trigger status: `is_active` means the trigger is enabled
         // to fire. In-flight run state is exposed separately as `has_active_fire`.
         "is_enabled": is_enabled,
@@ -687,16 +729,30 @@ fn trigger_output(
     output
 }
 
-fn trigger_run_output(run: &TriggerRunRecord) -> Value {
-    json!({
+fn trigger_run_output(
+    run: &TriggerRunRecord,
+    execution_spec: Option<&TriggerExecutionSpec>,
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
+) -> Value {
+    let mut output = json!({
         "fire_slot": run.fire_slot,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
         "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,
         "submitted_at": run.submitted_at,
         "completed_at": run.completed_at,
-        "semantic_evaluation": run.semantic_evaluation.as_ref(),
-    })
+    });
+    if let Some(spec) = execution_spec
+        && run.status != TriggerRunHistoryStatus::Running
+    {
+        output["assessment"] = json!(assess_trigger_run(
+            run.status,
+            run.run_id,
+            &spec.required_capability_ids,
+            evidence,
+        ));
+    }
+    output
 }
 
 fn trigger_remove_output(record: &TriggerRecord) -> Value {

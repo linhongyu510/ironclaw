@@ -28,7 +28,7 @@
 // arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::ids::{ThreadId, UserId};
+use ironclaw_host_api::ids::{CapabilityId, ThreadId, UserId};
 use ironclaw_host_api::turn::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -1015,19 +1015,42 @@ pub enum RebornAutomationRecentRunStatus {
     Unknown,
 }
 
+/// One headline answering whether durable runtime facts support the run's
+/// declared contract. This is deterministic and does not include model
+/// judgment about prose quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RebornAutomationSemanticVerdict {
-    Satisfied,
-    Unsatisfied,
-    EvaluationFailed,
+pub enum RebornAutomationAssessmentStatus {
+    AppearsSuccessful,
+    NeedsAttention,
+    Unverified,
+    RunFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationCapabilityEvidenceStatus {
+    Succeeded,
+    Failed,
+    Missing,
+    Incomplete,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornAutomationSemanticEvaluation {
-    pub verdict: RebornAutomationSemanticVerdict,
-    pub reason: String,
-    pub evaluated_at: DateTime<Utc>,
+pub struct RebornAutomationCapabilityEvidence {
+    pub capability_id: CapabilityId,
+    pub status: RebornAutomationCapabilityEvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRunAssessment {
+    pub status: RebornAutomationAssessmentStatus,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<RebornAutomationCapabilityEvidence>,
 }
 
 /// Client-safe automation run projection.
@@ -1047,8 +1070,10 @@ pub struct RebornAutomationRecentRunInfo {
     pub submitted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// Present for terminal structured runs. Legacy prompt runs and active
+    /// runs have no deterministic contract assessment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_evaluation: Option<RebornAutomationSemanticEvaluation>,
+    pub assessment: Option<RebornAutomationRunAssessment>,
 }
 
 /// Allowlisted client-visible state for automation list projections.

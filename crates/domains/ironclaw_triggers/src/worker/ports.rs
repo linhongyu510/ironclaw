@@ -148,32 +148,19 @@ pub struct TriggerRunFailureSettlement {
     pub run_id: TurnRunId,
 }
 
-/// A previously-accepted fire whose run reached terminal success. Emitted
-/// only after trigger storage durably records the run as successful.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerRunSuccessSettlement {
-    pub tenant_id: TenantId,
-    pub trigger_id: TriggerId,
-    pub fire_slot: Timestamp,
-    pub run_id: TurnRunId,
-}
-
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
     /// The worker invokes these hooks **inline** while processing poller
     /// work: `on_accepted_fire_settled` from the per-fire submit path,
     /// `on_failed_fire_settled` from the claim-time failure path, and
-    /// the terminal run callbacks from the active-cleanup sweep. Implementors
+    /// `on_run_failure_settled` from the active-cleanup sweep. Implementors
     /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
     /// egress) must be detached internally (for example a bounded spawn, as
-    /// the composition `TriggerSettlementHookObserver` does for accepted-fire
+    /// the composition `PostSubmitHookObserver` does for accepted-fire
     /// delivery) rather than awaited through this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 
     async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
-
-    /// A previously-accepted fire was durably settled as successful.
-    async fn on_run_success_settled(&self, _event: TriggerRunSuccessSettlement) {}
 
     /// A previously-accepted fire settled into a terminal failure state.
     ///

@@ -1,4 +1,3 @@
-// arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use std::collections::HashMap;
 
 use crate::AutomationName;
@@ -13,19 +12,16 @@ use ironclaw_host_api::{
 use tokio_postgres::Row;
 
 use crate::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest,
-    ClaimTriggerSemanticEvaluationRequest, ClaimedTriggerFire, ClearActiveFireRequest,
-    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, PendingTriggerSemanticEvaluation,
-    TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
-    TriggerRunRecord, TriggerRunStatus, TriggerSchedule, TriggerSemanticEvaluation,
-    TriggerSemanticEvaluationClaimId, TriggerState, reject_failed_result_after_active_run,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
-const TRIGGER_SEMANTIC_EVALUATION_TABLE: &str = "trigger_semantic_evaluations";
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
@@ -44,8 +40,7 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
        state, next_run_at, last_run_at, last_fired_slot, last_status,
        active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target, execution_spec_json";
 const TRIGGER_RUN_COLUMNS: &str = "\
-    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at, \
-    semantic_verdict, semantic_reason, semantic_evaluated_at";
+    tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
 const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
 
 /// PostgreSQL-backed [`TriggerRepository`] storing trigger records.
@@ -1043,14 +1038,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let Some(run_row) = run_row else {
             return Ok(None);
         };
-        let mut run = row_to_run_record(&run_row)?;
-        hydrate_postgres_semantic_evaluations(
-            &client,
-            &tenant_id,
-            &[run.trigger_id],
-            std::slice::from_mut(&mut run),
-        )
-        .await?;
+        let run = row_to_run_record(&run_row)?;
         // Then load the parent trigger record.
         let trigger_row = client
             .query_opt(
@@ -1094,13 +1082,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("query trigger run history", error))?;
-        let mut runs = rows
-            .iter()
-            .map(row_to_run_record)
-            .collect::<Result<Vec<_>, _>>()?;
-        hydrate_postgres_semantic_evaluations(&client, &tenant_id, &[trigger_id], &mut runs)
-            .await?;
-        Ok(runs)
+        rows.iter().map(row_to_run_record).collect()
     }
 
     async fn list_trigger_run_history_batch(
@@ -1114,7 +1096,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(runs_by_trigger);
         }
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
-        let trigger_id_values = trigger_ids
+        let trigger_ids = trigger_ids
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
@@ -1132,7 +1114,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                      WHERE row_rank <= $3
                      ORDER BY trigger_id, fire_slot DESC"
                 ),
-                &[&tenant_id.as_str(), &trigger_id_values, &limit],
+                &[&tenant_id.as_str(), &trigger_ids, &limit],
             )
             .await
             .map_err(|error| backend_error("query trigger run history batch", error))?;
@@ -1140,337 +1122,8 @@ impl TriggerRepository for PostgresTriggerRepository {
             let run = row_to_run_record(&row)?;
             runs_by_trigger.entry(run.trigger_id).or_default().push(run);
         }
-        let mut all_runs = runs_by_trigger
-            .values_mut()
-            .flat_map(|runs| runs.iter_mut())
-            .collect::<Vec<_>>();
-        hydrate_postgres_semantic_evaluation_refs(
-            &client,
-            &tenant_id,
-            &trigger_id_values,
-            &mut all_runs,
-        )
-        .await?;
         Ok(runs_by_trigger)
     }
-
-    async fn claim_semantic_evaluation(
-        &self,
-        request: ClaimTriggerSemanticEvaluationRequest,
-    ) -> Result<bool, TriggerError> {
-        let ClaimTriggerSemanticEvaluationRequest {
-            tenant_id,
-            trigger_id,
-            fire_slot,
-            run_id,
-            claim_id,
-            claimed_at,
-            stale_before,
-        } = request;
-        let client = self.connect().await?;
-        let changed = client
-            .execute(
-                &format!(
-                    "INSERT INTO {TRIGGER_SEMANTIC_EVALUATION_TABLE} (
-                        tenant_id, trigger_id, fire_slot, run_id, claim_id, claimed_at
-                    )
-                    SELECT rh.tenant_id, rh.trigger_id, rh.fire_slot, rh.run_id, $5, $6
-                    FROM {TRIGGER_RUN_TABLE} rh
-                    JOIN {TRIGGER_TABLE} tr
-                      ON tr.tenant_id = rh.tenant_id AND tr.trigger_id = rh.trigger_id
-                    WHERE rh.tenant_id = $1 AND rh.trigger_id = $2 AND rh.fire_slot = $3
-                      AND rh.run_id = $4 AND rh.status = 'ok'
-                      AND tr.execution_spec_json IS NOT NULL
-                    ON CONFLICT (tenant_id, trigger_id, fire_slot, run_id) DO UPDATE SET
-                        claim_id = EXCLUDED.claim_id,
-                        claimed_at = EXCLUDED.claimed_at
-                    WHERE trigger_semantic_evaluations.verdict IS NULL
-                      AND trigger_semantic_evaluations.claimed_at <= $7"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                    &fmt_ts(&fire_slot),
-                    &run_id.to_string(),
-                    &claim_id.to_string(),
-                    &fmt_ts(&claimed_at),
-                    &fmt_ts(&stale_before),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("claim semantic evaluation", error))?;
-        Ok(changed == 1)
-    }
-
-    async fn complete_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-        claim_id: TriggerSemanticEvaluationClaimId,
-        evaluation: TriggerSemanticEvaluation,
-    ) -> Result<bool, TriggerError> {
-        let mut client = self.connect().await?;
-        let transaction = client
-            .transaction()
-            .await
-            .map_err(|error| backend_error("begin semantic evaluation completion", error))?;
-        let verdict = crate::semantic_verdict_text(evaluation.verdict);
-        let evaluated_at = fmt_ts(&evaluation.evaluated_at);
-        let changed = transaction
-            .execute(
-                &format!(
-                    "UPDATE {TRIGGER_SEMANTIC_EVALUATION_TABLE}
-                SET verdict = $6, reason = $7, evaluated_at = $8
-                WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
-                  AND run_id = $4 AND claim_id = $5 AND verdict IS NULL"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                    &fmt_ts(&fire_slot),
-                    &run_id.to_string(),
-                    &claim_id.to_string(),
-                    &verdict,
-                    &evaluation.reason,
-                    &evaluated_at,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("complete semantic evaluation", error))?;
-        if changed != 1 {
-            transaction.rollback().await.map_err(|error| {
-                backend_error("roll back unowned semantic evaluation completion", error)
-            })?;
-            return Ok(false);
-        }
-        transaction
-            .execute(
-                &format!(
-                    "UPDATE {TRIGGER_RUN_TABLE}
-                     SET semantic_evaluation_state = 'complete', semantic_verdict = $5,
-                         semantic_reason = $6, semantic_evaluated_at = $7
-                     WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3 AND run_id = $4"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                    &fmt_ts(&fire_slot),
-                    &run_id.to_string(),
-                    &verdict,
-                    &evaluation.reason,
-                    &evaluated_at,
-                ],
-            )
-            .await
-            .map_err(|error| {
-                backend_error("project semantic evaluation into run history", error)
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| backend_error("commit semantic evaluation completion", error))?;
-        Ok(true)
-    }
-
-    async fn get_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-    ) -> Result<Option<TriggerSemanticEvaluation>, TriggerError> {
-        let client = self.connect().await?;
-        let row = client
-            .query_opt(
-                &format!(
-                    "SELECT verdict, reason, evaluated_at
-                     FROM {TRIGGER_SEMANTIC_EVALUATION_TABLE}
-                     WHERE tenant_id = $1 AND trigger_id = $2 AND fire_slot = $3
-                       AND run_id = $4 AND verdict IS NOT NULL"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                    &fmt_ts(&fire_slot),
-                    &run_id.to_string(),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("query retained semantic evaluation", error))?;
-        match row {
-            Some(row) => Ok(Some(TriggerSemanticEvaluation {
-                verdict: crate::parse_semantic_verdict(&required_text(&row, "verdict")?)?,
-                reason: required_text(&row, "reason")?,
-                evaluated_at: parse_timestamp(
-                    &required_text(&row, "evaluated_at")?,
-                    "evaluated_at",
-                )?,
-            })),
-            None => Ok(None),
-        }
-    }
-
-    async fn list_pending_semantic_evaluations(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<PendingTriggerSemanticEvaluation>, TriggerError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let client = self.connect().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT rh.tenant_id, rh.trigger_id, rh.fire_slot, rh.run_id, rh.thread_id,
-                            tr.creator_user_id, tr.agent_id, tr.project_id, tr.execution_spec_json
-                     FROM {TRIGGER_RUN_TABLE} rh
-                     JOIN {TRIGGER_TABLE} tr
-                       ON tr.tenant_id = rh.tenant_id AND tr.trigger_id = rh.trigger_id
-                     LEFT JOIN {TRIGGER_SEMANTIC_EVALUATION_TABLE} se
-                       ON se.tenant_id = rh.tenant_id AND se.trigger_id = rh.trigger_id
-                      AND se.fire_slot = rh.fire_slot AND se.run_id = rh.run_id
-                     WHERE rh.status = 'ok' AND rh.run_id IS NOT NULL AND rh.thread_id IS NOT NULL
-                       AND tr.execution_spec_json IS NOT NULL AND se.verdict IS NULL
-                     ORDER BY rh.completed_at, rh.tenant_id, rh.trigger_id, rh.fire_slot
-                     LIMIT $1"
-                ),
-                &[&(limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64)],
-            )
-            .await
-            .map_err(|error| backend_error("query pending semantic evaluations", error))?;
-        rows.iter()
-            .map(row_to_pending_semantic_evaluation)
-            .collect()
-    }
-
-    async fn get_pending_semantic_evaluation(
-        &self,
-        tenant_id: TenantId,
-        trigger_id: TriggerId,
-        fire_slot: Timestamp,
-        run_id: TurnRunId,
-    ) -> Result<Option<PendingTriggerSemanticEvaluation>, TriggerError> {
-        let client = self.connect().await?;
-        let row = client
-            .query_opt(
-                &format!(
-                    "SELECT rh.tenant_id, rh.trigger_id, rh.fire_slot, rh.run_id, rh.thread_id,
-                            tr.creator_user_id, tr.agent_id, tr.project_id, tr.execution_spec_json
-                     FROM {TRIGGER_RUN_TABLE} rh
-                     JOIN {TRIGGER_TABLE} tr
-                       ON tr.tenant_id = rh.tenant_id AND tr.trigger_id = rh.trigger_id
-                     LEFT JOIN {TRIGGER_SEMANTIC_EVALUATION_TABLE} se
-                       ON se.tenant_id = rh.tenant_id AND se.trigger_id = rh.trigger_id
-                      AND se.fire_slot = rh.fire_slot AND se.run_id = rh.run_id
-                     WHERE rh.tenant_id = $1 AND rh.trigger_id = $2 AND rh.fire_slot = $3
-                       AND rh.run_id = $4 AND rh.status = 'ok' AND rh.thread_id IS NOT NULL
-                       AND tr.execution_spec_json IS NOT NULL AND se.verdict IS NULL"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                    &fmt_ts(&fire_slot),
-                    &run_id.to_string(),
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("query pending semantic evaluation", error))?;
-        row.as_ref()
-            .map(row_to_pending_semantic_evaluation)
-            .transpose()
-    }
-}
-
-fn row_to_pending_semantic_evaluation(
-    row: &Row,
-) -> Result<PendingTriggerSemanticEvaluation, TriggerError> {
-    Ok(PendingTriggerSemanticEvaluation {
-        tenant_id: TenantId::new(required_text(row, "tenant_id")?)
-            .map_err(|error| invalid_record("tenant_id", error.to_string()))?,
-        trigger_id: TriggerId::parse(&required_text(row, "trigger_id")?)?,
-        fire_slot: parse_timestamp(&required_text(row, "fire_slot")?, "fire_slot")?,
-        run_id: parse_turn_run_id_with_field(&required_text(row, "run_id")?, "run_id")?,
-        thread_id: ThreadId::new(required_text(row, "thread_id")?)
-            .map_err(|error| invalid_record("thread_id", error.to_string()))?,
-        creator_user_id: UserId::new(required_text(row, "creator_user_id")?)
-            .map_err(|error| invalid_record("creator_user_id", error.to_string()))?,
-        agent_id: optional_text(row, "agent_id")?
-            .map(AgentId::new)
-            .transpose()
-            .map_err(|error| invalid_record("agent_id", error.to_string()))?,
-        project_id: optional_text(row, "project_id")?
-            .map(ProjectId::new)
-            .transpose()
-            .map_err(|error| invalid_record("project_id", error.to_string()))?,
-        execution_spec: serde_json::from_str(&required_text(row, "execution_spec_json")?)
-            .map_err(|error| invalid_record("execution_spec_json", error.to_string()))?,
-    })
-}
-
-async fn hydrate_postgres_semantic_evaluations(
-    client: &deadpool_postgres::Object,
-    tenant_id: &TenantId,
-    trigger_ids: &[TriggerId],
-    runs: &mut [TriggerRunRecord],
-) -> Result<(), TriggerError> {
-    let trigger_ids = trigger_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let mut refs = runs.iter_mut().collect::<Vec<_>>();
-    hydrate_postgres_semantic_evaluation_refs(client, tenant_id, &trigger_ids, &mut refs).await
-}
-
-async fn hydrate_postgres_semantic_evaluation_refs(
-    client: &deadpool_postgres::Object,
-    tenant_id: &TenantId,
-    trigger_ids: &[String],
-    runs: &mut [&mut TriggerRunRecord],
-) -> Result<(), TriggerError> {
-    if runs.is_empty() {
-        return Ok(());
-    }
-    let rows = client
-        .query(
-            &format!(
-                "SELECT trigger_id, fire_slot, run_id, verdict, reason, evaluated_at
-                 FROM {TRIGGER_SEMANTIC_EVALUATION_TABLE}
-                 WHERE tenant_id = $1 AND trigger_id = ANY($2::text[])
-                   AND verdict IS NOT NULL"
-            ),
-            &[&tenant_id.as_str(), &trigger_ids],
-        )
-        .await
-        .map_err(|error| backend_error("query retained semantic evaluations", error))?;
-    let mut evaluations = HashMap::new();
-    for row in rows {
-        let key = (
-            TriggerId::parse(&required_text(&row, "trigger_id")?)?,
-            parse_timestamp(&required_text(&row, "fire_slot")?, "fire_slot")?,
-            parse_turn_run_id_with_field(&required_text(&row, "run_id")?, "run_id")?,
-        );
-        evaluations.insert(
-            key,
-            TriggerSemanticEvaluation {
-                verdict: crate::parse_semantic_verdict(&required_text(&row, "verdict")?)?,
-                reason: required_text(&row, "reason")?,
-                evaluated_at: parse_timestamp(
-                    &required_text(&row, "evaluated_at")?,
-                    "evaluated_at",
-                )?,
-            },
-        );
-    }
-    for run in runs {
-        run.semantic_evaluation = run.run_id.and_then(|run_id| {
-            evaluations
-                .get(&(run.trigger_id, run.fire_slot, run_id))
-                .cloned()
-        });
-    }
-    Ok(())
 }
 
 async fn locked_record(
@@ -1659,23 +1312,6 @@ async fn prune_run_history(
                 "DELETE FROM {TRIGGER_RUN_TABLE}
                  WHERE tenant_id = $1
                    AND trigger_id = $2
-                   AND NOT (
-                       status = 'ok' AND run_id IS NOT NULL
-                       AND EXISTS (
-                           SELECT 1 FROM {TRIGGER_TABLE} tr
-                           WHERE tr.tenant_id = {TRIGGER_RUN_TABLE}.tenant_id
-                             AND tr.trigger_id = {TRIGGER_RUN_TABLE}.trigger_id
-                             AND tr.execution_spec_json IS NOT NULL
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM {TRIGGER_SEMANTIC_EVALUATION_TABLE} se
-                           WHERE se.tenant_id = {TRIGGER_RUN_TABLE}.tenant_id
-                             AND se.trigger_id = {TRIGGER_RUN_TABLE}.trigger_id
-                             AND se.fire_slot = {TRIGGER_RUN_TABLE}.fire_slot
-                             AND se.run_id = {TRIGGER_RUN_TABLE}.run_id
-                             AND se.verdict IS NOT NULL
-                       )
-                   )
                    AND fire_slot NOT IN (
                        SELECT fire_slot
                        FROM {TRIGGER_RUN_TABLE}
@@ -1713,18 +1349,6 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
     let completed_at = optional_text(row, "completed_at")?
         .map(|value| parse_timestamp(&value, "completed_at"))
         .transpose()?;
-    let semantic_evaluation = optional_text(row, "semantic_verdict")?
-        .map(|verdict| {
-            Ok(TriggerSemanticEvaluation {
-                verdict: crate::parse_semantic_verdict(&verdict)?,
-                reason: required_text(row, "semantic_reason")?,
-                evaluated_at: parse_timestamp(
-                    &required_text(row, "semantic_evaluated_at")?,
-                    "semantic_evaluated_at",
-                )?,
-            })
-        })
-        .transpose()?;
     Ok(TriggerRunRecord {
         tenant_id,
         trigger_id,
@@ -1734,7 +1358,6 @@ fn row_to_run_record(row: &Row) -> Result<TriggerRunRecord, TriggerError> {
         status,
         submitted_at,
         completed_at,
-        semantic_evaluation,
     })
 }
 
@@ -1931,25 +1554,7 @@ CREATE TABLE IF NOT EXISTS trigger_run_history (
     status TEXT NOT NULL,
     submitted_at TEXT NOT NULL,
     completed_at TEXT,
-    semantic_evaluation_state TEXT,
-    semantic_claimed_at TEXT,
-    semantic_verdict TEXT,
-    semantic_reason TEXT,
-    semantic_evaluated_at TEXT,
     PRIMARY KEY (tenant_id, trigger_id, fire_slot)
-);
-
-CREATE TABLE IF NOT EXISTS trigger_semantic_evaluations (
-    tenant_id TEXT NOT NULL,
-    trigger_id TEXT NOT NULL,
-    fire_slot TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    claim_id TEXT NOT NULL,
-    claimed_at TEXT NOT NULL,
-    verdict TEXT,
-    reason TEXT,
-    evaluated_at TEXT,
-    PRIMARY KEY (tenant_id, trigger_id, fire_slot, run_id)
 );
 
 CREATE INDEX IF NOT EXISTS trigger_run_history_trigger_fire_slot_idx
@@ -1962,20 +1567,4 @@ CREATE INDEX IF NOT EXISTS trigger_run_history_tenant_thread_id_idx
     ON trigger_run_history (tenant_id, thread_id);
 
 ALTER TABLE trigger_run_history ALTER COLUMN thread_id DROP NOT NULL;
-ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_evaluation_state TEXT;
-ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_claimed_at TEXT;
-ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_verdict TEXT;
-ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_reason TEXT;
-ALTER TABLE trigger_run_history ADD COLUMN IF NOT EXISTS semantic_evaluated_at TEXT;
-
-INSERT INTO trigger_semantic_evaluations (
-    tenant_id, trigger_id, fire_slot, run_id, claim_id, claimed_at,
-    verdict, reason, evaluated_at
-)
-SELECT tenant_id, trigger_id, fire_slot, run_id,
-       'legacy-migrated', COALESCE(semantic_claimed_at, semantic_evaluated_at),
-       semantic_verdict, semantic_reason, semantic_evaluated_at
-FROM trigger_run_history
-WHERE run_id IS NOT NULL AND semantic_verdict IS NOT NULL
-ON CONFLICT (tenant_id, trigger_id, fire_slot, run_id) DO NOTHING;
 "#;

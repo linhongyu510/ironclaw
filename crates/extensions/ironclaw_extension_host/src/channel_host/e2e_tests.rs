@@ -5718,7 +5718,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
         prompt: "generic triggered delivery".to_string(),
         execution_policy: None,
     };
-    use crate::channel_triggered_delivery::TriggerSettlementHook as _;
+    use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
         .await;
 
