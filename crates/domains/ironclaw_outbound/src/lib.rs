@@ -12,6 +12,7 @@ mod delivery_targets;
 mod error;
 mod ids;
 mod model_channel_delivery;
+mod notification_inbox;
 mod outbound_state_store;
 mod reply_attachment_intents;
 mod resolution_engine;
@@ -52,6 +53,12 @@ pub use ids::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef}
 pub use model_channel_delivery::{
     MODEL_DELIVERY_MAX_CONTENT_BYTES, MODEL_DELIVERY_PER_RUN_CAP, ModelChannelDelivery,
     ModelChannelDeliveryError, ModelChannelDeliveryEvidence, ModelChannelDeliveryRequest,
+};
+pub use notification_inbox::{
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_PAGE_LIMIT_MAX,
+    NoopNotificationInboxStore, NotificationAction, NotificationId, NotificationInboxStorePort,
+    NotificationKind, NotificationMutationRequest, NotificationPage, NotificationRecipient,
+    NotificationRecord, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 pub use outbound_state_store::OutboundStateStore;
 pub use reply_attachment_intents::{

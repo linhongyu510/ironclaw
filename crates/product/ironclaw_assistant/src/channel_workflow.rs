@@ -104,6 +104,7 @@ pub struct ChannelWorkflowDeliveryServices {
     /// materializes `/workspace/...` references through.
     pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
+    pub notification_inbox: Arc<dyn ironclaw_outbound::NotificationInboxStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     /// The owner-scoped outbound target catalog. The background-run notifier
@@ -196,6 +197,7 @@ impl RebornChannelWorkflowFactory {
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
             outbound_store: Arc::clone(&delivery.outbound_store),
+            notification_inbox: Arc::clone(&delivery.notification_inbox),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
@@ -468,6 +470,7 @@ impl RebornChannelWorkflowFactory {
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
             outbound_store: Arc::clone(&delivery.outbound_store),
+            notification_inbox: Arc::clone(&delivery.notification_inbox),
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
             delivery_targets: Arc::clone(&delivery.delivery_targets),

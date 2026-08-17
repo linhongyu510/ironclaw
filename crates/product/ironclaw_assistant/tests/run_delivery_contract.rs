@@ -49,8 +49,9 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
     CommunicationPreferenceRepository, DeliveredGateRouteStore, DeliveryDefaultScope,
-    DeliveryTargetCapabilities, OutboundError, OutboundStateStore, OutboundStateStorePort,
-    TriggeredFireFailureDeliveryRequest, TriggeredRunDeliveryOutcomeKind,
+    DeliveryTargetCapabilities, ListNotificationsRequest, NotificationInboxStorePort,
+    NotificationKind, NotificationRecipient, OutboundError, OutboundStateStore,
+    OutboundStateStorePort, TriggeredFireFailureDeliveryRequest, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
@@ -978,6 +979,8 @@ fn build_harness_with_gate_ports(
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        notification_inbox: Arc::clone(&store)
+            as Arc<dyn ironclaw_outbound::NotificationInboxStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
@@ -1853,6 +1856,25 @@ async fn observer_records_gate_route_after_approval_prompt() {
         .expect("route lookup")
         .expect("gate route recorded");
     assert_eq!(route.run_id, run_id);
+    let inbox = harness
+        .store
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("notification inbox");
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+    assert_eq!(inbox.unread_count, 1);
     assert!(
         !route.delivered_conversation_fingerprints.is_empty(),
         "fingerprints recorded"
@@ -2714,6 +2736,8 @@ fn build_triggered_harness_with_turns_catalog(
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        notification_inbox: Arc::clone(&store)
+            as Arc<dyn ironclaw_outbound::NotificationInboxStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
@@ -3602,6 +3626,59 @@ async fn triggered_empty_notification_set_delivers_nothing() {
         .await
         .expect("attempts");
     assert!(attempts.is_empty(), "no delivery attempt: {attempts:?}");
+    let inbox = harness
+        .store
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("notification inbox");
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::ApprovalRequired
+    );
+}
+
+#[tokio::test]
+async fn triggered_completion_is_published_to_the_web_inbox_without_channels() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        Vec::new(),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    let inbox = harness
+        .store
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: tenant(),
+                user_id: user(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("notification inbox");
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunCompleted);
 }
 
 #[tokio::test]
@@ -4012,6 +4089,8 @@ fn notify_user_fixture(
             None,
         )])) as Arc<dyn TurnCoordinator>,
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        notification_inbox: Arc::clone(&store)
+            as Arc<dyn ironclaw_outbound::NotificationInboxStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,

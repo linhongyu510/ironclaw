@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
@@ -61,6 +62,183 @@ fn build_outbound_store_with_permissions<F: RootFilesystem>(
     )])
     .expect("mount view");
     OutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+}
+
+fn notification_recipient() -> NotificationRecipient {
+    NotificationRecipient {
+        tenant_id: TenantId::new("test").expect("tenant"),
+        user_id: UserId::new("test").expect("user"),
+    }
+}
+
+fn notification_request(id: &str, timestamp: i64) -> PublishNotificationRequest {
+    let thread_id = ThreadId::new(format!("thread-{id}")).expect("thread");
+    PublishNotificationRequest {
+        id: NotificationId::new(id).expect("notification id"),
+        recipient: notification_recipient(),
+        kind: NotificationKind::ApprovalRequired,
+        severity: NotificationSeverity::Warning,
+        source: NotificationSource {
+            thread_id: thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            lifecycle_ref: Some(format!("gate-{id}")),
+        },
+        action: NotificationAction::OpenThread { thread_id },
+        occurred_at: Utc.timestamp_opt(timestamp, 0).single().expect("timestamp"),
+    }
+}
+
+#[tokio::test]
+async fn notification_inbox_is_durable_paginated_and_idempotent() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first_store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let first = notification_request("notification-1", 1_700_000_001);
+    let second = notification_request("notification-2", 1_700_000_002);
+
+    first_store
+        .publish(first.clone())
+        .await
+        .expect("publish first notification");
+    first_store
+        .publish(first)
+        .await
+        .expect("idempotent notification retry");
+    first_store
+        .publish(second)
+        .await
+        .expect("publish second notification");
+
+    let mut conflicting = notification_request("notification-1", 1_700_000_003);
+    conflicting.kind = NotificationKind::RunFailed;
+    assert!(matches!(
+        first_store.publish(conflicting).await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let mut mismatched_action = notification_request("notification-invalid", 1_700_000_003);
+    mismatched_action.action = NotificationAction::OpenThread {
+        thread_id: ThreadId::new("different-thread").expect("thread"),
+    };
+    assert!(matches!(
+        first_store.publish(mismatched_action).await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let reopened = build_outbound_store_for_backend(backend);
+    let first_page = reopened
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 1,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list first page");
+    assert_eq!(first_page.notifications.len(), 1);
+    assert_eq!(first_page.notifications[0].id.as_str(), "notification-2");
+    assert_eq!(first_page.unread_count, 2);
+
+    let second_page = reopened
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 1,
+            cursor: first_page.next_cursor,
+            include_archived: false,
+        })
+        .await
+        .expect("list second page");
+    assert_eq!(second_page.notifications.len(), 1);
+    assert_eq!(second_page.notifications[0].id.as_str(), "notification-1");
+    assert_eq!(second_page.unread_count, 2);
+    assert!(second_page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn notification_inbox_lifecycle_mutations_are_scoped_and_idempotent() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    store
+        .publish(notification_request(
+            "notification-lifecycle",
+            1_700_000_001,
+        ))
+        .await
+        .expect("publish notification");
+    let mutation = NotificationMutationRequest {
+        recipient: notification_recipient(),
+        notification_id: NotificationId::new("notification-lifecycle").expect("notification id"),
+        occurred_at: Utc
+            .timestamp_opt(1_700_000_010, 0)
+            .single()
+            .expect("timestamp"),
+    };
+    store.mark_read(mutation.clone()).await.expect("mark read");
+    store.mark_read(mutation.clone()).await.expect("retry read");
+    store.resolve(mutation).await.expect("resolve notification");
+
+    let page = store
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list notifications");
+    assert_eq!(page.unread_count, 0);
+    assert!(page.notifications[0].read_at.is_some());
+    assert!(page.notifications[0].resolved_at.is_some());
+}
+
+#[tokio::test]
+async fn notification_inbox_persists_across_libsql_reopen() {
+    let directory = tempfile::tempdir().expect("temporary libSQL directory");
+    let database_path = directory.path().join("outbound-notification-inbox.db");
+
+    {
+        let database = Arc::new(
+            libsql::Builder::new_local(&database_path)
+                .build()
+                .await
+                .expect("build first libSQL database"),
+        );
+        let root = Arc::new(
+            LibSqlRootFilesystem::new(database).expect("build first libSQL root filesystem"),
+        );
+        root.run_migrations()
+            .await
+            .expect("migrate first libSQL filesystem");
+        let store = OutboundStateStore::new(build_scoped_fs(root, TEST_OUTBOUND_ROOT));
+        store
+            .publish(notification_request("notification-libsql", 1_700_000_001))
+            .await
+            .expect("persist notification");
+    }
+
+    let database = Arc::new(
+        libsql::Builder::new_local(&database_path)
+            .build()
+            .await
+            .expect("reopen libSQL database"),
+    );
+    let root =
+        Arc::new(LibSqlRootFilesystem::new(database).expect("reopen libSQL root filesystem"));
+    root.run_migrations()
+        .await
+        .expect("migrate reopened libSQL filesystem");
+    let reopened = OutboundStateStore::new(build_scoped_fs(root, TEST_OUTBOUND_ROOT));
+    let page = reopened
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("read notification after database reopen");
+
+    assert_eq!(page.unread_count, 1);
+    assert_eq!(page.notifications[0].id.as_str(), "notification-libsql");
 }
 
 fn reply_attachment_scope() -> ironclaw_host_api::resource::ResourceScope {

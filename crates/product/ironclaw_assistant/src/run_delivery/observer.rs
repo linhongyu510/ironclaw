@@ -27,10 +27,11 @@ use ironclaw_extension_contracts::external::{
 use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
+    NotificationKind, OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest,
+    ProjectionUpdateRef, ReplyTargetBindingClaim, ReplyTargetBindingValidator,
+    ReplyTargetValidationRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, SourceRouteContext, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
 };
 use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
@@ -637,8 +638,33 @@ impl RunDeliveryObserver {
                 }
             };
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
+            if let Some(previous) = delivered_blocked_marker.as_ref()
+                && Some(previous) != next_blocked_marker.as_ref()
+                && let Some(kind) = inbox_kind_for_blocked_status(previous.status)
+            {
+                self.services
+                    .resolve_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        previous.gate_ref.as_deref(),
+                    )
+                    .await;
+            }
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
+            if let Some(kind) = inbox_kind_for_event(event_kind) {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        gate_ref_for_routing.as_deref(),
+                    )
+                    .await;
+            }
             let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
@@ -1549,6 +1575,23 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+}
+
+fn inbox_kind_for_event(event_kind: RunNotificationEventKind) -> Option<NotificationKind> {
+    match event_kind {
+        RunNotificationEventKind::ApprovalNeeded => Some(NotificationKind::ApprovalRequired),
+        RunNotificationEventKind::AuthRequired => Some(NotificationKind::AuthenticationRequired),
+        RunNotificationEventKind::RunBlocked => Some(NotificationKind::RunBlocked),
+        _ => None,
+    }
+}
+
+fn inbox_kind_for_blocked_status(status: TurnStatus) -> Option<NotificationKind> {
+    match status {
+        TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
+        TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
+        _ => None,
     }
 }
 

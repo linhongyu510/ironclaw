@@ -32,8 +32,11 @@ use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEv
 use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
-    OutboundError, OutboundStateStorePort,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, NotificationAction, NotificationId,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
+    NotificationRecipient, NotificationSeverity, NotificationSource,
+    OutboundDeliveryTargetProvider, OutboundError, OutboundStateStorePort,
+    PublishNotificationRequest,
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
@@ -124,6 +127,7 @@ pub struct RunDeliveryServices {
     pub thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
+    pub notification_inbox: Arc<dyn NotificationInboxStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     /// Canonical project-scoped reader used to materialize assistant-authored
@@ -389,6 +393,87 @@ pub(crate) fn turn_scope_from_thread_scope(
 }
 
 impl RunDeliveryServices {
+    pub(crate) async fn publish_inbox_notification(
+        &self,
+        user_id: &ironclaw_host_api::ids::UserId,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        kind: NotificationKind,
+        lifecycle_ref: Option<&str>,
+    ) {
+        let notification_id = match run_notification_inbox_id(run_id, kind, lifecycle_ref) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%error, %run_id, "invalid durable inbox notification id");
+                return;
+            }
+        };
+        let severity = match kind {
+            NotificationKind::RunCompleted => NotificationSeverity::Success,
+            NotificationKind::RunFailed | NotificationKind::DeliveryFailed => {
+                NotificationSeverity::Error
+            }
+            NotificationKind::ApprovalRequired
+            | NotificationKind::AuthenticationRequired
+            | NotificationKind::RunBlocked => NotificationSeverity::Warning,
+        };
+        let occurred_at = chrono::Utc::now();
+        if let Err(error) = self
+            .notification_inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: NotificationRecipient {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: user_id.clone(),
+                },
+                kind,
+                severity,
+                source: NotificationSource {
+                    thread_id: scope.thread_id.clone(),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: lifecycle_ref.map(str::to_string),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: scope.thread_id.clone(),
+                },
+                occurred_at,
+            })
+            .await
+        {
+            tracing::warn!(%error, %run_id, "failed to publish durable inbox notification");
+        }
+    }
+
+    pub(crate) async fn resolve_inbox_notification(
+        &self,
+        user_id: &ironclaw_host_api::ids::UserId,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        kind: NotificationKind,
+        lifecycle_ref: Option<&str>,
+    ) {
+        let notification_id = match run_notification_inbox_id(run_id, kind, lifecycle_ref) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let result = self
+            .notification_inbox
+            .resolve(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: user_id.clone(),
+                },
+                notification_id,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await;
+        if let Err(error) = result
+            && !matches!(error, OutboundError::DeliveryNotFound)
+        {
+            tracing::warn!(%error, %run_id, "failed to resolve durable inbox notification");
+        }
+    }
+
     /// Best-effort source-routed system notice on `conversation`. Failures
     /// are logged, never propagated — a notice must not break the flow that
     /// raised it.
@@ -536,4 +621,23 @@ impl RunDeliveryServices {
             );
         }
     }
+}
+
+fn run_notification_inbox_id(
+    run_id: TurnRunId,
+    kind: NotificationKind,
+    lifecycle_ref: Option<&str>,
+) -> Result<NotificationId, OutboundError> {
+    let kind = match kind {
+        NotificationKind::ApprovalRequired => "approval",
+        NotificationKind::AuthenticationRequired => "authentication",
+        NotificationKind::RunBlocked => "blocked",
+        NotificationKind::RunFailed => "failed",
+        NotificationKind::RunCompleted => "completed",
+        NotificationKind::DeliveryFailed => "delivery-failed",
+    };
+    let lifecycle_key = lifecycle_ref
+        .map(|value| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, value.as_bytes()).to_string())
+        .unwrap_or_else(|| "run".to_string());
+    NotificationId::new(format!("run:{run_id}:{kind}:{lifecycle_key}"))
 }

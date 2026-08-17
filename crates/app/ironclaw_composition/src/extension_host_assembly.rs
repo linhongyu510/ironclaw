@@ -401,6 +401,7 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_assistant::DeliveryCoordinator>>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    pub(crate) notification_inbox: Arc<dyn ironclaw_outbound::NotificationInboxStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     pub(crate) outbound_preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     /// Durable outcome record for proactive (trigger-fired) deliveries; the
@@ -446,6 +447,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         project_filesystem,
         delivery_coordinator: services.delivery_coordinator.clone(),
         outbound_state: Arc::clone(&services.outbound_state),
+        notification_inbox: Arc::clone(&services.notification_inbox),
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
         triggered_delivery_store: Arc::clone(&services.triggered_run_delivery),
@@ -519,6 +521,7 @@ pub(crate) fn start_channel_host(
         project_filesystem,
         delivery_coordinator,
         outbound_state,
+        notification_inbox,
         delivered_gate_routes,
         outbound_preferences,
         triggered_delivery_store,
@@ -533,6 +536,7 @@ pub(crate) fn start_channel_host(
         ironclaw_assistant::ChannelWorkflowDeliveryServices {
             coordinator,
             outbound_store: Arc::clone(outbound_state),
+            notification_inbox: Arc::clone(notification_inbox),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
             delivery_targets: Arc::clone(outbound_delivery_targets),

@@ -1,38 +1,16 @@
 // @ts-nocheck
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
-import { listThreads } from "../lib/api";
-import { useI18n } from "../lib/i18n";
-import { THREAD_STATE, useThreadStates } from "../lib/thread-state";
 import {
-  approvalThreadNotifications,
-  getNotificationState,
-  markNotificationIdsSeen,
-  subscribeNotifications,
-} from "../lib/notifications";
+  listNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import { notificationMessages } from "../lib/notifications";
 
-const NOTIFICATION_THREAD_LIMIT = 20;
+const NOTIFICATION_LIMIT = 30;
 const NOTIFICATION_REFETCH_MS = 10_000;
-
-function emptyNotificationState() {
-  return { initialized: false, seenIds: new Set() };
-}
-
-function profileScope(profile) {
-  return profile?.tenant_id && profile?.user_id
-    ? `${profile.tenant_id}:${profile.user_id}`
-    : null;
-}
-
-function normalizeThread(record) {
-  return {
-    ...record,
-    id: record?.id || record?.thread_id,
-    state: record?.state || null,
-    updated_at: record?.updated_at || null,
-    created_at: record?.created_at || null,
-  };
-}
 
 export function useNotifications({
   profile,
@@ -40,83 +18,85 @@ export function useNotifications({
   activeThreadId = null,
 } = {}) {
   const { t } = useI18n();
-  const threadStates = useThreadStates();
-  const scope = profileScope(profile);
-  const [notificationState, setNotificationState] = React.useState(() =>
-    scope ? getNotificationState(scope) : emptyNotificationState(),
-  );
-
-  React.useEffect(() => {
-    if (!scope) {
-      setNotificationState(emptyNotificationState());
-      return undefined;
-    }
-    setNotificationState(getNotificationState(scope));
-    return subscribeNotifications((nextState, changedScope) => {
-      if (changedScope === scope) setNotificationState(nextState);
-    });
-  }, [scope]);
-
+  const queryClient = useQueryClient();
+  const tenantId = profile?.tenant_id || null;
+  const userId = profile?.user_id || null;
+  const queryKey = ["notifications", "inbox", tenantId, userId];
   const query = useQuery({
-    queryKey: ["notifications", "approval-threads", scope || "pending-profile"],
-    queryFn: () =>
-      listThreads({
-        limit: NOTIFICATION_THREAD_LIMIT,
-        needsApproval: true,
-      }),
-    enabled: enabled && Boolean(scope),
+    queryKey,
+    queryFn: () => listNotifications({ limit: NOTIFICATION_LIMIT }),
+    enabled: enabled && Boolean(tenantId && userId),
     refetchInterval: NOTIFICATION_REFETCH_MS,
     refetchIntervalInBackground: false,
   });
 
-  const messages = React.useMemo(() => {
-    if (!scope) return [];
-    const records = Array.isArray(query.data?.threads) ? query.data.threads : [];
-    const approvalThreads = records.map((record) => ({
-      ...normalizeThread(record),
-      state: record?.state || THREAD_STATE.NEEDS_ATTENTION,
-    }));
-    return approvalThreadNotifications(approvalThreads, threadStates, t);
-  }, [query.data, scope, t, threadStates]);
-
-  React.useEffect(() => {
-    if (!activeThreadId || !scope) return;
-    const activeMessageIds = messages
-      .filter(
-        (message) =>
-          message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
-          !notificationState.seenIds.has(message.id),
-      )
-      .map((message) => message.id);
-    if (activeMessageIds.length === 0) return;
-    const next = markNotificationIdsSeen(activeMessageIds, scope);
-    setNotificationState(next);
-  }, [activeThreadId, messages, notificationState, scope]);
-
+  const messages = React.useMemo(
+    () => notificationMessages(query.data?.notifications, t),
+    [query.data, t],
+  );
   const unreadIds = React.useMemo(
-    () =>
-      new Set(
-        messages
-          .filter((message) => !notificationState.seenIds.has(message.id))
-          .map((message) => message.id),
-      ),
-    [messages, notificationState],
+    () => new Set(messages.filter((message) => !message.read).map((message) => message.id)),
+    [messages],
   );
 
-  const dismissMessage = React.useCallback((messageId) => {
-    if (!scope) return;
-    const next = markNotificationIdsSeen([messageId], scope);
-    setNotificationState(next);
-  }, [scope]);
+  const markRead = useMutation({
+    mutationFn: markNotificationRead,
+    onMutate: async (notificationId) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData(queryKey);
+      queryClient.setQueryData(queryKey, (current) => ({
+        ...current,
+        unread_count: Math.max(0, Number(current?.unread_count || 0) - 1),
+        notifications: (current?.notifications || []).map((notification) =>
+          notification.id === notificationId && !notification.read_at
+            ? { ...notification, read_at: new Date().toISOString() }
+            : notification,
+        ),
+      }));
+      return { previous };
+    },
+    onError: (_error, _notificationId, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey }),
+  });
+
+  const markAllRead = useMutation({
+    mutationFn: markAllNotificationsRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey }),
+  });
+
+  React.useEffect(() => {
+    if (!activeThreadId) return;
+    for (const message of messages) {
+      if (
+        !message.read &&
+        message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
+        !markRead.isPending
+      ) {
+        markRead.mutate(message.id);
+        break;
+      }
+    }
+  }, [activeThreadId, markRead, messages]);
+
+  const dismissMessage = React.useCallback(
+    (messageId) => {
+      if (unreadIds.has(messageId)) markRead.mutate(messageId);
+    },
+    [markRead, unreadIds],
+  );
 
   return {
     messages,
     unreadIds,
-    unreadCount: unreadIds.size,
-    hasUnread: unreadIds.size > 0,
+    unreadCount: Number(query.data?.unread_count || 0),
+    hasUnread: Number(query.data?.unread_count || 0) > 0,
     isLoading: query.isLoading,
-    error: query.error || null,
+    error: query.error || markRead.error || markAllRead.error || null,
     refetch: query.refetch,
     dismissMessage,
+    markAllRead: () => markAllRead.mutate(),
+    isMarkingAllRead: markAllRead.isPending,
   };
 }

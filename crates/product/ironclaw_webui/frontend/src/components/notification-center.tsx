@@ -64,6 +64,8 @@ export function NotificationCenter({ state }) {
   const hasUnread = state?.hasUnread || false;
   const unreadCount = state?.unreadCount || 0;
   const dismissMessage = state?.dismissMessage;
+  const markAllRead = state?.markAllRead;
+  const isMarkingAllRead = state?.isMarkingAllRead || false;
 
   const close = React.useCallback(() => {
     setOpen(false);
@@ -136,16 +138,29 @@ export function NotificationCenter({ state }) {
                     : t("notifications.allCaughtUp")}
                 </p>
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={close}
-                aria-label={t("notifications.close")}
-                title={t("notifications.close")}
-              >
-                <Icon name="close" className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-1">
+                {unreadCount > 0 && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={markAllRead}
+                    disabled={isMarkingAllRead}
+                  >
+                    {t("notifications.markAllRead")}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={close}
+                  aria-label={t("notifications.close")}
+                  title={t("notifications.close")}
+                >
+                  <Icon name="close" className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
 
             <div className="max-h-[calc(78dvh-4.5rem)] overflow-y-auto lg:max-h-[calc(min(70vh,32rem)-4.5rem)]">
