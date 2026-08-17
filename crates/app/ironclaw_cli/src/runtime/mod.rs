@@ -720,18 +720,21 @@ pub(crate) fn build_services_input_with_options(
     let mut services_input = match profile {
         RebornProfile::Standalone
         | RebornProfile::StandaloneUnrestricted
-        | RebornProfile::HostedSingleTenantVolume => {
-            build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
-        }
+        | RebornProfile::HostedSingleTenantVolume => build_standalone_local_runtime_services_input(
+            profile, owner_id, config, options, caller,
+        )?,
         RebornProfile::HostedSingleTenantVolumeSandboxed
         | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            build_sandboxed_local_runtime_services_input(profile, owner_id, config, options)?
+            build_sandboxed_local_runtime_services_input(
+                profile, owner_id, config, options, caller,
+            )?
         }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
             profile,
             owner_id,
             config,
             config_file.as_ref(),
+            caller,
         )?,
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
             // MigrationDryRun needs production storage handles so follow-up migration
@@ -895,6 +898,7 @@ fn build_sandboxed_local_runtime_services_input(
     owner_id: &str,
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
+    caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornHostBindings> {
     let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
@@ -914,7 +918,7 @@ fn build_sandboxed_local_runtime_services_input(
         _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
     };
     let services_input =
-        build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+        build_standalone_local_runtime_services_input(profile, owner_id, config, options, caller)?;
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
@@ -927,6 +931,7 @@ fn build_sandboxed_local_runtime_services_input(
 fn resolved_local_runtime_workspace_root(
     storage_root: &Path,
     reborn_home: &Path,
+    caller: RuntimeInputCaller,
 ) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir()
         .context("failed to resolve current directory for local runtime workspace")?;
@@ -934,12 +939,25 @@ fn resolved_local_runtime_workspace_root(
         return Ok(cwd);
     }
     let workspace_root = reborn_home.join("workspace");
-    tracing::warn!(
-        cwd = %cwd.display(),
-        workspace = %workspace_root.display(),
-        "current directory overlaps protected storage roots; using the default \
-         workspace instead"
-    );
+    // `serve` logs to an operator console, so the fallback is a `warn!` the
+    // operator sees; `run`/`repl` share the interactive REPL/TUI terminal, where
+    // `info!`/`warn!` corrupt the display — keep that path at `debug!` (repo
+    // logging invariant, cf. `memory_binding_diagnostics` above).
+    if caller == RuntimeInputCaller::Serve {
+        tracing::warn!(
+            cwd = %cwd.display(),
+            workspace = %workspace_root.display(),
+            "current directory overlaps protected storage roots; using the default \
+             workspace instead"
+        );
+    } else {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            workspace = %workspace_root.display(),
+            "current directory overlaps protected storage roots; using the default \
+             workspace instead"
+        );
+    }
     Ok(workspace_root)
 }
 
@@ -1007,10 +1025,11 @@ fn build_standalone_local_runtime_services_input(
     owner_id: &str,
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
+    caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
     let workspace_root =
-        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path())?;
+        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path(), caller)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -1037,10 +1056,11 @@ fn build_hosted_single_tenant_services_input(
     owner_id: &str,
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
     let workspace_root =
-        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path())?;
+        resolved_local_runtime_workspace_root(&local_runtime_root, config.home().path(), caller)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
