@@ -22,7 +22,7 @@ use ironclaw_event_log::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent}
 use ironclaw_event_projections::ReplayEventProjectionService;
 use ironclaw_host_api::{
     Timestamp,
-    execution_policy::TurnExecutionPolicy,
+    execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy},
     ids::{
         AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ProjectId, TenantId,
         ThreadId, UserId,
@@ -219,6 +219,7 @@ async fn automation_list_projects_required_capability_success_from_runtime_evide
         policy: TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![capability_id.clone()]),
             required_skills: Vec::new(),
+            result_delivery: ResultDeliveryPolicy::Deliver,
         },
     };
     record.prompt = spec.render_prompt();

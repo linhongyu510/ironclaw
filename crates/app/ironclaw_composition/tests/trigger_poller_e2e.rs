@@ -1524,6 +1524,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         success_criteria: vec!["Report only when changes exist".to_string()],
         output_instructions: "Return a concise change summary".to_string(),
         no_result_text: "No changes".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
             ..TurnExecutionPolicy::default()

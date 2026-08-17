@@ -698,6 +698,7 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
             "success_criteria",
             "output_instructions",
             "no_result_text",
+            "required_capability_ids",
             "policy"
         ])
     );
