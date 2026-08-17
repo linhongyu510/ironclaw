@@ -55,10 +55,11 @@ pub use model_channel_delivery::{
     ModelChannelDeliveryError, ModelChannelDeliveryEvidence, ModelChannelDeliveryRequest,
 };
 pub use notification_inbox::{
-    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_PAGE_LIMIT_MAX,
-    NoopNotificationInboxStore, NotificationAction, NotificationId, NotificationInboxStorePort,
-    NotificationKind, NotificationMutationRequest, NotificationPage, NotificationRecipient,
-    NotificationRecord, NotificationSeverity, NotificationSource, PublishNotificationRequest,
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_INBOX_MAX_RECORDS,
+    NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore, NotificationAction, NotificationId,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest, NotificationPage,
+    NotificationRecipient, NotificationRecord, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };
 pub use outbound_state_store::OutboundStateStore;
 pub use reply_attachment_intents::{

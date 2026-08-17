@@ -65,9 +65,13 @@ fn build_outbound_store_with_permissions<F: RootFilesystem>(
 }
 
 fn notification_recipient() -> NotificationRecipient {
+    notification_recipient_for("test")
+}
+
+fn notification_recipient_for(user_id: &str) -> NotificationRecipient {
     NotificationRecipient {
         tenant_id: TenantId::new("test").expect("tenant"),
-        user_id: UserId::new("test").expect("user"),
+        user_id: UserId::new(user_id).expect("user"),
     }
 }
 
@@ -100,9 +104,22 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .await
         .expect("publish first notification");
     first_store
-        .publish(first)
+        .publish(first.clone())
         .await
         .expect("idempotent notification retry");
+
+    let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&backend)));
+    let retry_store =
+        OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    racing
+        .arm(&format!("{TEST_OUTBOUND_ROOT}/notification-inbox/"), 1)
+        .await;
+    retry_store
+        .publish(first)
+        .await
+        .expect("an unchanged retry does not write");
+    assert_eq!(racing.injected_count().await, 0);
+
     first_store
         .publish(second)
         .await
@@ -138,19 +155,43 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
     assert_eq!(first_page.notifications[0].id.as_str(), "notification-2");
     assert_eq!(first_page.unread_count, 2);
 
+    let cursor = first_page.next_cursor.clone();
+    reopened
+        .archive(NotificationMutationRequest {
+            recipient: notification_recipient(),
+            notification_id: NotificationId::new("notification-2").expect("notification id"),
+            occurred_at: Utc
+                .timestamp_opt(1_700_000_010, 0)
+                .single()
+                .expect("timestamp"),
+        })
+        .await
+        .expect("archive pagination anchor");
+
     let second_page = reopened
         .list(ListNotificationsRequest {
             recipient: notification_recipient(),
             limit: 1,
-            cursor: first_page.next_cursor,
+            cursor,
             include_archived: false,
         })
         .await
         .expect("list second page");
     assert_eq!(second_page.notifications.len(), 1);
     assert_eq!(second_page.notifications[0].id.as_str(), "notification-1");
-    assert_eq!(second_page.unread_count, 2);
+    assert_eq!(second_page.unread_count, 1);
     assert!(second_page.next_cursor.is_none());
+    assert!(matches!(
+        reopened
+            .list(ListNotificationsRequest {
+                recipient: notification_recipient(),
+                limit: 1,
+                cursor: Some("not-a-valid-cursor".to_string()),
+                include_archived: false,
+            })
+            .await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
 }
 
 #[tokio::test]
@@ -174,7 +215,45 @@ async fn notification_inbox_lifecycle_mutations_are_scoped_and_idempotent() {
     };
     store.mark_read(mutation.clone()).await.expect("mark read");
     store.mark_read(mutation.clone()).await.expect("retry read");
-    store.resolve(mutation).await.expect("resolve notification");
+    store
+        .resolve(mutation.clone())
+        .await
+        .expect("resolve notification");
+
+    let foreign_recipient = notification_recipient_for("different-user");
+    assert!(matches!(
+        store
+            .list(ListNotificationsRequest {
+                recipient: foreign_recipient.clone(),
+                limit: 10,
+                cursor: None,
+                include_archived: false,
+            })
+            .await,
+        Err(OutboundError::AccessDenied)
+    ));
+    assert!(matches!(
+        store
+            .mark_read(NotificationMutationRequest {
+                recipient: foreign_recipient,
+                notification_id: mutation.notification_id.clone(),
+                occurred_at: mutation.occurred_at,
+            })
+            .await,
+        Err(OutboundError::AccessDenied)
+    ));
+
+    assert!(matches!(
+        store
+            .mark_read(NotificationMutationRequest {
+                recipient: notification_recipient(),
+                notification_id: NotificationId::new("missing-notification")
+                    .expect("notification id"),
+                occurred_at: mutation.occurred_at,
+            })
+            .await,
+        Err(OutboundError::NotificationNotFound)
+    ));
 
     let page = store
         .list(ListNotificationsRequest {
@@ -188,6 +267,172 @@ async fn notification_inbox_lifecycle_mutations_are_scoped_and_idempotent() {
     assert_eq!(page.unread_count, 0);
     assert!(page.notifications[0].read_at.is_some());
     assert!(page.notifications[0].resolved_at.is_some());
+
+    let original_read_at = page.notifications[0].read_at;
+    store
+        .publish(notification_request("notification-unread", 1_700_000_002))
+        .await
+        .expect("publish unread notification");
+    store
+        .publish(notification_request("notification-archived", 1_700_000_003))
+        .await
+        .expect("publish archived notification");
+    let archived_at = Utc
+        .timestamp_opt(1_700_000_020, 0)
+        .single()
+        .expect("timestamp");
+    store
+        .archive(NotificationMutationRequest {
+            recipient: notification_recipient(),
+            notification_id: NotificationId::new("notification-archived").expect("notification id"),
+            occurred_at: archived_at,
+        })
+        .await
+        .expect("archive notification");
+    store
+        .mark_all_read(MarkAllNotificationsReadRequest {
+            recipient: notification_recipient(),
+            occurred_at: Utc
+                .timestamp_opt(1_700_000_030, 0)
+                .single()
+                .expect("timestamp"),
+        })
+        .await
+        .expect("mark all visible notifications read");
+
+    let visible = store
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list visible notifications");
+    assert_eq!(visible.notifications.len(), 2);
+    assert_eq!(visible.unread_count, 0);
+    assert_eq!(
+        visible
+            .notifications
+            .iter()
+            .find(|record| record.id.as_str() == "notification-lifecycle")
+            .expect("existing read notification")
+            .read_at,
+        original_read_at
+    );
+
+    let with_archived = store
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list archived notifications");
+    let archived = with_archived
+        .notifications
+        .iter()
+        .find(|record| record.id.as_str() == "notification-archived")
+        .expect("archived notification");
+    assert_eq!(archived.archived_at, Some(archived_at));
+    assert_eq!(archived.read_at, Some(archived_at));
+}
+
+#[tokio::test]
+async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+
+    assert!(matches!(
+        store
+            .mark_read(NotificationMutationRequest {
+                recipient: notification_recipient(),
+                notification_id: NotificationId::new("notification-before-snapshot")
+                    .expect("notification id"),
+                occurred_at: Utc
+                    .timestamp_opt(1_700_000_000, 0)
+                    .single()
+                    .expect("timestamp"),
+            })
+            .await,
+        Err(OutboundError::DeliveryNotFound)
+    ));
+
+    for limit in [0, NOTIFICATION_PAGE_LIMIT_MAX + 1] {
+        assert!(matches!(
+            store
+                .list(ListNotificationsRequest {
+                    recipient: notification_recipient(),
+                    limit,
+                    cursor: None,
+                    include_archived: false,
+                })
+                .await,
+            Err(OutboundError::InvalidRequest { .. })
+        ));
+    }
+
+    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+        store
+            .publish(notification_request(
+                &format!("notification-capacity-{index}"),
+                1_700_001_000 + index as i64,
+            ))
+            .await
+            .expect("publish within inbox capacity");
+    }
+    assert!(matches!(
+        store
+            .publish(notification_request(
+                "notification-capacity-overflow",
+                1_700_009_000,
+            ))
+            .await,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    let racing_backend = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(VersionRacingBackend::new(racing_backend));
+    let racing_store =
+        OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let inbox_prefix = format!("{TEST_OUTBOUND_ROOT}/notification-inbox/");
+    racing.arm(&inbox_prefix, 1).await;
+    racing_store
+        .publish(notification_request(
+            "notification-cas-retry",
+            1_700_010_000,
+        ))
+        .await
+        .expect("publish retries a transient CAS conflict");
+    assert_eq!(racing.injected_count().await, 1);
+
+    racing.arm(&inbox_prefix, u32::MAX).await;
+    assert!(matches!(
+        racing_store
+            .publish(notification_request(
+                "notification-cas-exhausted",
+                1_700_010_001,
+            ))
+            .await,
+        Err(OutboundError::Backend)
+    ));
+    assert!(racing.injected_count().await > 1);
+
+    let surviving = racing_store
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list surviving notification after retry exhaustion");
+    assert_eq!(surviving.notifications.len(), 1);
+    assert_eq!(
+        surviving.notifications[0].id.as_str(),
+        "notification-cas-retry"
+    );
 }
 
 #[tokio::test]

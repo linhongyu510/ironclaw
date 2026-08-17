@@ -225,7 +225,7 @@ use ironclaw_product_contracts::notification_inbox::{
     NOTIFICATIONS_ARCHIVE_COMMAND_ID, NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
     NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
 };
-pub use ironclaw_product_contracts::notification_inbox::{
+use ironclaw_product_contracts::notification_inbox::{
     ProductListNotificationsRequest, ProductListNotificationsResponse,
     ProductMarkAllNotificationsReadRequest, ProductNotification, ProductNotificationAction,
     ProductNotificationKind, ProductNotificationMutationRequest,
@@ -1568,7 +1568,10 @@ fn map_notification_inbox_error(error: ironclaw_outbound::OutboundError) -> Prod
             "notification",
             ProductSurfaceValidationCode::InvalidValue,
         ),
-        ironclaw_outbound::OutboundError::DeliveryNotFound => ProductSurfaceError::not_found(),
+        ironclaw_outbound::OutboundError::DeliveryNotFound
+        | ironclaw_outbound::OutboundError::NotificationNotFound => {
+            ProductSurfaceError::not_found()
+        }
         ironclaw_outbound::OutboundError::AccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }

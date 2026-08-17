@@ -779,6 +779,10 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
     ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_READ_COMMAND, NOTIFICATIONS_VIEW,
+    ProductListNotificationsResponse, ProductNotificationMutationRequest,
+};
 use ironclaw_product_contracts::operator_llm::{
     LlmConfigService, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
 };
@@ -6003,6 +6007,176 @@ async fn query_product_surface_page(
         payload,
         next_cursor: page.next_cursor,
     })
+}
+
+#[tokio::test]
+async fn production_product_surface_uses_the_durable_notification_inbox() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "notification composition".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(
+            "runtime-notification-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-notification-tenant".to_string(),
+        agent_id: "runtime-notification-agent".to_string(),
+        source_binding_id: "runtime-notification-source".to_string(),
+        reply_target_binding_id: "runtime-notification-reply".to_string(),
+    })
+    .with_model_gateway_override(gateway);
+    let runtime =
+        tokio::time::timeout(PRODUCTION_SHAPED_BUILD_TIMEOUT, build_reborn_runtime(input))
+            .await
+            .expect("runtime build does not time out")
+            .expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-notification-tenant").expect("tenant"),
+        UserId::new("runtime-notification-owner").expect("user"),
+        Some(AgentId::new("runtime-notification-agent").expect("agent")),
+        None,
+    );
+    let thread_id = ThreadId::new("runtime-notification-thread").expect("thread");
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        runtime
+            .notification_inbox
+            .publish(ironclaw_outbound::PublishNotificationRequest {
+                id: ironclaw_outbound::NotificationId::new("runtime-notification-1")
+                    .expect("notification id"),
+                recipient: ironclaw_outbound::NotificationRecipient {
+                    tenant_id: caller.tenant_id.clone(),
+                    user_id: caller.user_id.clone(),
+                },
+                kind: ironclaw_outbound::NotificationKind::ApprovalRequired,
+                severity: ironclaw_outbound::NotificationSeverity::Warning,
+                source: ironclaw_outbound::NotificationSource {
+                    thread_id: thread_id.clone(),
+                    turn_run_id: Some(TurnRunId::new()),
+                    lifecycle_ref: Some("runtime-notification-gate".to_string()),
+                },
+                action: ironclaw_outbound::NotificationAction::OpenThread { thread_id },
+                occurred_at: Utc::now(),
+            }),
+    )
+    .await
+    .expect("notification publish does not time out")
+    .expect("persist notification through production store");
+
+    let bundle = runtime.product_surface(None).expect("product surface");
+    let initial_page = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        query_product_surface_page(
+            bundle.as_ref(),
+            caller.clone(),
+            RebornViewQuery {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                params: serde_json::json!({ "limit": 10 }),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("notification list does not time out")
+    .expect("list notification through production product surface");
+    let initial: ProductListNotificationsResponse =
+        serde_json::from_value(initial_page.payload).expect("notification response");
+    assert_eq!(initial.notifications.len(), 1);
+    assert_eq!(initial.notifications[0].id, "runtime-notification-1");
+    assert_eq!(initial.unread_count, 1);
+
+    let missing = invoke_product_command(
+        bundle.as_ref(),
+        caller.clone(),
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest {
+            notification_id: "runtime-notification-missing".to_string(),
+        },
+    )
+    .await
+    .expect_err("a missing notification is a typed product miss");
+    assert_eq!(missing.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(missing.kind, ProductSurfaceErrorKind::NotFound);
+
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        invoke_product_command(
+            bundle.as_ref(),
+            caller.clone(),
+            NOTIFICATIONS_MARK_READ_COMMAND,
+            ProductNotificationMutationRequest {
+                notification_id: "runtime-notification-1".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("mark-read command does not time out")
+    .expect("mark durable notification read");
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        invoke_product_command(
+            bundle.as_ref(),
+            caller.clone(),
+            NOTIFICATIONS_ARCHIVE_COMMAND,
+            ProductNotificationMutationRequest {
+                notification_id: "runtime-notification-1".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("archive command does not time out")
+    .expect("archive durable notification");
+
+    let visible_page = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        query_product_surface_page(
+            bundle.as_ref(),
+            caller.clone(),
+            RebornViewQuery {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                params: serde_json::json!({ "limit": 10 }),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("post-archive notification list does not time out")
+    .expect("list notifications after archive");
+    let visible: ProductListNotificationsResponse =
+        serde_json::from_value(visible_page.payload).expect("notification response");
+    assert!(visible.notifications.is_empty());
+    assert_eq!(visible.unread_count, 0);
+
+    let persisted = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        runtime
+            .notification_inbox
+            .list(ironclaw_outbound::ListNotificationsRequest {
+                recipient: ironclaw_outbound::NotificationRecipient {
+                    tenant_id: caller.tenant_id,
+                    user_id: caller.user_id,
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            }),
+    )
+    .await
+    .expect("persisted notification list does not time out")
+    .expect("read persisted archive state");
+    assert_eq!(persisted.notifications.len(), 1);
+    assert!(persisted.notifications[0].read_at.is_some());
+    assert!(persisted.notifications[0].archived_at.is_some());
+    drop(bundle);
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
+        .await
+        .expect("runtime shutdown does not time out")
+        .expect("runtime shuts down");
 }
 
 async fn stream_product_events(

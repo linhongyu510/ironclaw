@@ -164,6 +164,7 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::DeliveryNotFound
+        | OutboundError::NotificationNotFound
         | OutboundError::ReplyAttachmentIntentLimitExceeded => ProductSurfaceError {
             code: ProductSurfaceErrorCode::InvalidRequest,
             kind: ProductSurfaceErrorKind::Validation,

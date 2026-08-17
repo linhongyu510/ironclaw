@@ -19,6 +19,8 @@ pub enum OutboundError {
     AccessDenied,
     #[error("outbound delivery not found")]
     DeliveryNotFound,
+    #[error("notification not found")]
+    NotificationNotFound,
     #[error("reply attachment intents are already sealed for this run")]
     ReplyAttachmentIntentsSealed,
     #[error("reply attachment metadata conflicts with an existing path")]

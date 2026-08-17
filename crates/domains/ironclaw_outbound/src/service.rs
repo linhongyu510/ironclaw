@@ -299,6 +299,7 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
         | OutboundError::DeliveryNotFound
+        | OutboundError::NotificationNotFound
         | OutboundError::ReplyAttachmentIntentsSealed
         | OutboundError::ReplyAttachmentIntentConflict
         | OutboundError::ReplyAttachmentIntentLimitExceeded => false,

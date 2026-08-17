@@ -245,7 +245,8 @@ fn map_intent_port_error(error: OutboundError) -> FirstPartyCapabilityError {
         | OutboundError::CasConflict
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
-        | OutboundError::DeliveryNotFound => {
+        | OutboundError::DeliveryNotFound
+        | OutboundError::NotificationNotFound => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
     }

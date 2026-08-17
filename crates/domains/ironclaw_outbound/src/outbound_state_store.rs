@@ -80,14 +80,15 @@ use crate::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveredGateRouteRecord, DeliveredGateRouteStore,
     DeliveryDefaultScope, ListNotificationsRequest, LoadSubscriptionCursorRequest,
-    MAX_RUN_DELIVERY_CLEANUP_RECORDS, MarkAllNotificationsReadRequest, NotificationInboxStorePort,
-    NotificationMutationRequest, NotificationPage, NotificationRecipient, NotificationRecord,
-    OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus, OutboundError,
-    OutboundStateStorePort, ProjectionSubscriptionId, ProjectionSubscriptionRecord,
-    PublishNotificationRequest, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    MAX_RUN_DELIVERY_CLEANUP_RECORDS, MarkAllNotificationsReadRequest,
+    NOTIFICATION_INBOX_MAX_RECORDS, NotificationInboxStorePort, NotificationMutationRequest,
+    NotificationPage, NotificationRecipient, NotificationRecord, OutboundDeliveryAttempt,
+    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStorePort,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, PublishNotificationRequest,
+    ReplyAttachmentIntent, ReplyAttachmentIntentPort, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 
 /// Maximum number of compare-and-swap retries on a read-then-write path
@@ -133,6 +134,8 @@ const DELIVERED_GATE_ROUTES_CONV_IDX_ROOT: &str = "/outbound/delivered-gate-rout
 const RUN_DELIVERY_CLEANUP_ROOT: &str = "/outbound/run-delivery-cleanup";
 const REPLY_ATTACHMENT_INTENTS_ROOT: &str = "/outbound/reply-attachment-intents";
 const NOTIFICATION_INBOX_PATH: &str = "/outbound/notification-inbox/state.json";
+const NOTIFICATION_CURSOR_MAX_BYTES: usize =
+    (20 + 1 + crate::notification_inbox::NOTIFICATION_ID_MAX_BYTES) * 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -720,10 +723,22 @@ where
                                 reason: "notification id conflicts with an existing event",
                             });
                         }
-                        existing.updated_at = existing.updated_at.max(request.occurred_at);
+                        let updated_at = existing.updated_at.max(request.occurred_at);
+                        if existing.updated_at == updated_at
+                            && existing.severity == request.severity
+                        {
+                            let record = existing.clone();
+                            return Ok(CasApply::no_op(snapshot, record));
+                        }
+                        existing.updated_at = updated_at;
                         existing.severity = request.severity;
                         let record = existing.clone();
                         return Ok(CasApply::new(snapshot, record));
+                    }
+                    if snapshot.notifications.len() >= NOTIFICATION_INBOX_MAX_RECORDS {
+                        return Err(OutboundError::InvalidRequest {
+                            reason: "notification inbox is at capacity",
+                        });
                     }
                     let record = NotificationRecord {
                         id: request.id,
@@ -782,17 +797,18 @@ where
         notifications.sort_by(|left, right| {
             right
                 .created_at
-                .cmp(&left.created_at)
+                .timestamp_micros()
+                .cmp(&left.created_at.timestamp_micros())
                 .then_with(|| right.id.as_str().cmp(left.id.as_str()))
         });
         let start = match request.cursor.as_deref() {
-            Some(cursor) => notifications
-                .iter()
-                .position(|record| notification_cursor(record) == cursor)
-                .map(|position| position + 1)
-                .ok_or(OutboundError::InvalidRequest {
-                    reason: "notification cursor is invalid or stale",
-                })?,
+            Some(cursor) => {
+                let cursor = decode_notification_cursor(cursor)?;
+                notifications
+                    .iter()
+                    .position(|record| notification_is_after_cursor(record, &cursor))
+                    .unwrap_or(notifications.len())
+            }
             None => 0,
         };
         let end = start.saturating_add(request.limit).min(notifications.len());
@@ -909,7 +925,7 @@ where
                     .notifications
                     .iter_mut()
                     .find(|record| record.id == request.notification_id)
-                    .ok_or(OutboundError::DeliveryNotFound)?;
+                    .ok_or(OutboundError::NotificationNotFound)?;
                 mutation(record, request.occurred_at);
                 record.updated_at = record.updated_at.max(request.occurred_at);
                 Ok(CasApply::new(snapshot, ()))
@@ -1550,6 +1566,9 @@ fn validate_notification_inbox_snapshot(
     if &snapshot.recipient != recipient {
         return Err(OutboundError::AccessDenied);
     }
+    if snapshot.notifications.len() > NOTIFICATION_INBOX_MAX_RECORDS {
+        return Err(OutboundError::Serialization);
+    }
     let mut ids = std::collections::HashSet::with_capacity(snapshot.notifications.len());
     for record in &snapshot.notifications {
         let lifecycle_timestamp_is_invalid =
@@ -1596,6 +1615,57 @@ fn notification_cursor(record: &NotificationRecord) -> String {
         record.id.as_str()
     );
     hex::encode(raw)
+}
+
+struct NotificationCursor {
+    created_at_micros: i64,
+    id: crate::NotificationId,
+}
+
+fn decode_notification_cursor(cursor: &str) -> Result<NotificationCursor, OutboundError> {
+    if cursor.is_empty() || cursor.len() > NOTIFICATION_CURSOR_MAX_BYTES {
+        return Err(OutboundError::InvalidRequest {
+            reason: "notification cursor is invalid",
+        });
+    }
+    let bytes = hex::decode(cursor).map_err(|error| {
+        tracing::debug!(%error, "rejected malformed notification cursor encoding");
+        OutboundError::InvalidRequest {
+            reason: "notification cursor is invalid",
+        }
+    })?;
+    let raw = String::from_utf8(bytes).map_err(|error| {
+        tracing::debug!(%error, "rejected non-UTF-8 notification cursor");
+        OutboundError::InvalidRequest {
+            reason: "notification cursor is invalid",
+        }
+    })?;
+    let (created_at_micros, id) = raw.split_once(':').ok_or(OutboundError::InvalidRequest {
+        reason: "notification cursor is invalid",
+    })?;
+    let created_at_micros = created_at_micros.parse::<i64>().map_err(|error| {
+        tracing::debug!(%error, "rejected notification cursor timestamp");
+        OutboundError::InvalidRequest {
+            reason: "notification cursor is invalid",
+        }
+    })?;
+    let id = crate::NotificationId::try_from(id.to_string()).map_err(|error| {
+        tracing::debug!(%error, "rejected malformed notification cursor id");
+        OutboundError::InvalidRequest {
+            reason: "notification cursor is invalid",
+        }
+    })?;
+    Ok(NotificationCursor {
+        created_at_micros,
+        id,
+    })
+}
+
+fn notification_is_after_cursor(record: &NotificationRecord, cursor: &NotificationCursor) -> bool {
+    let created_at_micros = record.created_at.timestamp_micros();
+    created_at_micros < cursor.created_at_micros
+        || (created_at_micros == cursor.created_at_micros
+            && record.id.as_str() < cursor.id.as_str())
 }
 
 fn map_notification_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
