@@ -416,6 +416,7 @@ fn test_parts(
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::new(StubProjectService),
+        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_service: None,
         outbound_preference_write_requires_approval: false,

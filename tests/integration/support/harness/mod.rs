@@ -197,7 +197,7 @@ impl HarnessCapabilityMode {
             Self::HostRuntime(harness) => {
                 if harness.durable_capability_io_requested {
                     harness.install_durable_capability_io(
-                        turn_thread_service,
+                        Arc::clone(&turn_thread_service),
                         trajectory_observer.clone(),
                     );
                 }
@@ -220,7 +220,11 @@ impl HarnessCapabilityMode {
                     harness.install_trigger_active_run_lookup_for_test(&process_system)?;
                 }
                 Ok((
-                    harness.capability_factory(milestone_sink, trajectory_observer),
+                    harness.capability_factory(
+                        milestone_sink,
+                        turn_thread_service,
+                        trajectory_observer,
+                    ),
                     Arc::new(HostRuntimeHarnessSurfaceResolver),
                     harness.input_resolver(),
                     harness.capability_result_writer(),
@@ -1083,11 +1087,13 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
             harness: Arc::clone(self),
             milestone_sink,
+            thread_service,
             trajectory_observer,
         })
     }
@@ -1791,6 +1797,7 @@ impl HostRuntimeCapabilityHarness {
         self: &Arc<Self>,
         run_context: &LoopRunContext,
         milestone_sink: &Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
+        thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
         surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
@@ -2020,6 +2027,7 @@ impl HostRuntimeCapabilityHarness {
             milestone_sink: milestone_sink.clone(),
             skill_activation_source: self.skill_activation_source.clone(),
             project_service,
+            thread_service,
             trajectory_observer,
             // Feeds the same active-extension authority (installed +
             // activated extensions like `github`, `gmail`, MCP servers)

@@ -55,6 +55,9 @@ pub struct RefreshingCapabilityPortTestParts {
         Option<std::sync::Arc<crate::test_support::SkillActivationTestSource>>,
     pub project_service:
         std::sync::Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
+    /// Same thread service used by the run; structured-result declarations
+    /// are read from its durable prepared-context record.
+    pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
     /// [`build_extension_management_for_test`]. Wraps the extension-host
     /// local management port; mirrors `skill_activation_source` above.
