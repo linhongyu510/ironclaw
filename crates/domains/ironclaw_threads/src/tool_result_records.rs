@@ -22,7 +22,7 @@ pub(crate) fn validate_tool_result_record_content(
 }
 
 pub(crate) fn validate_tool_result_record_read(max_bytes: usize) -> Result<(), SessionThreadError> {
-    let ceiling = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+    let ceiling = crate::contract::effective_tool_result_read_max_bytes();
     if !(TOOL_RESULT_RECORD_READ_MIN_BYTES..=ceiling).contains(&max_bytes) {
         return Err(SessionThreadError::Serialization(
             "tool result record read size is outside the supported range".to_string(),

@@ -487,6 +487,28 @@ pub struct PutToolResultRecordRequest {
 /// The model-observation envelope in `tool_result_reference.rs` is derived
 /// from this value, so historical replay remains bounded.
 pub const TOOL_RESULT_RECORD_READ_MAX_BYTES: usize = 24 * 1024;
+/// Highest value `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` may request.
+pub(crate) const TOOL_RESULT_READ_ENV_CEILING_BYTES: usize = 64 * 1024;
+
+/// Default per-request read cap.
+pub(crate) const TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES: usize = 24 * 1024;
+
+/// Environment variable controlling [`effective_tool_result_read_max_bytes`].
+pub(crate) const TOOL_RESULT_READ_MAX_BYTES_ENV: &str = "IRONCLAW_TOOL_RESULT_READ_MAX_BYTES";
+
+/// Resolve the effective per-request cap for legacy result records.
+///
+/// Invalid values fall back to the default; valid values are clamped to the
+/// supported range.
+pub fn effective_tool_result_read_max_bytes() -> usize {
+    match std::env::var(TOOL_RESULT_READ_MAX_BYTES_ENV) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(value) => value.clamp(4, TOOL_RESULT_READ_ENV_CEILING_BYTES),
+            Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+        },
+        Err(_) => TOOL_RESULT_RECORD_READ_DEFAULT_MAX_BYTES,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadToolResultRecordRequest {
