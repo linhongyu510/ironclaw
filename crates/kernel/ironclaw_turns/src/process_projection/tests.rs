@@ -1261,6 +1261,7 @@ fn ownerless_scope_round_trips_through_the_process_claim() {
         resolved_run_profile: profile().resolved,
         subagent_depth: 0,
         spawn_tree_descendant_cap: None,
+        spawn_tree_root_run_id: None,
         runner_id: TurnRunnerId::new(),
         lease_token: crate::TurnLeaseToken::new(),
     };
