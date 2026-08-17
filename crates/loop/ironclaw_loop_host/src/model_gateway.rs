@@ -466,7 +466,8 @@ where
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -515,7 +516,8 @@ where
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -568,7 +570,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -622,7 +625,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -798,7 +802,8 @@ where
             None,
             None,
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -840,7 +845,8 @@ where
             None,
             None,
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -886,7 +892,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -933,7 +940,8 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            ProviderRequestContext::new(replay_identity, next_fallback_index),
+            ProviderRequestContext::new(replay_identity, next_fallback_index)
+                .with_tool_choice(request.tool_choice),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await;
@@ -1256,6 +1264,8 @@ impl ProviderReplayIdentity {
 struct ProviderRequestContext {
     replay_identity: ProviderReplayIdentity,
     next_fallback_index: Option<u32>,
+    /// Strategy-imposed provider tool-choice constraint for this call.
+    tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
 }
 
 impl ProviderRequestContext {
@@ -1263,7 +1273,16 @@ impl ProviderRequestContext {
         Self {
             replay_identity,
             next_fallback_index,
+            tool_choice: None,
         }
+    }
+
+    fn with_tool_choice(
+        mut self,
+        tool_choice: Option<ironclaw_loop_contracts::LoopModelToolChoice>,
+    ) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -1378,6 +1397,7 @@ where
     let ProviderRequestContext {
         replay_identity,
         next_fallback_index,
+        tool_choice,
     } = request_context;
     let redaction_started_at = Instant::now();
     let redaction_count = redact_completion_request(&mut completion);
@@ -1426,6 +1446,27 @@ where
             );
         }
         if !tool_definitions.is_empty() || !deferred_tool_definitions.is_empty() {
+            // A strategy-forced tool choice must name a capability on the
+            // visible tool surface; resolving through the definitions keeps
+            // capability→provider-name mapping in one place and rejects a
+            // forced capability the model could not actually call.
+            let forced_provider_tool_name = match tool_choice.as_ref() {
+                Some(ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id,
+                }) => Some(
+                    tool_definitions
+                        .iter()
+                        .find(|definition| &definition.capability_id == capability_id)
+                        .map(|definition| definition.name.as_str().to_string())
+                        .ok_or_else(|| {
+                            HostManagedModelError::safe(
+                                HostManagedModelErrorKind::InvalidRequest,
+                                "forced tool choice is not on the visible tool surface",
+                            )
+                        })?,
+                ),
+                None => None,
+            };
             // Resolve blank / `"default"` overrides to the provider's active
             // model, matching provider execution, so the native-deferred
             // capability decision and the served model cannot diverge.
@@ -1501,6 +1542,7 @@ where
             let mut tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             tool_request.deferred_tools = llm_deferred_tool_definitions;
+            tool_request.tool_choice = forced_provider_tool_name;
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
             let response = match if let Some(stream_sink) = stream_sink.as_ref() {
@@ -1670,6 +1712,15 @@ where
         debug!(
             "reborn model gateway dispatching text-only provider request because no capability port was supplied"
         );
+    }
+
+    if tool_choice.is_some() {
+        // Reaching the text-only path with a forced tool choice means the
+        // caller constrained a call that has no tool surface at all.
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "forced tool choice requires a tool-capable model call",
+        ));
     }
 
     let provider_started_at = live_latency_started_at();
@@ -2461,6 +2512,14 @@ fn provider_replay_matches_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> bool {
+    // Seeded prepared-context tool history carries the host-owned sentinel
+    // identity: replay it as a faithful tool round on ANY route. The
+    // carve-out is exact-match on the sentinel only; the accept door forces
+    // `signature: None` on seeded envelopes, so this can never smuggle a
+    // real route's replay artifacts.
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return true;
+    }
     provider_call.provider_id == expected.provider_id
         && provider_call.provider_model_id == expected.provider_model_id
 }
@@ -2478,6 +2537,13 @@ fn validate_provider_replay_identity(
             error,
         )
     })?;
+    // Seeded prepared-context envelopes carry the host-owned sentinel
+    // identity; route equality is not applicable to them (the match gate in
+    // `provider_replay_matches_identity` admits them on ANY route, and the
+    // accept door forces `signature: None` on seeded envelopes).
+    if provider_call.provider_id == ironclaw_threads::PREPARED_SEED_PROVIDER_ID {
+        return Ok(());
+    }
     if provider_call.provider_id != expected.provider_id
         || provider_call.provider_model_id != expected.provider_model_id
     {
@@ -2805,6 +2871,7 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ids::CapabilityId;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -2878,6 +2945,181 @@ mod tests {
         assert_eq!(
             requests[0].stop_sequences,
             Some(vec!["password: [REDACTED_SECRET]".to_string()])
+        );
+    }
+
+    #[derive(Default)]
+    struct ToolChoiceRecordingProvider {
+        requests: Mutex<Vec<ToolCompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolChoiceRecordingProvider {
+        fn model_name(&self) -> &str {
+            "tool-choice-recording-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("the tool-choice test always has a tool surface")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(ToolCompletionResponse {
+                content: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
+    }
+
+    struct StaticDefinitionCapabilityPort {
+        definitions: Vec<ironclaw_loop_contracts::ProviderToolDefinition>,
+    }
+
+    #[async_trait]
+    impl ironclaw_loop_contracts::LoopCapabilityPort for StaticDefinitionCapabilityPort {
+        fn tool_definitions(
+            &self,
+        ) -> Result<
+            Vec<ironclaw_loop_contracts::ProviderToolDefinition>,
+            ironclaw_loop_contracts::AgentLoopHostError,
+        > {
+            Ok(self.definitions.clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_loop_contracts::VisibleCapabilityRequest,
+        ) -> Result<
+            ironclaw_loop_contracts::VisibleCapabilitySurface,
+            ironclaw_loop_contracts::AgentLoopHostError,
+        > {
+            unreachable!("not used by the tool-choice tests")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: ironclaw_loop_contracts::LoopRequest,
+        ) -> Result<
+            ironclaw_host_api::resolution::Resolution,
+            ironclaw_loop_contracts::AgentLoopHostError,
+        > {
+            unreachable!("not used by the tool-choice tests")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: ironclaw_loop_contracts::LoopRequestBatch,
+        ) -> Result<
+            ironclaw_host_api::resolution::ResolutionBatch,
+            ironclaw_loop_contracts::AgentLoopHostError,
+        > {
+            unreachable!("not used by the tool-choice tests")
+        }
+    }
+
+    fn structured_result_definition() -> ironclaw_loop_contracts::ProviderToolDefinition {
+        ironclaw_loop_contracts::ProviderToolDefinition::from_parts(
+            CapabilityId::new("builtin.structured_result").expect("valid capability id"),
+            "builtin__structured_result",
+            "record the structured result",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("valid provider tool definition")
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_forces_the_resolved_provider_tool_name() {
+        let provider = ToolChoiceRecordingProvider::default();
+        let capabilities = Arc::new(StaticDefinitionCapabilityPort {
+            definitions: vec![structured_result_definition()],
+        });
+        let replay_identity =
+            ProviderReplayIdentity::new("tool-choice-recording-provider", provider.model_name())
+                .unwrap();
+
+        complete_model_request(
+            &provider,
+            CompletionRequest::new(vec![ChatMessage::user("finish")]),
+            Some(capabilities),
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
+                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id: CapabilityId::new("builtin.structured_result").unwrap(),
+                },
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].tool_choice.as_deref(),
+            Some("builtin__structured_result"),
+            "the forced capability must reach the provider as its provider tool name"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_model_request_rejects_a_forced_capability_off_the_visible_surface() {
+        let provider = ToolChoiceRecordingProvider::default();
+        let capabilities = Arc::new(StaticDefinitionCapabilityPort {
+            definitions: vec![structured_result_definition()],
+        });
+        let replay_identity =
+            ProviderReplayIdentity::new("tool-choice-recording-provider", provider.model_name())
+                .unwrap();
+
+        let error = complete_model_request(
+            &provider,
+            CompletionRequest::new(vec![ChatMessage::user("finish")]),
+            Some(capabilities),
+            None,
+            None,
+            ProviderRequestContext::new(replay_identity, None).with_tool_choice(Some(
+                ironclaw_loop_contracts::LoopModelToolChoice::ForcedCapability {
+                    capability_id: CapabilityId::new("builtin.other").unwrap(),
+                },
+            )),
+            None,
+        )
+        .await
+        .expect_err("a forced capability outside the tool surface must fail closed");
+
+        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+        assert!(
+            provider
+                .requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "no provider dispatch may happen for a rejected forced tool choice"
         );
     }
 
