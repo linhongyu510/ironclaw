@@ -34,10 +34,10 @@ mod tests {
         result_meta::FailureKind,
     };
     use ironclaw_host_runtime::{
-        CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
-        GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+        CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID,
+        CODING_WRITE_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, OUTBOUND_DELIVER_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
     };
@@ -1873,6 +1873,7 @@ mod tests {
         assert!(capability_ids.contains(&SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&CODING_BASH_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_SAVE_CAPABILITY_ID));
         let local_host_allowed_effects = vec![
@@ -1972,6 +1973,12 @@ mod tests {
         assert_eq!(
             shell_grant.constraints.network,
             local_host_shell_network_policy
+        );
+
+        let bash_grant = grant_for(CODING_BASH_CAPABILITY_ID);
+        assert_eq!(
+            bash_grant.constraints, shell_grant.constraints,
+            "bash and shell use the same process runtime authority"
         );
 
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
@@ -2235,6 +2242,7 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
@@ -2514,6 +2522,7 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
@@ -2596,6 +2605,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -2812,6 +2822,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             ));
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
@@ -3508,6 +3519,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
@@ -3615,6 +3627,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -3758,6 +3771,15 @@ mod tests {
             "shell should disclose configured local-host authority: {}",
             shell_descriptor.safe_description
         );
+        let bash_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == CODING_BASH_CAPABILITY_ID)
+            .expect("bash descriptor visible");
+        assert_eq!(
+            bash_descriptor.parameters_schema["required"],
+            serde_json::json!(["command"])
+        );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         for capability_id in [
             CODING_READ_CAPABILITY_ID,
@@ -3848,6 +3870,11 @@ mod tests {
             "provider tool shell description should disclose configured local-host authority: {}",
             shell_tool.description
         );
+        let bash_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == CODING_BASH_CAPABILITY_ID)
+            .expect("bash tool definition visible");
+        assert_eq!(bash_tool.name.as_str(), "bash");
         let input_ref = capability_io
             .register_provider_tool_call_input(
                 &run_context,
@@ -3943,6 +3970,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("standalone-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4076,6 +4104,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("standalone-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,

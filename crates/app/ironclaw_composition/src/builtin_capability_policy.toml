@@ -178,6 +178,22 @@ effects = [
 mounts = "ambient"
 network = "dev_wildcard"
 
+# The pinned bash coding engine uses the same runtime process port as shell and
+# therefore requires the same host authority. User-sandbox projection strips
+# direct filesystem authority and substitutes sandbox transport policy.
+[[grants]]
+capability = "builtin.bash"
+effects = [
+    "dispatch_capability",
+    "read_filesystem",
+    "write_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+]
+mounts = "ambient"
+network = "dev_wildcard"
+
 # Canonical pinned coding surface.
 [[grants]]
 capability = "builtin.read"
