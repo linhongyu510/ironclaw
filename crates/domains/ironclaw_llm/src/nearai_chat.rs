@@ -134,6 +134,30 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
         .unwrap_or_default()
 }
 
+/// Return whether model discovery targets an official public NEAR AI catalog.
+///
+/// These catalogs intentionally allow unauthenticated model listing. All other
+/// endpoints are treated as private so custom deployments and `private.near.ai`
+/// retain their configured API-key or session authentication.
+fn is_public_nearai_model_catalog(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let path = url.path().trim_end_matches('/');
+
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.host_str(),
+            Some("cloud-api.near.ai" | "cloud-stg-api.near.ai")
+        )
+        && matches!(path, "" | "/v1")
+}
+
 /// Default NEAR AI model used when no model is configured.
 pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
@@ -641,7 +665,10 @@ impl NearAiChatProvider {
     pub async fn list_models_full(&self) -> Result<Vec<ModelInfo>, LlmError> {
         match self.list_models_inner().await {
             Ok(models) => Ok(models),
-            Err(LlmError::SessionExpired { .. }) if !self.uses_api_key() => {
+            Err(LlmError::SessionExpired { .. })
+                if !is_public_nearai_model_catalog(&self.config.base_url)
+                    && !self.uses_api_key() =>
+            {
                 self.session.handle_auth_failure().await?;
                 self.list_models_inner().await
             }
@@ -651,20 +678,21 @@ impl NearAiChatProvider {
 
     async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = self.api_url("models");
-        let token = self.resolve_bearer_token().await?;
+        let requires_auth = !is_public_nearai_model_catalog(&self.config.base_url);
 
         tracing::debug!("Fetching models from: {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("Failed to fetch models: {}", e),
-            })?;
+        let request = self.client.get(&url);
+        let request = if requires_auth {
+            let token = self.resolve_bearer_token().await?;
+            request.header("Authorization", format!("Bearer {}", token))
+        } else {
+            request
+        };
+        let response = request.send().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to fetch models: {}", e),
+        })?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
@@ -673,7 +701,7 @@ impl NearAiChatProvider {
         })?;
 
         if !status.is_success() {
-            if status.as_u16() == 401 && !self.uses_api_key() {
+            if status.as_u16() == 401 && requires_auth && !self.uses_api_key() {
                 return Err(LlmError::SessionExpired {
                     provider: "nearai_chat".to_string(),
                 });
@@ -1091,8 +1119,12 @@ struct ChatCompletionRequest {
     stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatCompletionTool>>,
+    /// `"auto"`/`"required"`/`"none"` serialize as bare strings; a named
+    /// tool serializes as the OpenAI object form
+    /// `{"type":"function","function":{"name":…}}` — a bare tool-name string
+    /// is rejected by OpenAI-compatible chat servers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
+    tool_choice: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "is_false")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1414,6 +1446,17 @@ fn build_chat_completion_request(
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
+    let tool_choice = if has_tools {
+        tool_choice.map(|tc| match tc.as_str() {
+            "auto" | "required" | "none" => serde_json::Value::String(tc),
+            specific => serde_json::json!({
+                "type": "function",
+                "function": {"name": specific}
+            }),
+        })
+    } else {
+        None
+    };
 
     ChatCompletionRequest {
         model,
@@ -1422,7 +1465,7 @@ fn build_chat_completion_request(
         max_tokens,
         stop,
         tools: if has_tools { Some(tools) } else { None },
-        tool_choice: if has_tools { tool_choice } else { None },
+        tool_choice,
         stream: false,
         stream_options: None,
     }
@@ -1783,6 +1826,37 @@ mod tests {
         assert!(parse_nearai_models("").is_empty());
     }
 
+    #[test]
+    fn public_model_catalog_auth_is_scoped_to_official_cloud_endpoints() {
+        for base_url in [
+            "https://cloud-api.near.ai",
+            "https://cloud-api.near.ai/",
+            "https://cloud-api.near.ai/v1",
+            "https://cloud-stg-api.near.ai/v1/",
+        ] {
+            assert!(
+                is_public_nearai_model_catalog(base_url),
+                "expected public catalog: {base_url}"
+            );
+        }
+
+        for base_url in [
+            "https://private.near.ai",
+            "http://cloud-api.near.ai",
+            "https://cloud-api.near.ai.example.com",
+            "https://cloud-api.near.ai:8443",
+            "https://user@cloud-api.near.ai",
+            "https://cloud-api.near.ai/v2",
+            "https://cloud-api.near.ai/v1?tenant=private",
+            "not-a-url",
+        ] {
+            assert!(
+                !is_public_nearai_model_catalog(base_url),
+                "expected authenticated catalog: {base_url}"
+            );
+        }
+    }
+
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
         NearAiConfig {
             model: "test-model".to_string(),
@@ -1804,6 +1878,62 @@ mod tests {
 
     fn test_session() -> Arc<SessionManager> {
         Arc::new(SessionManager::new(SessionConfig::default()))
+    }
+
+    #[tokio::test]
+    async fn private_model_discovery_uses_session_authentication() {
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut headers_tx = Some(headers_tx);
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept provider request");
+                let (headers, _) = read_http_request_body(&mut socket).await;
+                if headers.starts_with("GET /v1/models ") {
+                    if let Some(headers_tx) = headers_tx.take() {
+                        headers_tx.send(headers).expect("capture request headers");
+                    }
+                    write_http_json_response(
+                        &mut socket,
+                        serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+                    )
+                    .await;
+                    break;
+                }
+                write_http_json_response(&mut socket, serde_json::json!({ "data": [] })).await;
+            }
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_nearai_config(&base_url);
+        config.api_key = None;
+        let session = Arc::new(SessionManager::new(SessionConfig {
+            auth_base_url: "http://127.0.0.1:1".to_string(),
+            session_path: temp.path().join("missing-session.json"),
+        }));
+        session
+            .set_token(secrecy::SecretString::from("session-token"))
+            .await;
+        let provider = NearAiChatProvider::new(config, session).expect("provider");
+
+        let models = provider
+            .list_models_full()
+            .await
+            .expect("private model discovery should use the session token");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "nearai/test-model");
+        let headers = headers_rx.await.expect("models request headers");
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer session-token")),
+            "private model discovery must send the session token: {headers}"
+        );
     }
 
     async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> (String, String) {
@@ -3856,7 +3986,7 @@ data: [DONE]
                     })),
                 },
             }]),
-            tool_choice: Some("auto".to_string()),
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
             stream_options: None,
         };
@@ -3891,6 +4021,51 @@ data: [DONE]
         assert!(
             json.get("tool_choice").is_none(),
             "tool_choice is invalid without tools on OpenAI-compatible chat APIs"
+        );
+    }
+
+    #[test]
+    fn test_request_encodes_named_tool_choice_as_the_openai_object_form() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("finish").into()],
+            vec![crate::provider::ToolDefinition {
+                name: "builtin__structured_result".to_string(),
+                description: "record the result".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            None,
+            None,
+            None,
+            Some("builtin__structured_result".to_string()),
+        );
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "builtin__structured_result"}
+            }),
+            "a bare tool-name string is rejected by OpenAI-compatible chat servers"
+        );
+        assert_eq!(
+            serde_json::to_value(build_chat_completion_request(
+                "gpt-4o".to_string(),
+                vec![ChatMessage::user("finish").into()],
+                vec![crate::provider::ToolDefinition {
+                    name: "lookup".to_string(),
+                    description: "lookup".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                None,
+                None,
+                None,
+                Some("required".to_string()),
+            ))
+            .unwrap()["tool_choice"],
+            serde_json::json!("required"),
+            "mode strings stay bare strings"
         );
     }
 

@@ -131,8 +131,9 @@ use ironclaw_loop_contracts::{
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus,
+    runner::ClaimedTurnRun,
 };
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
@@ -281,6 +282,10 @@ fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.inner.requires_ordered_batch_invocation(invocations)
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.inner.tool_definitions()
     }
@@ -309,14 +314,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.inner.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         self.surface_state.set_current(surface.clone())?;
         Ok(surface)
     }
@@ -326,7 +337,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let resolution = self.inner.invoke_capability(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -341,7 +355,10 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let resolution = self.inner.invoke_capability_batch(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let resolution = Box::pin(self.inner.invoke_capability_batch(request)).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
@@ -1017,6 +1034,10 @@ where
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
     model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
     cancellation_factory: Arc<dyn RunCancellationFactory>,
+    /// The journal-backed ownership authority. Held so every host this factory
+    /// builds can fence its transcript writes on the claimed run's lease still
+    /// being live (`ThreadBackedLoopTranscriptPort::with_run_lease_fence`).
+    agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
@@ -1116,15 +1137,16 @@ where
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
-        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
         safety_context: InstructionSafetyContext,
     ) -> Self {
-        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
-            AgentTurnRunCancellationFactory::new(Arc::clone(&agent_turn_runtime)),
-        );
+        let cancellation_factory: Arc<dyn RunCancellationFactory> =
+            Arc::new(AgentTurnRunCancellationFactory::new(
+                Arc::clone(&agent_turn_runtime) as Arc<dyn AgentTurnRuntimePort>,
+            ));
         Self {
             thread_service,
             thread_scope,
@@ -1135,6 +1157,7 @@ where
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
             cancellation_factory,
+            agent_turn_runtime,
             config,
             skill_context_source: None,
             attachment_read_port: None,
@@ -1619,13 +1642,17 @@ where
             max_messages,
         )
         .with_context_window_cache(Arc::clone(&context_window_cache));
-        if let Some(source) = self.skill_context_source.as_ref() {
+        // An unbound run's prepared context is its COMPLETE input by
+        // contract: no skill, identity, or memory lane is folded in, so the
+        // caller's declared context is exactly what the model sees.
+        let unbound_run = run_context.resolved_run_profile.profile_id.is_unbound();
+        if !unbound_run && let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
-        if let Some(source) = self.identity_context_source.as_ref() {
+        if !unbound_run && let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
-        if let Some(service) = self.memory_context_service.as_ref() {
+        if !unbound_run && let Some(service) = self.memory_context_service.as_ref() {
             context_adapter = context_adapter.with_memory_context_service(service.clone());
         }
         // Channel-origin runs carry host-fetched conversation history on the
@@ -1922,8 +1949,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: gw,
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1941,8 +1972,12 @@ where
                         thread_scope: effective_scope.clone(),
                         host_gateway: Arc::clone(&self.model_gateway),
                         max_messages,
-                        skill_context_source: self.skill_context_source.clone(),
-                        identity_context_source: self.identity_context_source.clone(),
+                        skill_context_source: (!unbound_run)
+                            .then(|| self.skill_context_source.clone())
+                            .flatten(),
+                        identity_context_source: (!unbound_run)
+                            .then(|| self.identity_context_source.clone())
+                            .flatten(),
                         instruction_materialization_store: Some(Arc::clone(
                             &instruction_materialization_store,
                         )),
@@ -1972,6 +2007,13 @@ where
             effective_scope.clone(),
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
+        )
+        // The lease this run was claimed under. A transcript append carries no
+        // lease of its own, so without this a worker whose lease recovery
+        // already reclaimed could still append beside the replacement's reply.
+        .with_run_lease_fence(
+            Arc::clone(&self.agent_turn_runtime),
+            request.claimed_run.lease_token,
         );
         if let Some(port) = self.reply_attachment_intent_port.as_ref() {
             transcript_adapter =
@@ -2211,6 +2253,11 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        self.capabilities
+            .requires_ordered_batch_invocation(invocations)
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.capabilities.tool_definitions()
     }
@@ -2226,14 +2273,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities.register_provider_tool_call(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.register_provider_tool_call(request)).await
     }
 
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.capabilities.visible_capabilities(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.visible_capabilities(request)).await
     }
 
     fn current_visible_capabilities(
@@ -2246,14 +2299,20 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
-        self.capabilities.invoke_capability(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability(request)).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
-        self.capabilities.invoke_capability_batch(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.capabilities.invoke_capability_batch(request)).await
     }
 }
 
@@ -2891,6 +2950,10 @@ mod thread_scope_tests {
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
 mod compaction_tests;
+
+#[cfg(test)]
+#[path = "loop_driver_host/run_lease_fence_tests.rs"]
+mod run_lease_fence_tests;
 
 #[cfg(test)]
 mod tests {

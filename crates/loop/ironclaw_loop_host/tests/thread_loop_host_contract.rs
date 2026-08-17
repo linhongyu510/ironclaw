@@ -155,6 +155,37 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
 }
 
 #[tokio::test]
+async fn thread_context_port_uses_documented_ascii_token_rate() {
+    let fixture = ThreadFixture::new_with_user_content(&"a".repeat(40)).await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_prompt_context_token_budget(PromptContextTokenBudget::new(10, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(
+        bundle.messages[0]
+            .compaction
+            .as_ref()
+            .expect("budget-admitted message should retain compaction metadata")
+            .estimated_tokens,
+        10
+    );
+}
+
+#[tokio::test]
 async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
     let fixture = ThreadFixture::new_with_user_content("message 1").await;
     for sequence in 2..=17 {
@@ -193,6 +224,143 @@ async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
 }
 
 #[tokio::test]
+async fn thread_context_port_pins_the_run_accepted_task_ahead_of_the_recent_tail() {
+    let mut fixture = ThreadFixture::new_with_user_content("original accepted task").await;
+    fixture.pin_initial_message_to_run();
+    for sequence in 2..=6 {
+        fixture
+            .accept_user_message(&format!("event-{sequence}"), &format!("message {sequence}"))
+            .await;
+    }
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 3,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .messages
+            .iter()
+            .map(|message| {
+                message
+                    .compaction
+                    .as_ref()
+                    .expect("transcript message metadata")
+                    .sequence
+            })
+            .collect::<Vec<_>>(),
+        vec![1, 5, 6]
+    );
+    let truncation = bundle
+        .recent_window_truncation
+        .expect("the displaced recent message must remain an exact compaction watermark");
+    assert_eq!(truncation.omitted_through_sequence, 4);
+    assert_eq!(
+        truncation.omitted_through_kind,
+        ironclaw_loop_contracts::LoopContextCompactionKind::User
+    );
+
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    ));
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt = prompt_port
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(3),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(prompt.recent_window_truncation, Some(truncation));
+}
+
+#[tokio::test]
+async fn task_pin_evicts_complete_tool_exchange_at_a_compactable_boundary() {
+    let mut fixture = ThreadFixture::new_with_user_content("original task").await;
+    fixture.pin_initial_message_to_run();
+    fixture
+        .thread_service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            content: MessageContent::text("assistant tool call"),
+        })
+        .await
+        .unwrap();
+    fixture
+        .thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            result_ref: "result:pin-boundary".to_string(),
+            safe_summary: ToolResultSafeSummary::new("tool output").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    fixture
+        .accept_user_message("event-4", "recent message")
+        .await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        3,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 3,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .messages
+            .iter()
+            .filter_map(|message| message.compaction.as_ref().map(|entry| entry.sequence))
+            .collect::<Vec<_>>(),
+        vec![1, 4]
+    );
+    assert_eq!(
+        bundle.recent_window_truncation,
+        Some(ironclaw_loop_contracts::LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        })
+    );
+}
+
+#[tokio::test]
 async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallback() {
     let fixture = ThreadFixture::new_with_user_content("old short").await;
     fixture
@@ -218,6 +386,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -226,6 +395,47 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].messages.len(), 1);
     assert_eq!(calls[0].messages[0].content, "latest short");
+}
+
+#[tokio::test]
+async fn model_port_empty_request_pins_the_run_accepted_task_on_cache_miss() {
+    let mut fixture = ThreadFixture::new_with_user_content("original accepted task").await;
+    fixture.pin_initial_message_to_run();
+    for sequence in 2..=6 {
+        fixture
+            .accept_user_message(&format!("event-{sequence}"), &format!("message {sequence}"))
+            .await;
+    }
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        3,
+    );
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    port.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
+        messages: Vec::new(),
+        surface_version: None,
+        model_preference: None,
+        fallback_index: 0,
+        iteration: 0,
+        capability_view: None,
+        tool_choice: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].messages.len(), 1);
+    assert_eq!(
+        calls[0].messages[0].content,
+        "original accepted task\nmessage 5\nmessage 6"
+    );
 }
 
 #[tokio::test]
@@ -249,6 +459,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         messages: messages.clone(),
         surface_version: None,
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 2,
@@ -284,6 +495,7 @@ async fn model_port_records_resolved_prompt_with_fallback_model_at_the_host_boun
         capability_view: Some(LoopModelCapabilityView {
             visible_capability_ids: vec![CapabilityId::new("filesystem.read").expect("capability")],
         }),
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -350,6 +562,7 @@ async fn model_port_keeps_effective_model_unavailable_without_provider_evidence(
         fallback_index: 2,
         iteration: 7,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -398,6 +611,7 @@ async fn model_port_retains_usage_reported_by_failed_calls() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect_err("model call fails");
@@ -447,6 +661,7 @@ async fn model_port_keeps_omitted_usage_unavailable() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model call succeeds");
@@ -493,6 +708,7 @@ async fn model_port_records_full_capability_surface_when_request_has_no_view() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("model response");
@@ -536,6 +752,7 @@ async fn model_port_continues_when_diagnostic_capability_lookup_fails() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .expect("diagnostic failure must not fail the model request");
@@ -608,6 +825,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -664,6 +882,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -759,6 +978,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -1215,10 +1435,12 @@ async fn context_port_renders_channel_conversation_context_as_one_framed_block()
 }
 
 #[tokio::test]
-async fn context_port_omits_channel_context_that_fails_prompt_safety() {
+async fn context_port_preserves_secret_like_channel_context_for_gateway_redaction() {
     let fixture = ThreadFixture::new().await;
-    // The loop prompt denylist rejects credential vocabulary; the port must
-    // degrade to no context instead of failing the prompt build later.
+    // The context port retains the raw conversation so false positives cannot
+    // erase useful context. The model gateway owns the final provider-bound
+    // redaction and its contract tests assert that the value never reaches the
+    // provider.
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -1236,11 +1458,16 @@ async fn context_port_omits_channel_context_that_fails_prompt_safety() {
             mode: PromptMode::TextOnly,
         })
         .await
-        .expect("unsafe advisory context must never fail the context load");
+        .expect("secret-like advisory context must not fail the context load");
 
+    let snippet = bundle
+        .instruction_snippets
+        .iter()
+        .find(|snippet| snippet.snippet_ref == "channel-context:conversation")
+        .expect("channel context must remain available before gateway redaction");
     assert!(
-        bundle.instruction_snippets.is_empty(),
-        "unsafe channel context must be omitted, not rendered"
+        snippet.model_content.contains("the password is hunter2"),
+        "the raw context seam must preserve the original conversation"
     );
 }
 
@@ -1837,6 +2064,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -1881,6 +2109,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -1923,6 +2152,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -1971,6 +2201,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2242,6 +2473,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2346,6 +2578,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2385,6 +2618,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 compaction: None,
             }],
             compaction_message_index: Vec::new(),
+            recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
                 model_content: "project instruction summary".to_string(),
@@ -2415,7 +2649,9 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 4);
+    // identity + instruction + memory recall framing (#7294) + memory snippet
+    // + user message.
+    assert_eq!(prompt_bundle.messages.len(), 5);
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
     let model_port = ThreadBackedLoopModelPort::new(
@@ -2436,6 +2672,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2446,15 +2683,18 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         .iter()
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        contents,
-        vec![
-            "identity policy summary",
-            "project instruction summary",
-            "project memory summary",
-            "hello reborn",
-        ]
+    assert_eq!(contents.len(), 5);
+    assert_eq!(contents[0], "identity policy summary");
+    assert_eq!(contents[1], "project instruction summary");
+    // The memory section opens with the recall-framing guidance (#7294),
+    // ahead of the memory snippet it frames.
+    assert!(
+        contents[2].starts_with("Recalled memory notice:"),
+        "memory section must open with the recall framing, got {:?}",
+        contents[2]
     );
+    assert_eq!(contents[3], "project memory summary");
+    assert_eq!(contents[4], "hello reborn");
 }
 
 #[tokio::test]
@@ -2485,6 +2725,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -2687,6 +2928,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -2757,6 +2999,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4135,6 +4378,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4182,6 +4426,7 @@ async fn model_port_rejects_mismatched_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4229,6 +4474,7 @@ async fn model_port_rejects_missing_fallback_route_evidence() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4266,6 +4512,7 @@ async fn model_port_accepts_matching_fallback_route_evidence() {
             fallback_index: 2,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4357,6 +4604,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4406,6 +4654,7 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
         capability_view: None,
         fallback_index: 0,
         iteration: 0,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4465,6 +4714,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4511,6 +4761,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4584,6 +4835,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         fallback_index: 0,
         iteration: 0,
         capability_view: None,
+        tool_choice: None,
     })
     .await
     .unwrap();
@@ -4708,6 +4960,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4760,6 +5013,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("malformed tool result reference content should fail");
@@ -4805,6 +5059,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .expect_err("missing tool result reference should fail before model call");
@@ -4850,6 +5105,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -4910,6 +5166,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -4970,6 +5227,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5013,6 +5271,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap();
@@ -5054,6 +5313,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5085,6 +5345,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5122,6 +5383,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5183,6 +5445,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             fallback_index: 0,
             iteration: 0,
             capability_view: None,
+            tool_choice: None,
         })
         .await
         .unwrap_err();
@@ -5493,6 +5756,7 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         messages: messages.to_vec(),
         surface_version: None,
         compaction_message_index: Vec::new(),
+        recent_window_truncation: None,
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -5590,6 +5854,16 @@ impl ThreadFixture {
             })
             .await
             .unwrap()
+    }
+
+    fn pin_initial_message_to_run(&mut self) {
+        self.run_context = self.run_context.clone().with_accepted_message_ref(
+            ironclaw_host_api::turn::AcceptedMessageRef::new(format!(
+                "msg:{}",
+                self.user_message_id
+            ))
+            .expect("message-backed accepted ref"),
+        );
     }
 }
 
@@ -6198,6 +6472,7 @@ impl SessionThreadService for StaticContextThreadService {
         Ok(ContextWindow {
             thread_id: request.thread_id,
             messages: vec![context_message],
+            recent_window_truncation: None,
         })
     }
 
@@ -6664,14 +6939,16 @@ impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryProm
     async fn load_memory_snippets(
         &self,
         request: ironclaw_loop_contracts::MemoryPromptContextRequest,
-    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
-        Ok(vec![LoopContextSnippet {
-            snippet_ref: "memory-snippet:test".to_string(),
-            model_content: "remembered fact".to_string(),
-            safe_summary: "remembered fact".to_string(),
-            metadata: None,
-        }])
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad::healthy(
+            vec![LoopContextSnippet {
+                snippet_ref: "memory-snippet:test".to_string(),
+                model_content: "remembered fact".to_string(),
+                safe_summary: "remembered fact".to_string(),
+                metadata: None,
+            }],
+        ))
     }
 }
 
@@ -6733,4 +7010,98 @@ async fn thread_context_port_loads_memory_snippets_through_wired_service_once_pe
     assert_eq!(calls[0].max_snippets, 8);
     assert_eq!(calls[0].scope, run_context.scope);
     assert_eq!(calls[0].actor.user_id, owner);
+}
+
+/// Reports a long-term lane that FAILED rather than matching nothing, so the
+/// port has a degradation to publish.
+struct DegradedMemoryPromptContextService;
+
+#[async_trait]
+impl ironclaw_loop_contracts::MemoryPromptContextService for DegradedMemoryPromptContextService {
+    async fn load_memory_snippets(
+        &self,
+        _request: ironclaw_loop_contracts::MemoryPromptContextRequest,
+    ) -> Result<ironclaw_loop_contracts::MemoryPromptContextLoad, AgentLoopHostError> {
+        Ok(ironclaw_loop_contracts::MemoryPromptContextLoad {
+            snippets: Vec::new(),
+            degradations: vec![ironclaw_loop_contracts::MemoryRetrievalDegradation::new(
+                ironclaw_loop_contracts::MemoryRetrievalLane::LongTerm,
+                ironclaw_loop_contracts::MemoryRetrievalFailureKind::Unavailable,
+            )],
+        })
+    }
+}
+
+/// A transient milestone-sink failure must not permanently suppress the
+/// degraded-retrieval note.
+///
+/// The note is the ONLY operator-visible signal that retrieval broke rather
+/// than simply matching nothing. Marking it emitted before the publish
+/// succeeds would mean one failed sink call put the operator back in exactly
+/// the state this behavior exists to escape — for the rest of the run, with no
+/// second chance. Same guarantee, and same two-step guard, as
+/// `context_port_survives_personal_context_admitted_milestone_sink_failure`.
+#[traced_test]
+#[tokio::test]
+async fn context_port_retries_memory_degradation_note_after_milestone_sink_failure() {
+    let fixture = ThreadFixture::new().await;
+    let owner = fixture
+        .thread_scope
+        .owner_user_id
+        .clone()
+        .expect("fixture thread scope carries an owner");
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(owner));
+    let milestone_sink = Arc::new(FailOnceMilestoneSink::default());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::new(DegradedMemoryPromptContextService) as Arc<_>)
+    .with_milestone_sink(milestone_sink.clone());
+
+    let request = || LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: ironclaw_loop_contracts::PromptMode::TextOnly,
+    };
+
+    // First prompt build: the publish is attempted and fails. The turn survives.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 1).await;
+    assert!(
+        milestone_sink.milestones().is_empty(),
+        "the first publish failed, so no note was delivered"
+    );
+    assert!(logs_contain("failed to emit memory degradation milestone"));
+
+    // Second prompt build of the SAME run: the cached load still records the
+    // degradation, and the note is retried rather than suppressed.
+    adapter.load_loop_context(request()).await.unwrap();
+    wait_for_fail_once_attempts(&milestone_sink, 2).await;
+    let milestones = milestone_sink.milestones();
+    assert_eq!(
+        milestones.len(),
+        1,
+        "exactly one note reaches the operator: retried after the failure, not duplicated"
+    );
+    assert!(matches!(
+        &milestones[0].kind,
+        LoopHostMilestoneKind::DriverNote { kind, safe_summary }
+            if *kind == LoopDriverNoteKind::Context
+                && safe_summary.as_str() == "memory retrieval degraded (long_term:unavailable)"
+    ));
+
+    // A third build must NOT publish again — the success is remembered.
+    adapter.load_loop_context(request()).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        milestone_sink.milestones().len(),
+        1,
+        "the note stays at one per run once it has actually been delivered"
+    );
 }

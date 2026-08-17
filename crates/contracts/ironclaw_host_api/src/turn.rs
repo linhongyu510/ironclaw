@@ -316,6 +316,25 @@ impl RunProfileId {
         Self::from_trusted_static("scheduled_trigger")
     }
 
+    /// Runs over a prepared unbound thread with an ordinary
+    /// assistant-message output contract.
+    pub fn unbound_default() -> Self {
+        Self::from_trusted_static("unbound_default")
+    }
+
+    /// Runs over a prepared unbound thread whose journaled output contract
+    /// is a JSON schema; the loop family enforces strict schema validation on
+    /// the terminal output.
+    pub fn unbound_structured() -> Self {
+        Self::from_trusted_static("unbound_structured")
+    }
+
+    /// True for both unbound profile ids. Admission uses this to derive the
+    /// concurrency class; readers must keep treating unknown ids as opaque.
+    pub fn is_unbound(&self) -> bool {
+        self == &Self::unbound_default() || self == &Self::unbound_structured()
+    }
+
     pub fn is_interactive_default(&self) -> bool {
         self == &Self::interactive_default()
     }
@@ -535,6 +554,7 @@ const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
 #[serde(rename_all = "snake_case")]
 pub enum ModelInvalidOutputDetailReason {
     EmptyAssistantResponse,
+    UnattendedQuestionEndingResponse,
     TextualToolCallSyntax,
     OutsideCapabilitySurface,
     ToolUseFinishWithoutToolCalls,
@@ -551,6 +571,9 @@ impl ModelInvalidOutputDetailReason {
     pub fn safe_summary(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "model returned an empty assistant response",
+            Self::UnattendedQuestionEndingResponse => {
+                "scheduled run ended by requesting user input"
+            }
             Self::TextualToolCallSyntax => {
                 "model returned textual tool-call syntax instead of structured tool calls"
             }
@@ -572,6 +595,7 @@ impl ModelInvalidOutputDetailReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EmptyAssistantResponse => "empty_assistant_response",
+            Self::UnattendedQuestionEndingResponse => "unattended_question_ending_response",
             Self::TextualToolCallSyntax => "textual_tool_call_syntax",
             Self::OutsideCapabilitySurface => "outside_capability_surface",
             Self::ToolUseFinishWithoutToolCalls => "tool_use_finish_without_tool_calls",
@@ -600,6 +624,9 @@ impl ModelInvalidOutputDetailReason {
         }
         match safe_summary {
             "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "scheduled run ended by requesting user input" => {
+                Some(Self::UnattendedQuestionEndingResponse)
+            }
             "model returned textual tool-call syntax instead of structured tool calls" => {
                 Some(Self::TextualToolCallSyntax)
             }
@@ -1077,6 +1104,9 @@ pub struct ProductTurnContext {
     /// prompt context; `None` for every non-channel origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_context: Option<String>,
+    /// Host-sealed restrictions for unattended execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_policy: Option<crate::execution_policy::TurnExecutionPolicy>,
 }
 
 impl ProductTurnContext {
@@ -1104,6 +1134,7 @@ impl ProductTurnContext {
             source_channel,
             owner,
             channel_context: None,
+            execution_policy: None,
         }
     }
 
@@ -1135,7 +1166,6 @@ pub enum SubmitTurnResponse {
         resolved_run_profile_version: RunProfileVersion,
         event_cursor: EventCursor,
         accepted_message_ref: AcceptedMessageRef,
-        reply_target_binding_ref: ReplyTargetBindingRef,
     },
 }
 
@@ -1267,6 +1297,7 @@ mod tests {
 
         for reason in [
             Reason::EmptyAssistantResponse,
+            Reason::UnattendedQuestionEndingResponse,
             Reason::TextualToolCallSyntax,
             Reason::OutsideCapabilitySurface,
             Reason::ToolUseFinishWithoutToolCalls,

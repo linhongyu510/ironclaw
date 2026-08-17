@@ -172,15 +172,27 @@ assistant message. Verdicts:
   failure).
 - `undisclosed`: the required tool was never advertised to the model
   (disclosure/agent-surface regression, hard failure).
+- `failure`: a write, append, or checkpoint returned a structured tool error.
+  Writes may be emitted up to three times — the initial attempt plus at most
+  two retries — only when the recovery contract permits the identical call;
+  `allowed_after_delay` also requires and honors `retry_after_ms`.
+  Non-retryable errors, missing delay metadata, exhausted attempts, and
+  checkpoint errors are hard failures.
 
 Scripts:
 
 | `--api-scripted-tool` | Tool sequence |
 | --- | --- |
 | `write_file_roundtrip` | `builtin.write_file` then `builtin.read_file` of a unique workspace path. |
-| `memory_roundtrip` | `ironclaw.memory.write` (replace) then `ironclaw.memory.read` of `stress/shared.md`. |
-| `memory_grow` | Write a quarter, append three quarters, then read — growing-append slope. |
-| `memory_mixed` | Write half, read, append half, read — mixed read/write. |
+| `memory_roundtrip` | `ironclaw.memory.write` (replace) then a read-back checkpoint of `stress/shared.md`. |
+| `memory_grow` | Write a quarter, append three quarters, then checkpoint — growing-append slope. |
+| `memory_mixed` | Write half, checkpoint, append half, checkpoint — mixed read/write. |
+
+Memory checkpoints use `ironclaw.memory.read` while the document and response
+envelope fit the host's 1 MiB model-visible output cap. Larger documents use
+bounded `ironclaw.memory.search` results for the read-back markers instead;
+the full document remains stored and indexed, while verification cannot fail
+merely because JSON metadata pushes an exact 1 MiB document over that cap.
 
 All memory scripts target the same relative path for every user, so each run
 also exercises same-relative-path isolation. `--api-scripted-doc-sizes` cycles
@@ -211,6 +223,35 @@ cargo run -p ironclaw_stress -- \
   --mock-llm-bind 127.0.0.1:3911
 ```
 
+### Nightly scripted memory matrix (CI lane)
+
+`.github/workflows/ironclaw-stress.yml` runs a nightly (03:30 UTC, plus
+`workflow_dispatch`) matrix of the three memory scripts — `memory_roundtrip`,
+`memory_grow`, `memory_mixed` — against a real `ironclaw serve` binary. The
+server profile selects the persistence backend: `hosted-single-tenant` is
+Postgres-backed, `hosted-single-tenant-volume` is embedded libSQL storage
+with no `[storage]` section. The stress runner's `--backend` flag does not
+choose that backend — it only labels the API-report lane for a workload
+driven over the WebUI HTTP API.
+
+Each script runs sequentially (each invocation binds the mock LLM sidecar at
+`127.0.0.1:19090` — the server's LLM base URL — and releases it on exit) at
+document sizes 4096, 32768, 131072, and 1048576 bytes, with users=6,
+concurrency=3, operations=4, hot writers=2, mock latency 250ms, a 10000ms
+timeline polling interval, a 120000ms terminal/p95 ceiling, and the
+zero-tolerance gate `--max-failure-rate 0`: any failed, leaked, missing, or
+undisclosed scripted verdict fails the job.
+
+Per-script outputs are stored under
+`target/ironclaw-stress/ironclaw-stress-libsql-scripted-<script>/` (JSONL,
+summary JSON, report text) and uploaded as
+`ironclaw-stress-libsql-scripted-<script>`. The server log is uploaded once,
+separately, as `ironclaw-stress-libsql-scripted-server-log` (always, even
+when a script fails), so a failed run has a single log artifact to fetch. The
+Postgres job's scripted memory leg is additionally mirrored under
+`ironclaw-stress-postgres-scripted-memory-roundtrip`, alongside its existing
+aggregate `ironclaw-stress-postgres-api-capacity` artifact.
+
 ## Presets
 
 Use `--preset` for a named single workload. Explicit CLI flags override preset
@@ -220,6 +261,7 @@ defaults.
 | --- | --- |
 | `chat-baseline` | Baseline user-turn storage latency and throughput. |
 | `hot-thread` | Same-thread serialization and busy-thread rejection behavior. |
+| `db-write-measurement` | One deterministic user turn with 10 tool calls, plus an idle write window. |
 | `large-context` | Context read amplification with prefilled history. |
 | `tool-heavy` | Tool transcript writes and larger tool output payloads. |
 | `model-tail` | Tail-spike synthetic model latency. |
@@ -249,6 +291,65 @@ cargo run -p ironclaw_stress --release -- \
   --human-read \
   --bottleneck-report
 ```
+
+### DB write measurement
+
+`db-write-measurement` is a fixed workload: one user, one thread, one turn, 10
+successful tool calls, and the production `filesystem-journal` process store.
+Unlike general presets, its workload-shape flags cannot be overridden.
+
+On Postgres, the report contains before/after/delta `pg_stat_user_tables`
+insert/update/delete counters and normalized `pg_stat_statements` calls for
+RootFilesystem entry/event/index/sequence tables and trigger tables. Statement
+output contains query IDs, operation names, and table names, never SQL text.
+
+```bash
+export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
+
+cargo run -p ironclaw_stress --release -- \
+  --backend postgres \
+  --preset db-write-measurement \
+  --db-write-idle-seconds 300 \
+  --human-read
+```
+
+For libSQL, use an isolated database path:
+
+```bash
+cargo run -p ironclaw_stress --release -- \
+  --backend libsql \
+  --libsql-path /tmp/ironclaw-write-measurement.db \
+  --preset db-write-measurement \
+  --db-write-idle-seconds 300 \
+  --human-read
+```
+
+The harness installs row-level audit triggers on the measured tables for the
+measurement window, then removes them. These counters include writes caused by
+the filesystem's own index and full-text-search triggers. The report excludes
+audit-counter rows from the table totals. Audit-counter writes still contribute
+to DB/WAL byte growth, so
+use the byte metrics only as supplementary evidence. libSQL does not expose a
+database-wide equivalent of `pg_stat_statements`; the libSQL report therefore
+does not claim per-statement counts.
+
+The default uses non-destructive snapshots scoped to the current database.
+`pg_stat_statements` must be installed and loaded; the command fails with setup
+instructions when it is unavailable. The optional statistics reset requires
+`pg_stat_statements` 1.7 or newer.
+
+For this preset, `--db-write-idle-seconds` defaults to 300. The tool waits that
+long after the turn and then captures an idle snapshot. Set it to 0 to skip the
+idle snapshot and report workload deltas only. Statement-to-table attribution
+matches bare table identifiers in normalized SQL, so it does not distinguish
+same-named tables in different schemas; per-table write counters are reported
+with schema-qualified names.
+
+`--db-write-reset-stats` resets the selected backend's counters. On Postgres,
+it is destructive to shared statistics: it resets normalized statement
+counters for the current database and counters for the measured tables. Use it
+only on an isolated measurement database. On libSQL, it clears only the
+harness-owned audit counter table.
 
 ## Suites
 
@@ -677,8 +778,9 @@ done with libsql. To use Postgres, pass `--postgres-url` or set:
 export IRONCLAW_FILESYSTEM_POSTGRES_URL='postgresql://USER:PASSWORD@HOST:PORT/DB'
 ```
 
-The URL is redacted in output. Postgres DB probe fields include database size
-and active/idle/waiting connection counts.
+The URL is redacted in output. Regular Postgres DB probe fields remain database
+size and active/idle/waiting connection counts. The `db-write-measurement`
+preset adds table-write and normalized-statement before/after/delta reports.
 
 ## Practical Workflow
 

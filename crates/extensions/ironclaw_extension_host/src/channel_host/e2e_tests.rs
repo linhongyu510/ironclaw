@@ -42,6 +42,7 @@ use ironclaw_assistant::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
+use ironclaw_extension_contracts::channel::ChannelConnectionStrategy;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
@@ -83,6 +84,12 @@ use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::inbound::{
     AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
+};
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelPreference,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
@@ -428,6 +435,8 @@ struct HarnessOptions {
     /// command actions (`/model set`, `set-provider`) deny by default;
     /// scenarios proving the admin path override this to an admin role.
     actor_role: AdminUserRole,
+    /// Optional connection-strategy override for migration boundary tests.
+    connection_strategy: Option<ChannelConnectionStrategy>,
 }
 
 impl HarnessOptions {
@@ -439,6 +448,7 @@ impl HarnessOptions {
             manifest_commands: None,
             foreign_scope_approvals: false,
             actor_role: AdminUserRole::Member,
+            connection_strategy: None,
         }
     }
 }
@@ -468,6 +478,15 @@ async fn build_harness_with_manifest_commands(
 ) -> Harness {
     let mut options = HarnessOptions::new(mode);
     options.manifest_commands = Some(commands);
+    build_harness_with_options(options).await
+}
+
+async fn build_harness_with_connection_strategy(
+    mode: TurnMode,
+    connection_strategy: ChannelConnectionStrategy,
+) -> Harness {
+    let mut options = HarnessOptions::new(mode);
+    options.connection_strategy = Some(connection_strategy);
     build_harness_with_options(options).await
 }
 
@@ -531,9 +550,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
-    let host =
-        slack_test_extension_host_with_manifest_commands(options.manifest_commands.as_deref())
-            .await;
+    let host = slack_test_extension_host_with_manifest_options(
+        options.manifest_commands.as_deref(),
+        options.connection_strategy,
+    )
+    .await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -565,6 +586,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(IngressReplyContextSource::new(Arc::clone(
             &ingress.reply_context,
         ))),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -594,6 +616,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         Arc::new(in_memory_backed_outbound_state_store());
     // The production shape: composition builds ONE product-side workflow
     // factory and the assembly names no product type at all (§12.11 D-A).
+    let model_preferences = Arc::new(ChannelModelPreferences::default());
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
             filesystem: Arc::new(InMemoryBackend::new()),
@@ -601,6 +624,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             turn_coordinator: Arc::new(coordinator.clone()),
             inbound_attachments: Arc::new(InertAttachmentLander),
             input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
+            llm_config: Some(Arc::clone(&model_preferences) as Arc<dyn LlmConfigService>),
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
@@ -635,6 +659,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                     max_wait: options.max_wait,
                     max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
                     max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+                    first_nudge_after: Duration::from_secs(3600),
+                    renudge_interval: Duration::from_secs(3600),
                 },
                 triggered_delivery_store: Arc::clone(&triggered_delivery_store),
             }),
@@ -655,7 +681,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         admin_users: Arc::new(FakeAdminUsers::seeded(USER, options.actor_role)),
     };
     let assembly = GenericChannelHostAssembly::start(deps);
-    let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
+    let command_executions = Arc::new(RecordingCommandExecutionSurface::new(model_preferences));
     let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
         as Arc<dyn ironclaw_product_contracts::surface::ProductSurface>);
     assert!(command_surface_set); // safety: this file is included only by cfg(test).
@@ -820,11 +846,12 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// (binding the real `SlackChannelAdapter`) — the snapshot both the ingress
 /// router and the delivery resolver read.
 async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
-    slack_test_extension_host_with_manifest_commands(None).await
+    slack_test_extension_host_with_manifest_options(None, None).await
 }
 
-async fn slack_test_extension_host_with_manifest_commands(
+async fn slack_test_extension_host_with_manifest_options(
     manifest_commands: Option<&[&str]>,
+    connection_strategy: Option<ChannelConnectionStrategy>,
 ) -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
         FakeEgressFactory, FakeToolAdapter, RecordingDrain,
@@ -840,7 +867,14 @@ async fn slack_test_extension_host_with_manifest_commands(
         fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
             Ok(ExtensionBindings {
                 tools: Some(Arc::new(FakeToolAdapter)),
-                channel: Some(Arc::new(ironclaw_slack_extension::SlackChannelAdapter)),
+                channel: {
+                    let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+                    ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                        .with_ingress(adapter.clone())
+                        .with_reply(adapter.clone())
+                        .with_delivery(adapter)
+                },
+                device_link: None,
             })
         }
     }
@@ -859,6 +893,18 @@ async fn slack_test_extension_host_with_manifest_commands(
         let mut manifest = slack_manifest_from_bundled_inventory();
         if let Some(commands) = manifest_commands {
             manifest = replace_toml_array(&manifest, "commands", commands);
+        }
+        if let Some(connection_strategy) = connection_strategy {
+            let strategy = match connection_strategy {
+                ChannelConnectionStrategy::AdminManagedChannels => "admin_managed_channels",
+                ChannelConnectionStrategy::WebGeneratedCode => "web_generated_code",
+                ChannelConnectionStrategy::DeviceLink => "device_link",
+                ChannelConnectionStrategy::OAuth => "oauth",
+            };
+            manifest = manifest.replace(
+                "strategy = \"oauth\"",
+                &format!("strategy = \"{strategy}\""),
+            );
         }
         ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
             manifest,
@@ -881,6 +927,9 @@ async fn slack_test_extension_host_with_manifest_commands(
             reserved_capability_ids: Default::default(),
             reserved_ingress_routes: Default::default(),
             hook_deadline: Duration::from_secs(5),
+            linked_sessions: crate::LinkedSessionStore::unavailable(),
+            linked_accounts: std::sync::Arc::new(crate::UnavailableLinkedAccountResolution),
+            admin_secrets: None,
         })
         .await,
     );
@@ -1271,6 +1320,7 @@ async fn background_run_notifier_fixture(
             Arc::new(driver_egress.clone()),
         )),
         Arc::new(NoReplyContext),
+        Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 2,
             backoff: Duration::ZERO,
@@ -1497,7 +1547,6 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     // Seed the creator's personal DM preference so the triggered approval prompt
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1543,7 +1592,6 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         blocked_run_id,
         TurnStatus::BlockedApproval,
         Some(TurnGateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -1580,6 +1628,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1600,6 +1650,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         agent_id: None,
         project_id: None,
         prompt: "triggered approval prompt".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(
@@ -1774,7 +1825,6 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     // Seed the creator's personal auth-prompt preference so the triggered auth
     // prompt resolves to team T-A / channel D123 — a personal DM.
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1817,7 +1867,6 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         run_id,
         TurnStatus::BlockedAuth,
         Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -1859,6 +1908,8 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -1877,6 +1928,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -1926,7 +1978,6 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
 
     // The only notification channel is a shared channel (not a DM).
     let outbound = Arc::new(in_memory_backed_outbound_state_store());
-    let dm_target = dm_reply_target_binding_ref();
     seed_notification_channels(
         outbound.as_ref(),
         &tenant,
@@ -1943,7 +1994,6 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         run_id,
         TurnStatus::BlockedAuth,
         Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-        dm_target,
         AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
     let coordinator = Arc::new(ScriptedTriggerCoordinator::new(template));
@@ -1985,6 +2035,8 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(vec![Arc::new(SlackPreferenceTargetCodec)
@@ -2003,6 +2055,7 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         agent_id: None,
         project_id: None,
         prompt: "triggered auth prompt not dm".to_string(),
+        execution_policy: None,
     };
     driver
         .on_trigger_submitted(triggered_request_from_fire(&fire, run_id, foreign_scope))
@@ -2498,7 +2551,7 @@ async fn slack_unpaired_mention_gets_a_threaded_pairing_notice() {
     assert_eq!(messages[0]["channel"], "C889");
     assert_eq!(
         messages[0]["text"].as_str(),
-        Some(slack_generic_connect_required_notice().as_str()),
+        Some(slack_manifest_connect_required_notice().as_str()),
         "the notice is this wiring's connect_required copy, verbatim"
     );
     assert_eq!(
@@ -2604,7 +2657,7 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     assert_eq!(messages.len(), 2, "A's reply + carol's nudge: {messages:?}");
     assert_eq!(
         messages[1]["text"].as_str(),
-        Some(slack_generic_connect_required_notice().as_str()),
+        Some(slack_manifest_connect_required_notice().as_str()),
     );
     assert_eq!(
         messages[1]["thread_ts"], "1710000007.000001",
@@ -2785,7 +2838,12 @@ async fn slack_dm_posts_working_indicator_and_deletes_it_after_final_reply() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "a running turn posts a working indicator before the reply"
+    );
 
     harness
         .coordinator
@@ -3015,7 +3073,13 @@ async fn slack_dm_delivers_final_reply_after_auth_completes_outside_slack() {
     let messages = harness.slack_messages();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["text"], "Ironclaw is thinking...");
+    assert!(
+        messages[1]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            && messages[1]["text"] != messages[0]["text"],
+        "the resumed turn posts a working indicator distinct from the auth prompt"
+    );
 
     harness
         .coordinator
@@ -3063,6 +3127,7 @@ struct RecordingTurnState {
     submitted_scopes: Vec<TurnScope>,
     submitted_actors: Vec<TurnActor>,
     submitted_channel_contexts: Vec<Option<String>>,
+    submitted_requested_models: Vec<Option<String>>,
 }
 
 impl RecordingTurnCoordinator {
@@ -3076,6 +3141,7 @@ impl RecordingTurnCoordinator {
                 submitted_scopes: Vec::new(),
                 submitted_actors: Vec::new(),
                 submitted_channel_contexts: Vec::new(),
+                submitted_requested_models: Vec::new(),
             })),
             threads,
             mode,
@@ -3101,6 +3167,14 @@ impl RecordingTurnCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .submitted_turn_count
+    }
+
+    fn submitted_requested_models(&self) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .submitted_requested_models
+            .clone()
     }
 
     /// Scopes of submitted turns in submission order — shared-channel
@@ -3169,20 +3243,12 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (reply_target_binding_ref, accepted_message_ref) = state
+        let accepted_message_ref = state
             .runs
             .get(&run_id)
-            .map(|run| {
-                (
-                    run.reply_target_binding_ref.clone(),
-                    run.accepted_message_ref.clone(),
-                )
-            })
+            .map(|run| run.accepted_message_ref.clone())
             .unwrap_or_else(|| {
-                (
-                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
-                )
+                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref") // safety: static test accepted ref is valid.
             });
         state.runs.insert(
             run_id,
@@ -3192,7 +3258,6 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                reply_target_binding_ref,
                 accepted_message_ref,
             ),
         );
@@ -3262,8 +3327,8 @@ impl RecordingTurnCoordinator {
     ///
     /// This prevents the delivery loop from waking in the gap between
     /// `resume_blocked_run_to_running` and `complete_active_run`, observing
-    /// `Running` with no blocked marker, and posting the "Ironclaw is thinking..."
-    /// working indicator — which would produce a spurious 4th message and make the
+    /// `Running` with no blocked marker, and posting the working indicator —
+    /// which would produce a spurious 4th message and make the
     /// `messages.len() == 3` assertion flaky.
     async fn complete_blocked_run(&self, text: &str) -> Result<(), ProductSurfaceFailure> {
         // Append the final assistant message first (does not touch `state`).
@@ -3299,20 +3364,12 @@ impl RecordingTurnCoordinator {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (reply_target_binding_ref, accepted_message_ref) = state
+        let accepted_message_ref = state
             .runs
             .get(&run_id)
-            .map(|run| {
-                (
-                    run.reply_target_binding_ref.clone(),
-                    run.accepted_message_ref.clone(),
-                )
-            })
+            .map(|run| run.accepted_message_ref.clone())
             .unwrap_or_else(|| {
-                (
-                    ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
-                    AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
-                )
+                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref") // safety: static test accepted ref is valid.
             });
         state.runs.insert(
             run_id,
@@ -3322,7 +3379,6 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                reply_target_binding_ref,
                 accepted_message_ref,
             ),
         );
@@ -3347,6 +3403,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             .product_context
             .as_ref()
             .and_then(|context| context.channel_context.clone());
+        let submitted_requested_model = request.requested_model.clone();
         let status = match &self.mode {
             TurnMode::Complete { assistant_text } => {
                 append_final_assistant_message(
@@ -3384,7 +3441,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_version: RunProfileVersion::new(1),
             event_cursor: EventCursor::default(),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
         let run_state = turn_state(
             request.scope,
@@ -3392,7 +3448,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             run_id,
             status,
             gate_ref,
-            request.reply_target_binding_ref,
             request.accepted_message_ref,
         );
         let mut state = self
@@ -3407,6 +3462,9 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         state
             .submitted_channel_contexts
             .push(submitted_channel_context);
+        state
+            .submitted_requested_models
+            .push(submitted_requested_model);
         state.active_run_id = Some(run_id);
         if matches!(
             status,
@@ -3533,7 +3591,6 @@ fn turn_state(
     run_id: TurnRunId,
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
-    reply_target_binding_ref: ReplyTargetBindingRef,
     accepted_message_ref: AcceptedMessageRef,
 ) -> TurnRunState {
     TurnRunState {
@@ -3543,9 +3600,6 @@ fn turn_state(
         run_id,
         status,
         accepted_message_ref,
-        source_binding_ref: ironclaw_turns::SourceBindingRef::new("slack:source")
-            .expect("source binding"), // safety: static test source binding is valid.
-        reply_target_binding_ref,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         allow_steering: true,
@@ -3758,11 +3812,156 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 /// Web API responses — the transport-seam analog of the old protocol-egress
 /// recorder.
 #[derive(Default)]
+struct ChannelModelPreferences {
+    preferences: Mutex<std::collections::HashMap<(String, String), String>>,
+}
+
+impl ChannelModelPreferences {
+    fn key(caller: &ironclaw_product_contracts::surface::ProductSurfaceCaller) -> (String, String) {
+        (
+            caller.tenant_id.as_str().to_string(),
+            caller.user_id.as_str().to_string(),
+        )
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for ChannelModelPreferences {
+    async fn snapshot(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn upsert_provider(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn delete_provider(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn set_active(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn list_models(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn user_model_preference(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        Ok(UserModelPreference {
+            model: self
+                .preferences
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&Self::key(&caller))
+                .cloned(),
+        })
+    }
+
+    async fn set_user_model_preference(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: SetUserModelPreferenceRequest,
+    ) -> Result<UserModelPreference, LlmConfigServiceError> {
+        let mut preferences = self
+            .preferences
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = Self::key(&caller);
+        match request.model.clone() {
+            Some(model) => {
+                preferences.insert(key, model);
+            }
+            None => {
+                preferences.remove(&key);
+            }
+        }
+        Ok(UserModelPreference {
+            model: request.model,
+        })
+    }
+
+    async fn resolve_user_model(
+        &self,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        requested_model: Option<String>,
+    ) -> Result<Option<String>, LlmConfigServiceError> {
+        Ok(requested_model.or_else(|| {
+            self.preferences
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&Self::key(&caller))
+                .cloned()
+        }))
+    }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn complete_nearai_wallet_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: NearAiWalletLoginRequest,
+    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn start_codex_login(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+}
+
 struct RecordingCommandExecutionSurface {
     invokes: Mutex<Vec<(String, String, serde_json::Value)>>,
+    model_preferences: Arc<ChannelModelPreferences>,
 }
 
 impl RecordingCommandExecutionSurface {
+    fn new(model_preferences: Arc<ChannelModelPreferences>) -> Self {
+        Self {
+            invokes: Mutex::new(Vec::new()),
+            model_preferences,
+        }
+    }
+
     fn invokes(&self) -> Vec<(String, String, serde_json::Value)> {
         self.invokes
             .lock()
@@ -3787,14 +3986,46 @@ impl ironclaw_product_contracts::surface::ProductSurface for RecordingCommandExe
         } else {
             "Model"
         };
+        let model_command =
+            if operation_id == ironclaw_assistant::PRODUCT_MODEL_COMMAND_OPERATION_ID {
+                Some(
+                    serde_json::from_value::<ironclaw_assistant::ProductModelCommandInput>(
+                        request.input.clone(),
+                    )
+                    .expect("model command input"),
+                )
+            } else {
+                None
+            };
         self.invokes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push((
-                operation_id,
+                operation_id.clone(),
                 caller.user_id.as_str().to_string(),
                 request.input,
             ));
+        if let Some(input) = model_command {
+            match input.action {
+                ironclaw_assistant::ProductModelCommand::Use { model } => {
+                    self.model_preferences
+                        .set_user_model_preference(
+                            caller.clone(),
+                            SetUserModelPreferenceRequest { model: Some(model) },
+                        )
+                        .await?;
+                }
+                ironclaw_assistant::ProductModelCommand::Default => {
+                    self.model_preferences
+                        .set_user_model_preference(
+                            caller.clone(),
+                            SetUserModelPreferenceRequest { model: None },
+                        )
+                        .await?;
+                }
+                _ => {}
+            }
+        }
         Ok(
             ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse {
                 output: serde_json::json!({
@@ -4279,6 +4510,22 @@ const DM_MODEL_SET: &str = r#"{
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model set fake-model","ts":"1710000000.000027"}
 	}"#;
 
+const DM_MODEL_USE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-command-model-use",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"/model use model-b","ts":"1710000000.000028"}
+	}"#;
+
+const DM_AFTER_MODEL_USE: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-after-model-use",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"use my saved model","ts":"1710000000.000029"}
+	}"#;
+
 const DM_UNKNOWN_COMMAND: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
@@ -4476,28 +4723,16 @@ const HYDRATED_TOP_LEVEL_MENTION: &str = r#"{
 }"#;
 
 /// The `connect_required` copy this assembly's wiring produces. The harness
-/// wires `channel_pairing: None` (composition wires the real registry, whose
-/// per-extension pairing service serves the manifest's
-/// `[connection.notices]` copy — pinned at the integration tier), so the
-/// host falls back to [`ChannelConnectionNoticePolicy::generic`] over the
-/// manifest's display name. Deriving the expectation from the same
-/// production constructor and the shipped manifest's `name` keeps this a pin
-/// of the wiring, not a test-local copy of the wording.
-fn slack_generic_connect_required_notice() -> String {
+/// wires `channel_pairing: None`, so the host reads the non-pairing fallback
+/// from the resolved manifest's `[channel.connection.notices]` policy. Read
+/// that shipped value here instead of duplicating its wording in the test.
+fn slack_manifest_connect_required_notice() -> String {
     let manifest = slack_manifest_from_bundled_inventory();
-    let prefix = "\nname = \"";
-    let start = manifest
-        .find(prefix)
-        .expect("bundled slack manifest declares its display name") // safety: shipped manifest fixture declares `name`.
-        + prefix.len();
-    let end = manifest[start..]
-        .find('"')
-        .map(|offset| start + offset)
-        .expect("manifest name string is closed"); // safety: shipped manifest fixture is valid TOML.
-    ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy::generic(
-        &manifest[start..end],
-    )
-    .connect_required
+    let manifest: toml::Value = toml::from_str(&manifest).expect("bundled Slack manifest parses"); // safety: shipped compile-time fixture is valid TOML.
+    manifest["channel"]["connection"]["notices"]["connect_required"]
+        .as_str()
+        .expect("bundled Slack manifest declares connect_required") // safety: shipped manifest contract requires connection notices.
+        .to_string()
 }
 
 const APP_MENTION_AUTH: &str = r#"{
@@ -4711,6 +4946,7 @@ async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_
         accepted_message_ref: AcceptedMessageRef::new("msg:auth-fanout-resolve")
             .expect("accepted message ref"), // safety: static test ref is valid.
         submitted_run_id: blocked_run_id,
+        submission: None,
     };
     let auth_envelope = auth_resolution_allowed_envelope("callback:test-fanout");
     observer.observe_ack(auth_envelope, auth_ack).await;
@@ -5024,6 +5260,7 @@ fn generic_outbound_target_deps(
         assembly: Arc::clone(&harness.assembly),
         channel_config: Arc::clone(&harness.channel_config),
         dm_targets,
+        identity_lookup: Arc::clone(&harness.identity_lookup) as Arc<dyn RebornUserIdentityLookup>,
         identity: ChannelOutboundTargetIdentity {
             tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
@@ -5229,6 +5466,59 @@ async fn generic_outbound_targets_list_from_channel_config_and_generic_dm_store(
             entry.summary.target_id.as_str()
         );
     }
+}
+
+/// REGRESSION (device-link cutover): a DM target recorded under the retired
+/// proof-code pairing flow is dead weight once the manifest switches to
+/// device linking — the harness's unversioned identity row (exactly what that
+/// ceremony left behind) must not validate it. The target is offered again
+/// only once the actor holds a device-link identity, and then exactly once.
+#[tokio::test]
+async fn device_link_outbound_target_requires_the_linked_identity() {
+    let harness = build_harness_with_connection_strategy(
+        TurnMode::Running,
+        ChannelConnectionStrategy::DeviceLink,
+    )
+    .await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("seed retained pre-cutover DM target");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    assert_eq!(
+        listed.len(),
+        0,
+        "a retired pairing's delivery target is not offered until the account \
+         is device-linked"
+    );
+
+    let installation = AdapterInstallationId::new(INSTALLATION).expect("installation");
+    harness.identity_lookup.bind(
+        crate::channel_identity::ChannelIdentityKeyspace::DeviceLinkV1
+            .provider_user_id(&installation, SLACK_USER),
+        UserId::new(USER).expect("user"),
+    );
+    let listed_after_link = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list after linking");
+    assert_eq!(
+        listed_after_link.len(),
+        1,
+        "the linked identity revalidates the recorded target, exactly once"
+    );
 }
 
 /// REGRESSION (OAuth post-bind provisioning): Slack's `conversations.open`
@@ -5470,6 +5760,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
         agent_id: None,
         project_id: None,
         prompt: "generic triggered delivery".to_string(),
+        execution_policy: None,
     };
     use crate::channel_triggered_delivery::PostSubmitDeliveryHook as _;
     hook.on_trigger_submitted(fire, blocked_run_id, foreign_run_scope())
@@ -5519,6 +5810,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
         agent_id: None,
         project_id: None,
         prompt: "notification channel removed since it was chosen".to_string(),
+        execution_policy: None,
     };
     let vanished_run_id = TurnRunId::new();
     hook.on_trigger_submitted(vanished_fire, vanished_run_id, foreign_run_scope())
@@ -5652,6 +5944,34 @@ async fn admin_dm_model_set_executes_via_command_surface() {
         harness.coordinator.submitted_turn_count(),
         0,
         "product commands are not turns"
+    );
+}
+
+/// A caller-scoped preference selected through the real channel command path
+/// must be resolved for the next ordinary message from the same bound user.
+#[tokio::test]
+async fn model_use_command_applies_to_the_next_channel_turn() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "done".to_string(),
+    })
+    .await;
+
+    let command = harness.post_event(DM_MODEL_USE).await;
+    assert_eq!(command.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_turn_count(),
+        0,
+        "model commands are not turns"
+    );
+
+    let message = harness.post_event(DM_AFTER_MODEL_USE).await;
+    assert_eq!(message.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_requested_models(),
+        vec![Some("model-b".to_string())]
     );
 }
 

@@ -1,8 +1,9 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
-//! `with_narrowed_capability_surface_policy_for_bridged_test`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `with_narrowed_capability_surface_policy_for_bridged_test`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -84,12 +85,25 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
+    /// Use production's durable loop-milestone event adapter and event store
+    /// over the same RootFilesystem as the group's turn workload.
+    pub fn with_durable_milestone_event_store_for_test(mut self) -> Self {
+        self.durable_milestone_event_store = true;
+        self
+    }
+
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
     /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = ToolDisclosureMode::Bridged;
+        self
+    }
+
+    /// Select an exact disclosure comparison arm without mutating process env.
+    pub fn with_tool_disclosure_mode(mut self, mode: ToolDisclosureMode) -> Self {
+        self.tool_disclosure = mode;
         self
     }
 
@@ -202,6 +216,13 @@ impl RebornIntegrationGroupBuilder {
     /// behavior byte-identical.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval_override = Some(interval);
+        self
+    }
+
+    /// Override the scheduler heartbeat interval for a deterministic measured
+    /// workload while preserving the production scheduler and process journal.
+    pub fn with_runner_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.runner_heartbeat_interval_override = Some(interval);
         self
     }
 
