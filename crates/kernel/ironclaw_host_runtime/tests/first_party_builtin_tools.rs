@@ -17,7 +17,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_event_log::InMemoryAuditSink;
-use ironclaw_extension_registry::ExtensionRegistry;
+use ironclaw_extension_registry::{CapabilityVisibility, ExtensionRegistry};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::process::{
@@ -59,12 +59,12 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID,
     CODING_EDIT_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID,
-    CapabilitySurfaceVersion, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
-    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
-    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
-    OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    CapabilitySurfaceVersion, DOCUMENT_EDIT_CAPABILITY_ID, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVER_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeProcessPort, SHELL_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
     SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
@@ -150,6 +150,17 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, all_builtin_capability_ids());
+    let shell = package
+        .manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("legacy shell manifest");
+    assert_eq!(
+        shell.visibility,
+        CapabilityVisibility::HostInternal,
+        "legacy shell must not compete with pinned bash on the model surface"
+    );
     for descriptor in &package.capabilities {
         let expected_permission = match descriptor.id.as_str() {
             HTTP_CAPABILITY_ID
@@ -454,7 +465,7 @@ fn product_surface_builtin_capabilities() -> &'static [&'static str] {
 }
 
 #[tokio::test]
-async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
+async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_tools() {
     let package =
         builtin_first_party_package_for_process_backend(ProcessBackendKind::None).unwrap();
     let ids = package
@@ -462,65 +473,73 @@ async fn builtin_first_party_processless_package_and_handlers_omit_process_port_
         .iter()
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert!(!ids.contains(&SHELL_CAPABILITY_ID));
+    for capability_id in [SHELL_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID] {
+        assert!(!ids.contains(&capability_id));
+        assert!(
+            !package
+                .manifest
+                .capabilities
+                .iter()
+                .any(|capability| capability.id.as_str() == capability_id)
+        );
+    }
     assert!(ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
-    assert!(
-        !package
-            .manifest
-            .capabilities
-            .iter()
-            .any(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
-    );
 
     let handlers = builtin_first_party_handlers_for_process_backend(
         Arc::new(InMemoryTriggerRepository::default()),
         ProcessBackendKind::None,
     )
     .unwrap();
-    assert!(!handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    for id in [SHELL_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID] {
+        assert!(!handlers.contains_handler(&capability_id(id)));
+    }
     assert!(handlers.contains_handler(&capability_id(SPAWN_SUBAGENT_CAPABILITY_ID)));
     assert!(handlers.contains_handler(&capability_id(ECHO_CAPABILITY_ID)));
 }
 
 #[tokio::test]
-async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
+async fn builtin_first_party_process_backend_package_and_handlers_keep_process_tools() {
     let package =
         builtin_first_party_package_for_process_backend(ProcessBackendKind::UserSandbox).unwrap();
-    assert!(
-        package
+    for capability_id in [SHELL_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID] {
+        let descriptor = package
             .capabilities
             .iter()
-            .any(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
-    );
-    let shell = package
-        .capabilities
-        .iter()
-        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
-        .expect("user-sandbox shell descriptor");
-    assert!(shell.description.contains("read-only system filesystem"));
-    assert!(shell.description.contains("/workspace/.venv"));
-    assert!(shell.description.contains("/workspace/.venv/bin/python"));
-    for effect in [
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-        EffectKind::Network,
-    ] {
-        assert!(!shell.effects.contains(&effect));
-    }
-    let manifest_shell = package
-        .manifest
-        .capabilities
-        .iter()
-        .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
-        .expect("user-sandbox shell manifest");
-    assert_eq!(manifest_shell.description, shell.description);
-    for effect in [
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-        EffectKind::Network,
-    ] {
-        assert!(!manifest_shell.effects.contains(&effect));
+            .find(|descriptor| descriptor.id.as_str() == capability_id)
+            .unwrap_or_else(|| panic!("user-sandbox {capability_id} descriptor"));
+        assert!(
+            descriptor
+                .description
+                .contains("read-only system filesystem")
+        );
+        assert!(descriptor.description.contains("/workspace/.venv"));
+        assert!(
+            descriptor
+                .description
+                .contains("/workspace/.venv/bin/python")
+        );
+        for effect in [
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ] {
+            assert!(!descriptor.effects.contains(&effect));
+        }
+        let manifest = package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == capability_id)
+            .unwrap_or_else(|| panic!("user-sandbox {capability_id} manifest"));
+        assert_eq!(manifest.description, descriptor.description);
+        for effect in [
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ] {
+            assert!(!manifest.effects.contains(&effect));
+        }
     }
 
     let handlers = builtin_first_party_handlers_for_process_backend(
@@ -528,16 +547,20 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
         ProcessBackendKind::UserSandbox,
     )
     .unwrap();
-    assert!(handlers.contains_handler(&capability_id(SHELL_CAPABILITY_ID)));
+    for id in [SHELL_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID] {
+        assert!(handlers.contains_handler(&capability_id(id)));
+    }
 
     let host_package =
         builtin_first_party_package_for_process_backend(ProcessBackendKind::LocalHost).unwrap();
-    let host_shell = host_package
-        .capabilities
-        .iter()
-        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
-        .expect("local-host shell descriptor");
-    assert!(!host_shell.description.contains("/workspace/.venv"));
+    for capability_id in [SHELL_CAPABILITY_ID, CODING_BASH_CAPABILITY_ID] {
+        let descriptor = host_package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == capability_id)
+            .unwrap_or_else(|| panic!("local-host {capability_id} descriptor"));
+        assert!(!descriptor.description.contains("/workspace/.venv"));
+    }
 }
 
 /// The always-on first-party package exposes only the exact coding
@@ -9056,6 +9079,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         CODING_BASH_CAPABILITY_ID,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        HTML_TO_PDF_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_UPDATE_CAPABILITY_ID,

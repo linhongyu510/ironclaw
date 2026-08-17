@@ -223,8 +223,8 @@ fn restrict_package_for_process_backend(
         // direct container networking but no host network service. These are
         // not host-filesystem or host-network effects, so do not ask the
         // invocation resolver to bind either service. Brokered network effects
-        // remain a follow-up once shell traffic can traverse ironclaw_network.
-        append_user_sandbox_shell_guidance(package)?;
+        // remain a follow-up once process traffic can traverse ironclaw_network.
+        append_user_sandbox_process_guidance(package)?;
         for effect in [
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
@@ -237,29 +237,35 @@ fn restrict_package_for_process_backend(
     Ok(())
 }
 
-fn append_user_sandbox_shell_guidance(
+fn append_user_sandbox_process_guidance(
     package: &mut ExtensionPackage,
 ) -> Result<(), ExtensionError> {
     const GUIDANCE: &str = " Runs inside a per-user sandbox with a writable persistent `/workspace` and a read-only system filesystem. Install Python packages under `/workspace`, preferably with `python3 -m venv /workspace/.venv`, then use `/workspace/.venv/bin/python` and `/workspace/.venv/bin/pip` in later calls because shell process state does not persist between calls.";
 
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID)?;
-    let descriptor = package
-        .capabilities
-        .iter_mut()
-        .find(|candidate| candidate.id == capability_id)
-        .ok_or_else(|| ExtensionError::InvalidManifest {
-            reason: format!("built-in first-party package is missing capability {capability_id}"),
-        })?;
-    let manifest = package
-        .manifest
-        .capabilities
-        .iter_mut()
-        .find(|candidate| candidate.id == capability_id)
-        .ok_or_else(|| ExtensionError::InvalidManifest {
-            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
-        })?;
-    descriptor.description.push_str(GUIDANCE);
-    manifest.description.push_str(GUIDANCE);
+    for capability_id in [SHELL_CAPABILITY_ID, coding::CODING_BASH_CAPABILITY_ID] {
+        let capability_id = CapabilityId::new(capability_id)?;
+        let descriptor = package
+            .capabilities
+            .iter_mut()
+            .find(|candidate| candidate.id == capability_id)
+            .ok_or_else(|| ExtensionError::InvalidManifest {
+                reason: format!(
+                    "built-in first-party package is missing capability {capability_id}"
+                ),
+            })?;
+        let manifest = package
+            .manifest
+            .capabilities
+            .iter_mut()
+            .find(|candidate| candidate.id == capability_id)
+            .ok_or_else(|| ExtensionError::InvalidManifest {
+                reason: format!(
+                    "built-in first-party manifest is missing capability {capability_id}"
+                ),
+            })?;
+        descriptor.description.push_str(GUIDANCE);
+        manifest.description.push_str(GUIDANCE);
+    }
     Ok(())
 }
 

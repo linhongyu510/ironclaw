@@ -1,4 +1,4 @@
-//! Capability-host shell integration tests.
+//! Capability-host process-tool integration tests.
 
 use std::sync::Arc;
 
@@ -6,7 +6,7 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId},
     resolution::Resolution,
 };
-use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
+use ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID;
 use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
     ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
@@ -14,6 +14,7 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
+use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 use super::{
@@ -44,7 +45,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: ProviderToolName::new("builtin_shell").expect("provider tool name"), // safety: test-only provider-safe literal.
+        name: ProviderToolName::new("bash").expect("provider tool name"), // safety: test-only provider-safe literal.
         arguments,
         response_reasoning: None,
         reasoning: None,
@@ -53,12 +54,12 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
 }
 
 #[tokio::test]
-async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mounts() {
+async fn standalone_yolo_bash_translates_workspace_workdir_without_scoped_mounts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");
     let workspace_root = dir.path().join("workspace");
-    let shell_workdir = workspace_root.join("qa-coding-smoke");
-    std::fs::create_dir_all(&shell_workdir).expect("workspace shell dir");
+    let bash_workdir = workspace_root.join("qa-coding-smoke");
+    std::fs::create_dir_all(&bash_workdir).expect("workspace bash dir");
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
     let services = crate::factory::build_runtime_substrate(
@@ -89,6 +90,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = RefreshingLoopCapabilityPortFactory {
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
         runtime,
         fallback_user_id: UserId::new("standalone-shell-user").expect("user id"),
         policy,
@@ -123,9 +125,9 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
             ironclaw_turns::InMemoryExternalToolCatalog::new(),
         ),
     };
-    let run_context = run_context("shell-workdir").await;
+    let run_context = run_context("bash-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the
-    // scripted shell call exercises the dispatch path instead of stopping at the
+    // scripted bash call exercises the dispatch path instead of stopping at the
     // per-tool approval gate (the Tools-settings switch is authoritative for
     // first-party tool dispatch).
     {
@@ -154,8 +156,8 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         .register_provider_tool_call_input(
             &run_context,
             &provider_tool_call(serde_json::json!({
-                "command": "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' standalone-shell-ok \"$PWD\"",
-                "workdir": "/workspace/qa-coding-smoke"
+                "command": "mkdir -p /workspace/qa-coding-smoke && test -d /host && printf '%s:%s' standalone-bash-ok \"$PWD\"",
+                "cwd": "/workspace/qa-coding-smoke"
             })),
         )
         .await
@@ -165,16 +167,17 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
-            capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
+            capability_id: CapabilityId::new(CODING_BASH_CAPABILITY_ID)
+                .expect("bash capability id"),
             input_ref,
             approval_resume: None,
             auth_resume: None,
         })
         .await
-        .expect("shell invocation");
+        .expect("bash invocation");
 
     let Resolution::Done(completed) = outcome else {
-        panic!("expected completed shell invocation");
+        panic!("expected completed bash invocation");
     };
     // The minted `refs.result` is an opaque uuid; the loop result ref the io
     // staged the output under is preserved on `refs.origin`.
@@ -182,19 +185,18 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         .refs
         .origin
         .as_ref()
-        .expect("completed shell invocation preserves the originating loop result ref");
+        .expect("completed bash invocation preserves the originating loop result ref");
     let output = capability_io
         .result_output(result_ref.as_str())
         .expect("result output lookup")
         .expect("result output");
-    assert_eq!(output["exit_code"], serde_json::json!(0));
-    assert_eq!(output["success"], serde_json::json!(true));
+    let rendered = output["output"].as_str().expect("bash output string");
     // `$PWD` is the real host workspace path at exec time, but the host-runtime
     // reverse output rewrite virtualizes it back to the `/workspace` alias before
     // the result reaches the model — so the caller only ever sees the alias path,
     // never the host layout.
-    assert_eq!(
-        output["output"],
-        serde_json::json!("standalone-shell-ok:/workspace/qa-coding-smoke")
+    assert!(
+        rendered.starts_with("standalone-bash-ok:/workspace/qa-coding-smoke\n\nWall time: "),
+        "bash output should preserve the virtualized workspace path: {rendered}"
     );
 }

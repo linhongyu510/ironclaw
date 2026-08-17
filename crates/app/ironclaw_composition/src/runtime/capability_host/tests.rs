@@ -3749,27 +3749,12 @@ mod tests {
             "coding edit schema must not advertise a retired `path` property: {}",
             edit_descriptor.parameters_schema
         );
-        let shell_descriptor = surface
-            .descriptors
-            .iter()
-            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
-            .expect("shell descriptor visible");
         assert!(
-            shell_descriptor.safe_description.contains("/host"),
-            "shell should disclose confirmed host alias: {}",
-            shell_descriptor.safe_description
-        );
-        assert!(
-            !shell_descriptor.safe_description.contains(&raw_host_home),
-            "shell description must not disclose raw host home path"
-        );
-        assert!(
-            shell_descriptor.safe_description.contains("local host")
-                && shell_descriptor
-                    .safe_description
-                    .contains("configured host process and network access"),
-            "shell should disclose configured local-host authority: {}",
-            shell_descriptor.safe_description
+            surface
+                .descriptors
+                .iter()
+                .all(|descriptor| descriptor.capability_id.as_str() != SHELL_CAPABILITY_ID),
+            "legacy shell must not be model-visible"
         );
         let bash_descriptor = surface
             .descriptors
@@ -3849,26 +3834,11 @@ mod tests {
             "coding edit tool schema must not advertise a retired `path` property: {}",
             edit_tool.parameters
         );
-        let shell_tool = tool_definitions
-            .iter()
-            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
-            .expect("shell tool definition visible");
         assert!(
-            shell_tool.description.contains("/host"),
-            "provider tool shell description should disclose confirmed host alias: {}",
-            shell_tool.description
-        );
-        assert!(
-            !shell_tool.description.contains(&raw_host_home),
-            "provider tool shell description must not disclose raw host home path"
-        );
-        assert!(
-            shell_tool.description.contains("local host")
-                && shell_tool
-                    .description
-                    .contains("configured host process and network access"),
-            "provider tool shell description should disclose configured local-host authority: {}",
-            shell_tool.description
+            tool_definitions
+                .iter()
+                .all(|definition| definition.capability_id.as_str() != SHELL_CAPABILITY_ID),
+            "legacy shell must not be offered to the model"
         );
         let bash_tool = tool_definitions
             .iter()
@@ -4169,17 +4139,12 @@ mod tests {
             "normal standalone read description must not disclose host roots: {}",
             read_descriptor.safe_description
         );
-        let shell_descriptor = surface
-            .descriptors
-            .iter()
-            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
-            .expect("shell descriptor visible");
         assert!(
-            !shell_descriptor
-                .safe_description
-                .contains("shell process and network access"),
-            "normal standalone shell description should not receive yolo disclosure: {}",
-            shell_descriptor.safe_description
+            surface
+                .descriptors
+                .iter()
+                .all(|descriptor| descriptor.capability_id.as_str() != SHELL_CAPABILITY_ID),
+            "legacy shell must not be model-visible"
         );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let read_tool = tool_definitions
@@ -4192,16 +4157,11 @@ mod tests {
             "normal standalone provider tool description must not disclose host roots: {}",
             read_tool.description
         );
-        let shell_tool = tool_definitions
-            .iter()
-            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
-            .expect("shell tool definition visible");
         assert!(
-            !shell_tool
-                .description
-                .contains("shell process and network access"),
-            "normal standalone shell provider tool should not receive yolo disclosure: {}",
-            shell_tool.description
+            tool_definitions
+                .iter()
+                .all(|definition| definition.capability_id.as_str() != SHELL_CAPABILITY_ID),
+            "legacy shell must not be offered to the model"
         );
 
         let input_ref = capability_io

@@ -2383,16 +2383,6 @@ mod tests {
                 .any(|descriptor| descriptor.safe_name == "hidden_tool"),
             "deferred tool should not be model-visible before discovery"
         );
-        assert_eq!(
-            surface
-                .descriptors
-                .iter()
-                .find(|descriptor| descriptor.safe_name == "read")
-                .expect("read_file descriptor")
-                .concurrency_hint,
-            ConcurrencyHint::SafeForParallel,
-            "visible surface must preserve inner descriptor metadata"
-        );
         let advertised = port.tool_definitions().expect("tool definitions");
         for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
             assert!(

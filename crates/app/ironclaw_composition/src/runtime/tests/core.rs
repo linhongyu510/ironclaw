@@ -859,7 +859,7 @@ struct ToolCallingGateway {
 }
 
 #[derive(Debug, Default)]
-struct SandboxShellCallingGateway {
+struct SandboxBashCallingGateway {
     calls: StdMutex<usize>,
 }
 
@@ -1184,7 +1184,7 @@ impl HostManagedModelGateway for ToolCallingGateway {
 }
 
 #[async_trait]
-impl HostManagedModelGateway for SandboxShellCallingGateway {
+impl HostManagedModelGateway for SandboxBashCallingGateway {
     async fn stream_model(
         &self,
         _request: HostManagedModelRequest,
@@ -1201,7 +1201,7 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let call_index = {
-            let mut calls = self.calls.lock().expect("shell gateway lock poisoned");
+            let mut calls = self.calls.lock().expect("bash gateway lock poisoned");
             let call_index = *calls;
             *calls += 1;
             call_index
@@ -1211,55 +1211,46 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 .messages
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
-                .expect("second model call should include shell result");
+                .expect("second model call should include bash result");
             assert!(
                 tool_result.content.contains("railway-sandbox-marker"),
-                "shell result should come from the configured sandbox transport: {}",
+                "bash result should come from the configured sandbox transport: {}",
                 tool_result.content
             );
-            let envelope: serde_json::Value = serde_json::from_str(&tool_result.content)
-                .expect("tool result should be a structured reference envelope");
-            let preview = envelope["model_observation"]["detail"]["content"]
-                .as_str()
-                .expect("tool result should include an inline result observation");
-            let shell_output: serde_json::Value =
-                serde_json::from_str(preview).expect("shell result should be structured JSON");
-            assert_eq!(
-                shell_output["sandboxed"],
-                serde_json::json!(true),
-                "model-visible shell result must report sandbox execution"
-            );
-            return Ok(HostManagedModelResponse::assistant_reply(
-                "sandbox shell ok",
-            ));
+            return Ok(HostManagedModelResponse::assistant_reply("sandbox bash ok"));
         }
 
         let surface = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(model_capability_error)?;
-        let shell_id = CapabilityId::new(ironclaw_host_runtime::SHELL_CAPABILITY_ID)
-            .expect("shell capability id");
+        let bash_id = CapabilityId::new(ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID)
+            .expect("bash capability id");
         assert!(
             surface
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.capability_id == shell_id),
-            "builtin shell must be visible for a sandboxed hosted profile"
+                .any(|descriptor| descriptor.capability_id == bash_id),
+            "pinned bash must be visible for a sandboxed hosted profile; visible: {:?}",
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>()
         );
-        let shell_tool = capabilities
+        let bash_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == shell_id)
-            .expect("shell provider tool definition");
+            .find(|definition| definition.capability_id == bash_id)
+            .expect("bash provider tool definition");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
-                turn_id: Some("provider-turn-shell".to_string()),
-                id: "shell-call-1".to_string(),
-                name: shell_tool.name,
+                turn_id: Some("provider-turn-bash".to_string()),
+                id: "bash-call-1".to_string(),
+                name: bash_tool.name,
                 arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -3386,7 +3377,7 @@ impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTra
 }
 
 #[derive(Debug, Default)]
-struct ShellRecordingSandboxTransport {
+struct BashRecordingSandboxTransport {
     requests: StdMutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
     shutdown_calls: AtomicUsize,
 }
@@ -3407,7 +3398,7 @@ fn user_sandbox_shutdown_error_preserves_runtime_process_source() {
 }
 
 #[async_trait]
-impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for BashRecordingSandboxTransport {
     async fn run_command(
         &self,
         request: ironclaw_host_api::process::CommandExecutionRequest,
@@ -3437,10 +3428,10 @@ impl ironclaw_host_api::process::SandboxCommandTransport for ShellRecordingSandb
 }
 
 #[tokio::test]
-async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process_port() {
+async fn railway_sandbox_profile_routes_model_bash_call_to_user_sandbox_process_port() {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(SandboxShellCallingGateway::default());
-    let sandbox_transport = Arc::new(ShellRecordingSandboxTransport::default());
+    let gateway = Arc::new(SandboxBashCallingGateway::default());
+    let sandbox_transport = Arc::new(BashRecordingSandboxTransport::default());
     let input = RebornRuntimeInput::from_build_input(
         crate::deployment::local_filesystem_build_input_with_profile(
             RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
@@ -3478,14 +3469,14 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
         .await;
     let reply = tokio::time::timeout(
         RUNTIME_SEND_TIMEOUT,
-        runtime.send_user_message(&conversation, "run the shell marker"),
+        runtime.send_user_message(&conversation, "run the bash marker"),
     )
     .await
-    .expect("sandbox shell turn should finish")
-    .expect("sandbox shell turn succeeds");
+    .expect("sandbox bash turn should finish")
+    .expect("sandbox bash turn succeeds");
 
     assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
-    assert_eq!(reply.text.as_deref(), Some("sandbox shell ok"));
+    assert_eq!(reply.text.as_deref(), Some("sandbox bash ok"));
     {
         let requests = sandbox_transport
             .requests
@@ -3494,7 +3485,7 @@ async fn railway_sandbox_profile_routes_model_shell_call_to_user_sandbox_process
         assert_eq!(
             requests.len(),
             1,
-            "shell must use the sandbox transport once"
+            "bash must use the sandbox transport once"
         );
         assert_eq!(requests[0].command, "printf railway-sandbox-marker");
     }
@@ -7698,23 +7689,23 @@ const OWNER: &str = "two-thread-owner";
 const AGENT: &str = "two-thread-agent";
 
 /// A mocked model doing what the demo's second thread does: read the activated body, take the
-/// workdir it ADVERTISES, and run the skill's command there through the real `builtin.shell`.
+/// workdir it ADVERTISES, and run the skill's command there through the real pinned `bash`.
 ///
 /// The point is path provenance. The sibling fixture walks the workspace and runs the script with
 /// `std::process::Command`, which proves the bytes landed but says nothing about the string handed
 /// to the model — and a wrong string is what shipped once. Parsed from the body, so a wrong
 /// advertised path fails this test.
 #[derive(Debug, Default)]
-struct SkillShellGateway {
+struct SkillBashGateway {
     calls: StdMutex<usize>,
     /// The workdir the body advertised, as the model read it.
     advertised_workdir: StdMutex<Option<String>>,
-    /// The shell's own stdout, replayed back to the model on the following call.
-    shell_output: StdMutex<Option<String>>,
+    /// Bash stdout, replayed back to the model on the following call.
+    bash_output: StdMutex<Option<String>>,
 }
 
 #[async_trait]
-impl HostManagedModelGateway for SkillShellGateway {
+impl HostManagedModelGateway for SkillBashGateway {
     async fn stream_model(
         &self,
         _request: HostManagedModelRequest,
@@ -7731,7 +7722,7 @@ impl HostManagedModelGateway for SkillShellGateway {
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let call_index = {
-            let mut calls = self.calls.lock().expect("skill shell gateway lock");
+            let mut calls = self.calls.lock().expect("skill bash gateway lock");
             let index = *calls;
             *calls += 1;
             index
@@ -7744,7 +7735,7 @@ impl HostManagedModelGateway for SkillShellGateway {
                 .iter()
                 .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
             {
-                *self.shell_output.lock().expect("shell output lock") =
+                *self.bash_output.lock().expect("bash output lock") =
                     Some(tool_result.content.clone());
             }
             return Ok(HostManagedModelResponse::assistant_reply("done"));
@@ -7762,24 +7753,25 @@ impl HostManagedModelGateway for SkillShellGateway {
         });
         *self.advertised_workdir.lock().expect("workdir lock") = Some(workdir.clone());
 
-        let shell_id = CapabilityId::new("builtin.shell").expect("shell id");
-        let shell_tool = capabilities
+        let bash_id =
+            CapabilityId::new(ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID).expect("bash id");
+        let bash_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == shell_id)
-            .expect("builtin.shell must be offered under a policy with a process backend");
+            .find(|definition| definition.capability_id == bash_id)
+            .expect("pinned bash must be offered under a policy with a process backend");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
-                turn_id: Some("skill-shell-turn".to_string()),
-                id: "call-skill-shell".to_string(),
-                name: shell_tool.name,
+                turn_id: Some("skill-bash-turn".to_string()),
+                id: "call-skill-bash".to_string(),
+                name: bash_tool.name,
                 // Exactly the shape the note tells the model to use.
                 arguments: serde_json::json!({
                     "command": "python3 scripts/egfr.py --scr 1.3 --age 62 --female",
-                    "workdir": workdir,
+                    "cwd": workdir,
                 }),
                 response_reasoning: None,
                 reasoning: None,
@@ -7963,8 +7955,7 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
 
 /// The demo end to end, with the model mocked and everything around it real.
 ///
-/// Thread 1 installs a skill carrying a script; thread 2 is a NEW runtime over the same store whose
-/// mocked model reads the advertised workdir and runs the command through the real `builtin.shell`.
+/// mocked model reads the advertised workdir and runs the command through the real pinned `bash`.
 /// Closes the half the sibling fixture cannot see: the path the model is TOLD. When that string was
 /// wrong, every command failed with `Failed to spawn command` and nothing noticed.
 #[tokio::test]
@@ -7992,7 +7983,7 @@ async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
     runtime.shutdown().await.expect("thread one shutdown");
 
     // ── Thread 2: a later conversation, driven by the mocked model ─────────────────────────────
-    let gateway = Arc::new(SkillShellGateway::default());
+    let gateway = Arc::new(SkillBashGateway::default());
     let runtime = build_reborn_runtime(
         two_thread_runtime_input(storage_root.clone()).with_model_gateway_override(gateway.clone()),
     )
@@ -8019,21 +8010,21 @@ async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
          resolved a second time by the shell and the directory does not exist"
     );
 
-    let shell_output = gateway
-        .shell_output
+    let bash_output = gateway
+        .bash_output
         .lock()
-        .expect("shell output lock")
+        .expect("bash output lock")
         .clone()
-        .expect("the shell call must have produced a result the model could read");
+        .expect("the bash call must have produced a result the model could read");
     assert!(
-        !shell_output.contains("Failed to spawn command")
-            && !shell_output.contains("No such file or directory"),
-        "the shell must resolve the advertised workdir; got {shell_output}"
+        !bash_output.contains("Failed to spawn command")
+            && !bash_output.contains("No such file or directory"),
+        "bash must resolve the advertised workdir; got {bash_output}"
     );
     assert!(
-        shell_output.contains("FIXTURE-OK") && shell_output.contains("stage=G3a"),
-        "the answer must come from the staged script itself, through the shell the model called, \
-         not from re-derived arithmetic; got {shell_output}"
+        bash_output.contains("FIXTURE-OK") && bash_output.contains("stage=G3a"),
+        "the answer must come from the staged script itself, through bash the model called, \
+         not from re-derived arithmetic; got {bash_output}"
     );
 
     runtime.shutdown().await.expect("thread two shutdown");

@@ -36,7 +36,7 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "edit",
     "glob",
     "grep",
-    "shell",
+    "bash",
     // memory
     "memory_search",
     "memory_read",
@@ -389,7 +389,7 @@ fn discovery_namespace(capability_id: &CapabilityId) -> DiscoveryNamespace {
 fn builtin_discovery_namespace(local_id: &str) -> DiscoveryNamespace {
     if matches!(
         local_id,
-        "read" | "write" | "edit" | "glob" | "grep" | "shell"
+        "read" | "write" | "edit" | "glob" | "grep" | "bash"
     ) {
         DiscoveryNamespace::Coding
     } else if local_id == "http" || local_id.starts_with("http.") {
@@ -1152,7 +1152,7 @@ mod tests {
             ("edit", ironclaw_host_runtime::CODING_EDIT_CAPABILITY_ID),
             ("glob", ironclaw_host_runtime::CODING_GLOB_CAPABILITY_ID),
             ("grep", ironclaw_host_runtime::CODING_GREP_CAPABILITY_ID),
-            ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
+            ("bash", ironclaw_host_runtime::CODING_BASH_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
             (
@@ -2528,7 +2528,7 @@ mod tests {
             "edit",
             "glob",
             "grep",
-            "shell",
+            "bash",
             "memory_search",
             "memory_read",
             "memory_write",

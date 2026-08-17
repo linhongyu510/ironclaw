@@ -1,4 +1,4 @@
-use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, CapabilityVisibility, ExtensionError};
 use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_output::COMMAND_MAX_OUTPU
 const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    first_party_capability_manifest(
+    let mut manifest = first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
         "Execute shell commands with copied v1 validation and saved-file references for large local output",
         vec![
@@ -61,7 +61,9 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 }),
             }),
         }),
-    )
+    )?;
+    manifest.visibility = CapabilityVisibility::HostInternal;
+    Ok(manifest)
 }
 
 pub(super) async fn dispatch(
