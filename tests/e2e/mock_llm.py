@@ -304,6 +304,7 @@ TOOL_CALL_PATTERNS = [
                 "version": 1,
                 "goal": f"E2E automation rename prompt {m.group('label')}",
                 "success_criteria": ["Complete the requested task"],
+                "required_capability_ids": [],
                 "output_instructions": "Return a concise result",
                 "no_result_text": "No result",
             },
