@@ -286,7 +286,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "subagent_type": {
                     "type": "string",
                     "enum": ["general", "explorer", "coder", "planner"],
-                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read, grep)\n- explorer: read + glob over filesystem (read, grep, glob)\n- coder: read + write + edit + shell (read, write, edit, shell, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read, grep, glob, http)"
+                    "description": "Which subagent profile to spawn. Options:\n- general: read-only file exploration (read_file, list_dir, grep)\n- explorer: read + glob over filesystem (read_file, list_dir, grep, glob)\n- coder: read + write + shell (read_file, write_file, apply_patch, shell, list_dir, grep, glob)\n- planner: read codebase + web research, returns a structured implementation plan (read_file, list_dir, grep, glob, http)"
                 },
                 "task": {
                     "type": "string",
@@ -372,7 +372,189 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["display_handle"],
             "additionalProperties": false
         }),
-
+        "schemas/builtin/read_file.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path to read. DOCX, XLSX, and PPTX return structured, addressable views for document_edit; formats such as PDF return extracted text." },
+                "offset": { "type": "integer", "minimum": 0, "description": "1-based starting line; 0 starts at the beginning" },
+                "limit": { "type": "integer", "minimum": 0, "description": "Maximum lines to return" }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/write_file.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path to write" },
+                "content": { "type": "string", "description": "Complete file content" }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/list_dir.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped directory path. Defaults to the workspace root." },
+                "recursive": { "type": "boolean", "description": "Whether to list recursively" },
+                "max_depth": { "type": "integer", "minimum": 0, "description": "Maximum recursive depth" }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/glob.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern relative to path" },
+                "path": { "type": "string", "description": "Scoped root path. Defaults to the workspace root." },
+                "max_results": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/grep.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regular expression to search for" },
+                "path": { "type": "string", "description": "Scoped file or directory path. Defaults to the workspace root." },
+                "glob": { "type": "string", "description": "Optional glob filter relative to path" },
+                "type_filter": { "type": "string", "description": "Optional file type filter" },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files_with_matches", "count"],
+                    "description": "Output mode. Defaults to files_with_matches."
+                },
+                "case_insensitive": { "type": "boolean" },
+                "multiline": { "type": "boolean" },
+                "context": { "type": "integer", "minimum": 0 },
+                "before_context": { "type": "integer", "minimum": 0 },
+                "after_context": { "type": "integer", "minimum": 0 },
+                "head_limit": { "type": "integer", "minimum": 0 },
+                "offset": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/document_edit.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path of the .docx/.xlsx/.pptx to edit. Read it with read_file first: the paragraph ids, cell references and slide indexes the edits name come from that read." },
+                "output_path": { "type": "string", "description": "Scoped path for the edited copy. Must differ from path and carry the same extension — the original is never modified." },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "description": "Structural edits, applied in order. The accepted shapes depend on the document format.\n\n.docx:\n- {\"op\": \"resolve_all_revisions\", \"disposition\": \"accept\"|\"reject\"} — resolve every tracked change\n- {\"op\": \"resolve_revisions\", \"paragraph\": \"p3\", \"disposition\": \"accept\"|\"reject\"} — resolve one paragraph's tracked changes\n- {\"op\": \"replace_paragraph_text\", \"paragraph\": \"p3\", \"text\": \"...\"} — replace a paragraph's text, keeping its style\n\n.xlsx:\n- {\"op\": \"set_cell_formula\", \"sheet\": \"Sheet1\", \"cell\": \"C5\", \"formula\": \"SUM(C2:C4)\"}\n\n.pptx:\n- {\"op\": \"clone_slide\", \"source\": 1, \"text\": [\"Title\", \"Body\"]} — append a copy of slide `source` (1-based) with its text replaced, inheriting the source's layout and style",
+                    "items": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "op": { "const": "resolve_all_revisions" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "resolve_revisions" }, "paragraph": { "type": "string" }, "disposition": { "type": "string", "enum": ["accept", "reject"] } }, "required": ["op", "paragraph", "disposition"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "replace_paragraph_text" }, "paragraph": { "type": "string" }, "text": { "type": "string" } }, "required": ["op", "paragraph", "text"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "set_cell_formula" }, "sheet": { "type": "string" }, "cell": { "type": "string" }, "formula": { "type": "string" } }, "required": ["op", "sheet", "cell", "formula"], "additionalProperties": false },
+                            { "type": "object", "properties": { "op": { "const": "clone_slide" }, "source": { "type": "integer", "minimum": 1 }, "text": { "type": "array", "items": { "type": "string" } } }, "required": ["op", "source", "text"], "additionalProperties": false }
+                        ]
+                    }
+                }
+            },
+            "required": ["path", "output_path", "edits"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/html_to_pdf.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path for the new .pdf. Must not already exist — existing PDFs are never overwritten." },
+                "html": { "type": "string", "maxLength": 1048576, "description": "HTML to render. Supported: h1-h3, p, ul/ol with li, hr as vertical spacing, blockquote, strong/b, em/i, code, br, and HTML entities. Other tags are ignored but their text still renders. CSS is not supported." },
+                "title": { "type": "string", "description": "Document title recorded in the PDF metadata" }
+            },
+            "required": ["path", "html"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/apply_patch.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped file path to patch" },
+                "old_string": {
+                    "type": ["string", "null"],
+                    "description": "Text to replace for a single targeted edit. Exact matches are preferred; fuzzy Unicode and trailing-whitespace normalization is used when exact text is not present."
+                },
+                "new_string": { "type": ["string", "null"], "description": "Replacement text for a single targeted edit" },
+                "edits": {
+                    "description": "One or more targeted replacements matched against the original file. Prefer this for multiple disjoint edits.",
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": { "type": "string", "description": "Text to replace" },
+                                    "new_string": { "type": "string", "description": "Replacement text" }
+                                },
+                                "required": ["old_string", "new_string"],
+                                "additionalProperties": false
+                            }
+                        },
+                        { "type": "null" },
+                        { "const": "null" }
+                    ]
+                },
+                "replace_all": { "type": "boolean", "description": "Replace every match instead of exactly one. Only valid with a single targeted edit." }
+            },
+            "required": ["path"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "not": { "const": "null" }
+                        }
+                    },
+                    "required": ["old_string", "new_string"],
+                    "not": {
+                        "properties": {
+                            "edits": { "type": "array" }
+                        },
+                        "required": ["edits"]
+                    }
+                },
+                {
+                    "properties": {
+                        "edits": { "type": "array" },
+                        "old_string": { "enum": ["null", null] },
+                        "new_string": { "enum": ["null", null] }
+                    },
+                    "required": ["edits"]
+                }
+            ],
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "replace_all": { "const": true }
+                        },
+                        "required": ["replace_all"]
+                    },
+                    "then": {
+                        "properties": {
+                            "edits": {
+                                "oneOf": [
+                                    {
+                                        "type": "array",
+                                        "maxItems": 1
+                                    },
+                                    { "type": "null" },
+                                    { "const": "null" }
+                                ]
+                            }
+                        }
+                    }
+                }
+            ],
+            "additionalProperties": false
+        }),
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -875,17 +1057,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
     })
 }
 
-/// Resolve the input schema refs of the coding capabilities
-/// (`schemas/builtin/coding.*.input.v1.json`, issue #7392 slice 3) from the
-/// owning crate assets. The `read` schema is narrowed to IronClaw's implemented
-/// source kinds; the remaining schemas are byte-identical to the pinned
-/// upstream fixtures.
-///
-/// ⚠️ TEMPORARY benchmark override (revert at cutover): production packages
-/// now declare these refs (the coding surface ships in every build for the
-/// /benchmark panel, issue #7392), so this arm compiles unconditionally.
-/// After the atomic cutover the pinned coding schemas become the stock schemas and
-/// this separate arm goes away.
+/// Resolve the exact pinned OMP coding input schema assets.
 fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
     let raw = match reference {
         "schemas/builtin/coding.read.input.v1.json" => {
@@ -908,9 +1080,6 @@ fn resolve_coding_input_schema_ref(reference: &str) -> Option<Value> {
         }
         _ => return None,
     };
-    // silent-ok: these are compile-embedded assets validated by the coding
-    // registration tests; a malformed schema fails that test and the build,
-    // so `.ok()` here cannot silently mask a real fault.
     serde_json::from_str(raw).ok()
 }
 

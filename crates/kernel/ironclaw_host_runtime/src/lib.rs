@@ -114,7 +114,7 @@ pub use first_party_tools::{
 pub use first_party_tools::{
     CODING_BASH_CAPABILITY_ID, CODING_EDIT_CAPABILITY_ID, CODING_GLOB_CAPABILITY_ID,
     CODING_GREP_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, CodingTools,
-    coding_package, insert_coding_handlers,
+    DOCUMENT_EDIT_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, coding_package, insert_coding_handlers,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

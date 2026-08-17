@@ -1,8 +1,8 @@
 //! Exact pinned coding surface for the always-on first-party package (issue #7392).
 //!
-//! Registers `read`, `write`, `edit`, `glob`, and `grep` with the pinned
-//! schemas, prompts, provider names, and engine behavior. These capabilities
-//! use the ordinary first-party dispatch path, so authorization, approvals,
+//! Registers the pinned `read`, `write`, `edit`, `glob`, `grep`, and `bash`
+//! tools while retaining the structural document capabilities.
+//! These capabilities use the ordinary first-party dispatch path, so authorization, approvals,
 //! resource accounting, mount scoping, and durable artifact handling remain
 //! host-owned.
 
@@ -22,8 +22,12 @@ use async_trait::async_trait;
 use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
-use ironclaw_extension_support::coding::pinned::{
-    CodingEngineContext, CodingEngineError, CodingEngineErrorKind, CodingSnapshotRegistry,
+use ironclaw_extension_support::coding::{
+    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityOutput, CodingCapabilityRequest,
+    CodingCapabilityState,
+    pinned::{
+        CodingEngineContext, CodingEngineError, CodingEngineErrorKind, CodingSnapshotRegistry,
+    },
 };
 use ironclaw_host_api::{
     artifact::{
@@ -54,8 +58,13 @@ pub const CODING_GLOB_CAPABILITY_ID: &str = GLOB_CAPABILITY_ID;
 pub const CODING_GREP_CAPABILITY_ID: &str = GREP_CAPABILITY_ID;
 /// Canonical capability id of the pinned `bash` engine.
 pub const CODING_BASH_CAPABILITY_ID: &str = "builtin.bash";
+/// Canonical capability id of the structural document editor.
+pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
+/// Canonical capability id of the HTML-to-PDF renderer.
+pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
 const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 8 * 1024;
+const MAX_DOCUMENT_EDIT_INPUT_BYTES: usize = 21 * 1024 * 1024;
 /// A 10 MiB source read can grow when rendered with Hashline anchors. Keep
 /// bounded headroom for that representation without allowing a grep over many
 /// large files to create an unbounded artifact.
@@ -68,6 +77,8 @@ const CODING_EDIT_PROVIDER_TOOL_NAME: &str = "edit";
 const CODING_GLOB_PROVIDER_TOOL_NAME: &str = "glob";
 const CODING_GREP_PROVIDER_TOOL_NAME: &str = "grep";
 const CODING_BASH_PROVIDER_TOOL_NAME: &str = "bash";
+const DOCUMENT_EDIT_PROVIDER_TOOL_NAME: &str = "builtin__document_edit";
+const HTML_TO_PDF_PROVIDER_TOOL_NAME: &str = "builtin__html_to_pdf";
 
 /// Model-visible descriptions. `read` uses the IronClaw-supported subset of
 /// the upstream prompt; the others use the verbatim pinned prompt files (`write.md`, `hashline.md`,
@@ -86,6 +97,8 @@ const CODING_GREP_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_GREP_DESCRIPTION;
 const CODING_BASH_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_BASH_DESCRIPTION;
+const DOCUMENT_EDIT_DESCRIPTION: &str = "Apply structural edits to a .docx/.xlsx/.pptx (accept or reject tracked changes, set a cell formula, clone a slide) and write the result to a new file, preserving every part the edit does not touch";
+const HTML_TO_PDF_DESCRIPTION: &str = "Render HTML (headings, paragraphs, lists, emphasis) to a new PDF file; existing PDFs are never edited in place";
 
 /// Schema refs resolving through `super::schemas::resolve_builtin_input_schema_ref`
 /// to the coding schema assets. `read` is narrowed to IronClaw's implemented
@@ -96,6 +109,8 @@ const CODING_EDIT_SCHEMA_REF: &str = "schemas/builtin/coding.edit.input.v1.json"
 const CODING_GLOB_SCHEMA_REF: &str = "schemas/builtin/coding.glob.input.v1.json";
 const CODING_GREP_SCHEMA_REF: &str = "schemas/builtin/coding.grep.input.v1.json";
 const CODING_BASH_SCHEMA_REF: &str = "schemas/builtin/coding.bash.input.v1.json";
+const DOCUMENT_EDIT_SCHEMA_REF: &str = "schemas/builtin/document_edit.input.v1.json";
+const HTML_TO_PDF_SCHEMA_REF: &str = "schemas/builtin/html_to_pdf.input.v1.json";
 
 #[derive(Debug, Clone, Copy)]
 struct CodingCapabilityMetadata {
@@ -166,6 +181,22 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
         ],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
         schema_ref: CODING_BASH_SCHEMA_REF,
+    },
+    CodingCapabilityMetadata {
+        id: DOCUMENT_EDIT_CAPABILITY_ID,
+        provider_tool_name: DOCUMENT_EDIT_PROVIDER_TOOL_NAME,
+        description: DOCUMENT_EDIT_DESCRIPTION,
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_DOCUMENT_EDIT_INPUT_BYTES,
+        schema_ref: DOCUMENT_EDIT_SCHEMA_REF,
+    },
+    CodingCapabilityMetadata {
+        id: HTML_TO_PDF_CAPABILITY_ID,
+        provider_tool_name: HTML_TO_PDF_PROVIDER_TOOL_NAME,
+        description: HTML_TO_PDF_DESCRIPTION,
+        effects: &[EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_DOCUMENT_EDIT_INPUT_BYTES,
+        schema_ref: HTML_TO_PDF_SCHEMA_REF,
     },
 ];
 
@@ -274,6 +305,7 @@ pub fn insert_coding_handlers(
 /// binds hashline edit tags to reads from the SAME run.
 pub struct CodingTools {
     snapshots: Arc<CodingSnapshotRegistry>,
+    document_state: CodingCapabilityState,
     post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
 }
 
@@ -281,9 +313,40 @@ impl CodingTools {
     pub fn new(snapshots: Arc<CodingSnapshotRegistry>) -> Self {
         Self {
             snapshots,
+            document_state: CodingCapabilityState::default(),
             post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines::default(),
         }
     }
+
+    async fn dispatch_document_capability(
+        &self,
+        request: &FirstPartyCapabilityRequest,
+        kind: CodingCapabilityKind,
+    ) -> Result<CodingCapabilityOutput, FirstPartyCapabilityError> {
+        let coding_request = CodingCapabilityRequest::new(
+            &request.capability_id,
+            kind,
+            &request.scope,
+            request.run_id,
+            request.mounts.as_ref(),
+            Arc::clone(&request.services.filesystem),
+            &request.input,
+        );
+        self.document_state
+            .dispatch(&coding_request)
+            .await
+            .map_err(legacy_coding_error)
+    }
+}
+
+fn is_structured_document_path(input: &serde_json::Value) -> bool {
+    let Some(path) = input.get("path").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let path = path.to_ascii_lowercase();
+    [".docx", ".xlsx", ".pptx", ".pdf"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
 }
 
 #[async_trait]
@@ -313,10 +376,25 @@ impl FirstPartyCapabilityHandler for CodingTools {
                 Arc::clone(&request.services.process),
             ))),
         };
+        let mut display_preview = None;
         let mut output = match request.capability_id.as_str() {
+            CODING_READ_CAPABILITY_ID if is_structured_document_path(&request.input) => {
+                let result = self
+                    .dispatch_document_capability(&request, CodingCapabilityKind::ReadFile)
+                    .await?;
+                display_preview = result.display_preview;
+                Ok(result.output)
+            }
             CODING_READ_CAPABILITY_ID => {
                 ironclaw_extension_support::coding::pinned::read(&context, request.input.clone())
                     .await
+            }
+            CODING_WRITE_CAPABILITY_ID if is_structured_document_path(&request.input) => {
+                let result = self
+                    .dispatch_document_capability(&request, CodingCapabilityKind::WriteFile)
+                    .await?;
+                display_preview = result.display_preview;
+                Ok(result.output)
             }
             CODING_WRITE_CAPABILITY_ID => {
                 ironclaw_extension_support::coding::pinned::write(&context, request.input.clone())
@@ -337,6 +415,20 @@ impl FirstPartyCapabilityHandler for CodingTools {
             CODING_BASH_CAPABILITY_ID => {
                 ironclaw_extension_support::coding::pinned::bash(&context, request.input.clone())
                     .await
+            }
+            DOCUMENT_EDIT_CAPABILITY_ID => {
+                let result = self
+                    .dispatch_document_capability(&request, CodingCapabilityKind::DocumentEdit)
+                    .await?;
+                display_preview = result.display_preview;
+                Ok(result.output)
+            }
+            HTML_TO_PDF_CAPABILITY_ID => {
+                let result = self
+                    .dispatch_document_capability(&request, CodingCapabilityKind::HtmlToPdf)
+                    .await?;
+                display_preview = result.display_preview;
+                Ok(result.output)
             }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
@@ -401,7 +493,8 @@ impl FirstPartyCapabilityHandler for CodingTools {
                 .set_output_bytes(output_bytes)
                 .set_process_count(process_count),
         )
-        .with_canonical_output_digest(canonical_output_digest);
+        .with_canonical_output_digest(canonical_output_digest)
+        .with_display_preview(display_preview);
         Ok(match pending_artifact {
             Some(artifact) => result.with_pending_artifact(artifact),
             None => result,
@@ -564,6 +657,13 @@ fn coding_error(error: CodingEngineError) -> FirstPartyCapabilityError {
             super::FIRST_PARTY_MAX_OUTPUT_BYTES as usize,
         ),
     )
+}
+
+fn legacy_coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
+    match error.safe_summary() {
+        Some(summary) => FirstPartyCapabilityError::with_safe_summary(error.kind(), summary),
+        None => FirstPartyCapabilityError::new(error.kind()),
+    }
 }
 
 fn bounded_diagnostic(message: &str, max_bytes: usize) -> String {

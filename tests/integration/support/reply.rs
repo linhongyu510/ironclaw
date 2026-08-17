@@ -27,6 +27,7 @@ const CODING_PROVIDER_NAME_OVERRIDES: &[(&str, &str)] = &[
     ("builtin.edit", "edit"),
     ("builtin.glob", "glob"),
     ("builtin.grep", "grep"),
+    ("builtin.bash", "bash"),
 ];
 
 /// The provider-facing tool name a scripted model call for `capability_id`
@@ -66,7 +67,7 @@ impl RebornScriptedReply {
     /// Scripts one model tool-call turn (CapabilityId, e.g. `"builtin.http"`).
     /// The emitted provider name is the capability's exact
     /// `provider_tool_name` override when it carries one (the pinned coding
-    /// tools `read`/`write`/`edit`/`glob`/`grep` — see
+    /// tools `read`/`write`/`edit`/`glob`/`grep`/`bash` — see
     /// [`CODING_PROVIDER_NAME_OVERRIDES`]), else the `'.' → "__"` encoding
     /// `ProviderToolName::new` requires (it rejects dots);
     /// `model_replay.rs`'s `trace_provider_tool_name` has an identical,

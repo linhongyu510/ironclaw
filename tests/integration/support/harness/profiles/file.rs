@@ -8,7 +8,8 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::{
-    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, GLOB_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    CODING_READ_CAPABILITY_ID, CODING_WRITE_CAPABILITY_ID, DOCUMENT_EDIT_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, JSON_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
