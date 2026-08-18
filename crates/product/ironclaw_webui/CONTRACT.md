@@ -258,7 +258,8 @@ is bounded before egress (registry-recognized audio types only, decoded-byte
 ceiling from `ironclaw_attachments::DEFAULT_VOICE_CLIP_BUDGET`) and rate-limited
 more tightly than other mutations (20/min per caller) because each accepted
 request is a billable inference call. It is advertised to the browser through
-`GET /session`'s `features.voice_input` and `voice`; when no
+`GET /session`'s `features.voice_input` and `voice` (the clip ceilings only —
+no format list, because the composer uploads exactly one format); when no
 transcription-capable backend resolved, the flag is false, the composer renders
 no microphone button, and the route itself answers `503`.
 

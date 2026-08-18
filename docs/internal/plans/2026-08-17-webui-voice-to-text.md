@@ -211,7 +211,7 @@ first try, with the composer showing `Invalid value (audio_base64)`.
 The remaining option is a re-encode, and the plan called client-side re-encode
 "heavy". It is much lighter than it sounds here, because the browser already
 owns a decoder for the container it just wrote: `decodeAudioData` handles
-webm/opus and mp4/aac natively, so `voice-encode.ts` only adds a downmix, a
+webm/opus and mp4/aac natively, so the re-encode only adds a downmix, a
 linear resample, and a WAV header (~120 lines, no dependency). It re-encodes to
 **16 kHz mono 16-bit WAV**, which is not a quality compromise — it is the rate
 Whisper models work at — and it makes Chrome and Safari byte-identical from the
@@ -229,9 +229,11 @@ ceiling. `voice_duration_ceiling_fits_the_byte_ceiling_as_wav` pins the two
 together so raising one without the other fails the build.
 
 `MediaRecorder`'s own container choice is now a purely browser-local
-preference (`RECORDER_CONTAINERS` in `voice-recorder.ts`), not the server's
-`voice.accept` list — the server list describes what may be *uploaded*, and
-that is always WAV.
+preference (`RECORDER_CONTAINERS` in `voice-recorder.ts`). The server therefore
+advertises no format list at all: `session.voice` carries only the ceilings,
+because the composer uploads exactly one format and an advertised list nothing
+reads is drift waiting to happen. The server-side registry check in
+`DecodeVoiceClip` stays the sole authority on what is accepted.
 
 ### 4. Spend budget — **deferred, deliberately**
 
@@ -274,13 +276,13 @@ without the other fails.
 | Layer | Change |
 |---|---|
 | `ironclaw_llm` | `TranscriptionErrorKind` + `ProviderStatus`; providers now report status instead of a formatted string |
-| `ironclaw_attachments` | `VoiceClipBudget` / `DEFAULT_VOICE_CLIP_BUDGET` (10 MiB, 300 s) and `voice_capabilities()` beside the attachment budgets — one home for advertised-and-enforced ceilings |
+| `ironclaw_attachments` | `VoiceClipBudget` / `DEFAULT_VOICE_CLIP_BUDGET` (10 MiB, 300 s) beside the attachment budgets — one home for advertised-and-enforced ceilings, serialized directly as `session.voice` |
 | `ironclaw_product_contracts` | `transcription` module: `TranscriptionService` port, request/response DTOs, `TRANSCRIBE_AUDIO_COMMAND` |
 | `ironclaw_assistant` | `DecodeVoiceClip` (registry media-type check, encoded- and decoded-byte ceilings, blank check), `RebornServices::{with_transcription, transcription_available, transcribe_audio}`, `ProductCommandHandler::TranscribeAudio` |
 | `ironclaw_composition` | `support::transcription`: provider build from `LlmConfig` + `LlmTranscriptionService` error boundary; `RebornRuntime::voice_input_enabled()` |
 | `ironclaw_webui` | `POST /api/webchat/v2/transcribe` descriptor + handler; `session.features.voice_input` and `session.voice` |
 | `ironclaw_cli` | Reads `runtime.voice_input_enabled()` into the serve config |
-| Frontend | `lib/voice.ts` (eager: server contract, capability probe, transcript insertion, `m:ss`), `lib/voice-recorder.ts` + `lib/voice-encode.ts` (lazy: `MediaRecorder` lifecycle, WAV re-encode, upload), `hooks/useVoiceInput.ts` (thin eager state wrapper), mic button + elapsed timer + inline retryable error in the composer, `mic`/`square` icons, voice strings in all 11 locales |
+| Frontend | `lib/voice.ts` (eager: ceilings, capability probe, transcript insertion, `m:ss`), `lib/voice-recorder.ts` (lazy: `MediaRecorder` lifecycle, WAV re-encode, upload), `hooks/useVoiceInput.ts` (thin eager state wrapper), mic button + elapsed timer + inline retryable error in the composer, `mic`/`square` icons, voice strings in all 11 locales |
 | Bundle | Recording engine + encoder load via dynamic `import()` on first mic press, so the initial /chat route pays only for the button; `check-bundle-budgets.ts` raised 222.0 → 224.0 KB with the deferral measured and the residue documented |
 | Docs | `.env.example` (`IRONCLAW_TRANSCRIPTION_MODEL`), WebUI `CONTRACT.md` (route row, `voice` charter sub-owner, retention paragraph), llm `CONTRACT.md`, composition `CONTRACT.md` |
 

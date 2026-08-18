@@ -18,22 +18,17 @@
 // voice contract. The server re-validates, so drift here only changes how
 // early the recorder gives up.
 export const FALLBACK_VOICE_LIMITS = {
-  // `audio/webm` is Chrome/Firefox, `audio/mp4` is Safari — one list covers
-  // both because the recorder picks the first entry the browser supports.
-  accept: ["audio/webm", "audio/ogg", "audio/mp4"],
   maxBytes: 10 * 1024 * 1024,
   maxDurationSecs: 300,
 };
 
-// Map `session.voice` (snake_case wire shape from `VoiceCapabilities`) into
-// the camelCase limits the recorder consumes.
+// Map `session.voice` (snake_case wire shape from `VoiceClipBudget`) into the
+// camelCase limits the recorder consumes. No format list: the composer uploads
+// one format, so what the recorder captures is its own business.
 export function voiceLimitsFromSession(session) {
   const v = session?.voice;
   if (!v) return FALLBACK_VOICE_LIMITS;
   return {
-    accept: Array.isArray(v.accept)
-      ? v.accept.filter((token) => typeof token === "string")
-      : FALLBACK_VOICE_LIMITS.accept,
     maxBytes: Number.isFinite(v.max_bytes)
       ? v.max_bytes
       : FALLBACK_VOICE_LIMITS.maxBytes,

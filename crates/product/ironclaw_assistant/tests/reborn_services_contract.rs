@@ -18217,11 +18217,6 @@ async fn transcribe_audio_without_a_wired_port_is_unavailable() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     );
-    assert!(
-        !services.transcription_available(),
-        "no port is wired, so the surface must advertise voice as unavailable"
-    );
-
     let error = services
         .transcribe_audio(
             caller_for_user("user-alpha"),

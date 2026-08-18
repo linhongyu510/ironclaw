@@ -2560,12 +2560,6 @@ where
         self
     }
 
-    /// Whether host-side speech-to-text is wired. Transports read this to gate
-    /// the voice affordance they advertise, so the button and the route agree.
-    pub fn transcription_available(&self) -> bool {
-        self.transcription.is_some()
-    }
-
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
         self

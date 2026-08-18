@@ -148,7 +148,7 @@ function renderChatInput({
     // tests opt in by overriding `useVoiceConfig`.
     useVoiceConfig: () => ({
       enabled: false,
-      limits: { accept: [], maxBytes: 1024, maxDurationSecs: 300 },
+      limits: { maxBytes: 1024, maxDurationSecs: 300 },
     }),
     useVoiceInput: () => ({
       status: "idle",
@@ -767,7 +767,7 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     // tests opt in by overriding `useVoiceConfig`.
     useVoiceConfig: () => ({
       enabled: false,
-      limits: { accept: [], maxBytes: 1024, maxDurationSecs: 300 },
+      limits: { maxBytes: 1024, maxDurationSecs: 300 },
     }),
     useVoiceInput: () => ({
       status: "idle",

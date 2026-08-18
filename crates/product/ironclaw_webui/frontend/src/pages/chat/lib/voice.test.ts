@@ -26,10 +26,8 @@ test("voiceLimitsFromSession maps the wire shape and falls back cleanly", () => 
   assert.deepEqual(voiceLimitsFromSession({}), FALLBACK_VOICE_LIMITS);
 
   assert.deepEqual(
-    voiceLimitsFromSession({
-      voice: { accept: ["audio/mp4"], max_bytes: 1024, max_duration_secs: 60 },
-    }),
-    { accept: ["audio/mp4"], maxBytes: 1024, maxDurationSecs: 60 },
+    voiceLimitsFromSession({ voice: { max_bytes: 1024, max_duration_secs: 60 } }),
+    { maxBytes: 1024, maxDurationSecs: 60 },
   );
 });
 
@@ -37,9 +35,8 @@ test("voiceLimitsFromSession maps the wire shape and falls back cleanly", () => 
 // keep the good half and fall back only on what is actually broken.
 test("voiceLimitsFromSession keeps good fields when others are malformed", () => {
   const limits = voiceLimitsFromSession({
-    voice: { accept: "audio/mp4", max_bytes: null, max_duration_secs: 45 },
+    voice: { max_bytes: null, max_duration_secs: 45 },
   });
-  assert.deepEqual(limits.accept, FALLBACK_VOICE_LIMITS.accept);
   assert.equal(limits.maxBytes, FALLBACK_VOICE_LIMITS.maxBytes);
   assert.equal(limits.maxDurationSecs, 45);
 });

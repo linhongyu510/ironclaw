@@ -52,7 +52,12 @@ pub fn attachment_capabilities() -> AttachmentCapabilities {
 }
 
 /// Ceilings for one voice clip recorded in a product composer and submitted for
-/// transcription.
+/// transcription. Serialized directly as the browser-facing `session.voice`
+/// contract — there is no accompanying format list because the composer
+/// uploads exactly one format (16 kHz mono WAV, see `voice-encode.ts`), and an
+/// advertised list nothing reads is drift waiting to happen. The server-side
+/// registry check in `DecodeVoiceClip` remains the sole authority on what is
+/// accepted.
 ///
 /// A voice clip is not an attachment — it is never landed, never persisted, and
 /// only its transcript survives the request. It nevertheless shares this
@@ -88,52 +93,6 @@ pub const DEFAULT_VOICE_CLIP_BUDGET: VoiceClipBudget = VoiceClipBudget {
     max_bytes: 10 * 1024 * 1024,
     max_duration_secs: 300,
 };
-
-/// Browser-facing voice-capture contract.
-///
-/// Carries the audio MIME types the server will accept for transcription —
-/// generated from the shared [`ironclaw_common`] format registry, so the
-/// recorder can never pick a container the decode then rejects — plus the
-/// budgets that decode enforces. Same relationship as
-/// [`AttachmentCapabilities`]: a pre-submit hint, with the server-side decode
-/// remaining the sole authority.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VoiceCapabilities {
-    /// Exact audio MIME types the transcription route accepts, in registry
-    /// order — never `audio/*`. The browser picks the first one its
-    /// `MediaRecorder` supports, which is how one contract covers Chrome
-    /// (`audio/webm`) and Safari (`audio/mp4`) without a per-browser branch.
-    pub accept: Vec<String>,
-    #[serde(flatten)]
-    pub budget: VoiceClipBudget,
-}
-
-/// The voice-capture contract advertised to browsers. Generated from the shared
-/// format registry and the budget the decode enforces.
-pub fn voice_capabilities() -> VoiceCapabilities {
-    VoiceCapabilities {
-        accept: audio_mime_types(),
-        budget: DEFAULT_VOICE_CLIP_BUDGET,
-    }
-}
-
-/// Every audio MIME type the shared registry recognizes, canonical spellings
-/// and aliases alike, in registry order.
-///
-/// Aliases are included deliberately: a browser reports the type it will
-/// actually emit (`audio/x-m4a`, `audio/opus`), and rejecting a spelling the
-/// registry already resolves would fail a recording the decode would have
-/// accepted.
-pub fn audio_mime_types() -> Vec<String> {
-    ironclaw_common::attachment_format::all_formats()
-        .iter()
-        .filter(|format| format.kind == ironclaw_common::AttachmentKind::Audio)
-        .flat_map(|format| {
-            std::iter::once(format.mime.to_string())
-                .chain(format.mime_aliases.iter().map(|alias| alias.to_string()))
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -175,58 +134,29 @@ mod tests {
         );
     }
 
-    /// The recorder picks a container from this list, so a MediaRecorder type
-    /// the browsers actually emit must be in it — otherwise voice capture is
-    /// silently unavailable on that browser.
+    /// The composer uploads exactly one format. If the registry ever stopped
+    /// recognizing it, every voice clip would 400 at the media-type check with
+    /// nothing in the UI explaining why.
     #[test]
-    fn voice_capabilities_cover_the_browser_recorder_containers() {
-        let advertised = voice_capabilities();
-        for required in ["audio/webm", "audio/mp4", "audio/ogg"] {
-            assert!(
-                advertised.accept.iter().any(|mime| mime == required),
-                "{required} is a MediaRecorder container and must be advertised: {:?}",
-                advertised.accept,
-            );
-        }
+    fn the_single_voice_upload_format_is_registry_supported() {
+        const VOICE_UPLOAD_MIME: &str = "audio/wav";
         assert!(
-            !advertised.accept.iter().any(|token| token.contains('*')),
-            "wildcards would advertise formats the decode rejects: {:?}",
-            advertised.accept,
+            ironclaw_common::attachment_format::is_supported_mime(VOICE_UPLOAD_MIME),
+            "{VOICE_UPLOAD_MIME} is what the composer uploads and must stay supported",
         );
-        assert!(
-            !advertised.accept.iter().any(|token| token.starts_with('.')),
-            "voice capture selects a recorder MIME type, not a file extension: {:?}",
-            advertised.accept,
+        assert_eq!(
+            ironclaw_common::attachment_format::kind_for_mime(VOICE_UPLOAD_MIME),
+            ironclaw_common::AttachmentKind::Audio,
         );
     }
 
-    /// Every advertised type must resolve in the registry, or the pre-submit
-    /// hint would promise something the server-side decode refuses.
+    /// The browser reads these keys off `session.voice` directly.
     #[test]
-    fn every_advertised_voice_mime_is_registry_supported() {
-        for mime in voice_capabilities().accept {
-            assert!(
-                ironclaw_common::attachment_format::is_supported_mime(&mime),
-                "advertised voice MIME {mime} is not in the shared registry",
-            );
-            assert_eq!(
-                ironclaw_common::attachment_format::kind_for_mime(&mime),
-                ironclaw_common::AttachmentKind::Audio,
-                "advertised voice MIME {mime} is not audio",
-            );
-        }
-    }
-
-    /// Flattened like [`AttachmentBudgets`] — a nested `budget` key would break
-    /// a browser reading `max_bytes` at the top level.
-    #[test]
-    fn voice_capabilities_serialize_the_budget_flat() {
-        let json = serde_json::to_value(voice_capabilities()).expect("serialize");
+    fn voice_budget_serializes_the_keys_the_browser_reads() {
+        let json = serde_json::to_value(DEFAULT_VOICE_CLIP_BUDGET).expect("serialize");
         let object = json.as_object().expect("object");
-        assert!(object.contains_key("accept"));
         assert!(object.contains_key("max_bytes"));
         assert!(object.contains_key("max_duration_secs"));
-        assert!(!object.contains_key("budget"), "budget must stay flattened");
     }
 
     /// The decoded ceiling has to fit inside the gateway body budget once

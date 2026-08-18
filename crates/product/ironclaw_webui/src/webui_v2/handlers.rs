@@ -66,7 +66,7 @@ use ironclaw_assistant::{
     TRACE_HOLD_AUTHORIZE_COMMAND,
 };
 use ironclaw_attachments::{
-    AttachmentCapabilities, VoiceCapabilities, attachment_capabilities, voice_capabilities,
+    AttachmentCapabilities, DEFAULT_VOICE_CLIP_BUDGET, VoiceClipBudget, attachment_capabilities,
 };
 use ironclaw_product_contracts::admin_users::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
@@ -195,11 +195,12 @@ pub struct WebUiV2SessionResponse {
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
     pub attachments: AttachmentCapabilities,
-    /// Voice-capture contract (accepted recorder MIME types + clip budget) for
-    /// the composer's microphone. Generated from the shared format registry so
-    /// the recorder can never pick a container the transcribe route rejects;
-    /// meaningful only when `features.voice_input` is set.
-    pub voice: VoiceCapabilities,
+    /// Clip ceilings for the composer's microphone: the byte cap the upload
+    /// must respect and the length at which the recorder stops itself.
+    /// Meaningful only when `features.voice_input` is set. There is no format
+    /// list — the composer uploads one format (16 kHz mono WAV) and the
+    /// server-side decode is the authority on what is accepted.
+    pub voice: VoiceClipBudget,
     /// The deployment's authenticated-session channel — the extension id the
     /// browser plugs into the generic session-inbound route. Absent when the
     /// deployment has no session channel (sends fail closed client-side).
@@ -276,7 +277,7 @@ pub async fn get_session(
             global_auto_approve,
         },
         attachments: attachment_capabilities(),
-        voice: voice_capabilities(),
+        voice: DEFAULT_VOICE_CLIP_BUDGET,
         session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
 }

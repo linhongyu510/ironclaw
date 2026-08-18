@@ -9540,18 +9540,15 @@ async fn session_advertises_the_voice_gate_and_recorder_contract() {
             "features.voice_input must mirror the deployment gate"
         );
 
-        // The contract is advertised regardless of the gate: it is generated
-        // from the shared format registry, and a browser that flips the gate
-        // on (a settings change, a reload) must not need a second shape.
-        let accept = body["voice"]["accept"]
-            .as_array()
-            .expect("voice.accept is a list");
-        for required in ["audio/webm", "audio/mp4"] {
-            assert!(
-                accept.iter().any(|token| token == required),
-                "voice.accept must cover the browser recorders ({required}): {accept:?}"
-            );
-        }
+        // The ceilings are advertised regardless of the gate: a browser that
+        // flips the gate on (a settings change, a reload) must not need a
+        // second shape. No format list is advertised — the composer uploads
+        // exactly one format and the server decides what it accepts.
+        assert!(
+            body["voice"].get("accept").is_none(),
+            "no format list should be advertised: {}",
+            body["voice"]
+        );
         assert!(
             body["voice"]["max_bytes"].as_u64().unwrap_or(0) > 0,
             "voice.max_bytes must be advertised so the recorder can stop itself"
