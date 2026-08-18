@@ -5,7 +5,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_triggers::{TriggerRunEvidenceScope, TriggerRunEvidenceSource};
+use ironclaw_triggers::{
+    TriggerCapabilityExecutionEvidence, TriggerRunEvidenceScope, TriggerRunEvidenceSource,
+};
 
 use super::*;
 
@@ -27,8 +29,33 @@ fn deterministic_assessment_never_treats_missing_required_action_as_success() {
     );
 }
 
+#[test]
+fn dynamic_run_reports_observed_calls_without_claiming_semantic_success() {
+    let run = make_run_record(TriggerId::new(), TriggerRunHistoryStatus::Ok);
+    let run_id = run.run_id.expect("test run has id");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let evidence = vec![TriggerCapabilityExecutionEvidence {
+        run_id,
+        capability_id,
+        status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
+        error_kind: None,
+    }];
+
+    let assessment = super::super::assess_run(&run, &[], Some(&evidence));
+
+    assert_eq!(
+        assessment.status,
+        crate::RebornAutomationAssessmentStatus::Unverified
+    );
+    assert_eq!(assessment.capabilities.len(), 1);
+    assert_eq!(
+        assessment.capabilities[0].status,
+        crate::RebornAutomationCapabilityEvidenceStatus::Succeeded
+    );
+}
+
 #[tokio::test]
-async fn automation_list_projects_displayed_run_evidence_despite_unrelated_saturation() {
+async fn automation_list_projects_dynamic_run_evidence_despite_unrelated_saturation() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let c = caller();
     let trigger_id = TriggerId::new();
@@ -46,7 +73,7 @@ async fn automation_list_projects_displayed_run_evidence_despite_unrelated_satur
         success_criteria: vec!["The report is delivered".to_string()],
         output_instructions: "Confirm delivery".to_string(),
         no_result_text: "No report was available".to_string(),
-        required_capability_ids: vec![capability_id.clone()],
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![capability_id.clone()]),
             required_skills: Vec::new(),
@@ -124,7 +151,7 @@ async fn automation_list_projects_displayed_run_evidence_despite_unrelated_satur
 
     assert_eq!(
         assessment.status,
-        crate::RebornAutomationAssessmentStatus::AppearsSuccessful
+        crate::RebornAutomationAssessmentStatus::Unverified
     );
     assert_eq!(
         assessment.capabilities[0].status,

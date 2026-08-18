@@ -25,10 +25,10 @@ pub struct TriggerExecutionSpec {
     pub success_criteria: Vec<String>,
     pub output_instructions: String,
     pub no_result_text: String,
-    /// Capabilities whose successful completion is required before a run can
-    /// be presented as evidence-backed. This is verification metadata, not an
-    /// execution allowlist; `policy.allowed_capability_ids` remains the
-    /// authority boundary.
+    /// Optional exact capabilities whose successful completion is required
+    /// before a run can be presented as evidence-backed. This is advanced
+    /// verification metadata, not an execution plan or allowlist;
+    /// `policy.allowed_capability_ids` remains the authority boundary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capability_ids: Vec<ironclaw_host_api::ids::CapabilityId>,
     #[serde(default)]

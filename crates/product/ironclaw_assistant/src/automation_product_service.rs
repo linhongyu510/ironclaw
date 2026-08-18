@@ -126,23 +126,9 @@ impl RebornAutomationProductService {
         runs_by_trigger: &HashMap<TriggerId, Vec<TriggerRunRecord>>,
         deadline: tokio::time::Instant,
     ) -> Option<Vec<TriggerCapabilityExecutionEvidence>> {
-        let evidence_required = records.iter().any(|record| {
-            record
-                .execution_spec
-                .as_ref()
-                .is_some_and(|spec| !spec.required_capability_ids.is_empty())
-        });
-        if !evidence_required {
-            return Some(Vec::new());
-        }
         let run_ids = records
             .iter()
-            .filter(|record| {
-                record
-                    .execution_spec
-                    .as_ref()
-                    .is_some_and(|spec| !spec.required_capability_ids.is_empty())
-            })
+            .filter(|record| record.execution_spec.is_some())
             .flat_map(|record| {
                 runs_by_trigger
                     .get(&record.trigger_id)
@@ -596,14 +582,17 @@ pub(super) fn assess_run(
         }
     };
     let summary = match status {
-        RebornAutomationAssessmentStatus::AppearsSuccessful if required_capabilities.is_empty() => {
-            "The run completed; textual quality was not evaluated."
-        }
         RebornAutomationAssessmentStatus::AppearsSuccessful => {
             "The run completed and every required capability reported success."
         }
+        RebornAutomationAssessmentStatus::NeedsAttention if required_capabilities.is_empty() => {
+            "The run completed, but an observed capability call failed."
+        }
         RebornAutomationAssessmentStatus::NeedsAttention => {
             "The run completed, but a required capability failed."
+        }
+        RebornAutomationAssessmentStatus::Unverified if required_capabilities.is_empty() => {
+            "The run completed and observed capability calls are shown, but no exact actions were predeclared for verification."
         }
         RebornAutomationAssessmentStatus::Unverified => {
             "The run completed, but required action evidence is incomplete."

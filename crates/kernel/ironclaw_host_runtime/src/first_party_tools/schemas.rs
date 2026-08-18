@@ -965,7 +965,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         },
                         "required_capability_ids": {
                             "type": "array", "maxItems": 64,
-                            "description": "Capabilities that must complete successfully for the run to be evidence-backed. Derive these from actions the user requested; use an empty array for answer-only work. Every entry must also be allowed by policy.allowed_capability_ids when that allowlist is present.",
+                            "description": "Optional advanced verification metadata for capabilities the user or policy explicitly requires. Omit this field for ordinary routines so future runs can discover their implementation dynamically. Do not predict tools merely because they may be useful. When present, every entry must also be allowed by policy.allowed_capability_ids when that allowlist is present.",
                             "items": { "type": "string" }
                         },
                         "policy": {
@@ -989,7 +989,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "additionalProperties": false
                         }
                     },
-                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "required_capability_ids", "policy"],
+                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
                     "additionalProperties": false
                 },
                 "schedule": {
@@ -1242,9 +1242,14 @@ mod tests {
                 "success_criteria",
                 "output_instructions",
                 "no_result_text",
-                "required_capability_ids",
                 "policy"
             ])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]
+                .get("required_capability_ids")
+                .is_some(),
+            "explicit capability evidence requirements remain available but optional"
         );
         assert_eq!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["required"],

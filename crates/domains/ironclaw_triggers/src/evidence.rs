@@ -123,9 +123,18 @@ pub fn assess_trigger_run(
         };
     }
     if required_capabilities.is_empty() {
+        let capabilities = observed_capabilities(run_id, evidence);
+        let status = if capabilities
+            .iter()
+            .any(|item| item.status == TriggerCapabilityRequirementStatus::Failed)
+        {
+            TriggerRunAssessmentStatus::NeedsAttention
+        } else {
+            TriggerRunAssessmentStatus::Unverified
+        };
         return TriggerRunAssessment {
-            status: TriggerRunAssessmentStatus::AppearsSuccessful,
-            capabilities: Vec::new(),
+            status,
+            capabilities,
         };
     }
 
@@ -151,6 +160,28 @@ pub fn assess_trigger_run(
         status,
         capabilities,
     }
+}
+
+fn observed_capabilities(
+    run_id: Option<TurnRunId>,
+    evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
+) -> Vec<TriggerCapabilityRequirementAssessment> {
+    let Some(run_id) = run_id else {
+        return Vec::new();
+    };
+    let Some(evidence) = evidence else {
+        return Vec::new();
+    };
+    let mut capability_ids = Vec::new();
+    for item in evidence.iter().filter(|item| item.run_id == run_id) {
+        if !capability_ids.contains(&item.capability_id) {
+            capability_ids.push(item.capability_id.clone());
+        }
+    }
+    capability_ids
+        .into_iter()
+        .map(|capability_id| assess_capability(Some(run_id), capability_id, Some(evidence)))
+        .collect()
 }
 
 fn assess_capability(
@@ -276,6 +307,59 @@ mod tests {
         assert_eq!(
             assessment.capabilities[0].error_kind.as_deref(),
             Some("provider_rejected")
+        );
+    }
+
+    #[test]
+    fn unconstrained_run_reports_observed_success_without_claiming_verification() {
+        let run_id = TurnRunId::new();
+        let evidence = [TriggerCapabilityExecutionEvidence {
+            run_id,
+            capability_id: capability(),
+            status: TriggerCapabilityExecutionStatus::Succeeded,
+            error_kind: None,
+        }];
+
+        let assessment = assess_trigger_run(
+            TriggerRunHistoryStatus::Ok,
+            Some(run_id),
+            &[],
+            Some(&evidence),
+        );
+
+        assert_eq!(assessment.status, TriggerRunAssessmentStatus::Unverified);
+        assert_eq!(assessment.capabilities.len(), 1);
+        assert_eq!(
+            assessment.capabilities[0].status,
+            TriggerCapabilityRequirementStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn unconstrained_run_surfaces_observed_failure() {
+        let run_id = TurnRunId::new();
+        let evidence = [TriggerCapabilityExecutionEvidence {
+            run_id,
+            capability_id: capability(),
+            status: TriggerCapabilityExecutionStatus::Failed,
+            error_kind: Some("provider_rejected".to_owned()),
+        }];
+
+        let assessment = assess_trigger_run(
+            TriggerRunHistoryStatus::Ok,
+            Some(run_id),
+            &[],
+            Some(&evidence),
+        );
+
+        assert_eq!(
+            assessment.status,
+            TriggerRunAssessmentStatus::NeedsAttention
+        );
+        assert_eq!(assessment.capabilities.len(), 1);
+        assert_eq!(
+            assessment.capabilities[0].status,
+            TriggerCapabilityRequirementStatus::Failed
         );
     }
 

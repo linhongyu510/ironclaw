@@ -90,9 +90,9 @@ raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
 to execute their frozen prompt without interpretation or backfill.
 
 The v1 contract contains a goal, one or more success criteria, output
-instructions, no-result text, required capability evidence, an optional
-capability allowlist, and required skill names. The trigger domain validates
-and renders this contract before
+instructions, no-result text, an optional capability allowlist, optional
+explicit capability-evidence requirements, and required skill names. The
+trigger domain validates and renders this contract before
 persistence. Production creation also resolves capability references against
 the current model-visible catalog and required skills through the normal skill
 selector before writing the trigger. The scheduler continues to submit the
@@ -138,11 +138,12 @@ skills resolve through the normal skill activation catalog before model context
 is built; missing, ambiguous, untrusted, unready, or over-budget requirements
 fail closed and never widen capabilities.
 
-`required_capability_ids` is verification metadata, not authority. New create
-requests always provide the field, using an empty list for answer-only work.
-Every required capability must also belong to `allowed_capability_ids` when an
-allowlist is present. Legacy structured records deserialize a missing field as
-an empty list.
+`required_capability_ids` is optional advanced verification metadata, not
+authority or an execution plan. Ordinary create requests omit it so future
+runs can discover whichever capabilities they need. It is appropriate only
+when the user or policy explicitly requires exact capabilities. Every declared
+requirement must also belong to `allowed_capability_ids` when an allowlist is
+present. Missing and empty fields deserialize identically for compatibility.
 
 Terminal structured runs receive a deterministic assessment when read through
 the WebUI automation service or `trigger_list`. The assessment folds the run's
@@ -152,10 +153,14 @@ they must not inherit the thread, mission, or invocation identity of the
 conversation that asks for status, because each scheduled run executes in its
 own thread. The assessment never infers an action from final-answer prose. A required
 capability that failed yields `needs_attention`, a missing/incomplete or
-unavailable fact yields `unverified`, and a completed run whose requirements
-all report success yields `appears_successful`. The latter is deliberately not
-a provider read-back guarantee, and textual criteria are not model-judged in
-this phase. Legacy raw-prompt and active runs have no assessment.
+unavailable fact yields `unverified`, and a completed run whose explicit
+requirements all report success yields `appears_successful`. With no explicit
+requirements, observed capability calls are still reported; any observed
+failure yields `needs_attention`, while an otherwise completed run remains
+`unverified` because runtime facts alone cannot prove semantic success. The
+assessment is deliberately not a provider read-back guarantee, and textual
+criteria are not model-judged in this phase. Legacy raw-prompt and active runs
+have no assessment.
 
 ### 3.4 Trigger state
 

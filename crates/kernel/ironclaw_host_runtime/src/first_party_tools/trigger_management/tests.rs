@@ -31,7 +31,6 @@ fn execution_contract(goal: impl Into<String>) -> Value {
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
         "no_result_text": "No result",
-        "required_capability_ids": [],
         "policy": { "result_delivery": "deliver" }
     })
 }
@@ -164,6 +163,81 @@ async fn trigger_list_exposes_deterministic_required_action_assessment() {
 }
 
 #[tokio::test]
+async fn trigger_list_reports_dynamic_run_evidence_without_claiming_verification() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("dynamic-evidence-status-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Discover how to deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: Vec::new(),
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(StaticRunEvidenceSource {
+            evidence: vec![TriggerCapabilityExecutionEvidence {
+                run_id,
+                capability_id,
+                status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
+                error_kind: None,
+            }],
+            observed_scope: Arc::new(std::sync::Mutex::new(None)),
+            observed_run_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = handler.dispatch(request).await.expect("list routines");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("unverified"));
+    assert_eq!(assessment["capabilities"][0]["status"], json!("succeeded"));
+}
+
+#[tokio::test]
 async fn trigger_list_returns_unverified_when_capability_evidence_stalls() {
     use ironclaw_triggers::ClearActiveFireRequest;
 
@@ -265,6 +339,12 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
         "trigger_create description must say the fire has no memory of this conversation: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("Omit required_capability_ids for ordinary routines")
+            && TRIGGER_CREATE_DESCRIPTION.contains("discover the tools it needs")
+            && TRIGGER_CREATE_DESCRIPTION.contains("never predict an implementation"),
+        "trigger_create must preserve dynamic capability discovery by default: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
