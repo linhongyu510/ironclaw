@@ -1578,6 +1578,9 @@ fn map_notification_inbox_error(
         ironclaw_notifications::NotificationInboxError::AccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
+        ironclaw_notifications::NotificationInboxError::Backend { .. } => {
+            ProductSurfaceError::service_unavailable(true)
+        }
         other => ProductSurfaceError::internal_from(other),
     }
 }
@@ -2997,6 +3000,9 @@ where
         caller: ProductSurfaceCaller,
         request: ProductNotificationMutationRequest,
     ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        // Terminal implementation of an authenticated ProductSurface command:
+        // the recipient is always re-derived from the verified caller, never
+        // accepted from the request body.
         self.notification_inbox
             .mark_read(notification_mutation_request(&caller, request)?)
             .await
@@ -4440,8 +4446,12 @@ where
                 views::view_page_with_cursor(response, next_cursor)
             }
             id if id == NOTIFICATIONS_VIEW.id => {
-                let request = serde_json::from_value(query.params)
-                    .map_err(ProductSurfaceError::internal_from)?;
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
                 let response = self
                     .build_notifications_view(caller, request, query.cursor)
                     .await?;

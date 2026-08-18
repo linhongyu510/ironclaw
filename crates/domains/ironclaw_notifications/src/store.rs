@@ -58,9 +58,7 @@ where
         else {
             return Ok(None);
         };
-        serde_json::from_slice(&versioned.entry.body)
-            .map(Some)
-            .map_err(|_| NotificationInboxError::Serialization)
+        decode_snapshot(&versioned.entry.body).map(Some)
     }
 }
 
@@ -73,7 +71,6 @@ where
         &self,
         request: PublishNotificationRequest,
     ) -> Result<NotificationRecord, NotificationInboxError> {
-        validate_notification_source(&request.source)?;
         validate_notification_action(&request.source, &request.action)?;
         let scope = notification_resource_scope(&request.recipient);
         let path = notification_inbox_path()?;
@@ -276,16 +273,11 @@ where
     ) -> Result<(), NotificationInboxError> {
         mutate_notification(self, request, |record, occurred_at| {
             let occurred_at = occurred_at.max(record.created_at);
-            let mut changed = false;
-            if record.resolved_at.is_none() {
-                record.resolved_at = Some(occurred_at);
-                changed = true;
+            if record.resolved_at.is_some() {
+                return false;
             }
-            if record.read_at.is_none() {
-                record.read_at = Some(occurred_at);
-                changed = true;
-            }
-            changed
+            record.resolved_at = Some(occurred_at);
+            true
         })
         .await
     }
@@ -296,16 +288,11 @@ where
     ) -> Result<(), NotificationInboxError> {
         mutate_notification(self, request, |record, occurred_at| {
             let occurred_at = occurred_at.max(record.created_at);
-            let mut changed = false;
-            if record.archived_at.is_none() {
-                record.archived_at = Some(occurred_at);
-                changed = true;
+            if record.archived_at.is_some() {
+                return false;
             }
-            if record.read_at.is_none() {
-                record.read_at = Some(occurred_at);
-                changed = true;
-            }
-            changed
+            record.archived_at = Some(occurred_at);
+            true
         })
         .await
     }
@@ -356,7 +343,9 @@ where
 }
 
 fn notification_inbox_path() -> Result<ScopedPath, NotificationInboxError> {
-    ScopedPath::new(NOTIFICATION_INBOX_PATH).map_err(|_| NotificationInboxError::Backend)
+    ScopedPath::new(NOTIFICATION_INBOX_PATH).map_err(|error| NotificationInboxError::Backend {
+        reason: error.to_string(),
+    })
 }
 
 fn notification_resource_scope(recipient: &NotificationRecipient) -> ResourceScope {
@@ -364,17 +353,6 @@ fn notification_resource_scope(recipient: &NotificationRecipient) -> ResourceSco
     scope.tenant_id = recipient.tenant_id.clone();
     scope.user_id = recipient.user_id.clone();
     scope
-}
-
-fn validate_notification_source(source: &NotificationSource) -> Result<(), NotificationInboxError> {
-    if source.lifecycle_ref.as_ref().is_some_and(|value| {
-        value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
-    }) {
-        return Err(NotificationInboxError::InvalidRequest {
-            reason: "notification lifecycle reference is invalid",
-        });
-    }
-    Ok(())
 }
 
 fn validate_notification_action(
@@ -396,13 +374,17 @@ fn validate_snapshot(
     recipient: &NotificationRecipient,
 ) -> Result<(), NotificationInboxError> {
     if snapshot.schema_version != NOTIFICATION_INBOX_SCHEMA_VERSION {
-        return Err(NotificationInboxError::Serialization);
+        return Err(NotificationInboxError::Serialization {
+            reason: "unsupported notification inbox schema version".to_string(),
+        });
     }
     if &snapshot.recipient != recipient {
         return Err(NotificationInboxError::AccessDenied);
     }
     if snapshot.notifications.len() > NOTIFICATION_INBOX_MAX_RECORDS {
-        return Err(NotificationInboxError::Serialization);
+        return Err(NotificationInboxError::Serialization {
+            reason: "notification inbox record bound exceeded".to_string(),
+        });
     }
     let mut ids = HashSet::with_capacity(snapshot.notifications.len());
     for record in &snapshot.notifications {
@@ -411,25 +393,31 @@ fn validate_snapshot(
             .flatten()
             .any(|timestamp| timestamp < record.created_at || timestamp > record.updated_at);
         if &record.recipient != recipient
-            || validate_notification_source(&record.source).is_err()
             || validate_notification_action(&record.source, &record.action).is_err()
             || record.updated_at < record.created_at
             || invalid_lifecycle_timestamp
             || !ids.insert(record.id.clone())
         {
-            return Err(NotificationInboxError::Serialization);
+            return Err(NotificationInboxError::Serialization {
+                reason: "notification inbox record invariant failed".to_string(),
+            });
         }
     }
     Ok(())
 }
 
 fn decode_snapshot(bytes: &[u8]) -> Result<NotificationInboxSnapshot, NotificationInboxError> {
-    serde_json::from_slice(bytes).map_err(|_| NotificationInboxError::Serialization)
+    serde_json::from_slice(bytes).map_err(|error| NotificationInboxError::Serialization {
+        reason: error.to_string(),
+    })
 }
 
 fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, NotificationInboxError> {
     validate_snapshot(snapshot, &snapshot.recipient)?;
-    let body = serde_json::to_vec(snapshot).map_err(|_| NotificationInboxError::Serialization)?;
+    let body =
+        serde_json::to_vec(snapshot).map_err(|error| NotificationInboxError::Serialization {
+            reason: error.to_string(),
+        })?;
     Ok(Entry::bytes(body)
         .with_content_type(ContentType::json())
         .with_indexed(
@@ -507,13 +495,23 @@ fn notification_is_after_cursor(record: &NotificationRecord, cursor: &Notificati
 fn map_cas_error(error: CasUpdateError<NotificationInboxError>) -> NotificationInboxError {
     match error {
         CasUpdateError::Apply(error) => error,
-        CasUpdateError::Timeout
-        | CasUpdateError::RetriesExhausted
-        | CasUpdateError::CasUnsupported
-        | CasUpdateError::Backend(_) => NotificationInboxError::Backend,
+        CasUpdateError::Timeout => NotificationInboxError::Backend {
+            reason: "notification inbox CAS update timed out".to_string(),
+        },
+        CasUpdateError::RetriesExhausted => NotificationInboxError::Backend {
+            reason: "notification inbox CAS retries exhausted".to_string(),
+        },
+        CasUpdateError::CasUnsupported => NotificationInboxError::Backend {
+            reason: "notification inbox backend does not support CAS".to_string(),
+        },
+        CasUpdateError::Backend(error) => NotificationInboxError::Backend {
+            reason: error.to_string(),
+        },
     }
 }
 
-fn map_filesystem_error(_error: FilesystemError) -> NotificationInboxError {
-    NotificationInboxError::Backend
+fn map_filesystem_error(error: FilesystemError) -> NotificationInboxError {
+    NotificationInboxError::Backend {
+        reason: error.to_string(),
+    }
 }

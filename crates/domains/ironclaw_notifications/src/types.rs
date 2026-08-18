@@ -11,6 +11,7 @@ use crate::NotificationInboxError;
 pub const NOTIFICATION_PAGE_LIMIT_MAX: usize = 100;
 pub const NOTIFICATION_INBOX_MAX_RECORDS: usize = 1_000;
 pub(crate) const NOTIFICATION_ID_MAX_BYTES: usize = 256;
+const LIFECYCLE_REF_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -59,6 +60,58 @@ impl AsRef<str> for NotificationId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LifecycleRef(String);
+
+impl LifecycleRef {
+    fn validate(value: &str) -> Result<(), NotificationInboxError> {
+        if value.is_empty()
+            || value.len() > LIFECYCLE_REF_MAX_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(NotificationInboxError::InvalidRequest {
+                reason: "notification lifecycle reference is invalid",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn new(value: impl Into<String>) -> Result<Self, NotificationInboxError> {
+        let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for LifecycleRef {
+    type Error = NotificationInboxError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<LifecycleRef> for String {
+    fn from(value: LifecycleRef) -> Self {
+        value.into_inner()
+    }
+}
+
+impl AsRef<str> for LifecycleRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationRecipient {
     pub tenant_id: TenantId,
@@ -95,7 +148,7 @@ pub enum NotificationAction {
 pub struct NotificationSource {
     pub thread_id: ThreadId,
     pub turn_run_id: Option<TurnRunId>,
-    pub lifecycle_ref: Option<String>,
+    pub lifecycle_ref: Option<LifecycleRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,46 +247,48 @@ impl NotificationInboxStorePort for NoopNotificationInboxStore {
         &self,
         _request: PublishNotificationRequest,
     ) -> Result<NotificationRecord, NotificationInboxError> {
-        Err(NotificationInboxError::Backend)
+        Err(notification_store_unavailable())
     }
 
     async fn list(
         &self,
         _request: ListNotificationsRequest,
     ) -> Result<NotificationPage, NotificationInboxError> {
-        Ok(NotificationPage {
-            notifications: Vec::new(),
-            next_cursor: None,
-            unread_count: 0,
-        })
+        Err(notification_store_unavailable())
     }
 
     async fn mark_read(
         &self,
         _request: NotificationMutationRequest,
     ) -> Result<(), NotificationInboxError> {
-        Err(NotificationInboxError::Backend)
+        Err(notification_store_unavailable())
     }
 
     async fn mark_all_read(
         &self,
         _request: MarkAllNotificationsReadRequest,
     ) -> Result<(), NotificationInboxError> {
-        Err(NotificationInboxError::Backend)
+        Err(notification_store_unavailable())
     }
 
     async fn resolve(
         &self,
         _request: NotificationMutationRequest,
     ) -> Result<(), NotificationInboxError> {
-        Err(NotificationInboxError::Backend)
+        Err(notification_store_unavailable())
     }
 
     async fn archive(
         &self,
         _request: NotificationMutationRequest,
     ) -> Result<(), NotificationInboxError> {
-        Err(NotificationInboxError::Backend)
+        Err(notification_store_unavailable())
+    }
+}
+
+fn notification_store_unavailable() -> NotificationInboxError {
+    NotificationInboxError::Backend {
+        reason: "notification inbox store is not configured".to_string(),
     }
 }
 
@@ -249,5 +304,16 @@ mod tests {
         assert_eq!(id.into_inner(), "notification-1");
         assert!(NotificationId::try_from(String::new()).is_err());
         assert!(serde_json::from_str::<NotificationId>("\"bad\\nid\"").is_err());
+    }
+
+    #[test]
+    fn lifecycle_ref_uses_the_validated_newtype_contract() {
+        let lifecycle_ref = LifecycleRef::new("gate-1").expect("valid lifecycle ref");
+        assert_eq!(lifecycle_ref.as_str(), "gate-1");
+        assert_eq!(lifecycle_ref.as_ref(), "gate-1");
+        assert_eq!(lifecycle_ref.into_inner(), "gate-1");
+        assert!(LifecycleRef::try_from(String::new()).is_err());
+        assert!(serde_json::from_str::<LifecycleRef>("\"bad\\nref\"").is_err());
+        assert!(LifecycleRef::new("x".repeat(LIFECYCLE_REF_MAX_BYTES + 1)).is_err());
     }
 }

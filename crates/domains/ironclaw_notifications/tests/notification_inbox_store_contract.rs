@@ -16,11 +16,11 @@ use ironclaw_host_api::{
     turn::TurnRunId,
 };
 use ironclaw_notifications::{
-    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_INBOX_MAX_RECORDS,
-    NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
-    PublishNotificationRequest,
+    LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
+    NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore,
+    NotificationAction, NotificationId, NotificationInboxError, NotificationInboxStore,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
+    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use tokio::sync::Mutex;
 
@@ -53,7 +53,7 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
         source: NotificationSource {
             thread_id: thread_id.clone(),
             turn_run_id: Some(TurnRunId::new()),
-            lifecycle_ref: Some(format!("gate-{id}")),
+            lifecycle_ref: Some(LifecycleRef::new(format!("gate-{id}")).expect("lifecycle ref")),
         },
         action: NotificationAction::OpenThread { thread_id },
         occurred_at: Utc.timestamp_opt(timestamp, 0).single().expect("time"),
@@ -145,6 +145,31 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
         .await
         .expect("resolve notification");
 
+    store
+        .resolve(NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: NotificationId::new("notification-unread").expect("id"),
+            occurred_at: read_at,
+        })
+        .await
+        .expect("resolve unread notification");
+    let resolved_page = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list resolved notification");
+    let resolved_unread = resolved_page
+        .notifications
+        .iter()
+        .find(|record| record.id.as_str() == "notification-unread")
+        .expect("resolved unread notification");
+    assert_eq!(resolved_unread.read_at, None, "resolve must not imply read");
+    assert_eq!(resolved_unread.resolved_at, Some(read_at));
+
     let archived_at = Utc.timestamp_opt(1_700_000_020, 0).single().expect("time");
     store
         .archive(NotificationMutationRequest {
@@ -196,7 +221,7 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
         .find(|record| record.id.as_str() == "notification-archived")
         .expect("archived notification");
     assert_eq!(archived.archived_at, Some(archived_at));
-    assert_eq!(archived.read_at, Some(archived_at));
+    assert_eq!(archived.read_at, None, "archive must not imply read");
 
     let foreign = NotificationRecipient {
         tenant_id: recipient().tenant_id,
@@ -222,6 +247,30 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
             })
             .await,
         Err(NotificationInboxError::NotificationNotFound)
+    ));
+}
+
+#[tokio::test]
+async fn unwired_notification_store_fails_closed_for_reads_and_writes() {
+    let store = NoopNotificationInboxStore;
+    let list_error = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect_err("an unwired inbox must not look empty");
+    assert!(matches!(list_error, NotificationInboxError::Backend { .. }));
+
+    let publish_error = store
+        .publish(request("notification-unwired", 1_700_000_001))
+        .await
+        .expect_err("an unwired inbox rejects writes");
+    assert!(matches!(
+        publish_error,
+        NotificationInboxError::Backend { .. }
     ));
 }
 
@@ -273,7 +322,7 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
         racing_store
             .publish(request("notification-cas-exhausted", 1_700_010_001))
             .await,
-        Err(NotificationInboxError::Backend)
+        Err(NotificationInboxError::Backend { .. })
     ));
     let surviving = racing_store
         .list(ListNotificationsRequest {

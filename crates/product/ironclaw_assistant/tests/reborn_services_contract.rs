@@ -169,6 +169,7 @@ use ironclaw_product_contracts::ironhub::{
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService,
 };
+use ironclaw_product_contracts::notification_inbox::NOTIFICATIONS_VIEW;
 use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
@@ -14294,6 +14295,32 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn notifications_unwired_backend_returns_retryable_service_unavailable() {
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::query(
+        &services,
+        caller(),
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            input: json!({}),
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await
+    .expect_err("an unwired notification backend must fail visibly");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
 }
 
 #[tokio::test]

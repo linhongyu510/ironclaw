@@ -99,10 +99,10 @@ files carry their members' exact layers.
 workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
-against the documented tree (PROPOSAL §5); on 2026-08-05 it reports:
+against the documented tree (PROPOSAL §5); on 2026-08-18 it reports:
 `target tree: OK (68 workspace members against 68 documented packages, 1
-documented exclusion(s), 0 owned exception(s))` (re-derived 2026-08-08 with the
-web-app channel's two crates).
+documented exclusion(s), 0 owned exception(s))` (re-derived after adding the
+notification inbox crate).
 
 Under `crates/extensions/packages/`, 15 package directories: 5 are workspace
 crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`) and 10 are data-only
