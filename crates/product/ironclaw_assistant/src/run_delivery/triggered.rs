@@ -562,11 +562,15 @@ async fn notify_background_run(
     {
         Ok(resolved) => resolved,
         Err(error) => {
-            tracing::warn!(target: TRACE_TARGET, %run_id, %error, "notification target lookup failed; continuing with the web inbox");
-            ResolvedNotificationTargets {
-                targets: Vec::new(),
-                lookup_failed: true,
-            }
+            tracing::warn!(
+                target: TRACE_TARGET,
+                %run_id,
+                %error,
+                "background run notification target lookup failed"
+            );
+            let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
         }
     };
     let ResolvedNotificationTargets {
