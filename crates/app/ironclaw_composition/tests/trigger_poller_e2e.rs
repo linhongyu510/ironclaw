@@ -41,8 +41,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -550,76 +550,6 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
                 "",
             ))
         }
-    }
-}
-
-#[derive(Default)]
-struct CapabilityProbeGateway {
-    outcome: TokioMutex<Option<Result<(), String>>>,
-}
-
-impl CapabilityProbeGateway {
-    async fn outcome(&self) -> Option<Result<(), String>> {
-        self.outcome.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl HostManagedModelGateway for CapabilityProbeGateway {
-    async fn stream_model(
-        &self,
-        _request: HostManagedModelRequest,
-    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        Ok(HostManagedModelResponse::assistant_reply(
-            "structured trigger probe had no capability port".to_string(),
-        ))
-    }
-
-    async fn stream_model_with_capabilities(
-        &self,
-        _request: HostManagedModelRequest,
-        capabilities: Arc<dyn LoopCapabilityPort>,
-    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        let call = ProviderToolCall {
-            provider_id: "structured-trigger-e2e-provider".to_string(),
-            provider_model_id: "structured-trigger-e2e-model".to_string(),
-            turn_id: Some("structured-trigger-e2e-turn".to_string()),
-            id: "structured-trigger-list-probe".to_string(),
-            name: ProviderToolName::new(provider_tool_name_for_capability_id(
-                TRIGGER_LIST_CAPABILITY_ID,
-            ))
-            .expect("trigger-list provider tool name"),
-            arguments: json!({}),
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        };
-        let outcome = capabilities
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
-            .await
-            .map(|_| ())
-            .map_err(|error| error.safe_summary);
-        *self.outcome.lock().await = Some(outcome);
-        Ok(HostManagedModelResponse::assistant_reply(
-            "structured trigger capability probe complete".to_string(),
-        ))
-    }
-}
-
-async fn wait_for_capability_probe(
-    gateway: &CapabilityProbeGateway,
-    deadline: Duration,
-) -> Result<(), String> {
-    let stop = Instant::now() + deadline;
-    loop {
-        if let Some(outcome) = gateway.outcome().await {
-            return outcome;
-        }
-        assert!(
-            Instant::now() < stop,
-            "capability probe did not reach the model"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2296,9 +2226,9 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 }
 
 #[tokio::test]
-async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no_tools() {
+async fn structured_trigger_creation_rejects_unavailable_and_empty_restrictions() {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(CapabilityProbeGateway::default());
+    let gateway = Arc::new(RecordingGateway::default());
     let runtime = build_runtime_with_tool_disclosure(
         &root,
         Arc::clone(&gateway),
@@ -2372,7 +2302,7 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
         "a failed skill preflight must not persist a trigger"
     );
 
-    let created = invoke_trigger_create(
+    let empty_allowlist = invoke_trigger_create_outcome(
         &runtime,
         json!({
             "name": "structured-empty-tool-surface",
@@ -2391,30 +2321,17 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
         }),
     )
     .await;
-    let trigger_id = TriggerId::parse(
-        created["trigger"]["trigger_id"]
-            .as_str()
-            .expect("created trigger id"),
-    )
-    .expect("valid trigger id");
-    let mut record = repo
-        .get_trigger(tenant_id.clone(), trigger_id)
-        .await
-        .expect("get structured trigger")
-        .expect("structured trigger persisted");
-    assert!(record.execution_spec.is_some(), "contract must persist");
-    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
-    repo.upsert_trigger(record)
-        .await
-        .expect("make structured trigger due");
-
-    let outcome = wait_for_capability_probe(gateway.as_ref(), Duration::from_secs(15)).await;
     runtime.shutdown().await.expect("runtime shutdown");
-
-    assert_eq!(
-        outcome,
-        Err("provider tool call is outside the visible capability surface".to_string()),
-        "Some([]) must reach the scheduled run as an empty tool surface"
+    assert!(
+        matches!(empty_allowlist, RuntimeCapabilityOutcome::Failed(_)),
+        "creation must reject an explicit empty capability allowlist: {empty_allowlist:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id)
+            .await
+            .expect("list triggers after rejected empty allowlist")
+            .is_empty(),
+        "an empty allowlist must not persist a zero-capability routine"
     );
 }
 

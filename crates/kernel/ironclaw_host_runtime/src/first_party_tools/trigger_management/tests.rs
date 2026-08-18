@@ -341,9 +341,14 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
         "trigger_create description must say the fire has no memory of this conversation: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains("Omit required_capability_ids for ordinary routines")
+        TRIGGER_CREATE_DESCRIPTION.contains(
+            "Omit both required_capability_ids and policy.allowed_capability_ids for ordinary routines",
+        )
             && TRIGGER_CREATE_DESCRIPTION.contains("discover the tools it needs")
-            && TRIGGER_CREATE_DESCRIPTION.contains("never predict an implementation"),
+            && TRIGGER_CREATE_DESCRIPTION.contains("never predict an implementation")
+            && TRIGGER_CREATE_DESCRIPTION.contains(
+                "never pass an empty allowed_capability_ids array because that would disable every capability",
+            ),
         "trigger_create must preserve dynamic capability discovery by default: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(

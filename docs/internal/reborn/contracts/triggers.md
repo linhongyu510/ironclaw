@@ -145,6 +145,12 @@ when the user or policy explicitly requires exact capabilities. Every declared
 requirement must also belong to `allowed_capability_ids` when an allowlist is
 present. Missing and empty fields deserialize identically for compatibility.
 
+`policy.allowed_capability_ids` is likewise an optional advanced restriction,
+not a tool-planning hint. Ordinary routines omit it and inherit the caller's
+normal capability surface. When present it must contain at least one capability;
+an empty array is rejected because it would silently create a routine with no
+usable capabilities.
+
 Terminal structured runs receive a deterministic assessment when read through
 the WebUI automation service or `trigger_list`. The assessment folds the run's
 terminal state and the canonical runtime capability projection for the exact

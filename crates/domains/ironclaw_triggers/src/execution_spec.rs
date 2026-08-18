@@ -176,6 +176,11 @@ fn validate_text(label: &str, value: &str, max_bytes: usize) -> Result<(), Trigg
 
 fn validate_policy(policy: &TurnExecutionPolicy) -> Result<(), TriggerError> {
     if let Some(capabilities) = &policy.allowed_capability_ids {
+        if capabilities.is_empty() {
+            return invalid(
+                "allowed_capability_ids must be omitted or contain at least one capability",
+            );
+        }
         if capabilities.len() > MAX_ALLOWED_CAPABILITIES {
             return invalid(format!(
                 "allowed_capability_ids must contain at most {MAX_ALLOWED_CAPABILITIES} items"

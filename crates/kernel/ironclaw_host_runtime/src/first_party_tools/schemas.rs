@@ -972,7 +972,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "type": "object",
                             "properties": {
                                 "allowed_capability_ids": {
-                                    "type": ["array", "null"], "maxItems": 64,
+                                    "type": ["array", "null"], "minItems": 1, "maxItems": 64,
+                                    "description": "Optional advanced restriction for an explicitly pinned capability surface. Omit this field for ordinary routines so future runs retain dynamic tool discovery. An empty array is invalid because it would create a routine that cannot use any capabilities.",
                                     "items": { "type": "string" }
                                 },
                                 "required_skills": {
@@ -1250,6 +1251,12 @@ mod tests {
                 .get("required_capability_ids")
                 .is_some(),
             "explicit capability evidence requirements remain available but optional"
+        );
+        assert_eq!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]["allowed_capability_ids"]
+                ["minItems"],
+            serde_json::json!(1),
+            "an explicit allowlist must not silently disable every capability"
         );
         assert_eq!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
