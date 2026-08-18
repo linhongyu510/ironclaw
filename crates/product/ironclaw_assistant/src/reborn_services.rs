@@ -208,10 +208,10 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
-use ironclaw_outbound::{
-    ListNotificationsRequest, MarkAllNotificationsReadRequest, NoopNotificationInboxStore,
-    NotificationAction, NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
-    NotificationRecipient, NotificationSeverity,
+use ironclaw_notifications::{
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_PAGE_LIMIT_MAX,
+    NoopNotificationInboxStore, NotificationAction, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
 };
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
@@ -1548,8 +1548,8 @@ fn notification_mutation_request(
     caller: &ProductSurfaceCaller,
     request: ProductNotificationMutationRequest,
 ) -> Result<NotificationMutationRequest, ProductSurfaceError> {
-    let notification_id =
-        ironclaw_outbound::NotificationId::new(request.notification_id).map_err(|_| {
+    let notification_id = ironclaw_notifications::NotificationId::new(request.notification_id)
+        .map_err(|_| {
             ProductSurfaceError::validation(
                 "notification_id",
                 ProductSurfaceValidationCode::InvalidId,
@@ -1562,17 +1562,20 @@ fn notification_mutation_request(
     })
 }
 
-fn map_notification_inbox_error(error: ironclaw_outbound::OutboundError) -> ProductSurfaceError {
+fn map_notification_inbox_error(
+    error: ironclaw_notifications::NotificationInboxError,
+) -> ProductSurfaceError {
     match error {
-        ironclaw_outbound::OutboundError::InvalidRequest { .. } => ProductSurfaceError::validation(
-            "notification",
-            ProductSurfaceValidationCode::InvalidValue,
-        ),
-        ironclaw_outbound::OutboundError::DeliveryNotFound
-        | ironclaw_outbound::OutboundError::NotificationNotFound => {
+        ironclaw_notifications::NotificationInboxError::InvalidRequest { .. } => {
+            ProductSurfaceError::validation(
+                "notification",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+        }
+        ironclaw_notifications::NotificationInboxError::NotificationNotFound => {
             ProductSurfaceError::not_found()
         }
-        ironclaw_outbound::OutboundError::AccessDenied => {
+        ironclaw_notifications::NotificationInboxError::AccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
         other => ProductSurfaceError::internal_from(other),
@@ -2944,11 +2947,18 @@ where
         request: ProductListNotificationsRequest,
         cursor: Option<String>,
     ) -> Result<ProductListNotificationsResponse, ProductSurfaceError> {
+        let limit = request.limit.unwrap_or(30) as usize;
+        if limit == 0 || limit > NOTIFICATION_PAGE_LIMIT_MAX {
+            return Err(ProductSurfaceError::validation(
+                "limit",
+                ProductSurfaceValidationCode::InvalidValue,
+            ));
+        }
         let page = self
             .notification_inbox
             .list(ListNotificationsRequest {
                 recipient: notification_recipient(&caller),
-                limit: request.limit.unwrap_or(30).clamp(1, 100) as usize,
+                limit,
                 cursor,
                 include_archived: false,
             })

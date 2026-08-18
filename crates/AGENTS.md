@@ -92,7 +92,7 @@ files carry their members' exact layers.
 
 ## Workspace facts
 
-**67 packages**: 65 under `crates/`, plus the root package
+**68 packages**: 66 under `crates/`, plus the root package
 `ironclaw_integration_tests` (the in-process Reborn integration suite,
 `tests/integration/`) and `tools/ironclaw_stress`. One documented exclusion:
 `tools/ironclaw_silk_decoder`, a standalone helper that is
@@ -100,7 +100,7 @@ workspace-`exclude`d. Zero crates sit flat under `crates/` and zero owned
 placement exceptions remain. The gate is
 `python3 scripts/ci/check-target-tree.py`, which compares the workspace
 against the documented tree (PROPOSAL §5); on 2026-08-05 it reports:
-`target tree: OK (67 workspace members against 67 documented packages, 1
+`target tree: OK (68 workspace members against 68 documented packages, 1
 documented exclusion(s), 0 owned exception(s))` (re-derived 2026-08-08 with the
 web-app channel's two crates).
 

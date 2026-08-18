@@ -5,22 +5,15 @@ use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
-    ClaimDeliveryAttemptForSendRequest, LoadSubscriptionCursorRequest, NoopNotificationInboxStore,
-    NotificationInboxStorePort, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError,
-    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    ClaimDeliveryAttemptForSendRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundDeliveryId, OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
 pub trait OutboundStateStorePort: Send + Sync {
-    /// Notification-inbox capability exposed by the same durable outbound
-    /// store. Test doubles that do not model the inbox fail closed on writes.
-    fn notification_inbox(&self) -> &dyn NotificationInboxStorePort {
-        static NOOP: NoopNotificationInboxStore = NoopNotificationInboxStore;
-        &NOOP
-    }
-
     async fn put_run_delivery_cleanup(
         &self,
         record: RunDeliveryCleanupRecord,

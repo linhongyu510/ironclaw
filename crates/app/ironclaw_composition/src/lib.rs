@@ -41,6 +41,7 @@ mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
+mod notification_store_assembly;
 mod observability;
 mod operator_secret_store;
 mod operator_tool_catalog;
@@ -433,6 +434,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    "/notifications",
     // The web-app channel's enrollment store. The alias keeps its pre-rename
     // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
     // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would

@@ -43,6 +43,7 @@ ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contract
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../../domains/ironclaw_conversations", version = "0.1.0" }
+ironclaw_notifications = { path = "../../domains/ironclaw_notifications", version = "0.1.0" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
 # The blocked-auth resume fan-out (WS6 eviction from the composition root)
 # reads durable process-gate records to find the caller's other parked runs.

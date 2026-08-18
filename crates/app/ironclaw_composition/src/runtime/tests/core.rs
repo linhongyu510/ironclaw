@@ -6046,21 +6046,21 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
         RUNTIME_POLL_TIMEOUT,
         runtime
             .notification_inbox
-            .publish(ironclaw_outbound::PublishNotificationRequest {
-                id: ironclaw_outbound::NotificationId::new("runtime-notification-1")
+            .publish(ironclaw_notifications::PublishNotificationRequest {
+                id: ironclaw_notifications::NotificationId::new("runtime-notification-1")
                     .expect("notification id"),
-                recipient: ironclaw_outbound::NotificationRecipient {
+                recipient: ironclaw_notifications::NotificationRecipient {
                     tenant_id: caller.tenant_id.clone(),
                     user_id: caller.user_id.clone(),
                 },
-                kind: ironclaw_outbound::NotificationKind::ApprovalRequired,
-                severity: ironclaw_outbound::NotificationSeverity::Warning,
-                source: ironclaw_outbound::NotificationSource {
+                kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
+                severity: ironclaw_notifications::NotificationSeverity::Warning,
+                source: ironclaw_notifications::NotificationSource {
                     thread_id: thread_id.clone(),
                     turn_run_id: Some(TurnRunId::new()),
                     lifecycle_ref: Some("runtime-notification-gate".to_string()),
                 },
-                action: ironclaw_outbound::NotificationAction::OpenThread { thread_id },
+                action: ironclaw_notifications::NotificationAction::OpenThread { thread_id },
                 occurred_at: Utc::now(),
             }),
     )
@@ -6089,6 +6089,19 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
     assert_eq!(initial.notifications.len(), 1);
     assert_eq!(initial.notifications[0].id, "runtime-notification-1");
     assert_eq!(initial.unread_count, 1);
+
+    let invalid_limit = query_product_surface_page(
+        bundle.as_ref(),
+        caller.clone(),
+        RebornViewQuery {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            params: serde_json::json!({ "limit": 0 }),
+            cursor: None,
+        },
+    )
+    .await
+    .expect_err("an invalid notification limit is rejected at the product boundary");
+    assert_eq!(invalid_limit.code, ProductSurfaceErrorCode::InvalidRequest);
 
     let missing = invoke_product_command(
         bundle.as_ref(),
@@ -6156,8 +6169,8 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
         RUNTIME_POLL_TIMEOUT,
         runtime
             .notification_inbox
-            .list(ironclaw_outbound::ListNotificationsRequest {
-                recipient: ironclaw_outbound::NotificationRecipient {
+            .list(ironclaw_notifications::ListNotificationsRequest {
+                recipient: ironclaw_notifications::NotificationRecipient {
                     tenant_id: caller.tenant_id,
                     user_id: caller.user_id,
                 },

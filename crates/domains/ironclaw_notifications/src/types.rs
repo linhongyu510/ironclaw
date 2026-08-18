@@ -1,5 +1,3 @@
-//! Durable, metadata-only user notification inbox contracts.
-
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
@@ -8,14 +6,9 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::OutboundError;
+use crate::NotificationInboxError;
 
 pub const NOTIFICATION_PAGE_LIMIT_MAX: usize = 100;
-/// Maximum number of durable notification records retained for one recipient.
-///
-/// Publishing a new identity at capacity fails closed. Existing identities
-/// remain replayable so idempotent producers can safely retry without making
-/// the inbox grow or requiring implicit retention/deletion policy.
 pub const NOTIFICATION_INBOX_MAX_RECORDS: usize = 1_000;
 pub(crate) const NOTIFICATION_ID_MAX_BYTES: usize = 256;
 
@@ -24,19 +17,19 @@ pub(crate) const NOTIFICATION_ID_MAX_BYTES: usize = 256;
 pub struct NotificationId(String);
 
 impl NotificationId {
-    fn validate(value: &str) -> Result<(), OutboundError> {
+    fn validate(value: &str) -> Result<(), NotificationInboxError> {
         if value.is_empty()
             || value.len() > NOTIFICATION_ID_MAX_BYTES
             || value.chars().any(char::is_control)
         {
-            return Err(OutboundError::InvalidRequest {
+            return Err(NotificationInboxError::InvalidRequest {
                 reason: "notification id is invalid",
             });
         }
         Ok(())
     }
 
-    pub fn new(value: impl Into<String>) -> Result<Self, OutboundError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, NotificationInboxError> {
         let value = value.into();
         Self::validate(&value)?;
         Ok(Self(value))
@@ -52,7 +45,7 @@ impl NotificationId {
 }
 
 impl TryFrom<String> for NotificationId {
-    type Error = OutboundError;
+    type Error = NotificationInboxError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::validate(&value)?;
@@ -102,8 +95,6 @@ pub enum NotificationAction {
 pub struct NotificationSource {
     pub thread_id: ThreadId,
     pub turn_run_id: Option<TurnRunId>,
-    /// Opaque, bounded host-issued reference such as a gate id. It is used
-    /// only for deduplication/resolution and is never rendered to the user.
     pub lifecycle_ref: Option<String>,
 }
 
@@ -166,30 +157,34 @@ pub trait NotificationInboxStorePort: Send + Sync {
     async fn publish(
         &self,
         request: PublishNotificationRequest,
-    ) -> Result<NotificationRecord, OutboundError>;
+    ) -> Result<NotificationRecord, NotificationInboxError>;
 
     async fn list(
         &self,
         request: ListNotificationsRequest,
-    ) -> Result<NotificationPage, OutboundError>;
+    ) -> Result<NotificationPage, NotificationInboxError>;
 
-    async fn mark_read(&self, request: NotificationMutationRequest) -> Result<(), OutboundError>;
+    async fn mark_read(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError>;
 
     async fn mark_all_read(
         &self,
         request: MarkAllNotificationsReadRequest,
-    ) -> Result<(), OutboundError>;
+    ) -> Result<(), NotificationInboxError>;
 
-    async fn resolve(&self, request: NotificationMutationRequest) -> Result<(), OutboundError>;
+    async fn resolve(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError>;
 
-    async fn archive(&self, request: NotificationMutationRequest) -> Result<(), OutboundError>;
+    async fn archive(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError>;
 }
 
-/// Empty default for product surfaces that do not expose an inbox.
-///
-/// Reads are empty, while every write fails loudly so a production surface
-/// cannot acknowledge a notification lifecycle transition without durable
-/// storage being wired.
 #[derive(Debug, Default)]
 pub struct NoopNotificationInboxStore;
 
@@ -198,14 +193,14 @@ impl NotificationInboxStorePort for NoopNotificationInboxStore {
     async fn publish(
         &self,
         _request: PublishNotificationRequest,
-    ) -> Result<NotificationRecord, OutboundError> {
-        Err(OutboundError::Backend)
+    ) -> Result<NotificationRecord, NotificationInboxError> {
+        Err(NotificationInboxError::Backend)
     }
 
     async fn list(
         &self,
         _request: ListNotificationsRequest,
-    ) -> Result<NotificationPage, OutboundError> {
+    ) -> Result<NotificationPage, NotificationInboxError> {
         Ok(NotificationPage {
             notifications: Vec::new(),
             next_cursor: None,
@@ -213,23 +208,32 @@ impl NotificationInboxStorePort for NoopNotificationInboxStore {
         })
     }
 
-    async fn mark_read(&self, _request: NotificationMutationRequest) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
+    async fn mark_read(
+        &self,
+        _request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError> {
+        Err(NotificationInboxError::Backend)
     }
 
     async fn mark_all_read(
         &self,
         _request: MarkAllNotificationsReadRequest,
-    ) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
+    ) -> Result<(), NotificationInboxError> {
+        Err(NotificationInboxError::Backend)
     }
 
-    async fn resolve(&self, _request: NotificationMutationRequest) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
+    async fn resolve(
+        &self,
+        _request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError> {
+        Err(NotificationInboxError::Backend)
     }
 
-    async fn archive(&self, _request: NotificationMutationRequest) -> Result<(), OutboundError> {
-        Err(OutboundError::Backend)
+    async fn archive(
+        &self,
+        _request: NotificationMutationRequest,
+    ) -> Result<(), NotificationInboxError> {
+        Err(NotificationInboxError::Backend)
     }
 }
 
@@ -243,7 +247,6 @@ mod tests {
         assert_eq!(id.as_str(), "notification-1");
         assert_eq!(id.as_ref(), "notification-1");
         assert_eq!(id.into_inner(), "notification-1");
-
         assert!(NotificationId::try_from(String::new()).is_err());
         assert!(serde_json::from_str::<NotificationId>("\"bad\\nid\"").is_err());
     }

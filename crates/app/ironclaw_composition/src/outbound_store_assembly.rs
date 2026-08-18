@@ -2,16 +2,14 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_outbound::{
-    CommunicationPreferenceRepository, DeliveredGateRouteStore, NotificationInboxStorePort,
-    OutboundStateStore, OutboundStateStorePort, ReplyAttachmentIntentPort,
-    TriggeredRunDeliveryStore,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
+    OutboundStateStorePort, ReplyAttachmentIntentPort, TriggeredRunDeliveryStore,
 };
 
 /// All outbound persistence roles backed by one shared store allocation.
 pub(crate) struct OutboundStoreAssembly {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
-    pub(crate) notification_inbox: Arc<dyn NotificationInboxStorePort>,
     pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
@@ -29,7 +27,6 @@ pub(crate) fn build_outbound_stores(
     OutboundStoreAssembly {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
-        notification_inbox: Arc::clone(&store) as Arc<dyn NotificationInboxStorePort>,
         reply_attachment_intents: Arc::clone(&store) as Arc<dyn ReplyAttachmentIntentPort>,
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
