@@ -22,7 +22,6 @@ use ironclaw_loop_host::{
     wrap_external_tools, wrap_surface_disclosure,
 };
 use ironclaw_product_contracts::project_service::ProjectService;
-use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use tokio::sync::Mutex as AsyncMutex;
@@ -57,7 +56,6 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     pub(super) skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     pub(super) project_service: Arc<dyn ProjectService>,
-    pub(super) thread_service: Arc<dyn SessionThreadService>,
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     pub(super) outbound_preference_write_requires_approval: bool,
@@ -115,7 +113,6 @@ pub(crate) async fn create_refreshing_capability_port(
         milestone_sink: config.milestone_sink,
         skill_activation_source: config.skill_activation_source,
         project_service: config.project_service,
-        thread_service: config.thread_service,
         trajectory_observer: config.trajectory_observer,
         outbound_preferences_service: config.outbound_preferences_service,
         outbound_preference_write_requires_approval: config
@@ -156,7 +153,6 @@ struct RefreshingCapabilityPort {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
-    thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_preference_write_requires_approval: bool,
@@ -329,43 +325,20 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.gate_record_store),
             )?);
         }
-        // Unbound structured runs get the synthetic result tool built from
-        // the run's journaled output schema. The run's contract is "complete
-        // by recording a validated result", so a missing record or schema is
-        // a host build failure, never a silently text-shaped run.
-        if self.run_context.resolved_run_profile.profile_id
-            == ironclaw_host_api::turn::RunProfileId::unbound_structured()
-        {
-            let declarations = ironclaw_threads::read_declarations_for_run_scope(
-                self.thread_service.as_ref(),
-                &self.run_context.scope,
-            )
-            .await
-            .map_err(|error| {
-                // debug!, not warn!: background diagnostics stay off the REPL.
-                // The stable summary carries no backend detail (redaction
-                // discipline; the cause is in the trace).
-                tracing::debug!(%error, "unbound structured declarations read failed");
-                AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                    "unbound structured declarations read failed",
-                )
-            })?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
-                    "unbound structured run has no prepared-context declarations",
-                )
-            })?;
-            let ironclaw_host_api::prepared_context::OutputContract::JsonSchema { schema } =
-                declarations.output
-            else {
-                return Err(AgentLoopHostError::new(
-                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
-                    "unbound structured run declares no output schema",
-                ));
-            };
-            synthetic_capabilities.push(ironclaw_loop_host::structured_result_capability(schema)?);
+        let suppressed_scheduled_run = self
+            .run_context
+            .product_context
+            .as_ref()
+            .filter(|context| {
+                context.origin == ironclaw_host_api::turn::TurnOriginKind::ScheduledTrigger
+            })
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery
+                    == ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+            });
+        if suppressed_scheduled_run {
+            synthetic_capabilities.push(ironclaw_loop_host::nothing_to_report_result_capability()?);
         }
         let port = wrap_synthetic_capabilities(
             port,
@@ -546,7 +519,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
-        thread_service,
+        thread_service: _,
         trajectory_observer,
         outbound_preferences_service,
         outbound_preference_write_requires_approval,
@@ -604,7 +577,6 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         milestone_sink,
         skill_activation_source,
         project_service,
-        thread_service,
         trajectory_observer,
         outbound_preferences_service,
         outbound_preference_write_requires_approval,

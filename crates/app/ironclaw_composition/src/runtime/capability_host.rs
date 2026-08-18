@@ -208,7 +208,6 @@ pub(super) fn capability_wiring(
             milestone_sink,
             skill_activation_source,
             project_service,
-            thread_service,
             trajectory_observer,
             outbound_preferences_service,
             outbound_preference_write_requires_approval,
@@ -244,7 +243,6 @@ struct RefreshingLoopCapabilityPortFactory {
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     skill_activation_source: Option<Arc<ComposedSelectableSkillContextSource>>,
     project_service: Arc<dyn ProjectService>,
-    thread_service: Arc<dyn SessionThreadService>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_service: Option<Arc<dyn OutboundPreferencesProductService>>,
     outbound_preference_write_requires_approval: bool,
@@ -344,7 +342,6 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             milestone_sink: Arc::clone(&self.milestone_sink),
             skill_activation_source: self.skill_activation_source.clone(),
             project_service: Arc::clone(&self.project_service),
-            thread_service: Arc::clone(&self.thread_service),
             // Same observer drives both the input hook (on the capability port the
             // refreshing helper builds) and the result hook (on `StagedCapabilityIo`),
             // so the two callbacks correlate by `call_id` for one tool call.

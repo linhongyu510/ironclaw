@@ -19,6 +19,7 @@ mod in_memory;
 mod prepared_context;
 mod service;
 mod stored_message;
+mod structured_finalization;
 mod summary_artifacts;
 mod title;
 mod tool_artifacts;
@@ -48,11 +49,12 @@ pub use contract::{
     GoalStatement, InboundMessageReplayMetadata, LatestThreadMessageRequest,
     ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    PublishStructuredFinalizationMessageRequest, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadRecord, SummaryArtifact, SummaryKind, SummaryModelContextPolicy,
+    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
     effective_tool_result_read_max_bytes,
 };
@@ -66,6 +68,10 @@ pub use prepared_context::{
     PreparedContextRequest, ThreadServicePreparedContextSource, read_declarations_for_run_scope,
     record_is_prepared_context_hidden, validate_output_contract, validate_output_schema,
     validate_prepared_seed_content,
+};
+pub use structured_finalization::{
+    PutStructuredFinalizationRequest, ReadStructuredFinalizationRequest,
+    StructuredFinalizationAccounting, StructuredFinalizationRecord, StructuredFinalizationUsage,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers
@@ -81,5 +87,6 @@ pub use tool_artifacts::{
     DurableToolArtifactStore, LegacyResultArtifactRequest, TOOL_ARTIFACT_CHUNK_BYTES,
 };
 pub use tool_result_reference::{
-    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary,
 };

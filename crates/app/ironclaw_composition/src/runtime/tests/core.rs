@@ -2002,6 +2002,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
         tool_choice: None,
+        response_format: None,
     }
 }
 
@@ -4241,6 +4242,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
@@ -4276,6 +4278,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
                 requested_run_profile: None,
+                output_contract: None,
                 idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
                 received_at: Utc::now(),
                 requested_run_id: None,
@@ -4317,6 +4320,7 @@ async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     runtime
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: runtime.thread_scope.clone(),
             thread_id: parent_scope.thread_id.clone(),
             turn_run_id: parent_run_id.to_string(),
@@ -7194,6 +7198,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
+            output_contract: None,
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),

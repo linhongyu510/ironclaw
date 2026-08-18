@@ -14,7 +14,6 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 use super::{
@@ -90,7 +89,6 @@ async fn standalone_yolo_bash_translates_workspace_workdir_without_scoped_mounts
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = RefreshingLoopCapabilityPortFactory {
-        thread_service: Arc::new(InMemorySessionThreadService::default()),
         runtime,
         fallback_user_id: UserId::new("standalone-shell-user").expect("user id"),
         policy,

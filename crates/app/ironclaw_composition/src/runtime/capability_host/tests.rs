@@ -23,7 +23,7 @@ mod tests {
             ArtifactReadRequest, ArtifactReadTarget, ArtifactRef, ArtifactSelector,
             ArtifactWriteMetadata,
         },
-        capability::EffectKind,
+        capability::{EXTENSION_SEARCH_CAPABILITY_ID, EffectKind},
         ids::{
             AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName,
             ResourceReservationId, TenantId, ThreadId, UserId,
@@ -69,7 +69,7 @@ mod tests {
     use ironclaw_assistant::RebornOutboundPreferencesService;
     use ironclaw_extension_manager::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
-        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID,
     };
 
     #[derive(Default)]
@@ -1347,6 +1347,7 @@ mod tests {
         };
         thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
@@ -2242,7 +2243,6 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
@@ -2522,7 +2522,6 @@ mod tests {
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
@@ -2605,7 +2604,6 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
@@ -2735,6 +2733,7 @@ mod tests {
     }
 
     #[tokio::test]
+
     async fn standalone_outbound_delivery_targets_list_uses_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
@@ -2822,7 +2821,6 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             ));
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
@@ -3519,7 +3517,6 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
@@ -3627,7 +3624,6 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -3940,7 +3936,6 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("standalone-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4074,7 +4069,6 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = RefreshingLoopCapabilityPortFactory {
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
             runtime,
             fallback_user_id: UserId::new("standalone-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
