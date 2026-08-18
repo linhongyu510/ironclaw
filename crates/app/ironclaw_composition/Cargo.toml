@@ -169,6 +169,8 @@ ironclaw_host_runtime = { path = "../../kernel/ironclaw_host_runtime", features 
 # mem0 provider with its mock transport: the provider-swap integration test
 # drives the config-driven factory over the in-memory `MockMem0Transport`.
 ironclaw_memory_mem0 = { path = "../../extensions/packages/mem0", features = ["test-support"] }
+# Mnesis provider with its mock transport, for the same reason.
+ironclaw_memory_mnesis = { path = "../../extensions/packages/mnesis", features = ["test-support"] }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", features = ["test-support"] }
 ironclaw_conversations = { path = "../../domains/ironclaw_conversations" }
 ironclaw_composition = { path = ".", features = ["test-support"] }

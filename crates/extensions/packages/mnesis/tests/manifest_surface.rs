@@ -89,7 +89,7 @@ fn the_two_lanes_stay_distinct_and_are_never_presented_as_one_surface() {
         "the memory lane keeps the stable IronClaw tool id"
     );
     assert!(
-        MANIFEST.contains("mnesis.knowledge.search"),
+        MANIFEST.contains("mnesis.hosted.memory.knowledge.search"),
         "corpus retrieval is a distinct tool, not an ironclaw.memory.* id"
     );
     let memory_output =

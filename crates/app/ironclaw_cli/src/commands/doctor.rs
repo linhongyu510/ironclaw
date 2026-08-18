@@ -59,6 +59,8 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     let providers_path = context.boot_config().home().providers_file_path();
     checks.push(check_providers_file(&providers_path));
 
+    checks.push(check_memory_binding(&config_path));
+
     let snapshot = reborn_runtime_readiness_snapshot();
 
     checks.push(driver_check("text_only_driver", &snapshot.text_only_driver));
@@ -83,6 +85,66 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
     DoctorDto {
         checks,
         summary: DoctorSummary { pass, fail, skip },
+    }
+}
+
+const MNESIS_MEMORY_PROVIDER_ID: &str = "mnesis.hosted.memory";
+
+const MNESIS_REQUIRED_ENV: [&str; 4] = [
+    "MEMORY_MNESIS_KNOWLEDGE_ENDPOINT",
+    "MEMORY_MNESIS_MEMORY_ENDPOINT",
+    "MEMORY_MNESIS_KNOWLEDGE_TOKEN",
+    "MEMORY_MNESIS_MEMORY_TOKEN",
+];
+
+/// Reports the bound memory provider and, for Mnesis, which required settings
+/// are present. Presence only: no endpoint, token, or handle value is read out.
+fn check_memory_binding(path: &std::path::Path) -> DoctorCheck {
+    let provider = RebornConfigFile::load(path)
+        .ok()
+        .flatten()
+        .and_then(|file| file.memory)
+        .and_then(|memory| memory.provider);
+    let Some(provider) = provider else {
+        return DoctorCheck {
+            name: "memory_binding".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Pass,
+            detail: "ironclaw.memory (default native binding)".to_string(),
+        };
+    };
+    if provider != MNESIS_MEMORY_PROVIDER_ID {
+        return DoctorCheck {
+            name: "memory_binding".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Pass,
+            detail: provider,
+        };
+    }
+    let missing: Vec<&str> = MNESIS_REQUIRED_ENV
+        .iter()
+        .copied()
+        .filter(|name| {
+            !std::env::var(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .collect();
+    let outcome = if missing.is_empty() {
+        CheckOutcome::Pass
+    } else {
+        CheckOutcome::Fail
+    };
+    let detail = if missing.is_empty() {
+        format!("{provider} (all lane settings present)")
+    } else {
+        format!("{provider} (unset: {})", missing.join(", "))
+    };
+    DoctorCheck {
+        name: "memory_binding".to_string(),
+        category: CheckCategory::Core,
+        outcome,
+        detail,
     }
 }
 
@@ -234,6 +296,32 @@ mod tests {
     fn doctor_providers_file_absent_is_skip() {
         let check = check_providers_file(std::path::Path::new("/nonexistent/providers.json"));
         assert_eq!(check.outcome, CheckOutcome::Skip);
+    }
+
+    #[test]
+    fn doctor_memory_binding_defaults_to_native() {
+        let check = check_memory_binding(std::path::Path::new("/nonexistent/config.toml"));
+        assert_eq!(check.outcome, CheckOutcome::Pass);
+        assert!(check.detail.contains("ironclaw.memory"));
+    }
+
+    #[test]
+    fn doctor_memory_binding_reports_unset_mnesis_settings_without_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("[memory]\nprovider = \"{MNESIS_MEMORY_PROVIDER_ID}\"\n"),
+        )
+        .unwrap();
+
+        let check = check_memory_binding(&path);
+
+        assert_eq!(check.outcome, CheckOutcome::Fail);
+        for name in MNESIS_REQUIRED_ENV {
+            assert!(check.detail.contains(name), "{name} must be reported");
+        }
+        assert!(!check.detail.contains("Bearer"));
     }
 
     #[test]

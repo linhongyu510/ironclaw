@@ -106,7 +106,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "ironclaw.memory.search",
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
-    "mnesis.knowledge.search",
+    "mnesis.hosted.memory.knowledge.search",
     "builtin.read_file",
     "builtin.list_dir",
     "builtin.glob",

@@ -1,0 +1,131 @@
+{
+  "classes": [
+    {
+      "error": {
+        "version": 1,
+        "class": "input",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "provider request failed validation",
+        "retryAfterMs": null
+      },
+      "transient": false,
+      "hostErrorKind": "input",
+      "httpStatus": 400,
+      "retryableWhenIdempotent": false
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "policy_denied",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "principal is not authorized for this owner scope",
+        "retryAfterMs": null
+      },
+      "transient": false,
+      "hostErrorKind": "operation",
+      "httpStatus": 403,
+      "retryableWhenIdempotent": false
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "unauthenticated",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "bearer identity was rejected",
+        "retryAfterMs": null
+      },
+      "transient": false,
+      "hostErrorKind": "operation",
+      "httpStatus": 401,
+      "retryableWhenIdempotent": false
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "unavailable",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "retrieval lane unavailable",
+        "retryAfterMs": 1000
+      },
+      "transient": true,
+      "hostErrorKind": "unavailable",
+      "httpStatus": 503,
+      "retryableWhenIdempotent": true
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "deadline",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "deadline budget elapsed before completion",
+        "retryAfterMs": null
+      },
+      "transient": true,
+      "hostErrorKind": "unavailable",
+      "httpStatus": 504,
+      "retryableWhenIdempotent": true
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "rate_limited",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "tenant capacity reached",
+        "retryAfterMs": 2500
+      },
+      "transient": true,
+      "hostErrorKind": "unavailable",
+      "httpStatus": 429,
+      "retryableWhenIdempotent": true
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "corrupt_response",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "response failed contract decoding",
+        "retryAfterMs": null
+      },
+      "transient": false,
+      "hostErrorKind": "operation",
+      "httpStatus": 502,
+      "retryableWhenIdempotent": false
+    },
+    {
+      "error": {
+        "version": 1,
+        "class": "internal",
+        "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "message": "provider operation failed",
+        "retryAfterMs": null
+      },
+      "transient": false,
+      "hostErrorKind": "operation",
+      "httpStatus": 500,
+      "retryableWhenIdempotent": false
+    }
+  ],
+  "statusToClass": [
+    { "status": 400, "class": "input" },
+    { "status": 401, "class": "unauthenticated" },
+    { "status": 403, "class": "policy_denied" },
+    { "status": 404, "class": "unauthenticated" },
+    { "status": 413, "class": "input" },
+    { "status": 415, "class": "input" },
+    { "status": 429, "class": "rate_limited" },
+    { "status": 503, "class": "unavailable" },
+    { "status": 504, "class": "deadline" },
+    { "status": 418, "class": "input" },
+    { "status": 507, "class": "unavailable" },
+    { "status": 200, "class": "corrupt_response" }
+  ],
+  "cancellation": [
+    { "reason": "client_disconnect", "errorClass": null },
+    { "reason": "deadline_exceeded", "errorClass": "deadline" },
+    { "reason": "server_shutdown", "errorClass": "unavailable" }
+  ],
+  "boundaries": {
+    "maximumErrorMessageBytes": 512,
+    "maximumRetryAfterMs": 3600000
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "readLongTerm": {
+    "version": 1,
+    "operation": "read_long_term",
+    "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "deadlineBudgetMs": 5000,
+    "query": "what did we decide about payout cadence",
+    "maxSnippets": 8,
+    "contextProfileId": "default"
+  },
+  "readShortTerm": {
+    "version": 1,
+    "operation": "read_short_term",
+    "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "deadlineBudgetMs": 2500,
+    "query": "current thread summary",
+    "maxSnippets": 4,
+    "contextProfileId": "default"
+  },
+  "memorySearch": {
+    "version": 1,
+    "operation": "memory_search",
+    "correlationId": "11111111-2222-4333-8444-555555555555",
+    "deadlineBudgetMs": 10000,
+    "query": "prior corrections to the payout model",
+    "limit": 20
+  },
+  "knowledgeSearch": {
+    "version": 1,
+    "operation": "knowledge_search",
+    "correlationId": "11111111-2222-4333-8444-555555555555",
+    "deadlineBudgetMs": 10000,
+    "query": "retrieval calibration contract",
+    "limit": 50,
+    "source": null,
+    "hybrid": true
+  },
+  "recordInteraction": {
+    "version": 1,
+    "operation": "record_interaction",
+    "correlationId": "99999999-8888-4777-8666-555555555555",
+    "deadlineBudgetMs": 15000,
+    "operationId": "77777777-6666-4555-8444-333333333333",
+    "turnRunId": "run-2026-08-15-01",
+    "messages": [
+      {
+        "role": "user",
+        "content": "summarize the payout decision",
+        "name": null
+      },
+      {
+        "role": "assistant",
+        "content": "The cadence stays monthly with an epoch-boundary guard.",
+        "name": null
+      }
+    ],
+    "metadata": {
+      "surface": "webchat"
+    }
+  },
+  "boundaries": {
+    "maximumQueryBytes": 4096,
+    "maximumContextSnippets": 50,
+    "maximumMemorySearchResults": 20,
+    "maximumKnowledgeSearchResults": 50,
+    "maximumInteractionMessages": 64,
+    "maximumMessageBytes": 8192,
+    "maximumInteractionBytes": 131072,
+    "maximumMetadataEntries": 32,
+    "maximumDeadlineBudgetMs": 60000
+  }
+}

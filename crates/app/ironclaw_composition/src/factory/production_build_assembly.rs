@@ -23,6 +23,7 @@ pub(super) async fn build_production_shaped(
         trust_fixture_extensions_for_test,
         memory_binding_policy,
         memory_provider_connection,
+        mnesis_connection,
         ..
     } = input;
     let owner_id = deployment.owner_id.clone();
@@ -48,7 +49,8 @@ pub(super) async fn build_production_shaped(
         }
         crate::resolve_memory_provider(
             memory_binding_policy,
-            &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
+            &crate::MemoryProviderDeps::for_third_party(memory_provider_connection)
+                .with_mnesis(mnesis_connection),
         )?
     };
     let profile = deployment.profile();

@@ -3,6 +3,7 @@ use ironclaw_memory::{
     MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation, MemoryService,
     MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
     MemoryServiceErrorKind, MemoryServiceRecordRequest, MemoryServiceRecordResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     memory_context_disabled,
 };
 use serde_json::{Value, json};
@@ -68,6 +69,67 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         }
         .encode()
         .ok()
+    }
+
+    /// Backs `ironclaw.memory.search`.
+    pub async fn search(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceSearchRequest,
+    ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
+        self.search_lane(MnesisLane::Memory, "memory_search", invocation, request)
+            .await
+    }
+
+    /// Backs the knowledge tool. Separate lane so corpus evidence never lands
+    /// in owner-scoped memory results.
+    pub async fn knowledge_search(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceSearchRequest,
+    ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
+        self.search_lane(
+            MnesisLane::Knowledge,
+            "knowledge_search",
+            invocation,
+            request,
+        )
+        .await
+    }
+
+    async fn search_lane(
+        &self,
+        lane: MnesisLane,
+        operation: &'static str,
+        invocation: MemoryInvocation,
+        request: MemoryServiceSearchRequest,
+    ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
+        if request.query.trim().is_empty() {
+            return Ok(MemoryServiceSearchResponse {
+                query: request.query,
+                results: Vec::new(),
+            });
+        }
+        if request.query.len() > MAX_QUERY_BYTES {
+            return Err(MemoryServiceError::input());
+        }
+        let limit = request.limit.min(MAX_SNIPPETS);
+        let attribution = self.attribution_for(&invocation);
+        let hits = self
+            .query_lane(lane, operation, &request.query, limit, attribution)
+            .await?;
+        Ok(MemoryServiceSearchResponse {
+            query: request.query,
+            results: hits
+                .into_iter()
+                .map(|hit| MemoryServiceSearchResult {
+                    content: hit.text,
+                    score: hit.score,
+                    path: hit.relative_path,
+                    is_hybrid_match: matches!(lane, MnesisLane::Knowledge),
+                })
+                .collect(),
+        })
     }
 
     async fn query_lane(
@@ -313,10 +375,11 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MnesisResult {
     pub relative_path: String,
     pub text: String,
+    pub score: f32,
     pub owner_scope: Option<ResultOwnerScope>,
 }
 
@@ -427,6 +490,11 @@ fn decode_results(body: &Value, limit: usize) -> Vec<MnesisResult> {
             Some(MnesisResult {
                 relative_path: safe_relative_path(path),
                 text: text.to_string(),
+                score: object
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .map(|score| score as f32)
+                    .unwrap_or_default(),
                 owner_scope: decode_owner_scope(object),
             })
         })
@@ -472,6 +540,7 @@ mod tests {
         let unscoped = MnesisResult {
             relative_path: "a.md".to_string(),
             text: "alpha".to_string(),
+            score: 0.0,
             owner_scope: None,
         };
         assert!(unscoped.into_snippet().is_none());

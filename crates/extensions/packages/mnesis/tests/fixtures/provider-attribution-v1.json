@@ -1,0 +1,23 @@
+{
+  "attribution": {
+    "version": 1,
+    "ownerScope": {
+      "version": 1,
+      "recordClass": "thread-private",
+      "tenantId": "near ai",
+      "principalId": "José",
+      "agentId": "research-agent",
+      "projectId": "company-brain",
+      "threadId": "thread-42"
+    },
+    "missionId": "memory evaluation",
+    "invocationId": "11111111-2222-4333-8444-555555555555",
+    "correlationId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "deadlineAt": 1800000000000
+  },
+  "ownerScopeKey": "mos1.WzEsInRocmVhZC1wcml2YXRlIiwibmVhciBhaSIsIkpvc8OpIiwicmVzZWFyY2gtYWdlbnQiLCJjb21wYW55LWJyYWluIiwidGhyZWFkLTQyIl0",
+  "encoding": "mpa1.WzEsIm1vczEuV3pFc0luUm9jbVZoWkMxd2NtbDJZWFJsSWl3aWJtVmhjaUJoYVNJc0lrcHZjOE9wSWl3aWNtVnpaV0Z5WTJndFlXZGxiblFpTENKamIyMXdZVzU1TFdKeVlXbHVJaXdpZEdoeVpXRmtMVFF5SWwwIiwibWVtb3J5IGV2YWx1YXRpb24iLCIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJhYWFhYWFhYS1iYmJiLTRjY2MtOGRkZC1lZWVlZWVlZWVlZWUiLDE4MDAwMDAwMDAwMDBd",
+  "headers": {
+    "X-Mnesis-Provider-Attribution": "mpa1.WzEsIm1vczEuV3pFc0luUm9jbVZoWkMxd2NtbDJZWFJsSWl3aWJtVmhjaUJoYVNJc0lrcHZjOE9wSWl3aWNtVnpaV0Z5WTJndFlXZGxiblFpTENKamIyMXdZVzU1TFdKeVlXbHVJaXdpZEdoeVpXRmtMVFF5SWwwIiwibWVtb3J5IGV2YWx1YXRpb24iLCIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJhYWFhYWFhYS1iYmJiLTRjY2MtOGRkZC1lZWVlZWVlZWVlZWUiLDE4MDAwMDAwMDAwMDBd"
+  }
+}

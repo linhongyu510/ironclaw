@@ -43,7 +43,7 @@ use ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID;
 #[cfg(feature = "memory-mnesis")]
 use ironclaw_memory_mnesis::{
     EndpointProfile, MnesisConfig, MnesisHttpTransport, MnesisLimits, MnesisMemoryService,
-    SecretHandle,
+    MnesisTransport, SecretHandle,
 };
 #[cfg(test)]
 use ironclaw_memory_native::NativeMemoryService;
@@ -113,6 +113,8 @@ pub struct MemoryProviderDeps {
     pub mem0_transport_override: Option<Arc<dyn Mem0Transport>>,
     /// Mnesis connection settings for the mnesis arm.
     pub mnesis: MnesisConnectionConfig,
+    #[cfg(feature = "memory-mnesis")]
+    pub mnesis_transport_override: Option<Arc<dyn MnesisTransport>>,
 }
 
 /// Mnesis connection settings. Carries secret handles plus the resolved bearer
@@ -144,6 +146,8 @@ impl MemoryProviderDeps {
             #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
             mnesis: MnesisConnectionConfig::default(),
+            #[cfg(feature = "memory-mnesis")]
+            mnesis_transport_override: None,
         }
     }
 
@@ -208,10 +212,19 @@ fn create_third_party_provider(
     None
 }
 
+/// Erased so the HTTP and mock arms share one type the handler can hold.
 #[cfg(feature = "memory-mnesis")]
-fn create_mnesis_provider(
-    deps: &MemoryProviderDeps,
-) -> Option<Arc<MnesisMemoryService<MnesisHttpTransport>>> {
+type MnesisProvider = MnesisMemoryService<Arc<dyn MnesisTransport>>;
+
+#[cfg(feature = "memory-mnesis")]
+const MNESIS_KNOWLEDGE_SEARCH_CAPABILITY_ID: &str = "mnesis.hosted.memory.knowledge.search";
+
+#[cfg(feature = "memory-mnesis")]
+fn create_mnesis_provider(deps: &MemoryProviderDeps) -> Option<Arc<MnesisProvider>> {
+    if let Some(transport) = deps.mnesis_transport_override.clone() {
+        return Some(Arc::new(MnesisMemoryService::new(transport)));
+    }
+
     let settings = &deps.mnesis;
     let (Some(knowledge_endpoint), Some(memory_endpoint)) = (
         settings.knowledge_endpoint.as_deref(),
@@ -260,7 +273,9 @@ fn create_mnesis_provider(
         knowledge_bearer.expose_secret(),
         memory_bearer.expose_secret(),
     ) {
-        Ok(transport) => Some(Arc::new(MnesisMemoryService::new(transport))),
+        Ok(transport) => Some(Arc::new(MnesisMemoryService::new(
+            Arc::new(transport) as Arc<dyn MnesisTransport>
+        ))),
         Err(error) => {
             tracing::warn!(
                 target: LOG_TARGET,
@@ -443,6 +458,10 @@ pub fn resolve_memory_provider(
                                 ),
                             }
                         })?;
+                        let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
+                            Arc::new(MnesisMemoryToolHandler {
+                                provider: Arc::clone(&provider),
+                            });
                         ResolvedMemoryProvider {
                             resolver: resolver.with_third_party_provider(
                                 extension_id.as_str(),
@@ -450,7 +469,7 @@ pub fn resolve_memory_provider(
                             ),
                             package: Some(bundle.package),
                             lifecycle: bundle.lifecycle,
-                            tool_handler: None,
+                            tool_handler: Some(tool_handler),
                             guidance: bundle.guidance,
                         }
                     }
@@ -467,6 +486,52 @@ pub fn resolve_memory_provider(
             );
             Ok(ResolvedMemoryProvider::unbound(resolver))
         }
+    }
+}
+
+/// Routes the manifest's two model-visible tools to their lanes.
+#[cfg(feature = "memory-mnesis")]
+#[derive(Debug)]
+struct MnesisMemoryToolHandler {
+    provider: Arc<MnesisProvider>,
+}
+
+#[cfg(feature = "memory-mnesis")]
+#[async_trait::async_trait]
+impl FirstPartyCapabilityHandler for MnesisMemoryToolHandler {
+    async fn dispatch(
+        &self,
+        request: ironclaw_host_runtime::FirstPartyCapabilityRequest,
+    ) -> Result<
+        ironclaw_host_runtime::FirstPartyCapabilityResult,
+        ironclaw_host_runtime::FirstPartyCapabilityError,
+    > {
+        use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
+        use ironclaw_host_runtime::{
+            FirstPartyCapabilityError, finish_memory_tool_result, map_memory_service_error,
+            memory_invocation_for_request,
+        };
+        use ironclaw_memory::{
+            MEMORY_SEARCH_CAPABILITY_ID, MemoryServiceSearchRequest, search_response_output,
+        };
+
+        let start = std::time::Instant::now();
+        let invocation = memory_invocation_for_request(&request);
+        let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)
+            .map_err(map_memory_service_error)?;
+        let response = match request.capability_id.as_str() {
+            MEMORY_SEARCH_CAPABILITY_ID => self.provider.search(invocation, parsed).await,
+            MNESIS_KNOWLEDGE_SEARCH_CAPABILITY_ID => {
+                self.provider.knowledge_search(invocation, parsed).await
+            }
+            _ => {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::OperationFailed,
+                ));
+            }
+        }
+        .map_err(map_memory_service_error)?;
+        finish_memory_tool_result(search_response_output(response), start)
     }
 }
 
@@ -655,6 +720,8 @@ mod tests {
             #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
             mnesis: MnesisConnectionConfig::default(),
+            #[cfg(feature = "memory-mnesis")]
+            mnesis_transport_override: None,
         };
         assert!(create_provider(&MemoryProviderBinding::Native, &deps).is_some());
     }

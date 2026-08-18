@@ -23,7 +23,7 @@ input_schema_ref = "schemas/memory/search.input.v1.json"
 output_schema_ref = "schemas/memory/search.output.v1.json"
 
 [[tools]]
-id = "mnesis.knowledge.search"
+id = "mnesis.hosted.memory.knowledge.search"
 description = "Search the Mnesis indexed corpus for evidence relevant to the current question. Returns document evidence with source provenance and an index generation, not personal memory, and its scores are not comparable with memory scores. Scope comes from the trusted invocation and cannot be supplied or widened by the model."
 effects = ["read_filesystem"]
 default_permission = "allow"

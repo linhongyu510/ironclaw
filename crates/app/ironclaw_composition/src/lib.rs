@@ -130,9 +130,12 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 // consumer: `ironclaw_cli` runtime, `tests/integration/group_memory` · pinned by: `composition/tests/memory_mem0_swap.rs` (`MemoryLifecycleConsumers` is the fn's return type)
 pub use memory_provider_factory::{
-    Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
-    memory_lifecycle_consumers, resolve_memory_provider,
+    Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, MnesisConnectionConfig,
+    ResolvedMemoryProvider, memory_lifecycle_consumers, resolve_memory_provider,
 };
+// consumer: `ironclaw_cli` runtime Mnesis connection · pinned by: `ironclaw_cli` runtime build (`--features memory-mnesis`)
+#[cfg(feature = "memory-mnesis")]
+pub use ironclaw_memory_mnesis::{EndpointProfile as MnesisEndpointProfile, SecretHandle};
 // consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 // consumer: `ironclaw_cli` explicit sandbox-profile boot wiring · pinned by: `ironclaw_cli` runtime build + profile tests

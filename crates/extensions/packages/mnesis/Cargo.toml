@@ -50,5 +50,10 @@ tracing = "0.1"
 
 [dev-dependencies]
 ironclaw_memory_mnesis = { path = ".", features = ["test-support"] }
+# The provider-level MemoryService contract suite this crate wires in
+# tests/memory_service_contract.rs (over a stateful fake Mnesis server).
+ironclaw_memory = { path = "../../../domains/ironclaw_memory", features = [
+    "test-support",
+] }
 base64 = "0.22"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

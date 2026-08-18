@@ -787,6 +787,7 @@ pub(crate) fn build_services_input_with_options(
         app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
     };
     services_input = services_input.with_memory_provider_connection(memory_provider_connection);
+    services_input = services_input.with_mnesis_connection(mnesis_connection());
 
     Ok(RuntimeServicesInput {
         services_input,
@@ -1303,6 +1304,41 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Mnesis lane endpoints and bearers. Both lanes must be fully supplied or the
+/// factory fails closed; nothing here has a default and no value is logged.
+fn mnesis_connection() -> ironclaw_composition::MnesisConnectionConfig {
+    #[cfg(feature = "memory-mnesis")]
+    {
+        let handle = |name: &str| {
+            optional_nonempty_env(name)
+                .and_then(|raw| ironclaw_composition::SecretHandle::new(raw).ok())
+        };
+        ironclaw_composition::MnesisConnectionConfig {
+            knowledge_endpoint: optional_nonempty_env("MEMORY_MNESIS_KNOWLEDGE_ENDPOINT"),
+            memory_endpoint: optional_nonempty_env("MEMORY_MNESIS_MEMORY_ENDPOINT"),
+            knowledge_credential: handle("MEMORY_MNESIS_KNOWLEDGE_CREDENTIAL"),
+            memory_credential: handle("MEMORY_MNESIS_MEMORY_CREDENTIAL"),
+            knowledge_bearer: optional_nonempty_env("MEMORY_MNESIS_KNOWLEDGE_TOKEN")
+                .map(SecretString::from),
+            memory_bearer: optional_nonempty_env("MEMORY_MNESIS_MEMORY_TOKEN")
+                .map(SecretString::from),
+            host_allowlist: optional_nonempty_env("MEMORY_MNESIS_HOST_ALLOWLIST")
+                .map(|raw| {
+                    raw.split(',')
+                        .map(|host| host.trim().to_string())
+                        .filter(|host| !host.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            profile: ironclaw_composition::MnesisEndpointProfile::default(),
+        }
+    }
+    #[cfg(not(feature = "memory-mnesis"))]
+    {
+        ironclaw_composition::MnesisConnectionConfig::default()
+    }
 }
 
 pub(crate) fn default_owner_id(config_file: Option<&ironclaw_config::RebornConfigFile>) -> &str {

@@ -23,10 +23,10 @@ use secrecy::SecretString;
 use ironclaw_config::StorageBackend;
 use ironclaw_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
-use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
+use crate::{Mem0ConnectionConfig, MnesisConnectionConfig};
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
@@ -224,6 +224,7 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
+    pub(crate) mnesis_connection: MnesisConnectionConfig,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -412,6 +413,13 @@ impl RebornHostBindings {
     /// when the binding policy binds a third-party provider; otherwise inert.
     pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
         self.memory_provider_connection = connection;
+        self
+    }
+
+    /// Mnesis lane endpoints and credentials, read from `MEMORY_MNESIS_*` env.
+    /// Only consulted when the binding policy binds Mnesis; otherwise inert.
+    pub fn with_mnesis_connection(mut self, connection: MnesisConnectionConfig) -> Self {
+        self.mnesis_connection = connection;
         self
     }
 
@@ -955,6 +963,7 @@ impl RebornHostBindings {
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
+            mnesis_connection: MnesisConnectionConfig::default(),
         }
     }
 

@@ -1,3 +1,7 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
+
 use ironclaw_memory::{MemoryService, MemoryServiceErrorKind};
 use ironclaw_memory_mnesis::{
     EndpointProfile, MnesisConfig, MnesisError, MnesisHttpTransport, MnesisLane, MnesisLimits,
@@ -287,6 +291,88 @@ async fn every_read_is_marked_idempotent_so_retry_stays_safe() {
     let recorded = service.transport().recorded();
     assert!(!recorded.is_empty());
     assert!(recorded.iter().all(|request| request.idempotent));
+}
+
+#[tokio::test]
+async fn a_redirect_is_never_followed_and_the_credential_never_reaches_its_target() {
+    let (relay_port, relayed) = redirect_target();
+    let origin_port = redirecting_origin(relay_port);
+    let config = config_for(
+        &format!("http://127.0.0.1:{origin_port}"),
+        EndpointProfile::LoopbackDevelopment,
+    );
+    let transport = build(&config, "redirect-canary-bearer").expect("loopback is permitted");
+
+    let response = transport
+        .execute(MnesisRequest {
+            lane: MnesisLane::Memory,
+            operation: "memory_search",
+            body: json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+            idempotent: false,
+            attribution: None,
+        })
+        .await
+        .expect("a redirect is a response, not a transport failure");
+
+    assert!(
+        relayed.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the redirect target was contacted, so the credential left its configured endpoint"
+    );
+    assert_eq!(
+        response.status, 302,
+        "the redirect must surface to the caller rather than being followed"
+    );
+    assert!(!response.is_success());
+}
+
+fn redirect_target() -> (u16, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the redirect target binds");
+    let port = listener
+        .local_addr()
+        .expect("the redirect target reports its address")
+        .port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let request = read_bounded(&mut stream);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let _ = stream.flush();
+            let _ = sender.send(request);
+        }
+    });
+    (port, receiver)
+}
+
+fn redirecting_origin(target_port: u16) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the redirecting origin binds");
+    let port = listener
+        .local_addr()
+        .expect("the redirecting origin reports its address")
+        .port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            read_bounded(&mut stream);
+            let redirect = format!(
+                "HTTP/1.1 302 Found\r\n\
+                 Location: http://127.0.0.1:{target_port}/relayed\r\n\
+                 Content-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(redirect.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
+fn read_bounded(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let mut buffer = [0_u8; 4096];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    String::from_utf8_lossy(&buffer[..read]).into_owned()
 }
 
 #[tokio::test]

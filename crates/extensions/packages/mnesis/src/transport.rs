@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
@@ -81,6 +83,16 @@ impl MnesisTransportError {
 pub trait MnesisTransport: Send + Sync {
     async fn execute(&self, request: MnesisRequest)
     -> Result<MnesisResponse, MnesisTransportError>;
+}
+
+#[async_trait]
+impl MnesisTransport for Arc<dyn MnesisTransport> {
+    async fn execute(
+        &self,
+        request: MnesisRequest,
+    ) -> Result<MnesisResponse, MnesisTransportError> {
+        self.as_ref().execute(request).await
+    }
 }
 
 pub struct MnesisHttpTransport {
