@@ -61,6 +61,7 @@ pub struct ProductNotification {
     pub severity: ProductNotificationSeverity,
     pub action: ProductNotificationAction,
     pub thread_id: String,
+    pub turn_run_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub read_at: Option<DateTime<Utc>>,

@@ -2980,6 +2980,7 @@ where
                         }
                     },
                     thread_id: record.source.thread_id.to_string(),
+                    turn_run_id: record.source.turn_run_id.map(|id| id.to_string()),
                     created_at: record.created_at,
                     updated_at: record.updated_at,
                     read_at: record.read_at,

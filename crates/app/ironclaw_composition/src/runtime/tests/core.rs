@@ -6088,6 +6088,7 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
         serde_json::from_value(initial_page.payload).expect("notification response");
     assert_eq!(initial.notifications.len(), 1);
     assert_eq!(initial.notifications[0].id, "runtime-notification-1");
+    assert!(initial.notifications[0].turn_run_id.is_some());
     assert_eq!(initial.unread_count, 1);
 
     let invalid_limit = query_product_surface_page(

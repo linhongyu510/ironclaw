@@ -1508,6 +1508,7 @@ impl StubServices {
                             thread_id: "thread-alpha".to_string(),
                         },
                         thread_id: "thread-alpha".to_string(),
+                        turn_run_id: Some("run-alpha".to_string()),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                         read_at: None,
@@ -3348,6 +3349,7 @@ async fn notification_inbox_routes_query_and_mutate_product_surface() {
     assert_eq!(list.status(), StatusCode::OK);
     let body = read_json(list).await;
     assert_eq!(body["notifications"][0]["kind"], "authentication_required");
+    assert_eq!(body["notifications"][0]["turn_run_id"], "run-alpha");
     assert_eq!(body["unread_count"], 1);
 
     for (path, operation_id) in [
