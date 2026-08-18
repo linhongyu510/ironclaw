@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0-rc.2] - 2026-08-18
+
+### Fixed in 1.3.0-rc.2
+
+- Upgrades from 1.2 now accept and preserve the released extension
+  `activation_state` field instead of crash-looping during startup.
+- The canonical Reborn runtime image again supports opt-in, public-key-only
+  worker SSH on port 2222 while running IronClaw as an unprivileged user.
+
 ## [1.3.0-rc.1] - 2026-08-17
 
 ## [1.2.0] - 2026-08-13
