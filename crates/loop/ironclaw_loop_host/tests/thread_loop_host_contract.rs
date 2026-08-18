@@ -4016,6 +4016,7 @@ async fn transcript_port_replaces_unsafe_inline_output_with_typed_safety_observa
             result_ref: result_ref.clone(),
             safe_summary: "tool completed".to_string(),
             provider_call: None,
+            intrinsic_outcome: None,
             model_observation: Some(observation),
         })
         .await
@@ -4028,6 +4029,7 @@ async fn transcript_port_replaces_unsafe_inline_output_with_typed_safety_observa
             result_ref: safe_result_ref.clone(),
             safe_summary: "tool completed".to_string(),
             provider_call: None,
+            intrinsic_outcome: None,
             model_observation: Some(ModelVisibleToolObservation {
                 schema_version: 1,
                 status: ToolObservationStatus::Success,

@@ -815,6 +815,14 @@ impl ResourceGovernor for ReleaseFailsOnceGovernor {
     ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
         self.inner.reserve_with_outcome(scope, estimate)
     }
+    fn grow_reservation_with_outcome(
+        &self,
+        reservation_id: ironclaw_host_api::ids::ResourceReservationId,
+        additional: ironclaw_host_api::resource::ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ironclaw_resources::ResourceError> {
+        self.inner
+            .grow_reservation_with_outcome(reservation_id, additional)
+    }
 
     fn reserve_with_id_and_outcome(
         &self,
@@ -898,6 +906,7 @@ async fn first_party_adapter_retries_a_failed_reservation_release_on_the_next_di
         SecretMode::ScrubbedEnv,
     );
     let lane_request = || RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -1009,6 +1018,7 @@ async fn first_party_adapter_defers_a_failed_release_after_planner_failure() {
     );
     let reservation = prepared_reservation(&governor, &scope);
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
@@ -1079,6 +1089,7 @@ async fn first_party_adapter_defers_a_failed_release_after_service_resolution_fa
     );
     let reservation = prepared_reservation(&governor, &scope);
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
+        artifact_namespace: None,
         run_id: None,
         origin: None,
         package: &package,
