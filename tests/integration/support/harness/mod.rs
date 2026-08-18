@@ -1312,7 +1312,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    /// Install a sticky scripted `builtin.shell` process result on the inert
+    /// Install a sticky scripted `builtin.bash` process result on the inert
     /// recording process port (mirrors `install_http_responses`). Errors if the
     /// harness has no recording port (e.g. the `.with_live_shell()` path).
     pub(crate) fn install_process_script(

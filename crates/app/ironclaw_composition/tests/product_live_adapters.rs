@@ -28,7 +28,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    CODING_READ_CAPABILITY_ID, ECHO_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    CODING_BASH_CAPABILITY_ID, CODING_READ_CAPABILITY_ID, ECHO_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
@@ -542,29 +542,29 @@ async fn standalone_adapter_gates_builtin_echo_when_global_auto_approve_is_off()
 }
 
 #[tokio::test]
-async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface() {
+async fn standalone_adapter_invokes_builtin_bash_through_product_live_surface() {
     let root = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(ironclaw_composition::local_filesystem_build_input(
-        "builtin-shell-owner",
+        "builtin-bash-owner",
         root.path().join("standalone"),
     ))
     .await;
-    let run_context = loop_run_context("builtin-shell").await;
+    let run_context = loop_run_context("builtin-bash").await;
     disable_global_auto_approve_for_run(
         &services,
         &run_context,
-        UserId::new("user-builtin-shell").unwrap(),
+        UserId::new("user-builtin-bash").unwrap(),
     )
     .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let input_ref = io
         .stage_input(
             &run_context,
-            serde_json::json!({ "command": "echo hello product shell" }),
+            serde_json::json!({ "command": "echo hello product bash" }),
         )
         .unwrap();
-    let capability_id = capability_id(SHELL_CAPABILITY_ID);
-    let shell_effects = vec![
+    let capability_id = capability_id(CODING_BASH_CAPABILITY_ID);
+    let bash_effects = vec![
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
@@ -572,14 +572,14 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
     ];
-    let user_id = UserId::new("user-builtin-shell").unwrap();
-    let shell_grant = CapabilityGrant {
+    let user_id = UserId::new("user-builtin-bash").unwrap();
+    let bash_grant = CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id.clone(),
         grantee: Principal::User(user_id.clone()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            allowed_effects: shell_effects.clone(),
+            allowed_effects: bash_effects.clone(),
             mounts: MountView::default(),
             network: NetworkPolicy {
                 allowed_targets: vec![NetworkTargetPattern {
@@ -610,12 +610,12 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
                     CapabilitySurfacePolicy::allow_all(),
                 )
                 .with_grants(CapabilitySet {
-                    grants: vec![shell_grant],
+                    grants: vec![bash_grant],
                 })
                 .with_provider_trust_for_effects(
                     ExtensionId::new("builtin").unwrap(),
                     EffectiveTrustClass::user_trusted(),
-                    shell_effects,
+                    bash_effects,
                 ),
             ),
             capability_input_resolver: io.clone(),
@@ -640,7 +640,7 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
             .descriptors
             .iter()
             .any(|descriptor| descriptor.capability_id == capability_id),
-        "builtin shell must be visible through the product-live adapter surface"
+        "builtin bash must be visible through the product-live adapter surface"
     );
 
     let outcome = capability_port
@@ -655,7 +655,7 @@ async fn standalone_adapter_invokes_builtin_shell_through_product_live_surface()
         .await
         .unwrap();
     let Resolution::Blocked(blocked) = outcome else {
-        panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
+        panic!("expected approval gate for builtin bash outcome, got {outcome:?}");
     };
     assert_eq!(blocked.kind(), "approval");
     // The minted gate ref is an opaque uuid; the originating loop gate ref

@@ -150,9 +150,9 @@ pub struct RebornIntegrationHarnessBuilder {
     real_egress_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
-    /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
-    /// of a `bool` + `Option` so the modes are mutually exclusive by
-    /// construction — the last shell-selecting builder method wins, and a live
+    /// How the `BuiltinHttpTools` backend wires model-visible `builtin.bash`.
+    /// One enum instead of a `bool` + `Option` keeps the modes mutually
+    /// exclusive — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
     /// Mutually exclusive raw-provider behavior for this one-thread harness.
@@ -568,9 +568,9 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Opt-in to real shell execution for this harness. By default the
-    /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
-    /// `builtin.shell` turns record the command without spawning any OS process.
+    /// Opt in to real command execution for this harness. By default the
+    /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so
+    /// `builtin.bash` turns record the command without spawning any OS process.
     ///
     /// Call `.with_live_shell()` only when the test genuinely needs to observe the
     /// output of a real command (e.g. `echo hello`). The command must be hermetic —
@@ -583,9 +583,9 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Script the inert recording process port so `builtin.shell` returns a
+    /// Script the inert recording process port so `builtin.bash` returns a
     /// non-zero exit code (error-path coverage). The tool still surfaces a
-    /// *Completed* result carrying `exit_code`/`success: false`. Implies
+    /// completed result carrying the OMP exit-code notice. Implies
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_exit_code(mut self, exit_code: i64) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
@@ -593,9 +593,9 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Script the inert recording process port so `builtin.shell` returns a
+    /// Script the inert recording process port so `builtin.bash` returns a
     /// timeout error (`RuntimeProcessError::Timeout`), which the tool maps to a
-    /// recoverable model-visible `Failed{Resource}` capability error. Implies
+    /// completed OMP timeout notice. Implies
     /// [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_shell_timeout(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
@@ -691,7 +691,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Route scripted `builtin.shell` calls through the real Docker-backed
+    /// Route scripted `builtin.bash` calls through the real Docker-backed
     /// sandbox profile. The calling test owns the Docker availability gate.
     pub fn with_sandbox_shell_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::SandboxShellTools;
@@ -1723,9 +1723,9 @@ impl RebornIntegrationHarness {
         self.capability_recorder.real_egress_transport_requests()
     }
 
-    /// Assert that a `builtin.shell` command was recorded by the inert process
+    /// Assert that a `builtin.bash` command was recorded by the inert process
     /// port and that the recorded command string contains `substr`. This proves
-    /// the shell tool call was dispatched through the process port without
+    /// the bash tool call was dispatched through the process port without
     /// spawning a real OS process (a safety invariant).
     ///
     /// Checks only the `[baseline_process_count..]` delta so a group thread
@@ -1755,7 +1755,7 @@ impl RebornIntegrationHarness {
         }
         Err(
             "no shell commands were recorded by the inert process port; either no \
-             builtin.shell turn ran or the harness is using the live-shell path"
+             builtin.bash turn ran or the harness is using the live-shell path"
                 .into(),
         )
     }

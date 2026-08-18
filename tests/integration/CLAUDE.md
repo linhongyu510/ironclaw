@@ -265,10 +265,11 @@ Requests that match no scripted response fall back to the recording egress defau
 
 ### Shell / process
 
-When `.with_builtin_http_tools()` is active, `builtin.shell` turns are dispatched
-through the inert `RecordingProcessPort` by default. It records every
-`CommandExecutionRequest.command` string and returns exit 0 / empty output without
-spawning any OS process.
+When `.with_builtin_http_tools()` is active, model-visible `builtin.bash` turns
+are dispatched through the inert `RecordingProcessPort` by default. It records
+every `CommandExecutionRequest.command` string and returns exit 0 / empty output
+without spawning any OS process. The legacy `builtin.shell` capability remains
+host-internal and is not advertised to models.
 
 - `assert_shell_command_recorded(substr)` — the recorded command string contains `substr`.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
@@ -280,7 +281,7 @@ Implies `.with_builtin_http_tools()`.
 
 **`.with_sandbox_shell_tools()`** — dedicated runtime-integration opt-in. It
 builds the explicit local-Docker sandbox profile through production composition
-and dispatches `builtin.shell` into the hardened Python worker. Only
+and dispatches `builtin.bash` into the hardened Python worker. Only
 `reborn_sandbox_shell_turn.rs` selects it; the Docker availability gate remains
 owned by that test.
 

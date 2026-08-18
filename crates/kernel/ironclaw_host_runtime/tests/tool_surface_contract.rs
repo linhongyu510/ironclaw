@@ -666,7 +666,13 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         .await
         .unwrap();
 
-    assert_eq!(surface.capabilities.len(), package.capabilities.len());
+    let model_visible_count = package
+        .manifest
+        .capabilities
+        .iter()
+        .filter(|capability| capability.visibility == CapabilityVisibility::Model)
+        .count();
+    assert_eq!(surface.capabilities.len(), model_visible_count);
     for capability in &surface.capabilities {
         jsonschema::validator_for(&capability.descriptor.parameters_schema).unwrap_or_else(
             |error| {

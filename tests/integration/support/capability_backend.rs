@@ -73,10 +73,10 @@ pub(super) enum RebornCapabilityBackend {
     /// without a confirmed host-home mount) is observable at the
     /// integration tier.
     BuiltinHttpToolsConfirmedHostMount,
-    /// `builtin.shell` through the production Docker sandbox composition.
+    /// `builtin.bash` through the production Docker sandbox composition.
     SandboxShellTools,
     /// Issue #7392 slice 3 registration seam: the pinned coding first-party
-    /// surface (exact `read`/`write`/`edit`/`glob`/`grep` names, pinned
+    /// surface (exact `read`/`write`/`edit`/`glob`/`grep`/`bash` names, pinned
     /// schemas/descriptions) selected in the composed runtime via
     /// `HostRuntimeHarnessOptions::with_coding_tools`. Same real
     /// capability path as `BuiltinHttpTools` — CapabilityHost, grants,
@@ -85,7 +85,7 @@ pub(super) enum RebornCapabilityBackend {
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
-/// `builtin.shell`. These are mutually exclusive; the builder holds exactly one.
+/// `builtin.bash`. These are mutually exclusive; the builder holds exactly one.
 #[derive(Debug, Clone, Default)]
 pub(super) enum ShellMode {
     /// Slice 5 default: the inert `RecordingProcessPort` records the command and

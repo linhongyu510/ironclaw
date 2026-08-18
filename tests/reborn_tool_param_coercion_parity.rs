@@ -81,7 +81,10 @@ async fn reborn_provider_tool_arguments_are_schema_coerced_before_http_dispatch(
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url.as_str(), "https://api.example.test/v1/coercion");
     assert_eq!(request.timeout_ms, Some(2500));
-    assert_eq!(request.response_body_limit, Some(4096));
+    // The requested 4 KiB remains the model-visible shaping budget. The
+    // transport receives the 10 MiB artifact-capture ceiling so a larger body
+    // can spill durably instead of being destroyed at the egress boundary.
+    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
     assert!(
         request
             .headers
