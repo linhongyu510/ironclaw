@@ -32,9 +32,10 @@ use ironclaw_host_api::{
     Timestamp,
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     artifact::{
-        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactDigest, ArtifactId,
-        ArtifactNamespaceId, ArtifactRef, ArtifactWriteError, ArtifactWriteMetadata,
-        CompletedArtifact,
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactAccessError,
+        ArtifactAccessPort, ArtifactDigest, ArtifactId, ArtifactNamespaceId,
+        ArtifactPersistencePort, ArtifactReadChunk, ArtifactReadRequest, ArtifactRef,
+        ArtifactWriteError, ArtifactWriteHandle, ArtifactWriteMetadata, CompletedArtifact,
     },
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
@@ -134,6 +135,77 @@ impl AccountedArtifactPersister for TestArtifactPersister {
             total_lines: None,
             content_type: metadata.content_type,
             digest: ArtifactDigest::from_bytes(bytes),
+        })
+    }
+}
+
+#[derive(Default)]
+struct TestArtifactStore {
+    metadata: tokio::sync::Mutex<Option<ArtifactWriteMetadata>>,
+    bytes: tokio::sync::Mutex<Vec<u8>>,
+}
+
+impl TestArtifactStore {
+    async fn metadata(&self) -> Option<ArtifactWriteMetadata> {
+        self.metadata.lock().await.clone()
+    }
+
+    async fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl ArtifactAccessPort for TestArtifactStore {
+    async fn read(
+        &self,
+        _request: ArtifactReadRequest,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ArtifactPersistencePort for TestArtifactStore {
+    async fn allocate(
+        &self,
+        metadata: ArtifactWriteMetadata,
+    ) -> Result<ArtifactWriteHandle, ArtifactWriteError> {
+        let handle = ArtifactWriteHandle::new(
+            ArtifactId::new(0),
+            metadata.owner_scope.clone(),
+            metadata.namespace,
+        );
+        *self.metadata.lock().await = Some(metadata);
+        self.bytes.lock().await.clear();
+        Ok(handle)
+    }
+
+    async fn append(
+        &self,
+        _handle: &ArtifactWriteHandle,
+        chunk: &[u8],
+    ) -> Result<(), ArtifactWriteError> {
+        self.bytes.lock().await.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        handle: ArtifactWriteHandle,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let bytes = self.bytes.lock().await;
+        let metadata = self.metadata.lock().await;
+        let content_type = metadata
+            .as_ref()
+            .map(|metadata| metadata.content_type.clone())
+            .ok_or(ArtifactWriteError::InvalidHandle)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(handle.artifact_id()),
+            byte_len: u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?,
+            total_lines: None,
+            content_type,
+            digest: ArtifactDigest::from_bytes(&bytes),
         })
     }
 }
@@ -765,7 +837,11 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .iter()
         .map(|capability| capability.descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, all_builtin_capability_ids());
+    let expected_ids = all_builtin_capability_ids()
+        .into_iter()
+        .filter(|id| *id != SHELL_CAPABILITY_ID)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected_ids);
     assert!(
         surface
             .capabilities
@@ -778,12 +854,10 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
             .iter()
             .all(|capability| capability.estimated_resources.output_bytes.is_some())
     );
-    let shell = surface
-        .capabilities
-        .iter()
-        .find(|capability| capability.descriptor.id.as_str() == SHELL_CAPABILITY_ID)
-        .expect("shell capability must be visible");
-    assert_eq!(shell.estimated_resources.process_count, Some(1));
+    assert!(
+        !ids.contains(&SHELL_CAPABILITY_ID),
+        "HostInternal shell must not be model-visible"
+    );
 
     let spawn = surface
         .capabilities
@@ -4669,7 +4743,7 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
-    assert_eq!(request.response_body_limit, Some(4096));
+    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
@@ -5036,12 +5110,12 @@ async fn builtin_http_truncates_one_byte_over_text_responses_with_a_hint() {
 }
 
 #[tokio::test]
-async fn builtin_http_default_large_response_result_stays_under_documented_cap() {
-    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
-        b'a';
-        1024 * 1024
-    ]));
-    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+async fn builtin_http_spills_large_sanitized_response_to_artifact() {
+    let body = vec![b'a'; 1024 * 1024];
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(body.clone()));
+    let artifacts = Arc::new(TestArtifactStore::default());
+    let runtime =
+        runtime_with_http_egress_and_artifacts(Arc::clone(&egress), Arc::clone(&artifacts));
 
     let output = invoke_with_context(
         &runtime,
@@ -5054,26 +5128,86 @@ async fn builtin_http_default_large_response_result_stays_under_documented_cap()
     .await
     .unwrap();
 
-    // The 48 KiB inline body puts the serialized result over the inline
-    // artifact budget, so the completed output is the bounded artifact
-    // preview string: the head of the serialized result, led by the inline
-    // body content (object keys serialize in sorted order, so trailing
-    // metadata such as the status and the truncation envelope stays in the
-    // persisted artifact rather than the preview).
-    let preview = output.as_str().expect("artifact-scoped preview text");
+    assert_eq!(output["artifact_ref"], json!("artifact://0"));
+    assert_eq!(output["response_bytes"], json!(body.len()));
+    assert_eq!(output["body_truncated"], json!(true));
     assert!(
-        preview.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
-        "preview exceeded the inline artifact budget: {} bytes",
-        preview.len()
+        output["body_text"]
+            .as_str()
+            .expect("bounded text preview")
+            .len()
+            < ARTIFACT_INLINE_PREVIEW_MAX_BYTES
     );
     assert!(
-        preview.contains(&"a".repeat(4096)),
-        "preview must carry the inline body head"
+        output.as_str().is_none(),
+        "result must not spill a second time"
+    );
+
+    assert_eq!(artifacts.bytes().await, body);
+    assert_eq!(
+        artifacts
+            .metadata()
+            .await
+            .expect("artifact metadata")
+            .producer_capability_id
+            .as_str(),
+        HTTP_CAPABILITY_ID
     );
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].response_body_limit, Some(48 * 1024));
+    assert!(
+        requests[0].response_body_limit > Some(48 * 1024),
+        "transport must capture beyond the inline preview budget"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_spills_large_binary_response_without_base64_expansion() {
+    let body = vec![0xFF; 32 * 1024];
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(body.clone()));
+    let artifacts = Arc::new(TestArtifactStore::default());
+    let runtime =
+        runtime_with_http_egress_and_artifacts(Arc::clone(&egress), Arc::clone(&artifacts));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/archive.bin"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["artifact_ref"], json!("artifact://0"));
+    assert_eq!(output["body_base64_omitted"], json!(true));
+    assert!(output.get("body_base64").is_none());
+    assert_eq!(artifacts.bytes().await, body);
+    assert_eq!(
+        artifacts
+            .metadata()
+            .await
+            .expect("artifact metadata")
+            .content_type,
+        "application/octet-stream"
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_large_response_fails_closed_without_artifact_store() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![b'a'; 32 * 1024]));
+    let runtime = runtime_with_http_egress(egress);
+
+    let failure = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/large-page"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure, FailureKind::MethodMissing);
 }
 
 #[tokio::test]
@@ -5560,7 +5694,9 @@ async fn builtin_http_reports_body_and_header_truncation_together() {
     let egress = Arc::new(
         RecordingRuntimeHttpEgress::with_body(vec![b'a'; 1024 * 1024]).with_headers(headers),
     );
-    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let artifacts = Arc::new(TestArtifactStore::default());
+    let runtime =
+        runtime_with_http_egress_and_artifacts(Arc::clone(&egress), Arc::clone(&artifacts));
 
     let output = invoke_with_context(
         &runtime,
@@ -5573,22 +5709,17 @@ async fn builtin_http_reports_body_and_header_truncation_together() {
     .await
     .unwrap();
 
-    // The 48 KiB inline body plus oversized headers push the serialized
-    // result over the inline artifact budget, so the completed output is the
-    // bounded artifact preview: the head of the serialized result, led by
-    // the inline body content. The header-truncation flag and the truncation
-    // envelope serialize after the body (sorted key order) and live in the
-    // persisted artifact rather than the preview.
-    let preview = output.as_str().expect("artifact-scoped preview text");
+    assert_eq!(output["artifact_ref"], json!("artifact://0"));
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
     assert!(
-        preview.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
-        "preview exceeded the inline artifact budget: {} bytes",
-        preview.len()
+        output["body_text"]
+            .as_str()
+            .expect("bounded body preview")
+            .contains(&"a".repeat(1024))
     );
-    assert!(
-        preview.contains(&"a".repeat(4096)),
-        "preview must carry the inline body head"
-    );
+    assert_eq!(artifacts.bytes().await.len(), 1024 * 1024);
 }
 
 #[tokio::test]
@@ -7423,7 +7554,12 @@ async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
         8 * 1024 * 1024
     ]));
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
+    let artifacts = Arc::new(TestArtifactStore::default());
+    let runtime = runtime_with_http_egress_artifacts_and_governor(
+        Arc::clone(&egress),
+        artifacts,
+        Arc::clone(&governor),
+    );
 
     let output = invoke_with_context(
         &runtime,
@@ -7439,16 +7575,8 @@ async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
     .await
     .unwrap();
 
-    // The 128 KiB inline body puts the serialized result over the inline
-    // artifact budget, so the completed output is the bounded artifact
-    // preview; the request bytes are still accounted against the tenant.
-    let preview = output.as_str().expect("artifact-scoped preview text");
-    assert!(
-        preview.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
-        "preview exceeded the inline artifact budget: {} bytes",
-        preview.len()
-    );
-    assert!(preview.contains("\"body_text\""));
+    assert_eq!(output["artifact_ref"], json!("artifact://0"));
+    assert!(output["body_text"].as_str().is_some());
     let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
     assert_eq!(governor.usage_for(&tenant_account).network_egress_bytes, 4);
 }
@@ -8939,6 +9067,45 @@ where
     T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
+}
+fn runtime_with_http_egress_and_artifacts<T>(
+    egress: Arc<T>,
+    artifacts: Arc<TestArtifactStore>,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
+{
+    runtime_with_http_egress_artifacts_and_governor(
+        egress,
+        artifacts,
+        Arc::new(InMemoryResourceGovernor::new()),
+    )
+}
+
+fn runtime_with_http_egress_artifacts_and_governor<T>(
+    egress: Arc<T>,
+    artifacts: Arc<TestArtifactStore>,
+    governor: Arc<InMemoryResourceGovernor>,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(DiskFilesystem::new()),
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_artifact_ports(artifacts.clone(), artifacts)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_first_party_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
 }
 
 fn runtime_with_http_egress_and_policy<T>(

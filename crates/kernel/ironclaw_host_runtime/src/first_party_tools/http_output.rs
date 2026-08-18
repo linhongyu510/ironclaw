@@ -29,6 +29,7 @@ const HTTP_TRUNCATION_HINT: &str = "Response body was truncated for the model-vi
 pub(super) struct HttpDispatchOutput {
     pub output: Value,
     pub network_egress_bytes: u64,
+    pub pending_artifact: Option<crate::first_party::PendingFirstPartyArtifact>,
 }
 
 pub(super) fn shape_response(
@@ -80,6 +81,7 @@ pub(super) fn shape_response(
     HttpDispatchOutput {
         output: Value::Object(output),
         network_egress_bytes: response.request_bytes,
+        pending_artifact: None,
     }
 }
 

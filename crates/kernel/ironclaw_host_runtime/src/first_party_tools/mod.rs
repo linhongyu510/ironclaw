@@ -594,6 +594,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let start = Instant::now();
         let mut network_egress_bytes = 0;
         let process_count = 0u32;
+        let mut pending_artifact = None;
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
@@ -601,6 +602,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
+                pending_artifact = result.pending_artifact;
                 (result.output, None)
             }
             SHELL_CAPABILITY_ID => {
@@ -681,7 +683,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             .set_output_bytes(output_bytes)
             .set_network_egress_bytes(network_egress_bytes)
             .set_process_count(process_count);
-        Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
+        let result =
+            FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview);
+        Ok(match pending_artifact {
+            Some(artifact) => result.with_pending_artifact(artifact),
+            None => result,
+        })
     }
 }
 
