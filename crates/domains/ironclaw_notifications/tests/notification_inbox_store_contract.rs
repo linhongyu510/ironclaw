@@ -69,10 +69,49 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .publish(first_request.clone())
         .await
         .expect("publish first");
+
+    let mut severity_conflict = first_request.clone();
+    severity_conflict.severity = NotificationSeverity::Error;
+    assert!(matches!(
+        first.publish(severity_conflict).await,
+        Err(NotificationInboxError::InvalidRequest { .. })
+    ));
+    let unchanged = first
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("read after conflicting publish");
+    assert_eq!(unchanged.notifications.len(), 1);
+    assert_eq!(
+        unchanged.notifications[0].severity,
+        NotificationSeverity::Warning
+    );
+    assert_eq!(
+        unchanged.notifications[0].updated_at,
+        first_request.occurred_at
+    );
+
+    let mut kind_conflict = first_request.clone();
+    kind_conflict.kind = NotificationKind::RunBlocked;
+    assert!(matches!(
+        first.publish(kind_conflict).await,
+        Err(NotificationInboxError::InvalidRequest { .. })
+    ));
     first
-        .publish(first_request)
+        .publish(first_request.clone())
         .await
         .expect("idempotent retry");
+
+    let mut delayed_retry = first_request;
+    delayed_retry.occurred_at = Utc.timestamp_opt(1_700_000_100, 0).single().expect("time");
+    first
+        .publish(delayed_retry)
+        .await
+        .expect("delayed idempotent retry");
     first
         .publish(request("notification-2", 1_700_000_002))
         .await
@@ -301,9 +340,17 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
             .await
             .expect("publish within capacity");
     }
+    store
+        .archive(NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: NotificationId::new("notification-capacity-0").expect("id"),
+            occurred_at: Utc.timestamp_opt(1_700_009_000, 0).single().expect("time"),
+        })
+        .await
+        .expect("archive one capacity record");
     assert!(matches!(
         store
-            .publish(request("notification-capacity-overflow", 1_700_009_000))
+            .publish(request("notification-capacity-overflow", 1_700_009_001))
             .await,
         Err(NotificationInboxError::InvalidRequest { .. })
     ));

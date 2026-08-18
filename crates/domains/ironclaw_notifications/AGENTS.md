@@ -8,6 +8,11 @@
   closed.
 - Recipient scope is mandatory on every read and mutation.
 - Retention is explicit: never delete unread or unarchived records to make room.
+- The current snapshot has a deliberate 1,000-record lifetime bound. Once full,
+  publication fails closed even when records are archived; automatic eviction
+  would weaken stable-ID deduplication and requires a separately reviewed,
+  auditable retention design. Track that follow-up in
+  [#7687](https://github.com/nearai/ironclaw/issues/7687).
 - Persistence uses `ScopedFilesystem` plus bounded CAS; backend selection stays
   in composition.
 - Notification production and product read policy belong to the originating

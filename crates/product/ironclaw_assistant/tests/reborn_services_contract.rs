@@ -14298,6 +14298,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn notifications_unwired_backend_returns_retryable_service_unavailable() {
     let services = session_services(
         Arc::new(InMemorySessionThreadService::default()),
@@ -14321,6 +14322,10 @@ async fn notifications_unwired_backend_returns_retryable_service_unavailable() {
     assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
+    assert!(
+        logs_contain("notification inbox store is not configured"),
+        "the bound backend cause must be logged before the product error is sanitized"
+    );
 }
 
 #[tokio::test]

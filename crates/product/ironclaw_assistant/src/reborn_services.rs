@@ -1578,10 +1578,20 @@ fn map_notification_inbox_error(
         ironclaw_notifications::NotificationInboxError::AccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
-        ironclaw_notifications::NotificationInboxError::Backend { .. } => {
+        ironclaw_notifications::NotificationInboxError::Backend { reason } => {
+            tracing::warn!(
+                reason = %reason,
+                "notification inbox backend unavailable at the product boundary"
+            );
             ProductSurfaceError::service_unavailable(true)
         }
-        other => ProductSurfaceError::internal_from(other),
+        ironclaw_notifications::NotificationInboxError::Serialization { reason } => {
+            tracing::warn!(
+                reason = %reason,
+                "notification inbox serialization failed at the product boundary"
+            );
+            ProductSurfaceError::internal()
+        }
     }
 }
 

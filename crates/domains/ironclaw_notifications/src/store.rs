@@ -98,6 +98,7 @@ where
                     {
                         if existing.recipient != request.recipient
                             || existing.kind != request.kind
+                            || existing.severity != request.severity
                             || existing.source != request.source
                             || existing.action != request.action
                         {
@@ -105,17 +106,8 @@ where
                                 reason: "notification id conflicts with an existing event",
                             });
                         }
-                        let updated_at = existing.updated_at.max(request.occurred_at);
-                        if existing.updated_at == updated_at
-                            && existing.severity == request.severity
-                        {
-                            let record = existing.clone();
-                            return Ok(CasApply::no_op(snapshot, record));
-                        }
-                        existing.updated_at = updated_at;
-                        existing.severity = request.severity;
                         let record = existing.clone();
-                        return Ok(CasApply::new(snapshot, record));
+                        return Ok(CasApply::no_op(snapshot, record));
                     }
                     if snapshot.notifications.len() >= NOTIFICATION_INBOX_MAX_RECORDS {
                         return Err(NotificationInboxError::InvalidRequest {
