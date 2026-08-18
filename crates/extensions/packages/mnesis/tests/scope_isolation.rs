@@ -193,3 +193,46 @@ fn request(query: &str, max_snippets: usize) -> ironclaw_memory::MemoryServiceCo
         context_profile_id: ironclaw_memory::MemoryContextProfileId::new("default").unwrap(),
     }
 }
+
+/// Ranking-level poisoning: a record that claims a foreign owner and an
+/// implausibly high score must not be promoted, relabelled, or allowed to
+/// crowd out the caller's own records. Rank is Mnesis's to assert; scope
+/// truth is not, so the provider must carry the foreign label through intact
+/// and preserve order rather than letting a score decide ownership.
+#[tokio::test]
+async fn a_high_scoring_foreign_record_is_never_promoted_over_the_callers_own() {
+    let mut poisoned = scoped("other-tenant", "other-principal", "poisoned");
+    poisoned["score"] = json!(9_999_999.0);
+    let mut owned = scoped("tenant-mnesis", "user-mnesis", "genuine");
+    owned["score"] = json!(0.01);
+
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
+        "results": [poisoned, owned]
+    })));
+    let snippets = service
+        .read_long_term(invocation(), request("anything", 4))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snippets.len(),
+        2,
+        "neither record may be silently discarded"
+    );
+    assert_eq!(
+        snippets[0].tenant_id, "other-tenant",
+        "server order must survive; the provider must not re-rank on a claimed score"
+    );
+    assert!(
+        snippets
+            .iter()
+            .any(|s| s.tenant_id == "tenant-mnesis" && s.text == "genuine"),
+        "a high foreign score must not crowd out the caller's own record"
+    );
+    assert!(
+        snippets
+            .iter()
+            .all(|s| !(s.tenant_id == "tenant-mnesis" && s.text == "poisoned")),
+        "a high score must never buy a foreign record the caller's label"
+    );
+}

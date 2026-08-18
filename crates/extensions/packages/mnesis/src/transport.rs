@@ -15,6 +15,14 @@ pub enum MnesisLane {
     Memory,
 }
 
+impl MnesisLane {
+    /// Only the corpus lane runs hybrid retrieval. Stated here so the request
+    /// body and the result flag cannot disagree about it.
+    pub fn is_hybrid(self) -> bool {
+        matches!(self, Self::Knowledge)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MnesisRequest {
     pub lane: MnesisLane,
@@ -33,6 +41,12 @@ pub struct MnesisResponse {
 impl MnesisResponse {
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+
+    /// Separates an outage from a refusal: only the former is worth retrying or
+    /// degrading to empty, and the two must not drift apart per lane.
+    pub fn is_server_error(&self) -> bool {
+        (500..600).contains(&self.status)
     }
 }
 

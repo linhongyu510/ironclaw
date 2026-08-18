@@ -195,6 +195,10 @@ where
         let Some(observer) = self.lifecycle_trajectory_observer.as_deref() else {
             return;
         };
+        // A retrieval that contributed nothing to the prompt reports nothing:
+        // the consumer adapter projects each event as a capability input/result
+        // pair, so emitting one here would put a phantom zero-result memory
+        // read into traces that score tool calls.
         if snippets.is_empty() {
             return;
         }

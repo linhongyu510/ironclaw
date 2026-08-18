@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_loop_host::CapabilityTrajectoryObserver;
+use ironclaw_loop_host::{CapabilityTrajectoryObserver, LifecycleTrajectoryObserver};
 
 /// Receives each capability (tool) call's resolved input and result during a
 /// reborn run. See the [module docs](self) for the data-exposure and threading
@@ -223,7 +223,9 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
         self.inner
             .on_capability_result(call_id, capability_id, output);
     }
+}
 
+impl LifecycleTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
     /// Projected as one input/result pair so existing consumers see the read.
     fn on_lifecycle_retrieval(
         &self,
@@ -244,6 +246,13 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
 pub(crate) fn as_capability_observer(
     observer: Arc<dyn RebornTrajectoryObserver>,
 ) -> Arc<dyn CapabilityTrajectoryObserver> {
+    Arc::new(CapabilityTrajectoryObserverAdapter { inner: observer })
+}
+
+/// Host-initiated recall, projected onto the same composition observer.
+pub(crate) fn as_lifecycle_observer(
+    observer: Arc<dyn RebornTrajectoryObserver>,
+) -> Arc<dyn LifecycleTrajectoryObserver> {
     Arc::new(CapabilityTrajectoryObserverAdapter { inner: observer })
 }
 

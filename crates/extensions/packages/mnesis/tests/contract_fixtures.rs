@@ -15,7 +15,7 @@
 
 use ironclaw_memory_mnesis::{
     MAX_INTERACTION_BYTES, MAX_INTERACTION_MESSAGES, MAX_MESSAGE_BYTES, MAX_METADATA_ENTRIES,
-    OwnerRecordClass, OwnerScope, PROVIDER_ATTRIBUTION_HEADER, ProviderAttribution,
+    OwnerAxes, OwnerRecordClass, OwnerScope, PROVIDER_ATTRIBUTION_HEADER, ProviderAttribution,
 };
 use serde_json::Value;
 
@@ -39,9 +39,11 @@ fn frozen_scope(scope: &Value) -> OwnerScope {
     OwnerScope::narrowest(
         text("tenantId").expect("the frozen scope must carry a tenant"),
         text("principalId").expect("the frozen scope must carry a principal"),
-        text("agentId"),
-        text("projectId"),
-        text("threadId"),
+        OwnerAxes {
+            agent_id: text("agentId"),
+            project_id: text("projectId"),
+            thread_id: text("threadId"),
+        },
     )
 }
 

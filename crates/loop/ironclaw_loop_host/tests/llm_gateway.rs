@@ -29,9 +29,9 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface,
 };
 use ironclaw_loop_host::{
-    CapabilityTrajectoryObserver, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelRouteSnapshot, HostManagedModelStreamSink, HostManagedToolResultContent,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
+    HostManagedModelStreamSink, HostManagedToolResultContent, LifecycleTrajectoryObserver,
     ThreadBackedLoopContextPort,
 };
 use ironclaw_loop_host::{
@@ -4220,9 +4220,7 @@ struct RecordingLifecycleObserver {
     events: Mutex<Vec<(String, String, serde_json::Value, serde_json::Value)>>,
 }
 
-impl CapabilityTrajectoryObserver for RecordingLifecycleObserver {
-    fn on_capability_input(&self, _: &str, _: &str, _: &serde_json::Value) {}
-
+impl LifecycleTrajectoryObserver for RecordingLifecycleObserver {
     fn on_lifecycle_retrieval(
         &self,
         retrieval_id: &str,
@@ -4239,10 +4237,63 @@ impl CapabilityTrajectoryObserver for RecordingLifecycleObserver {
     }
 }
 
+/// Panics on every callback. The read must still succeed: the call site catches
+/// the unwind. Under `panic = "abort"` this test aborts the process instead of
+/// passing, which is the point — it fails loudly if that profile is ever set.
+#[derive(Debug, Default)]
+struct PanickingLifecycleObserver;
+
+impl LifecycleTrajectoryObserver for PanickingLifecycleObserver {
+    fn on_lifecycle_retrieval(
+        &self,
+        _retrieval_id: &str,
+        _operation_id: &str,
+        _query: &serde_json::Value,
+        _results: &serde_json::Value,
+    ) {
+        panic!("a trajectory observer must never be able to fail the memory read");
+    }
+}
+
 /// Caller-level coverage (`.claude/rules/testing.md` — `load_loop_context` gates
 /// whether memory reaches the model): a `ThreadBackedLoopContextPort` wired with
 /// a memory source must return NON-empty `memory_snippets`, derive the query from
 /// the latest user message, and fetch exactly once per run — a second
+/// A panicking observer must not fail the read that carried it.
+#[tokio::test]
+async fn a_panicking_lifecycle_observer_cannot_fail_the_memory_read() {
+    let fixture = ThreadFixture::new().await;
+    let memory_service = Arc::new(CountingMemoryContextService::default());
+    let run_context = fixture.run_context.clone().with_actor(TurnActor::new(
+        UserId::new("user-production-gateway").unwrap(),
+    ));
+    let context_port = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_memory_context_service(Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>)
+    .with_lifecycle_trajectory_observer(
+        Arc::new(PanickingLifecycleObserver) as Arc<dyn LifecycleTrajectoryObserver>
+    );
+
+    let bundle = context_port
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .expect("an observer panic must be caught, not surfaced as a read failure");
+
+    assert!(
+        !bundle.memory_snippets.is_empty(),
+        "the snippets the observer panicked on must still reach the caller"
+    );
+    assert_eq!(memory_service.fetches.load(Ordering::SeqCst), 1);
+}
+
 /// `load_loop_context` reuses the per-run cache (fetch count stays 1). The wired
 /// trajectory observer must see that one real read and nothing on the cache hit.
 #[tokio::test]
@@ -4263,7 +4314,7 @@ async fn load_loop_context_surfaces_memory_and_fetches_once_per_run() {
     )
     .with_memory_context_service(Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>)
     .with_lifecycle_trajectory_observer(
-        Arc::clone(&observer) as Arc<dyn CapabilityTrajectoryObserver>
+        Arc::clone(&observer) as Arc<dyn LifecycleTrajectoryObserver>
     );
 
     let request = LoopContextRequest {
@@ -4339,7 +4390,7 @@ async fn empty_memory_retrieval_reports_no_lifecycle_event() {
     )
     .with_memory_context_service(Arc::new(EmptyMemoryPromptContextService))
     .with_lifecycle_trajectory_observer(
-        Arc::clone(&observer) as Arc<dyn CapabilityTrajectoryObserver>
+        Arc::clone(&observer) as Arc<dyn LifecycleTrajectoryObserver>
     );
 
     let bundle = context_port

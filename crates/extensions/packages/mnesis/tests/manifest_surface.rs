@@ -61,8 +61,11 @@ fn the_tool_inventory_carries_no_administrative_capability() {
 fn the_write_path_is_host_driven_and_never_model_visible() {
     let lowered = MANIFEST.to_ascii_lowercase();
     assert!(
-        lowered.contains("lifecycle = [\"read_long_term\", \"record_interaction\"]"),
-        "the recording lane is declared now that the idempotency proofs have landed"
+        lowered.contains(
+            "lifecycle = [\"read_long_term\", \"read_short_term\", \"record_interaction\"]"
+        ),
+        "the recording lane is declared now that the idempotency proofs have landed, and \
+         the short-term lane now that the read path is proven to fail closed under revocation"
     );
     for effect in ["write_filesystem", "network"] {
         assert!(

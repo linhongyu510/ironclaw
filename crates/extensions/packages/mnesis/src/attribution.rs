@@ -42,14 +42,35 @@ pub struct OwnerScope {
     pub thread_id: Option<String>,
 }
 
+/// Named so the three optional axes cannot be transposed at a call site: a
+/// swap here silently changes the derived record class and the owner key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnerAxes {
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+impl OwnerAxes {
+    pub fn with_thread(thread_id: Option<String>) -> Self {
+        Self {
+            thread_id,
+            ..Self::default()
+        }
+    }
+}
+
 impl OwnerScope {
     pub fn narrowest(
         tenant_id: impl Into<String>,
         principal_id: impl Into<String>,
-        agent_id: Option<String>,
-        project_id: Option<String>,
-        thread_id: Option<String>,
+        axes: OwnerAxes,
     ) -> Self {
+        let OwnerAxes {
+            agent_id,
+            project_id,
+            thread_id,
+        } = axes;
         let record_class = if thread_id.is_some() {
             OwnerRecordClass::ThreadPrivate
         } else if project_id.is_some() {
@@ -165,24 +186,43 @@ mod tests {
     #[test]
     fn narrowest_selects_the_record_class_from_the_axes_present() {
         assert_eq!(
-            OwnerScope::narrowest("t", "p", None, None, None).record_class,
+            OwnerScope::narrowest("t", "p", OwnerAxes::default()).record_class,
             OwnerRecordClass::PrincipalPrivate
         );
         assert_eq!(
-            OwnerScope::narrowest("t", "p", Some("a".into()), None, None).record_class,
+            OwnerScope::narrowest(
+                "t",
+                "p",
+                OwnerAxes {
+                    agent_id: Some("a".into()),
+                    ..OwnerAxes::default()
+                }
+            )
+            .record_class,
             OwnerRecordClass::AgentPrivate
         );
         assert_eq!(
-            OwnerScope::narrowest("t", "p", Some("a".into()), Some("j".into()), None).record_class,
+            OwnerScope::narrowest(
+                "t",
+                "p",
+                OwnerAxes {
+                    agent_id: Some("a".into()),
+                    project_id: Some("j".into()),
+                    ..OwnerAxes::default()
+                }
+            )
+            .record_class,
             OwnerRecordClass::ProjectPrivate
         );
         assert_eq!(
             OwnerScope::narrowest(
                 "t",
                 "p",
-                Some("a".into()),
-                Some("j".into()),
-                Some("h".into())
+                OwnerAxes {
+                    agent_id: Some("a".into()),
+                    project_id: Some("j".into()),
+                    thread_id: Some("h".into()),
+                }
             )
             .record_class,
             OwnerRecordClass::ThreadPrivate
@@ -192,7 +232,7 @@ mod tests {
     #[test]
     fn a_non_positive_deadline_is_refused() {
         let attribution = ProviderAttribution {
-            owner_scope: OwnerScope::narrowest("t", "p", None, None, None),
+            owner_scope: OwnerScope::narrowest("t", "p", OwnerAxes::default()),
             mission_id: None,
             invocation_id: "11111111-2222-4333-8444-555555555555".to_string(),
             correlation_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),

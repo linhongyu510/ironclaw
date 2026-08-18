@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
@@ -94,14 +94,13 @@ fn allowlist_permits(host: &str, allowlist: &[String]) -> bool {
         .any(|entry| entry.trim_end_matches('.').to_ascii_lowercase() == host)
 }
 
+// Private ranges are deliberately NOT blocked: the endpoint is operator
+// configured, and an internally hosted Mnesis is a supported deployment. The
+// control for narrowing that is `host_allowlist`, not this list. Link-local is
+// blocked, which covers the cloud metadata address.
 fn is_always_blocked(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_unspecified()
-                || v4.is_multicast()
-                || v4.is_link_local()
-                || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-        }
+        IpAddr::V4(v4) => v4.is_unspecified() || v4.is_multicast() || v4.is_link_local(),
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_always_blocked(&IpAddr::V4(v4));
@@ -213,10 +212,38 @@ mod tests {
     }
 
     #[test]
-    fn rejection_never_echoes_the_configured_url() {
+    fn a_scheme_rejection_never_echoes_the_host_path_or_query() {
         let error = production("ftp://secret-host.internal/path?token=swordfish").unwrap_err();
         let rendered = error.to_string();
         assert!(!rendered.contains("secret-host.internal"));
         assert!(!rendered.contains("swordfish"));
+    }
+
+    #[test]
+    fn a_blocked_address_names_the_host_but_never_the_path_or_query() {
+        // Naming the refused host is the point of this message, and an operator
+        // supplied literal address is not a secret. The path and query still
+        // are, so they must not survive into the error.
+        let error =
+            production("https://169.254.169.254/latest/meta-data?token=swordfish").unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("169.254.169.254"));
+        assert!(!rendered.contains("meta-data"));
+        assert!(!rendered.contains("swordfish"));
+    }
+
+    #[test]
+    fn private_ranges_stay_reachable_because_the_allowlist_is_the_control() {
+        // Pinned as a decision, not an oversight: an internally hosted Mnesis is
+        // supported, and narrowing it is the allowlist's job.
+        production("https://10.0.0.5/memory/mcp").unwrap();
+        production("https://192.168.1.10:8443/rar/mcp").unwrap();
+        let allowlist = vec!["mnesis.internal".to_string()];
+        check_endpoint(
+            "https://10.0.0.5/memory/mcp",
+            EndpointProfile::Production,
+            &allowlist,
+        )
+        .unwrap_err();
     }
 }

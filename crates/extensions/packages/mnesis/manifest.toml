@@ -10,7 +10,7 @@ kind = "first_party"
 service = "mnesis_memory_provider"
 
 [memory]
-lifecycle = ["read_long_term", "record_interaction"]
+lifecycle = ["read_long_term", "read_short_term", "record_interaction"]
 
 [[tools]]
 id = "ironclaw.memory.search"

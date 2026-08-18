@@ -82,8 +82,9 @@ pub use cancellation_port::{
 pub use capability_port::{
     CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
     DecoratingLoopCapabilityPortFactory, DurablePersistence, HostRuntimeLoopCapabilityPort,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
-    LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    HostRuntimeLoopCapabilityPortFactory, LifecycleTrajectoryObserver, LoopCapabilityInputResolver,
+    LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
     CapabilitySurfacePolicyFilter, CapabilitySurfaceVisibleFilter,
@@ -364,7 +365,8 @@ where
     /// context). Rendered as ONE framed system-context block per prompt
     /// build; `None` everywhere else.
     channel_conversation_context: Option<String>,
-    lifecycle_trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    // arch-exempt: optional_arc, absent unless a consumer installs an observer; no LoopHostDependencies bundle yet, plan #4368
+    lifecycle_trajectory_observer: Option<Arc<dyn LifecycleTrajectoryObserver>>,
 }
 
 struct IdentityCandidateCache {
@@ -443,7 +445,7 @@ where
 
     pub fn with_lifecycle_trajectory_observer(
         mut self,
-        observer: Arc<dyn CapabilityTrajectoryObserver>,
+        observer: Arc<dyn LifecycleTrajectoryObserver>,
     ) -> Self {
         self.lifecycle_trajectory_observer = Some(observer);
         self

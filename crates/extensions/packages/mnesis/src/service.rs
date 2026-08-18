@@ -8,9 +8,9 @@ use ironclaw_memory::{
 };
 use serde_json::{Value, json};
 
-use crate::attribution::{OwnerScope, ProviderAttribution};
+use crate::attribution::{OwnerAxes, OwnerScope, ProviderAttribution};
 use crate::idempotency::{WriteIdentity, assert_interaction_bounds, operation_id};
-use crate::transport::{MnesisLane, MnesisRequest, MnesisTransport};
+use crate::transport::{MnesisLane, MnesisRequest, MnesisResponse, MnesisTransport};
 
 const MAX_SNIPPETS: usize = 20;
 const MAX_QUERY_BYTES: usize = 4_096;
@@ -51,9 +51,11 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         let owner_scope = OwnerScope::narrowest(
             scope.tenant_id.as_str(),
             scope.user_id.as_str(),
-            scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
-            scope.project_id.as_ref().map(|id| id.as_str().to_string()),
-            thread_id,
+            OwnerAxes {
+                agent_id: scope.agent_id.as_ref().map(|id| id.as_str().to_string()),
+                project_id: scope.project_id.as_ref().map(|id| id.as_str().to_string()),
+                thread_id,
+            },
         );
         let deadline_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -126,7 +128,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                     content: hit.text,
                     score: hit.score,
                     path: hit.relative_path,
-                    is_hybrid_match: matches!(lane, MnesisLane::Knowledge),
+                    is_hybrid_match: lane.is_hybrid(),
                 })
                 .collect(),
         })
@@ -140,9 +142,12 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         limit: usize,
         attribution: Option<String>,
     ) -> Result<Vec<MnesisResult>, MemoryServiceError> {
-        let body = match lane {
-            MnesisLane::Knowledge => json!({ "query": query, "limit": limit, "hybrid": true }),
-            MnesisLane::Memory => json!({ "query": query, "limit": limit }),
+        // The memory lane omits the key entirely rather than sending false, so
+        // the wire shape stays exactly what the server already accepts.
+        let body = if lane.is_hybrid() {
+            json!({ "query": query, "limit": limit, "hybrid": true })
+        } else {
+            json!({ "query": query, "limit": limit })
         };
 
         let response = self
@@ -158,11 +163,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .map_err(MemoryServiceError::unavailable_from)?;
 
         if !response.is_success() {
-            return Err(if (500..600).contains(&response.status) {
-                MemoryServiceError::unavailable()
-            } else {
-                MemoryServiceError::operation()
-            });
+            return Err(lane_failure(&response));
         }
 
         Ok(decode_results(&response.body, limit))
@@ -188,11 +189,15 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         if response.is_success() {
             return Ok(());
         }
-        Err(if (500..600).contains(&response.status) {
-            MemoryServiceError::unavailable()
-        } else {
-            MemoryServiceError::operation()
-        })
+        Err(lane_failure(&response))
+    }
+}
+
+fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
+    if response.is_server_error() {
+        MemoryServiceError::unavailable()
+    } else {
+        MemoryServiceError::operation()
     }
 }
 
@@ -519,7 +524,7 @@ fn safe_relative_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{MnesisResponse, MockMnesisTransport};
+    use crate::transport::MockMnesisTransport;
 
     #[test]
     fn decodes_the_contract_envelope_and_a_bare_array() {
@@ -638,6 +643,42 @@ mod tests {
             error.kind(),
             ironclaw_memory::MemoryServiceErrorKind::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn the_read_and_write_lanes_classify_every_failure_status_alike() {
+        for status in [400, 401, 403, 404, 409, 429, 500, 502, 503, 504] {
+            let response = MnesisResponse {
+                status,
+                body: Value::Null,
+            };
+            let expected = if (500..600).contains(&status) {
+                ironclaw_memory::MemoryServiceErrorKind::Unavailable
+            } else {
+                ironclaw_memory::MemoryServiceErrorKind::Operation
+            };
+            assert_eq!(
+                response.is_server_error(),
+                expected == ironclaw_memory::MemoryServiceErrorKind::Unavailable,
+                "status {status}"
+            );
+            assert_eq!(lane_failure(&response).kind(), expected, "status {status}");
+
+            let service =
+                MnesisMemoryService::new(MockMnesisTransport::new(Box::new(move |_request| {
+                    Some(MnesisResponse {
+                        status,
+                        body: Value::Null,
+                    })
+                })));
+            let read = service
+                .query_lane(MnesisLane::Memory, "memory_search", "q", 4, None)
+                .await
+                .unwrap_err();
+            let write = service.record_lane(json!({}), None).await.unwrap_err();
+            assert_eq!(read.kind(), expected, "read lane, status {status}");
+            assert_eq!(write.kind(), expected, "write lane, status {status}");
+        }
     }
 
     #[tokio::test]

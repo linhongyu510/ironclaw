@@ -13,7 +13,7 @@ pub const MEMORY_GUIDANCE_ASSETS: &[(&str, &str)] = &[];
 pub const MEMORY_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 pub use attribution::{
-    OwnerRecordClass, OwnerScope, PROVIDER_ATTRIBUTION_HEADER, ProviderAttribution,
+    OwnerAxes, OwnerRecordClass, OwnerScope, PROVIDER_ATTRIBUTION_HEADER, ProviderAttribution,
 };
 pub use config::{
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_RESPONSE_BYTES,

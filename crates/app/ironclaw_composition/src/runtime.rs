@@ -3512,7 +3512,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>;
         let lifecycle_trajectory_observer = trajectory_observer
             .clone()
-            .map(crate::observability::trajectory_observer::as_capability_observer);
+            .map(crate::observability::trajectory_observer::as_lifecycle_observer);
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,

@@ -27,15 +27,14 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityResolveError,
-    CapabilitySurfacePolicyFilter, CapabilitySurfaceProfileResolver, CapabilityTrajectoryObserver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, GuardedSystemInferencePort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    StructuredOutputLoopPromptPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    active_task_compaction_prompt_id,
+    CapabilitySurfacePolicyFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
+    LifecycleTrajectoryObserver, LoopAttachmentReadPort, LoopCapabilityInputResolver,
+    LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
+    RunCancellationObservationKind, RunStateLoopCancellationPort, StructuredOutputLoopPromptPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -1114,7 +1113,8 @@ where
     /// `EmptyUserProfileSource` — this is a genuine `Option`.)
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
-    lifecycle_trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    // arch-exempt: optional_arc, absent unless a consumer installs an observer; no LoopHostDependencies bundle yet, plan #4368
+    lifecycle_trajectory_observer: Option<Arc<dyn LifecycleTrajectoryObserver>>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1503,7 +1503,7 @@ where
 
     pub fn with_lifecycle_trajectory_observer(
         mut self,
-        observer: Arc<dyn CapabilityTrajectoryObserver>,
+        observer: Arc<dyn LifecycleTrajectoryObserver>,
     ) -> Self {
         self.lifecycle_trajectory_observer = Some(observer);
         self

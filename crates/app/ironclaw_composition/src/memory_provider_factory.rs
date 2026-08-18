@@ -423,20 +423,13 @@ pub fn resolve_memory_provider(
                                 reason: format!("mem0 memory provider package is invalid: {error}"),
                             }
                         })?;
-                        let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
-                            Arc::new(Mem0MemoryToolHandler {
-                                provider: Arc::clone(&provider),
-                            });
-                        ResolvedMemoryProvider {
-                            resolver: resolver.with_third_party_provider(
-                                extension_id.as_str(),
-                                provider as Arc<dyn MemoryService>,
-                            ),
-                            package: Some(bundle.package),
-                            lifecycle: bundle.lifecycle,
-                            tool_handler: Some(tool_handler),
-                            guidance: bundle.guidance,
-                        }
+                        bind_third_party(
+                            resolver,
+                            extension_id.as_str(),
+                            Arc::clone(&provider) as Arc<dyn MemoryService>,
+                            bundle,
+                            Arc::new(Mem0MemoryToolHandler { provider }),
+                        )
                     }
                     // create_mem0_provider already logged why; fail closed —
                     // no tools registered, no lifecycle hooks called.
@@ -458,21 +451,16 @@ pub fn resolve_memory_provider(
                                 ),
                             }
                         })?;
-                        let tool_handler: Arc<dyn FirstPartyCapabilityHandler> =
-                            Arc::new(MnesisMemoryToolHandler {
-                                provider: Arc::clone(&provider),
-                            });
-                        ResolvedMemoryProvider {
-                            resolver: resolver.with_third_party_provider(
-                                extension_id.as_str(),
-                                provider as Arc<dyn MemoryService>,
-                            ),
-                            package: Some(bundle.package),
-                            lifecycle: bundle.lifecycle,
-                            tool_handler: Some(tool_handler),
-                            guidance: bundle.guidance,
-                        }
+                        bind_third_party(
+                            resolver,
+                            extension_id.as_str(),
+                            Arc::clone(&provider) as Arc<dyn MemoryService>,
+                            bundle,
+                            Arc::new(MnesisMemoryToolHandler { provider }),
+                        )
                     }
+                    // create_mnesis_provider already logged why; fail closed —
+                    // no tools registered, no lifecycle hooks called.
                     None => ResolvedMemoryProvider::unbound(resolver),
                 });
             }
@@ -486,6 +474,25 @@ pub fn resolve_memory_provider(
             );
             Ok(ResolvedMemoryProvider::unbound(resolver))
         }
+    }
+}
+
+/// One binding shape for every third-party provider arm, so a new provider
+/// cannot bind on terms the others do not share.
+#[cfg(any(feature = "memory-mem0", feature = "memory-mnesis"))]
+fn bind_third_party(
+    resolver: MemoryServiceResolver,
+    extension_id: &str,
+    provider: Arc<dyn MemoryService>,
+    bundle: ironclaw_host_runtime::memory_native_extension::BundledMemoryProvider,
+    tool_handler: Arc<dyn FirstPartyCapabilityHandler>,
+) -> ResolvedMemoryProvider {
+    ResolvedMemoryProvider {
+        resolver: resolver.with_third_party_provider(extension_id, provider),
+        package: Some(bundle.package),
+        lifecycle: bundle.lifecycle,
+        tool_handler: Some(tool_handler),
+        guidance: bundle.guidance,
     }
 }
 

@@ -6,7 +6,7 @@ use ironclaw_memory::{MemoryService, MemoryServiceErrorKind};
 use ironclaw_memory_mnesis::{
     EndpointProfile, MnesisConfig, MnesisError, MnesisHttpTransport, MnesisLane, MnesisLimits,
     MnesisMemoryService, MnesisRequest, MnesisResponse, MnesisTransport, MockMnesisTransport,
-    SecretHandle,
+    OwnerAxes, SecretHandle,
 };
 use serde_json::{Value, json};
 
@@ -435,9 +435,7 @@ fn canary_attribution() -> String {
             std::env::var("MNESIS_CANARY_TENANT").unwrap_or_else(|_| "ironclaw-lab".to_string()),
             std::env::var("MNESIS_CANARY_PRINCIPAL")
                 .unwrap_or_else(|_| "ironclaw-integration-reader".to_string()),
-            None,
-            None,
-            None,
+            OwnerAxes::default(),
         ),
         mission_id: None,
         invocation_id: "11111111-2222-4333-8444-555555555555".to_string(),
@@ -481,4 +479,109 @@ fn service_lanes(service: &MnesisMemoryService<MockMnesisTransport>) -> Vec<Mnes
         .iter()
         .map(|request| request.lane)
         .collect()
+}
+
+/// A server that sends response headers and then stalls forever. The client's
+/// own deadline must end the call: a lane that trickles must not be able to pin
+/// a run open, which is the client half of the slowloris defence.
+fn stalling_origin() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the stalling origin binds");
+    let port = listener
+        .local_addr()
+        .expect("the stalling origin reports its address")
+        .port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            read_bounded(&mut stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n",
+            );
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn a_stalled_lane_ends_on_the_client_deadline_rather_than_pinning_the_run() {
+    let port = stalling_origin();
+    let mut config = config_for(
+        &format!("http://127.0.0.1:{port}"),
+        EndpointProfile::LoopbackDevelopment,
+    );
+    config.limits.request_timeout_secs = 1;
+    config.limits.total_deadline_secs = 3;
+    config.limits.max_retries = 0;
+    let transport = build(&config, "stall-canary-bearer").expect("loopback is permitted");
+
+    let started = std::time::Instant::now();
+    let error = transport
+        .execute(MnesisRequest {
+            lane: MnesisLane::Memory,
+            operation: "memory_search",
+            body: json!({"query": "anything", "limit": 4}),
+            idempotent: false,
+            attribution: None,
+        })
+        .await
+        .expect_err("a stalled response must not resolve as success");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the client hung on a stalled lane for {elapsed:?} instead of honouring its deadline"
+    );
+    assert!(
+        !error.to_string().contains("stall-canary-bearer"),
+        "a timeout must not echo the credential"
+    );
+}
+
+/// A plain-TCP listener addressed over `https://`. The handshake must fail
+/// rather than degrade to cleartext: this is the control that also closes DNS
+/// rebinding for a production endpoint, because an attacker-controlled address
+/// cannot complete a TLS handshake for the configured hostname.
+fn cleartext_listener_posing_as_tls() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the cleartext listener binds");
+    let port = listener
+        .local_addr()
+        .expect("the cleartext listener reports its address")
+        .port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn tls_is_required_and_never_degrades_to_cleartext() {
+    let port = cleartext_listener_posing_as_tls();
+    let config = config_for(
+        &format!("https://127.0.0.1:{port}"),
+        EndpointProfile::Production,
+    );
+    let transport = build(&config, "tls-canary-bearer").expect("loopback https is permitted");
+
+    let error = transport
+        .execute(MnesisRequest {
+            lane: MnesisLane::Memory,
+            operation: "memory_search",
+            body: json!({"query": "anything", "limit": 4}),
+            idempotent: false,
+            attribution: None,
+        })
+        .await
+        .expect_err("a server that cannot complete a TLS handshake must not be talked to");
+
+    assert!(
+        !error.to_string().contains("tls-canary-bearer"),
+        "a handshake failure must not echo the credential"
+    );
 }

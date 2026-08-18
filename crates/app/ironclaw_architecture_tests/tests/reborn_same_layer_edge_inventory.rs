@@ -1,5 +1,6 @@
 //! Same-layer dependency inventory — the guard the layer matrix cannot be
 //! (target-architecture epic #3773, CHECKLIST WS10; issue #7149).
+// arch-exempt: large_file, one centralized inventory by design; it grows by an entry when a same-layer edge is added, plan #6310
 //!
 //! # The hole
 //!
