@@ -221,7 +221,14 @@ observed_date = "2026-08-08"
 # preflight-then-migrate adoption seam into composition. These are deployment
 # assembly responsibilities; the extension host now receives only the neutral
 # `RootFilesystem` contract. Measured on this tree with the gate itself.
-loc_ceiling = 43170
+# Re-ratcheted 43293 -> 43170 on 2026-08-18 after the journaled adoption engine
+# was replaced by the rename-based boot migrator, evicting the adoption store
+# verifiers from composition.
+# Union re-measured on 2026-08-18 after merging main (unbound-turns surfaces:
+# composition holds only the wire-DTO mapping, port adapter, and mount wiring).
+# The deltas are disjoint and the ceiling is the gate's exact merged-tree
+# measurement.
+loc_ceiling = 43440
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -232,8 +239,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 43293
-loc_observed_date = "2026-08-14"
+loc_observed = 43440
+loc_observed_date = "2026-08-18"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
@@ -304,9 +311,16 @@ loc_observed_date = "2026-08-14"
 # Union re-measured on 2026-08-12 after merging main into the unified-channel
 # branch (both sides re-equalized on their own trees: 838 here, 831 on main);
 # measured on the merged tree, keeping the designed 15-site window.
-# Re-equalized at 822 on 2026-08-14 after the profile-stable storage merge:
-# the merged tree reports 837 governed sites, so 822 + 15 tolerance preserves
-# the designed zero-headroom effective ceiling.
+# 823 -> 826 on 2026-08-13 after merging #7532: the structured-trigger path
+# adds the production preflight seam and carries its existing multi-impl
+# capability/create-hook ports through assembly.
+# 826 -> 830 on 2026-08-14 for the shared runtime-event sink: four governed
+# carrier/assembly sites route cancellation and milestone producers through one
+# `EventSink` seam. Production uses `CoalescingEventSink`; the overload fake
+# verifies lossless cancellation behavior.
+# Re-equalized on 2026-08-18 after merging main into the profile-stable storage
+# branch: the merged tree reports its governed sites below, and
+# ceiling + 15 tolerance preserves the designed zero-headroom effective ceiling.
 arc_dyn_ceiling = 822
 arc_dyn_tolerance = 15
 arc_dyn_observed = 837

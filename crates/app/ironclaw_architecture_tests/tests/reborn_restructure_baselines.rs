@@ -180,13 +180,20 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// the profile-stable durable-storage branch. This is the exact merged-tree
 /// production-source count, including both main's composition changes and the
 /// branch's storage adoption assembly; it is not a sum of historical pins.
-/// Re-measured 42_989 -> 43_265 on 2026-08-14 after the current
-/// profile-stable storage review changes, using
+/// Re-measured 42_989 -> 43_265 on 2026-08-14 after the profile-stable
+/// storage review changes, using
 /// `bash scripts/ci/check-composition-budget.sh --print`.
 /// Re-measured 43_265 -> 43_170 on 2026-08-18 after replacing the journaled
 /// storage-layout adoption engine with the rename-based boot migrator
 /// (adoption store verifiers evicted from composition).
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_170;
+/// Union re-measured on 2026-08-18 after merging main (the unbound-turns
+/// surfaces work, whose composition share is the wire-DTO mapping, port
+/// adapter, and mount wiring) into this branch. `bash
+/// scripts/ci/check-composition-budget.sh --print` is the single
+/// authoritative re-capture, and this record moves with
+/// `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed` to the
+/// same figure in this commit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_440;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 837 Arc<dyn> (governed prod, excl slack/extension_host)".

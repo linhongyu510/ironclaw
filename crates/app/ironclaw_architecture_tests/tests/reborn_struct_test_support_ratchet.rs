@@ -74,7 +74,7 @@ struct FrozenPathCount {
 /// the caller-filtered extension-authority test seam reused the production
 /// capability surface and deleted two duplicate test-only policy builders.
 const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 272;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 268;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -93,13 +93,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "dead-code",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/factory.rs",
-        count: 2,
+        count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/runtime.rs",
-        count: 2,
+        count: 1,
     },
     FrozenPathCount {
         category: "dead-code",
@@ -159,7 +159,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/factory.rs",
-        count: 8,
+        count: 7,
     },
     FrozenPathCount {
         category: "test-support",
@@ -177,7 +177,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_composition/src/runtime.rs",
-        count: 11,
+        count: 10,
     },
     FrozenPathCount {
         category: "test-support",

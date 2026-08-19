@@ -40,8 +40,8 @@ use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnExecutionOutcome,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -78,6 +78,11 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+    /// The reply route, owned by the CONVERSATION binding the envelope
+    /// resolved to — runs themselves carry no reply-target binding, so the
+    /// observer routes every notification from the product-side binding it
+    /// already holds.
+    reply_target_binding_ref: &'a ReplyTargetBindingRef,
 }
 
 /// The live working indicator for one run: the currently posted message (if
@@ -641,9 +646,9 @@ impl RunDeliveryObserver {
                         scope: &scope,
                         thread_scope: &thread_scope,
                         actor: &actor,
+                        reply_target_binding_ref: &binding.reply_target_binding_ref,
                     },
                     run_id,
-                    &actionable_state,
                     notification,
                 )
                 .await?;
@@ -865,6 +870,9 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
+                if state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport) {
+                    return Ok(None);
+                }
                 let Some(message) = self
                     .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?
@@ -1032,7 +1040,6 @@ impl RunDeliveryObserver {
         &self,
         context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
-        state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
@@ -1040,8 +1047,9 @@ impl RunDeliveryObserver {
             scope,
             thread_scope,
             actor,
+            reply_target_binding_ref,
         } = context;
-        let reply_target = state.reply_target_binding_ref.clone();
+        let reply_target = reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
