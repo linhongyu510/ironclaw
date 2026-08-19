@@ -413,18 +413,15 @@ fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, Notifi
     Ok(Entry::bytes(body)
         .with_content_type(ContentType::json())
         .with_indexed(
-            tenant_id_index_key(),
+            tenant_id_index_key()?,
             tenant_id_index_value(&snapshot.recipient),
         ))
 }
 
-fn tenant_id_index_key() -> IndexKey {
-    static KEY: std::sync::OnceLock<IndexKey> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| match IndexKey::new(TENANT_ID_INDEX_KEY) {
-        Ok(key) => key,
-        Err(_) => unreachable!("tenant_id is a valid filesystem index key"),
+fn tenant_id_index_key() -> Result<IndexKey, NotificationInboxError> {
+    IndexKey::new(TENANT_ID_INDEX_KEY).map_err(|error| NotificationInboxError::Serialization {
+        reason: format!("notification inbox tenant index key is invalid: {error}"),
     })
-    .clone()
 }
 
 fn tenant_id_index_value(recipient: &NotificationRecipient) -> IndexValue {
