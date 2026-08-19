@@ -322,6 +322,85 @@ async fn unwired_notification_store_fails_closed_for_reads_and_writes() {
 }
 
 #[tokio::test]
+async fn a_lowered_bound_drains_the_snapshot_instead_of_locking_the_recipient_out() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let roomy = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY * 3);
+
+    // Fill and close well past the smaller bound this recipient will be reopened
+    // with, the way lowering the configured capacity would leave a live inbox.
+    for index in 0..TEST_CAPACITY * 3 {
+        let id = format!("closed-{index}");
+        roomy
+            .publish(request(&id, 1_700_000_000 + index as i64))
+            .await
+            .expect("publish under the roomy bound");
+        let mutation = NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: NotificationId::new(id.as_str()).expect("id"),
+            occurred_at: Utc
+                .timestamp_opt(1_700_500_000 + index as i64, 0)
+                .single()
+                .expect("time"),
+        };
+        roomy.resolve(mutation.clone()).await.expect("resolve");
+        roomy.archive(mutation).await.expect("archive");
+    }
+
+    let tightened = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
+
+    // Reading never rejects an over-bound snapshot: a lowered bound must not turn
+    // a configuration change into a locked-out inbox.
+    let before = tightened
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: NOTIFICATION_PAGE_LIMIT_MAX,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("an over-bound snapshot stays readable");
+    assert_eq!(before.notifications.len(), TEST_CAPACITY * 3);
+
+    // Publishing drains to the active bound rather than shedding one record per
+    // call, so the tightened bound actually takes effect.
+    let arrival = request("gate-after-tightening", 1_800_000_000);
+    let arrival_id = arrival.id.clone();
+    tightened
+        .publish(arrival)
+        .await
+        .expect("the new gate is admitted");
+
+    let after = tightened
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: NOTIFICATION_PAGE_LIMIT_MAX,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list after draining");
+    assert_eq!(
+        after.notifications.len(),
+        TEST_CAPACITY,
+        "the snapshot converges on the active bound instead of staying over it"
+    );
+    assert!(
+        after
+            .notifications
+            .iter()
+            .any(|record| record.id == arrival_id),
+        "the arrival that triggered the drain is one of the survivors"
+    );
+    assert!(
+        after
+            .notifications
+            .iter()
+            .all(|record| record.id.as_str() != "closed-0"),
+        "draining sheds the oldest closed records first"
+    );
+}
+
+#[tokio::test]
 async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);

@@ -118,9 +118,15 @@ where
                         let record = existing.clone();
                         return Ok(CasApply::no_op(snapshot, record));
                     }
-                    if snapshot.notifications.len() >= capacity
-                        && !evict_oldest_closed_record(&mut snapshot)
-                    {
+                    // Drain to the active bound rather than shedding one record
+                    // per call: a bound that was lowered while records already
+                    // existed has to actually take effect, and reads never reject
+                    // an over-bound snapshot, so draining here is what converges
+                    // it instead of locking the recipient out.
+                    while snapshot.notifications.len() >= capacity
+                        && evict_oldest_closed_record(&mut snapshot)
+                    {}
+                    if snapshot.notifications.len() >= capacity {
                         return Err(NotificationInboxError::InvalidRequest {
                             reason: "notification inbox is at capacity",
                         });
@@ -441,8 +447,10 @@ fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, Notifi
         ))
 }
 
-/// Reclaim one slot from a full snapshot so a new event is never lost to the
-/// ceiling. Only a record the producer resolved *and* the recipient archived is
+/// Reclaim one slot from a snapshot that is at its bound, so a new event is
+/// never lost to the ceiling. Callers loop to drain, which is what converges a
+/// snapshot that already exceeded a bound lowered under it. Only a record the
+/// producer resolved *and* the recipient archived is
 /// eligible; an open record is never evicted, because dropping one would lose
 /// an actionable gate, which is the very thing this inbox exists to deliver.
 /// Returns false when nothing is closed, leaving the write to fail rather than

@@ -16,13 +16,19 @@
   behaviour below is provable without re-encoding a full snapshot thousands of
   times.
 - That bound is 1,000 records in production, and it *is* the idempotency
-  window: a publish at the bound reclaims the oldest record that is both
-  resolved and archived, and a later retry for a reclaimed id is admitted as a
+  window: a publish at the bound reclaims records that are both resolved and
+  archived, oldest first, and a later retry for a reclaimed id is admitted as a
   new record rather than recognised as a duplicate. When nothing is closed the
   publish fails instead of evicting live state, so a full inbox of open gates is
   never silently thinned. Widening the window means retaining durable
   deduplication state for reclaimed ids, which is a persisted-schema change and
   needs its own rollback review.
+- A publish drains to the active bound, it does not shed one record per call, so
+  a bound lowered under an existing snapshot converges instead of staying over
+  it forever. Reads never reject an over-bound snapshot: validation guards
+  against corruption with the absolute product ceiling, deliberately not with
+  the configured bound, because rejecting there would turn lowering the
+  configuration into a locked-out recipient.
 - Persistence uses `ScopedFilesystem` plus bounded CAS; backend selection stays
   in composition.
 - Notification production and product read policy belong to the originating
