@@ -1707,6 +1707,24 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             )],
         ),
         (
+            "unsupported result delivery",
+            json!({
+                "name": "Bad result delivery",
+                "execution_contract": {
+                    "goal": "Run work",
+                    "success_criteria": ["Work completed"],
+                    "output_instructions": "Return the result",
+                    "no_result_text": "No change",
+                    "policy": { "result_delivery": "always" }
+                },
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![(
+                "execution_contract.policy.result_delivery",
+                DispatchInputIssueCode::InvalidValue,
+            )],
+        ),
+        (
             "missing schedule timezone",
             json!({
                 "name": "Missing timezone",

@@ -817,7 +817,15 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
                             missing_required("execution_contract.policy.result_delivery")
                                 .expected("deliver or suppress_when_nothing_to_report"),
                         ),
-                        Some(Value::String(_)) => {}
+                        Some(Value::String(value))
+                            if matches!(
+                                value.as_str(),
+                                "deliver" | "suppress_when_nothing_to_report"
+                            ) => {}
+                        Some(Value::String(_)) => issues.push(
+                            invalid_value("execution_contract.policy.result_delivery")
+                                .expected("deliver or suppress_when_nothing_to_report"),
+                        ),
                         Some(_) => issues.push(type_mismatch(
                             "execution_contract.policy.result_delivery",
                             "deliver or suppress_when_nothing_to_report",
