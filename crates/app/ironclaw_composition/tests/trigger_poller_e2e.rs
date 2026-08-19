@@ -81,7 +81,6 @@ fn trigger_execution_contract(goal: impl Into<String>) -> Value {
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
         "no_result_text": "No result",
-        "required_capability_ids": [],
         "policy": { "result_delivery": "deliver" }
     })
 }
@@ -2226,7 +2225,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 }
 
 #[tokio::test]
-async fn structured_trigger_creation_rejects_unavailable_and_empty_restrictions() {
+async fn structured_trigger_creation_rejects_capability_pinning_and_missing_skills() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway::default());
     let runtime = build_runtime_with_tool_disclosure(
@@ -2241,13 +2240,42 @@ async fn structured_trigger_creation_rejects_unavailable_and_empty_restrictions(
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let repo = runtime.trigger_repository();
 
-    let invalid = invoke_trigger_create_outcome(
+    let required_capability = invoke_trigger_create_outcome(
         &runtime,
         json!({
-            "name": "structured-missing-capability",
+            "name": "structured-required-capability",
             "execution_contract": {
                 "version": 1,
-                "goal": "Use a missing capability",
+                "goal": "Use a pinned capability",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "required_capability_ids": ["missing.capability"],
+                "policy": { "result_delivery": "deliver" }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(required_capability, RuntimeCapabilityOutcome::Failed(_)),
+        "creation must reject model-authored required capability IDs: {required_capability:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected required capability")
+            .is_empty(),
+        "a rejected required capability must not persist a trigger"
+    );
+
+    let allowed_capability = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-allowed-capability",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Use a pinned capability surface",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
@@ -2261,16 +2289,17 @@ async fn structured_trigger_creation_rejects_unavailable_and_empty_restrictions(
     )
     .await;
     assert!(
-        matches!(invalid, RuntimeCapabilityOutcome::Failed(_)),
-        "creation preflight must reject an unavailable capability before persistence: {invalid:?}"
+        matches!(allowed_capability, RuntimeCapabilityOutcome::Failed(_)),
+        "creation must reject model-authored capability allowlists: {allowed_capability:?}"
     );
     assert!(
         repo.list_triggers(tenant_id.clone())
             .await
-            .expect("list triggers after rejected preflight")
+            .expect("list triggers after rejected capability allowlist")
             .is_empty(),
-        "a failed creation preflight must not persist a trigger"
+        "a rejected capability allowlist must not persist a trigger"
     );
+
     let missing_skill = invoke_trigger_create_outcome(
         &runtime,
         json!({
@@ -2302,36 +2331,12 @@ async fn structured_trigger_creation_rejects_unavailable_and_empty_restrictions(
         "a failed skill preflight must not persist a trigger"
     );
 
-    let empty_allowlist = invoke_trigger_create_outcome(
-        &runtime,
-        json!({
-            "name": "structured-empty-tool-surface",
-            "execution_contract": {
-                "version": 1,
-                "goal": "Report trigger status",
-                "success_criteria": ["Return a definitive status"],
-                "output_instructions": "Return concise Markdown",
-                "no_result_text": "No trigger status is available",
-                "policy": {
-                    "allowed_capability_ids": [],
-                    "result_delivery": "deliver"
-                }
-            },
-            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
-        }),
-    )
-    .await;
     runtime.shutdown().await.expect("runtime shutdown");
-    assert!(
-        matches!(empty_allowlist, RuntimeCapabilityOutcome::Failed(_)),
-        "creation must reject an explicit empty capability allowlist: {empty_allowlist:?}"
-    );
     assert!(
         repo.list_triggers(tenant_id)
             .await
-            .expect("list triggers after rejected empty allowlist")
-            .is_empty(),
-        "an empty allowlist must not persist a zero-capability routine"
+            .expect("list triggers after rejected restrictions")
+            .is_empty()
     );
 }
 

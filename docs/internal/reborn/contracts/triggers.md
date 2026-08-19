@@ -89,15 +89,17 @@ This is a new-write rule, not a destructive migration. Existing rows with a
 raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
 to execute their frozen prompt without interpretation or backfill.
 
-The v1 contract contains a goal, one or more success criteria, output
-instructions, no-result text, an optional capability allowlist, optional
-explicit capability-evidence requirements, and required skill names. The
-trigger domain validates and renders this contract before
-persistence. Production creation also resolves capability references against
-the current model-visible catalog and required skills through the normal skill
-selector before writing the trigger. The scheduler continues to submit the
-frozen prompt; only the neutral execution policy crosses the trusted-trigger
-turn boundary.
+The durable v1 contract contains a goal, one or more success criteria, output
+instructions, no-result text, required skill names, and legacy/internal fields
+for a capability allowlist and explicit capability-evidence requirements. The
+model-facing `trigger_create` surface neither advertises nor accepts the two
+capability-ID fields. New model-authored routines therefore store an absent
+allowlist and no explicit capability requirements, allowing each future run to
+discover the capabilities needed for that run. The trigger domain validates
+and renders the contract before persistence. Production creation resolves
+required skills through the normal skill selector before writing the trigger.
+The scheduler continues to submit the frozen prompt; only the neutral execution
+policy crosses the trusted-trigger turn boundary.
 
 New `trigger_create` calls must explicitly select
 `execution_contract.policy.result_delivery`; omission is a model-visible input
@@ -131,25 +133,16 @@ configured notification channel remains `NoDefaultConfigured`. Failed,
 cancelled, blocked, and recovery-required runs never qualify for suppression;
 their existing visible notification behavior is unchanged.
 
-Capability allowlists are intersections: absent preserves the scheduled
-surface, an empty list exposes no capabilities, and a non-empty list can only
-narrow the surface. Global and scheduled-trigger denials still win. Required
-skills resolve through the normal skill activation catalog before model context
-is built; missing, ambiguous, untrusted, unready, or over-budget requirements
-fail closed and never widen capabilities.
-
-`required_capability_ids` is optional advanced verification metadata, not
-authority or an execution plan. Ordinary create requests omit it so future
-runs can discover whichever capabilities they need. It is appropriate only
-when the user or policy explicitly requires exact capabilities. Every declared
-requirement must also belong to `allowed_capability_ids` when an allowlist is
-present. Missing and empty fields deserialize identically for compatibility.
-
-`policy.allowed_capability_ids` is likewise an optional advanced restriction,
-not a tool-planning hint. Ordinary routines omit it and inherit the caller's
-normal capability surface. When present it must contain at least one capability;
-an empty array is rejected because it would silently create a routine with no
-usable capabilities.
+For backward compatibility, previously persisted or internally constructed
+contracts may still carry capability fields. Their semantics are unchanged:
+an allowlist is an intersection with the scheduled surface, global and
+scheduled-trigger denials still win, and explicit requirements contribute to
+runtime-evidence assessment. These fields remain readable and enforceable but
+cannot be authored through `trigger_create`; no data migration is required.
+Required skills remain part of the creation surface and resolve through the
+normal skill activation catalog before model context is built. Missing,
+ambiguous, untrusted, unready, or over-budget requirements fail closed and
+never widen capabilities.
 
 Terminal structured runs receive a deterministic assessment when read through
 the WebUI automation service or `trigger_list`. The assessment folds the run's

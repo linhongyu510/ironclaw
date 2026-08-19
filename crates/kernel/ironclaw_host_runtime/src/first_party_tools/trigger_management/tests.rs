@@ -3,26 +3,6 @@ use ironclaw_host_api::turn::TurnRunId;
 
 use super::*;
 
-/// Accept-all preflight for tests that pin persistence/round-trip behavior of
-/// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
-#[derive(Debug)]
-struct AcceptAllTriggerCreateHook;
-
-#[async_trait]
-impl TriggerCreateHook for AcceptAllTriggerCreateHook {
-    async fn validate_execution_policy(
-        &self,
-        _scope: &ResourceScope,
-        _policy: &TurnExecutionPolicy,
-    ) -> Result<(), TriggerError> {
-        Ok(())
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
 fn execution_contract(goal: impl Into<String>) -> Value {
     let goal = goal.into();
     json!({
@@ -341,15 +321,10 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
         "trigger_create description must say the fire has no memory of this conversation: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
-        TRIGGER_CREATE_DESCRIPTION.contains(
-            "Omit both required_capability_ids and policy.allowed_capability_ids for ordinary routines",
-        )
-            && TRIGGER_CREATE_DESCRIPTION.contains("discover the tools it needs")
-            && TRIGGER_CREATE_DESCRIPTION.contains("never predict an implementation")
-            && TRIGGER_CREATE_DESCRIPTION.contains(
-                "never pass an empty allowed_capability_ids array because that would disable every capability",
-            ),
-        "trigger_create must preserve dynamic capability discovery by default: {TRIGGER_CREATE_DESCRIPTION}"
+        TRIGGER_CREATE_DESCRIPTION.contains("discover the tools it needs dynamically")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("allowed_capability_ids")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("required_capability_ids"),
+        "trigger_create must preserve dynamic capability discovery without exposing exact-ID fields: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
@@ -545,7 +520,6 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
             "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
                 "required_skills": ["payment-operations"],
                 "result_delivery": "suppress_when_nothing_to_report"
             }
@@ -555,10 +529,62 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
 
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
     assert_eq!(parsed.execution_contract.version, 1);
+    assert!(parsed.execution_contract.required_capability_ids.is_empty());
+    assert!(
+        parsed
+            .execution_contract
+            .policy
+            .allowed_capability_ids
+            .is_none(),
+        "new model-authored routines must retain dynamic capability discovery"
+    );
     assert_eq!(
         parsed.execution_contract.policy.result_delivery,
         ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
     );
+}
+
+#[test]
+fn trigger_create_input_rejects_model_authored_capability_ids() {
+    let required = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "required_capability_ids": ["stripe.list_payments"],
+            "policy": { "result_delivery": "deliver" }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+    let allowed = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    for input in [required, allowed] {
+        let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+            Ok(_) => panic!("model-authored capability IDs must not deserialize"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("capability_ids"),
+            "the rejected field should be identifiable: {error}"
+        );
+    }
 }
 
 #[test]
@@ -601,17 +627,14 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
-                "result_delivery": "deliver"
-            }
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });
 
     let output = create_trigger(
         &repository,
-        &AcceptAllTriggerCreateHook,
+        &NoopTriggerCreateHook,
         &scope,
         input,
         Utc::now(),
@@ -628,14 +651,16 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     let spec = record.execution_spec.as_ref().expect("stored contract");
     assert_eq!(record.prompt, spec.render_prompt());
     assert!(record.prompt.contains("## Success criteria"));
+    assert!(spec.required_capability_ids.is_empty());
+    assert!(spec.policy.allowed_capability_ids.is_none());
 }
 
 #[tokio::test]
 async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
     // The compatibility registration path (`NoopTriggerCreateHook`) has no
-    // preflight service; a contract carrying capability/skill restrictions
-    // must fail closed at creation instead of persisting unvalidated
-    // restrictions that every fired run would then trip over.
+    // preflight service; a contract carrying required skills must fail closed
+    // at creation instead of persisting unvalidated requirements that every
+    // fired run would then trip over.
     let repository = InMemoryTriggerRepository::default();
     let scope = ResourceScope::local_default(
         UserId::new("preflightless-user").expect("user"),
@@ -651,7 +676,7 @@ async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
             "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
+                "required_skills": ["payment-operations"],
                 "result_delivery": "deliver"
             }
         },

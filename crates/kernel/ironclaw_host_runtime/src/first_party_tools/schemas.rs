@@ -941,7 +941,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "execution_contract": {
                     "type": "object",
-                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Future runs discover capabilities dynamically; required skills must activate before the first model call.",
                     "properties": {
                         "version": { "const": 1 },
                         "goal": {
@@ -963,19 +963,9 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "minLength": 1,
                             "description": "Exact useful response when the task finds no result."
                         },
-                        "required_capability_ids": {
-                            "type": "array", "maxItems": 64,
-                            "description": "Optional advanced verification metadata for capabilities the user or policy explicitly requires. Omit this field for ordinary routines so future runs can discover their implementation dynamically. Do not predict tools merely because they may be useful. When present, every entry must also be allowed by policy.allowed_capability_ids when that allowlist is present.",
-                            "items": { "type": "string" }
-                        },
                         "policy": {
                             "type": "object",
                             "properties": {
-                                "allowed_capability_ids": {
-                                    "type": ["array", "null"], "minItems": 1, "maxItems": 64,
-                                    "description": "Optional advanced restriction for an explicitly pinned capability surface. Omit this field for ordinary routines so future runs retain dynamic tool discovery. An empty array is invalid because it would create a routine that cannot use any capabilities.",
-                                    "items": { "type": "string" }
-                                },
                                 "required_skills": {
                                     "type": "array", "maxItems": 8,
                                     "items": { "type": "string" }
@@ -1249,14 +1239,14 @@ mod tests {
         assert!(
             schema["properties"]["execution_contract"]["properties"]
                 .get("required_capability_ids")
-                .is_some(),
-            "explicit capability evidence requirements remain available but optional"
+                .is_none(),
+            "model-authored routines must not predict exact evidence capabilities"
         );
-        assert_eq!(
-            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]["allowed_capability_ids"]
-                ["minItems"],
-            serde_json::json!(1),
-            "an explicit allowlist must not silently disable every capability"
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                .get("allowed_capability_ids")
+                .is_none(),
+            "model-authored routines must retain dynamic capability discovery"
         );
         assert_eq!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["required"],

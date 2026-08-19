@@ -172,32 +172,6 @@ fn structured_execution_spec_rejects_required_capability_outside_allowed_surface
     assert!(error.to_string().contains("required_capability_ids"));
 }
 
-#[test]
-fn structured_execution_spec_rejects_an_empty_capability_allowlist() {
-    let spec = TriggerExecutionSpec {
-        version: 1,
-        goal: "Summarize the week".to_string(),
-        success_criteria: vec!["Return the summary".to_string()],
-        output_instructions: "Be concise".to_string(),
-        no_result_text: "Nothing to summarize".to_string(),
-        required_capability_ids: Vec::new(),
-        policy: TurnExecutionPolicy {
-            allowed_capability_ids: Some(Vec::new()),
-            ..TurnExecutionPolicy::default()
-        },
-    };
-
-    let error = spec
-        .validate()
-        .expect_err("an explicit empty allowlist would disable every capability");
-
-    assert!(
-        error
-            .to_string()
-            .contains("allowed_capability_ids must be omitted or contain at least one capability")
-    );
-}
-
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0)
         .single()
