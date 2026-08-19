@@ -29,11 +29,13 @@ apt_acquire_options=(
   -o Acquire::Retries=2
 )
 run_apt() {
-  sudo timeout --kill-after=5s 120s apt-get "${apt_acquire_options[@]}" "$@"
+  local deadline="$1"
+  shift
+  sudo timeout --kill-after=5s "${deadline}" apt-get "${apt_acquire_options[@]}" "$@"
 }
 update_ok=false
 for attempt in 1 2 3; do
-  if run_apt update; then
+  if run_apt 120s update; then
     update_ok=true
     break
   fi
@@ -45,4 +47,4 @@ if [ "${update_ok}" != true ]; then
   exit 1
 fi
 
-run_apt install -y "$@"
+run_apt 300s install -y "$@"

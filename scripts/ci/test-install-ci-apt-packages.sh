@@ -20,8 +20,12 @@ command_name="$1"
 shift
 if [[ "${command_name}" == "timeout" ]]; then
   printf '%s\n' "timeout $*" >> "${APT_TIMEOUT_CALLS}"
+  expected_deadline="120s"
+  if [[ " $* " == *" install "* ]]; then
+    expected_deadline="300s"
+  fi
   [[ "$1" == "--kill-after=5s" ]]
-  [[ "$2" == "120s" ]]
+  [[ "$2" == "${expected_deadline}" ]]
   shift 2
   command_name="$1"
   shift
@@ -76,8 +80,15 @@ if ! grep -Fxq -- "apt-get ${apt_options} install -y clang mold" "${apt_calls}";
   cat "${apt_calls}" >&2
   exit 1
 fi
-if [[ "$(wc -l < "${fixture_root}/apt-timeout-calls")" -ne 3 ]]; then
-  echo "every apt invocation must have a whole-command deadline" >&2
+timeout_calls="${fixture_root}/apt-timeout-calls"
+if [[ "$(grep -Fxc -- "timeout --kill-after=5s 120s apt-get ${apt_options} update" "${timeout_calls}")" -ne 2 ]]; then
+  echo "every apt update must have a 120-second whole-command deadline" >&2
+  cat "${timeout_calls}" >&2
+  exit 1
+fi
+if ! grep -Fxq -- "timeout --kill-after=5s 300s apt-get ${apt_options} install -y clang mold" "${timeout_calls}"; then
+  echo "apt install must have a 300-second whole-command deadline" >&2
+  cat "${timeout_calls}" >&2
   exit 1
 fi
 if [[ "$(cat "${sleep_calls}")" != "5" ]]; then
