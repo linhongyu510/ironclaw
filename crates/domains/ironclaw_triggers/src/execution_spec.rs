@@ -122,16 +122,6 @@ fn validate_required_capabilities(spec: &TriggerExecutionSpec) -> Result<(), Tri
     if unique.len() != spec.required_capability_ids.len() {
         return invalid("required_capability_ids must not contain duplicates");
     }
-    if let Some(allowed) = &spec.policy.allowed_capability_ids
-        && let Some(disallowed) = spec
-            .required_capability_ids
-            .iter()
-            .find(|capability| !allowed.contains(capability))
-    {
-        return invalid(format!(
-            "required_capability_ids contains `{disallowed}`, which is outside allowed_capability_ids"
-        ));
-    }
     Ok(())
 }
 

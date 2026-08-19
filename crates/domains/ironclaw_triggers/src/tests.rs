@@ -147,7 +147,7 @@ fn structured_execution_spec_rejects_duplicate_policy_references() {
 }
 
 #[test]
-fn structured_execution_spec_rejects_required_capability_outside_allowed_surface() {
+fn legacy_execution_spec_remains_readable_when_requirement_is_outside_allowed_surface() {
     let spec = TriggerExecutionSpec {
         version: 1,
         goal: "Send the weekly report".to_string(),
@@ -166,10 +166,9 @@ fn structured_execution_spec_rejects_required_capability_outside_allowed_surface
         },
     };
 
-    let error = spec
-        .validate()
-        .expect_err("required capabilities must be allowed to execute");
-    assert!(error.to_string().contains("required_capability_ids"));
+    spec.validate().expect(
+        "legacy capability requirements outside the allowlist remain readable; runtime policy still prevents execution",
+    );
 }
 
 fn ts(seconds: i64) -> Timestamp {

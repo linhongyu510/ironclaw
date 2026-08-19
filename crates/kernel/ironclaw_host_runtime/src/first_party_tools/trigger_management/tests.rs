@@ -541,8 +541,14 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
     );
 }
 
-#[test]
-fn trigger_create_input_rejects_model_authored_capability_ids() {
+#[tokio::test]
+async fn trigger_create_rejects_model_authored_capability_ids_before_persistence() {
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("model-authored-capability-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
     let required = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
@@ -571,13 +577,23 @@ fn trigger_create_input_rejects_model_authored_capability_ids() {
     });
 
     for input in [required, allowed] {
-        let error = match serde_json::from_value::<TriggerCreateInput>(input) {
-            Ok(_) => panic!("model-authored capability IDs must not deserialize"),
-            Err(error) => error,
-        };
+        create_trigger(
+            &repository,
+            &NoopTriggerCreateHook,
+            &scope,
+            input,
+            Utc::now(),
+        )
+        .await
+        .expect_err("model-authored capability IDs must be rejected");
+
+        let records = repository
+            .list_triggers(scope.tenant_id.clone())
+            .await
+            .expect("list records after rejected input");
         assert!(
-            error.to_string().contains("capability_ids"),
-            "the rejected field should be identifiable: {error}"
+            records.is_empty(),
+            "a rejected model-authored capability field must not persist a trigger"
         );
     }
 }

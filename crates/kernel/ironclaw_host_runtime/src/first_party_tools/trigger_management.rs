@@ -446,9 +446,9 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    require_explicit_result_delivery(&input)?;
     let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
-    require_explicit_result_delivery(&input)?;
     let schedule_kind = parsed_input.schedule.kind();
     let schedule = parsed_input
         .schedule

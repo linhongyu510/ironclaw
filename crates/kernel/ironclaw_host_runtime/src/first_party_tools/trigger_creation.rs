@@ -4,7 +4,7 @@ use ironclaw_host_api::execution_policy::{
 use ironclaw_triggers::TriggerExecutionSpec;
 use serde::{Deserialize, Deserializer};
 
-use super::trigger_management::TriggerScheduleInput;
+use crate::first_party_tools::trigger_management::TriggerScheduleInput;
 
 pub(super) struct TriggerCreateInput {
     pub(super) name: String,
