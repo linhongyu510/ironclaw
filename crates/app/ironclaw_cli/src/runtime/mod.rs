@@ -42,9 +42,8 @@ use trigger_poller::trigger_poller_settings;
 #[cfg(test)]
 pub(crate) use storage_boot::ensure_ready_layout_for_active_profile;
 pub(crate) use storage_boot::{
-    OnboardingSecretStoreMode, StorageAdoptionOutcome, adopt_storage_layout,
-    ensure_embedded_secret_store_for_active_profile, ensure_ready_layout_for_profile,
-    prepare_onboarding_layout,
+    OnboardingSecretStoreMode, ensure_embedded_secret_store_for_active_profile,
+    ensure_ready_layout_for_profile, prepare_onboarding_layout,
 };
 
 pub(crate) fn init_tracing() {
@@ -733,7 +732,7 @@ pub(crate) fn build_services_input_with_options(
 
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
-    let storage_paths = ensure_startup_layout(config, profile, config_file.as_ref())?;
+    let storage_paths = ensure_startup_layout(config, profile)?;
     let legacy_skill_snapshot_source =
         storage_layout::ready_legacy_skill_snapshot_source(config.home())?;
     let mut services_input = match profile {
@@ -1708,12 +1707,12 @@ mod tests {
     use super::test_env::EnvGuard;
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
-        RuntimeInputOptions, adopt_storage_layout, apply_credential_refresh_override, block_on_cli,
-        build_runtime_input, build_runtime_input_with_options,
-        ensure_embedded_secret_store_for_active_profile, ensure_ready_layout_for_active_profile,
-        ensure_ready_layout_for_profile, ensure_startup_layout, no_assistant_text_message,
-        protect_reborn_log_filter, read_config_file, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options, ensure_embedded_secret_store_for_active_profile,
+        ensure_ready_layout_for_active_profile, ensure_ready_layout_for_profile,
+        ensure_startup_layout, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings, storage_boot,
         storage_layout, with_binary_host_extension_bindings_from_bundles,
     };

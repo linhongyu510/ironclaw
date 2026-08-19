@@ -76,12 +76,14 @@ Configure the Railway service with all of the following:
   bake values into this runbook.
 
 For the release that first adopts the profile-agnostic storage layout, stop the
-old deployment completely and take a Railway volume backup or snapshot. Set
-`IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1` for the first new startup.
-That process automatically adopts exactly one supported legacy root before it
-binds the listener. Remove the variable after `layout.toml` is present and the
-deployment is healthy. Do not authorize cutover during an overlapping or
-rolling deployment; old binaries do not honor the new migration locks.
+old deployment completely and take a Railway volume backup or snapshot. The
+first new startup migrates the populated legacy root automatically before it
+binds the listener; `layout.toml` marks completion. Volume-backed Railway
+services deploy with recreate semantics, so no old replica overlaps the
+migration; if you schedule migration windows explicitly, set
+`IRONCLAW_REBORN_STORAGE_MIGRATION=manual` until the window opens. Note that
+binary rollback after migration requires restoring the pre-upgrade volume
+backup; old binaries cannot read the canonical layout.
 
 The volume is the durable IronClaw installation boundary. It holds the Reborn
 home's direct `state/`, `system/`, `workspaces/`, and `runtime/` namespaces,

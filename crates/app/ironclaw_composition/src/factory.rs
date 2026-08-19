@@ -124,9 +124,7 @@ use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendKind, ContentKind, DiskFilesystem, IndexPolicy, StorageClass,
 };
-use ironclaw_filesystem::{
-    CompositeRootFilesystem, LibSqlRootFilesystem, PostgresRootFilesystem, RootFilesystem,
-};
+use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
     DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     SecretMode,
@@ -818,93 +816,6 @@ pub async fn open_standalone_secret_store(
     let scoped = crate::wrap_scoped(filesystem);
     let (store, _crypto) = build_secret_store(root, scoped, None).await?;
     Ok(store as Arc<dyn SecretStorePort>)
-}
-
-/// Verify the standalone libSQL secrets store during layout adoption.
-///
-/// Normal store opens deliberately do not perform this verification: adoption
-/// needs a fail-closed master-key witness before it commits a durable layout,
-/// whereas normal runtime startup preserves its established open semantics.
-/// This preflight intentionally opens the existing schema read-only through
-/// `RootFilesystem` operations and does not run migrations; a rejected key
-/// must leave the legacy database byte-for-byte logically unchanged.
-pub async fn verify_standalone_secret_store_for_adoption(
-    root: &Path,
-) -> Result<(), RebornBuildError> {
-    let database_path = crate::filesystem_assembly::standalone_db_path(root);
-    if !database_path
-        .try_exists()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!(
-                "standalone secret database could not be inspected before adoption: {error}"
-            ),
-        })?
-    {
-        // A supported legacy root may contain only disk-backed skills or
-        // system content. No database means there is no encrypted ciphertext
-        // to authenticate; importantly, preflight must not create one.
-        return Ok(());
-    }
-    let db = open_standalone_libsql_database(root).await?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db)?);
-    let scoped = crate::wrap_scoped(Arc::clone(&filesystem));
-    let (_store, crypto) = build_secret_store(root, scoped, None).await?;
-    ironclaw_secrets::verify_existing_encrypted_records(filesystem.as_ref(), crypto.as_ref())
-        .await
-        .map_err(RebornBuildError::SecretStateVerification)?;
-    Ok(())
-}
-
-/// Authenticate any existing standalone ciphertext, then advance the
-/// canonical libSQL schema needed to finish layout adoption.
-///
-/// Keeping the read-only verification as the first operation is the security
-/// boundary: a wrong master key fails before `run_migrations` can mutate the
-/// adopted database. An absent database has no ciphertext to authenticate, so
-/// the migration step initializes the empty canonical store after preflight.
-pub async fn prepare_standalone_store_for_adoption(root: &Path) -> Result<(), RebornBuildError> {
-    verify_standalone_secret_store_for_adoption(root).await?;
-    let db = open_standalone_libsql_database(root).await?;
-    let filesystem = LibSqlRootFilesystem::new(db)?;
-    filesystem.run_migrations().await?;
-    Ok(())
-}
-
-/// Verify the configured hosted PostgreSQL store and secrets master key before
-/// an offline filesystem adoption is allowed to commit its ready manifest.
-///
-/// This deliberately builds only the authoritative database root and secret
-/// resolver. It does not seed host content, start workers, or construct a
-/// runtime, and therefore cannot admit traffic before layout adoption commits.
-/// It also does not run schema migrations: rejected credentials must not
-/// mutate the external database before adoption is admitted.
-pub async fn verify_hosted_postgres_store_for_adoption(
-    input: RebornHostBindings,
-) -> Result<(), RebornBuildError> {
-    let RebornStorageInput::HostedSingleTenantPostgres {
-        pool_source,
-        secret_master_key,
-        ..
-    } = input.storage
-    else {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "storage adoption verifier requires hosted single-tenant PostgreSQL bindings"
-                .to_string(),
-        });
-    };
-    let pool = open_postgres_pool_from_source(pool_source)?;
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
-    let scoped = crate::wrap_scoped(Arc::clone(&filesystem));
-    let (_store, crypto) = build_secret_store(
-        Path::new("external-postgres"),
-        scoped,
-        Some(secret_master_key),
-    )
-    .await?;
-    ironclaw_secrets::verify_existing_encrypted_records(filesystem.as_ref(), crypto.as_ref())
-        .await
-        .map_err(RebornBuildError::SecretStateVerification)?;
-    Ok(())
 }
 
 /// Where a resolved standalone master key came from, used to name the source in

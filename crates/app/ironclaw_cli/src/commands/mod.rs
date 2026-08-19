@@ -18,7 +18,6 @@ pub(crate) mod serve_sso;
 pub(crate) mod service;
 pub(crate) mod skills;
 pub(crate) mod status;
-pub(crate) mod storage;
 pub(crate) mod traces;
 pub(crate) mod user_directory;
 pub(crate) mod webui_auth;
@@ -62,8 +61,6 @@ pub(crate) enum Command {
     Skills(skills::SkillsCommand),
     /// Show Reborn runtime status snapshot.
     Status(status::StatusCommand),
-    /// Adopt a supported legacy durable-storage layout offline.
-    Storage(storage::StorageCommand),
     /// Manage trace contributions to TraceCommons.
     Traces(Box<traces::TracesCommand>),
 }
@@ -108,9 +105,6 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Status(command) => {
-                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
-            }
-            Self::Storage(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Traces(command) => command.execute(),

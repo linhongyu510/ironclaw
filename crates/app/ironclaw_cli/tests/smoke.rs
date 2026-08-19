@@ -1096,36 +1096,15 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("service"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
-    assert!(stdout.contains("storage"), "stdout: {stdout}");
+    // The one-shot legacy layout migration runs automatically at startup;
+    // pin that no `storage` subcommand resurfaces without a reviewed design.
+    assert!(!stdout.contains("storage adopt"), "stdout: {stdout}");
     // No standalone `tui` subcommand exists (Reborn's interactive surface
     // is `repl`); pin this so a `full`-feature build never grows one
     // without an explicit, reviewed decision.
     assert!(
         !stdout.to_lowercase().contains("tui"),
         "unexpected tui subcommand: {stdout}"
-    );
-}
-
-#[test]
-fn storage_adopt_help_requires_the_offline_operator_confirmations() {
-    let output = Command::new(reborn_bin())
-        .args(["storage", "adopt", "--help"])
-        .output()
-        .expect("ironclaw storage adopt --help should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("--confirm-processes-stopped"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("--confirm-backup-snapshot"),
-        "stdout: {stdout}"
     );
 }
 

@@ -1,22 +1,18 @@
-//! Advisory locks that serialize startup cutover and journal recovery.
+//! Advisory locks that serialize the boot-time layout migration.
 
+use super::filesystem::*;
 use super::*;
-use super::{filesystem::*, model::*};
 
-pub(super) struct AdoptionLock {
+pub(super) struct MigrationLock {
     #[cfg(any(unix, windows))]
     _file: File,
-}
-
-pub(super) fn acquire_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
-    acquire_named_lock(adoption_root, ADOPTION_LOCK_FILE, "storage adoption")
 }
 
 pub(super) fn acquire_named_lock(
     directory: &Path,
     file_name: &str,
     operation: &str,
-) -> anyhow::Result<AdoptionLock> {
+) -> anyhow::Result<MigrationLock> {
     #[cfg(not(any(unix, windows)))]
     {
         bail!(
@@ -29,7 +25,7 @@ pub(super) fn acquire_named_lock(
     {
         let path = directory.join(file_name);
         require_ordinary_directory(directory)?;
-        let mut file = open_adoption_lock_file(&path)?;
+        let mut file = open_migration_lock_file(&path)?;
         fs2::FileExt::try_lock_exclusive(&file).with_context(|| {
         format!(
             "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
@@ -43,12 +39,12 @@ pub(super) fn acquire_named_lock(
         file.sync_all()
             .with_context(|| format!("sync advisory lock {}", path.display()))?;
         sync_directory(directory)?;
-        Ok(AdoptionLock { _file: file })
+        Ok(MigrationLock { _file: file })
     }
 }
 
 #[cfg(unix)]
-pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
+pub(super) fn open_migration_lock_file(path: &Path) -> anyhow::Result<File> {
     if path.exists() {
         require_ordinary_file(path)?;
     }
@@ -75,7 +71,7 @@ pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
 }
 
 #[cfg(windows)]
-pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
+pub(super) fn open_migration_lock_file(path: &Path) -> anyhow::Result<File> {
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -103,14 +99,4 @@ pub(super) fn open_adoption_lock_file(path: &Path) -> anyhow::Result<File> {
         );
     }
     Ok(file)
-}
-
-pub(super) fn acquire_existing_adoption_lock(adoption_root: &Path) -> anyhow::Result<AdoptionLock> {
-    if !adoption_root.is_dir() {
-        bail!(
-            "adoption journal parent is not an ordinary directory at {}; refusing recovery",
-            adoption_root.display()
-        );
-    }
-    acquire_adoption_lock(adoption_root)
 }

@@ -1,4 +1,4 @@
-//! Storage-layout boot and adoption tests.
+//! Storage-layout boot and migration tests.
 //!
 //! The production orchestration lives in `runtime/storage_boot.rs`; these
 //! tests stay adjacent to that owner while sharing the runtime test module's
@@ -136,8 +136,8 @@ fn seed_legacy_embedded_store(root: &Path) {
 }
 
 #[test]
-fn storage_adopt_config_file_migration_dry_run_matches_normal_boot_without_mutation() {
-    // Break caught: storage adoption derives its requirement from the raw
+fn config_file_migration_dry_run_rejects_a_legacy_home_without_mutation() {
+    // Break caught: dry-run admission derives its requirement from the raw
     // environment/default profile instead of the config-file-only profile
     // that normal boot admits.
     let _lock = lock_runtime_env();
@@ -149,24 +149,18 @@ fn storage_adopt_config_file_migration_dry_run_matches_normal_boot_without_mutat
     seed_legacy_embedded_store(&legacy);
     let before = layout_tree_snapshot(config.home().path());
 
-    let normal_boot_error = super::ensure_ready_layout_for_active_profile(&config)
-        .expect_err("config-file migration dry-run must reject the incompatible layout");
-    assert_eq!(layout_tree_snapshot(config.home().path()), before);
+    super::ensure_ready_layout_for_active_profile(&config)
+        .expect_err("config-file migration dry-run must reject the not-ready layout");
 
-    let context = crate::context::RebornCliContext::from_boot_config(config.clone());
-    let adoption_error = super::adopt_storage_layout(&context, true, true, None)
-        .expect_err("storage adoption must honor config-file migration dry-run admission");
-
-    assert_eq!(adoption_error.to_string(), normal_boot_error.to_string());
     assert_eq!(
         layout_tree_snapshot(config.home().path()),
         before,
-        "storage adoption under migration-dry-run must not alter durable layout files"
+        "migration dry-run must not alter durable layout files"
     );
 }
 
 #[test]
-fn storage_adopt_uses_the_config_file_sandboxed_profile_requirement() {
+fn command_admission_uses_the_config_file_sandboxed_profile_requirement() {
     // Break caught: a config-file-only sandboxed profile is checked as the
     // default standalone profile, rejecting its own safe multi-user layout.
     let _lock = lock_runtime_env();
@@ -186,143 +180,17 @@ fn storage_adopt_uses_the_config_file_sandboxed_profile_requirement() {
     let normal_boot_paths = super::ensure_ready_layout_for_active_profile(&config)
         .expect("normal boot admits the config-file sandboxed layout");
     assert_eq!(normal_boot_paths, expected_paths);
-    assert_eq!(layout_tree_snapshot(config.home().path()), before);
-
-    let context = crate::context::RebornCliContext::from_boot_config(config);
-    super::adopt_storage_layout(&context, true, true, None)
-        .expect("storage adoption admits the same config-file sandboxed layout");
-
     assert_eq!(
-        layout_tree_snapshot(context.boot_config().home().path()),
+        layout_tree_snapshot(config.home().path()),
         before,
         "admitting an already-ready sandboxed layout must not rewrite it"
     );
 }
 
 #[test]
-fn storage_adopt_external_store_failure_precedes_filesystem_mutation() {
+fn automatic_startup_rejects_unsafe_legacy_shapes_without_mutation() {
     let _lock = lock_runtime_env();
-    let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "not-a-postgres-url");
-    let _master_key = EnvGuard::set(
-        "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-        &ironclaw_secrets::keychain::generate_master_key_hex(),
-    );
-    let (_temp, config) = boot_config_with_config_toml(
-        "hosted-single-tenant",
-        r#"
-[storage]
-backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-"#,
-    );
-    let legacy_prompt = config
-        .home()
-        .path()
-        .join("hosted-single-tenant/system/prompts/operator.md");
-    std::fs::create_dir_all(legacy_prompt.parent().expect("prompt parent"))
-        .expect("legacy system tree");
-    std::fs::write(&legacy_prompt, b"operator prompt").expect("legacy prompt");
-
-    let context = crate::context::RebornCliContext::from_boot_config(config);
-    let confirmation_error = super::adopt_storage_layout(&context, false, false, None)
-        .expect_err("missing confirmations fail before PostgreSQL migrations");
-    assert!(
-        confirmation_error
-            .to_string()
-            .contains("--confirm-processes-stopped"),
-        "operator confirmation must precede external store access: {confirmation_error:#}"
-    );
-    let error = super::adopt_storage_layout(&context, true, true, None)
-        .expect_err("unreachable PostgreSQL must fail before adoption starts");
-
-    assert!(
-        error
-            .to_string()
-            .contains("open hosted single-tenant PostgreSQL store"),
-        "{error:#}"
-    );
-    assert!(legacy_prompt.is_file(), "legacy source remains in place");
-    assert!(
-        !context
-            .boot_config()
-            .home()
-            .path()
-            .join("layout.toml")
-            .exists()
-    );
-    assert!(
-        !context
-            .boot_config()
-            .home()
-            .path()
-            .join("runtime/layout-adoption/journal.toml")
-            .exists(),
-        "external verification precedes every adoption mutation"
-    );
-}
-
-#[test]
-fn storage_adopt_external_postgres_classifies_hosted_pool_and_operator_store() {
-    let _lock = lock_runtime_env();
-    let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
-    let (_temp, config) = boot_config_with_config_toml("hosted-single-tenant", "");
-    let requirement = super::storage_boot::storage_layout_requirement_for_profile(
-        RebornProfile::HostedSingleTenant,
-    )
-    .expect("hosted profile has external PostgreSQL storage");
-    let hosted_pool = ironclaw_composition::deployment::DeploymentConfig::for_profile(
-        RebornCompositionProfile::HostedSingleTenant,
-        false,
-    );
-    let operator_store = ironclaw_composition::deployment::DeploymentConfig::for_profile(
-        RebornCompositionProfile::Production,
-        false,
-    );
-
-    assert_eq!(
-        hosted_pool.storage_shape(),
-        ironclaw_composition::deployment::StorageShape::HostedSingleTenantPool
-    );
-    assert_eq!(
-        operator_store.storage_shape(),
-        ironclaw_composition::deployment::StorageShape::OperatorSupplied
-    );
-
-    let hosted_error = super::storage_boot::canonical_store_verification_for_adoption(
-        &config,
-        &hosted_pool,
-        None,
-        requirement,
-    )
-    .expect_err("hosted pool verification reaches its PostgreSQL boot path");
-    assert!(
-        hosted_error
-            .to_string()
-            .contains("open hosted single-tenant PostgreSQL store"),
-        "{hosted_error:#}"
-    );
-
-    let operator_error = super::storage_boot::canonical_store_verification_for_adoption(
-        &config,
-        &operator_store,
-        None,
-        requirement,
-    )
-    .expect_err("operator-supplied PostgreSQL remains fail closed for adoption");
-    assert_eq!(
-        operator_error.to_string(),
-        "external PostgreSQL layout adoption is supported only for hosted single-tenant pool storage; operator-supplied handles cannot be reopened by offline adoption"
-    );
-}
-
-#[test]
-fn automatic_startup_rejects_unsafe_legacy_shapes_before_postgres_verification() {
-    let _lock = lock_runtime_env();
-    let _cutover = EnvGuard::set(
-        super::storage_layout::StartupAdoptionAuthority::ENV,
-        super::storage_layout::StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
-    );
+    let _policy = EnvGuard::clear(super::storage_layout::StorageMigrationPolicy::ENV);
     let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "not-a-postgres-url");
     let _master_key = EnvGuard::set(
         "IRONCLAW_REBORN_SECRET_MASTER_KEY",
@@ -335,7 +203,7 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 "#;
 
-    for case in ["unknown-entry", "multiple-roots", "unreleased-sandbox"] {
+    for case in ["unknown-entry", "unreleased-sandbox"] {
         let (_temp, config) = boot_config_with_config_toml("hosted-single-tenant", storage_config);
         let home = config.home().path();
         match case {
@@ -345,33 +213,19 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
                 std::fs::write(legacy.join("unknown.bin"), b"unknown")
                     .expect("unknown legacy entry");
             }
-            "multiple-roots" => {
-                let prompt = home.join("hosted-single-tenant/system/prompts/operator.md");
-                std::fs::create_dir_all(prompt.parent().expect("prompt parent"))
-                    .expect("hosted legacy root");
-                std::fs::write(prompt, b"prompt").expect("legacy prompt");
-                seed_legacy_embedded_store(&home.join("local-dev"));
-            }
             "unreleased-sandbox" => {
                 seed_legacy_embedded_store(&home.join("hosted-single-tenant-volume-sandboxed"));
             }
             _ => unreachable!("table is exhaustive"),
         }
         let before = layout_tree_snapshot(home);
-        let config_file = super::read_config_file(&config).expect("read config");
 
-        let error = super::ensure_startup_layout(
-            &config,
-            RebornProfile::HostedSingleTenant,
-            config_file.as_ref(),
-        )
-        .expect_err("unsafe legacy state must fail before PostgreSQL verification");
+        let error = super::ensure_startup_layout(&config, RebornProfile::HostedSingleTenant)
+            .expect_err("unsafe legacy state must fail closed");
 
         assert!(
-            !error
-                .to_string()
-                .contains("open hosted single-tenant PostgreSQL store"),
-            "{case} reached PostgreSQL verification: {error:#}"
+            !error.to_string().contains("PostgreSQL store"),
+            "{case} must fail during filesystem classification: {error:#}"
         );
         assert_eq!(
             layout_tree_snapshot(home),
@@ -379,6 +233,57 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
             "{case} must fail without filesystem mutation"
         );
     }
+}
+
+#[test]
+fn manual_migration_policy_defers_startup_migration_without_mutation() {
+    let _lock = lock_runtime_env();
+    let _policy = EnvGuard::set(
+        super::storage_layout::StorageMigrationPolicy::ENV,
+        super::storage_layout::StorageMigrationPolicy::MANUAL,
+    );
+    let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+    let legacy = config.home().path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+    let before = layout_tree_snapshot(config.home().path());
+
+    let error = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+        .expect_err("manual policy defers boot-time migration");
+
+    assert!(
+        error
+            .to_string()
+            .contains(super::storage_layout::StorageMigrationPolicy::ENV),
+        "{error:#}"
+    );
+    assert_eq!(
+        layout_tree_snapshot(config.home().path()),
+        before,
+        "deferred migration must not alter durable layout files"
+    );
+}
+
+#[test]
+fn automatic_startup_migrates_a_legacy_local_dev_home() {
+    let _lock = lock_runtime_env();
+    let _policy = EnvGuard::clear(super::storage_layout::StorageMigrationPolicy::ENV);
+    let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+    let legacy = config.home().path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let paths = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+        .expect("automatic startup migration");
+
+    assert!(paths.state_root().join("reborn-local-dev.db").is_file());
+    assert!(config.home().path().join("layout.toml").is_file());
+    assert!(!legacy.join("reborn-local-dev.db").exists());
+
+    // A second startup admits the migrated layout without further writes.
+    let before = layout_tree_snapshot(config.home().path());
+    let readmitted = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+        .expect("ready admission after migration");
+    assert_eq!(readmitted, paths);
+    assert_eq!(layout_tree_snapshot(config.home().path()), before);
 }
 
 #[test]
@@ -422,12 +327,14 @@ fn compatible_base_docker_railway_layout_admission_never_rewrites_the_ready_layo
 }
 
 #[test]
-fn runtime_input_refuses_legacy_state_before_constructing_runtime_services() {
+fn runtime_input_refuses_unsafe_legacy_state_before_constructing_runtime_services() {
     let _lock = lock_runtime_env();
     let (_enabled, _interval) = clear_trigger_poller_env();
     let (_temp, config) = boot_config_with_config_toml("local-dev", "");
     let legacy_root = config.home().path().join("local-dev");
     std::fs::create_dir_all(&legacy_root).expect("create legacy root");
+    // An embedded database without its cached master key is an unsafe shape:
+    // migrating it would make every encrypted secret unreadable.
     std::fs::write(
         legacy_root.join("reborn-local-dev.db"),
         b"legacy state sentinel",
@@ -435,13 +342,13 @@ fn runtime_input_refuses_legacy_state_before_constructing_runtime_services() {
     .expect("seed legacy state");
 
     let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
-        Ok(_) => panic!("legacy state must be rejected before runtime construction"),
+        Ok(_) => panic!("unsafe legacy state must be rejected before runtime construction"),
         Err(error) => error,
     };
 
     assert!(
-        error.to_string().contains("legacy"),
-        "expected offline-adoption refusal, got {error:#}"
+        error.to_string().contains("master key"),
+        "expected the missing-master-key refusal, got {error:#}"
     );
     assert!(
         !config

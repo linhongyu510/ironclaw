@@ -1,15 +1,15 @@
-# Reborn Storage Layout Adoption Runbook
+# Reborn Storage Layout Migration Runbook
 
 This is the operator procedure for moving one supported released Reborn home
-to the profile-stable layout. It is a bounded operation performed either by a
-deployment-authorized migration startup or by the manual recovery command. It
-does not merge deployments, discover arbitrary directories, or make profiles
-interchangeable.
+to the profile-stable layout. Migration runs automatically at boot, is
+rename-based (nothing is copied, nothing is deleted), and fails closed on
+every ambiguity. It does not merge deployments, discover arbitrary
+directories, or make profiles interchangeable.
 
 ## Target layout and boundary
 
 `IRONCLAW_REBORN_HOME` is the one installation storage boundary. After a
-successful adoption, its durable filesystem layout is:
+successful migration, its durable filesystem layout is:
 
 ```text
 <IRONCLAW_REBORN_HOME>/
@@ -23,9 +23,9 @@ successful adoption, its durable filesystem layout is:
 │   ├── prompts/
 │   └── skills/
 ├── workspaces/users/<tenant-user-digest>/
-├── runtime/layout-adoption/
-│   ├── journal.toml
-│   └── snapshot/<legacy-source>/
+├── runtime/
+│   ├── layout-migration.toml
+│   └── layout-adoption/snapshot/<legacy-source>/   (staged legacy skills)
 ├── logs/
 ├── cache/
 └── tmp/
@@ -33,138 +33,73 @@ successful adoption, its durable filesystem layout is:
 
 `state/` is authoritative application state. `system/` contains host-managed
 extensions, prompts, and skills. `workspaces/users/<tenant-user-digest>/` is a
-persistent tenant-plus-user workspace leaf. `runtime/` contains provider and
-process bookkeeping plus bounded adoption recovery. `logs/`, `cache/`, and
-`tmp/` are operational namespaces, never authoritative application state:
-
-- `logs/` may retain diagnostic output on the volume, but it is not an adoption
-  source, rollback source, or durable record store. Its retention is the
-  observability owner's policy.
-- `cache/` holds rebuildable data and may be evicted at any time. Adoption and
-  rollback do not preserve it as application state.
-- `tmp/` holds invocation-local scratch data. It has no retention or rollback
-  guarantee and must not be used to recover a turn, credential, or workspace.
-
-The layout state machine creates or validates these directories as ordinary
-directories, but never copies their contents as canonical state. A non-empty
-target namespace during adoption is an unexplained-content conflict, not a
-reason to merge or infer provenance.
+persistent tenant-plus-user workspace leaf. `runtime/` holds provider/process
+bookkeeping, the retained migration provenance record, and the staged legacy
+skill trees the boot importer reads. `logs/`, `cache/`, and `tmp/` are
+operational namespaces, never authoritative application state.
 
 There is no deployment-id directory and no profile-named state directory. The
-root `layout.toml` is published last and records the durable-state and security
-envelope that startup admits. Until it exists and validates, normal startup
-refuses to open stores or start traffic.
+root `layout.toml` is published last and records the durable-state and
+security envelope that startup admits. Until it exists and validates, normal
+startup refuses to open stores or start traffic.
 
-## Before touching a populated home
+## How boot-time migration works
 
-1. Stop every `ironclaw` process and service that could use the home. Verify
-   this operationally; lack of a known PID or socket is not proof of quiescence.
+On startup without a valid `layout.toml`, the binary classifies the home:
+
+- **Empty home** → fresh canonical initialization.
+- **Exactly one populated legacy source** (`local-dev/`,
+  `hosted-single-tenant/`, `hosted-single-tenant-volume/`, or the bare-home
+  DB/key set left by a fixed historical bug) → automatic migration.
+- **Several populated sources** → the most recently used one (by database and
+  master-key mtimes) is migrated; every loser stays byte-for-byte in place and
+  is named in `runtime/layout-migration.toml`. An unorderable tie between real
+  profile directories fails closed. A bare-home artifact never wins a tie.
+- **Unknown content, a populated `hosted-single-tenant-volume-sandboxed/`
+  root, or an unsafe shape** (embedded database without its cached master
+  key, symlinks, sidecars without the main database) → fail closed with the
+  specific reason; nothing is selected or modified.
+
+The migration itself, guarded by an advisory lock on the home and a POSIX
+record-lock probe against SQLite's locking ranges (which detects live readers,
+writers, and idle open WAL connections of any other process):
+
+1. Writes `runtime/layout-migration.toml` with `phase = "in-progress"`.
+2. Renames the database unit, master key, and `system/` content into
+   `state/` and `system/`; renames legacy skill trees into
+   `runtime/layout-adoption/snapshot/<source>/` for the normal boot importer.
+3. Marks the record `phase = "complete"`, then publishes `layout.toml` last.
+   The manifest preserves the legacy external-memory namespace
+   (`legacy_memory_provider_app_id`).
+
+Renames are same-volume metadata operations: nothing is duplicated, nothing
+destroyed. A crash mid-migration leaves a record without a manifest; the next
+startup refuses with a restore-the-backup message rather than guessing.
+
+## Operator controls
+
+- `IRONCLAW_REBORN_STORAGE_MIGRATION=manual` — defer migration; startup
+  reports the deferral and exits instead of migrating. Unset or `automatic`
+  is the default.
+- `IRONCLAW_REBORN_PROFILE=migration-dry-run` — validate-only admission with
+  the production database/environment configuration; never initializes,
+  migrates, or starts traffic.
+- Stateful CLI commands never migrate; they report the `ironclaw serve`
+  remedy and leave the home untouched.
+
+## Before upgrading a populated home
+
+1. Stop every old `ironclaw` process that could use the home. Platform
+   recreate deploys (volume-backed services) already guarantee this; the
+   live-writer probe is the mechanical backstop.
 2. Take and retain a filesystem/volume snapshot or backup of the entire home.
-   Automatic adoption retains its own rollback snapshot, but that snapshot is
-   on the same storage and is not protection against volume loss.
-3. Perform a read-only inventory. There is no write-free `storage adopt`
-   mode. `doctor` checks binary/configuration readiness only; it does **not**
-   inspect `layout.toml`, adoption journals, legacy candidates, or security
-   envelope compatibility. Run the normal startup admission under the
-   validate-only profile, using the same production database/environment
-   configuration the deployment will use:
+   Migration renames rather than copies, so the backup is the rollback path.
+3. Optionally run the validate-only profile first:
 
    ```bash
    export IRONCLAW_REBORN_HOME=/absolute/path/to/ironclaw-reborn
-   find "$IRONCLAW_REBORN_HOME" -maxdepth 2 -mindepth 1 -print | sort
    IRONCLAW_REBORN_PROFILE=migration-dry-run ironclaw serve
    ```
-
-   This command is expected to exit non-zero after validation with
-   `profile=migration-dry-run ... must not start live Reborn runtime traffic`.
-   An earlier layout, journal, candidate, envelope, or production-storage
-   error means admission failed and must be resolved first. The validate-only
-   profile neither adopts nor initializes a layout and never starts a listener
-   or live runtime traffic.
-
-4. Identify the single supported populated legacy source. `local-dev/` and
-   `hosted-single-tenant-volume/` are released sources; the bare-home DB/key
-   set is a separate legacy candidate. More than one populated candidate is a
-   conflict. The command makes no writes, chooses no source, and never merges
-   them.
-5. A populated `hosted-single-tenant-volume-sandboxed/` root is unreleased.
-   It is not an adoption source. Preserve it for inspection and explicitly
-   archive it under operator control; do not expect automatic workspace merge.
-
-## Deployment-authorized automatic adoption
-
-Normal startup never treats the presence of a legacy root as proof that old
-replicas are stopped. Without explicit cutover authority it exits before
-creating a journal or moving the source and prints the recovery command.
-
-After the deployment has stopped every old replica, authorize the migration
-startup with the exact versioned value:
-
-```bash
-IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1 ironclaw serve
-```
-
-Startup performs automatic adoption only for exactly one supported legacy
-source or a compatible interrupted journal. It takes a new-binary cutover lock,
-revalidates the source or journal under that lock, verifies the production
-store, runs the existing journaled state machine, publishes `layout.toml` last,
-and starts traffic only after the canonical stores reopen successfully. A
-competing new replica fails before verification or source mutation.
-
-Remove `IRONCLAW_REBORN_STORAGE_CUTOVER` after the canonical layout is ready.
-Later starts see the valid manifest and do not need migration authority.
-
-The environment value is an operator/deployment attestation, not a process
-probe. Never set it while an old binary can still write the legacy database.
-Old releases do not participate in the new cutover or adoption locks.
-
-Automatic startup refuses multiple roots, unknown content, the unreleased
-sandbox root, incompatible security envelopes, invalid journals, and journals
-that contain an external workspace import. Those cases remain manual.
-
-## Manual adoption and recovery
-
-For an ambiguous deployment, an explicit external workspace import, or manual
-recovery, keep services stopped and run:
-
-```bash
-ironclaw storage adopt \
-  --confirm-processes-stopped \
-  --confirm-backup-snapshot
-```
-
-The command uses one journaled source, takes ownership of its retained snapshot
-under `runtime/layout-adoption/snapshot/`, stages into journal-owned paths, and
-publishes `layout.toml` only after the canonical store and secret resolver
-verify. It never automatically deletes the source snapshot, adoption journal,
-or an external workspace source.
-
-For embedded libSQL, verification reopens the adopted database and encrypted
-secret resolver. For hosted PostgreSQL, the command validates both operator
-acknowledgements before opening the configured pool or running production
-filesystem migrations. It then constructs the encrypted secret store and
-authenticates every reconstructable encrypted secret and credential-account
-record, up to the 100,000-record verification limit, before making the layout
-ready. A malformed or unauthenticatable record, an over-limit scan, or any
-credential-session record fails the cutover: session AAD identity is encrypted
-inside that record and cannot be reconstructed from its durable locator for this
-offline check. An empty store has no existing ciphertext against which a key can
-be checked. Connection, migration, or key-verification failures leave the
-legacy source in place and do not publish `layout.toml`.
-
-Released tenant/user skill trees under
-`tenants/<tenant>/users/<user>/skills/` remain in the retained adoption
-snapshot and are imported through the normal boot importer into the canonical
-database. Any other content under a legacy `tenants/` tree is rejected rather
-than guessed or broadened to another owner.
-
-If automatic adoption is interrupted, leave the home in place and keep old
-services stopped. Retry startup with the same versioned cutover value when the
-journal has no external workspace import; otherwise rerun the explicit manual
-command. Both paths resume only the exact journaled phase and snapshot. They
-refuse unexplained partial layouts, unsupported journal or manifest versions,
-symlinks, unknown source content, or canonical conflicts. Do not manually
-combine staged files, database sidecars, or workspace leaves.
 
 ## Profiles, workspaces, and credentials
 
@@ -174,25 +109,19 @@ with the persisted `layout.toml` security envelope and rejects changes that
 alter durable backend, tenancy, or weaken per-caller workspace isolation.
 
 For Docker, a sandbox gets exactly one selected
-`workspaces/users/<tenant-user-digest>` leaf as `/workspace`. It never receives
-the Reborn home, `state/`, the cached master key, `system/`, `runtime/`, a
-workspace parent, sibling workspaces, provider credentials, Railway tokens, or
-a Docker socket. Railway checkpoints use the same typed scope but are
-provider-specific; they are not a portable migration of Docker workspace
-contents, and changing provider/environment requires a separate operator plan.
+`workspaces/users/<tenant-user-digest>` leaf as `/workspace`. It never
+receives the Reborn home, `state/`, the cached master key, `system/`,
+`runtime/`, a workspace parent, sibling workspaces, provider credentials,
+Railway tokens, or a Docker socket.
 
 ## Rollback and retention
 
-Keep the external backup and the retained adoption snapshot through the agreed
-rollback window. A compatible profile rollback after adoption is only a
-restart with another admitted policy and reuses the same canonical layout.
-
 Rolling back to an old binary is one-way and operational: stop IronClaw,
-preserve/archive the canonical target, then restore the retained snapshot to
-its original legacy location (or restore the full pre-adoption backup/home)
+preserve/archive the canonical target, then restore the pre-migration backup
 before starting the old binary. An old binary cannot safely read the canonical
-layout. Never run old and new binaries against diverging copies. This procedure
-does not delete any source, snapshot, journal, or workspace.
+layout. Never run old and new binaries against diverging copies. The retained
+`runtime/layout-migration.toml` record and any ignored legacy sources are
+diagnostic state; do not delete them as cleanup.
 
 ## Recorded-QA credential source
 
@@ -202,13 +131,11 @@ the Reborn **installation root**—the directory that contains `config.toml` and
 The fixture derives the database and master-key paths from
 `<source-root>/state/`; its tenant, user, and agent selectors are separately
 controlled by the corresponding `..._TENANT`, `..._USER`, and `..._AGENT`
-variables. Point it at a ready canonical installation and supply selectors that
-identify exactly one configured source account; it is a QA credential-import
-source, not an adoption or rollback authority.
+variables.
 
 ## Regression commands
 
-The bounded layout state machine is covered by
+The bounded layout admission and migration machinery is covered by
 `crates/app/ironclaw_cli/src/runtime/storage_layout/` tests. The canonical
 path and transition contract is covered by
 `crates/app/ironclaw_config/tests/profile_contract.rs`; run:
@@ -216,16 +143,6 @@ path and transition contract is covered by
 ```bash
 cargo test -p ironclaw_config --test profile_contract
 cargo test -p ironclaw storage_layout
-cargo test -p ironclaw --test storage_adoption
+cargo test -p ironclaw storage_boot
 cargo test -p ironclaw_composition --test profile_acceptance
-IRONCLAW_REQUIRE_DOCKER_TESTS=1 \
-  cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
-IRONCLAW_REQUIRE_DOCKER_TESTS=1 \
-  cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
-```
-
-The Railway live canary remains provider-specific and opt-in:
-
-```bash
-cargo test -p ironclaw_sandbox --test railway_sandbox_live -- --ignored --nocapture
 ```

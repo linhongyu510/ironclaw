@@ -2,13 +2,13 @@ use super::*;
 
 #[cfg(any(unix, windows))]
 #[test]
-fn adoption_lock_rejects_an_existing_non_file_path() {
+fn migration_lock_rejects_an_existing_non_file_path() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let adoption_root = temp.path().join("layout-adoption");
-    fs::create_dir(&adoption_root).expect("adoption root");
-    fs::create_dir(adoption_root.join(ADOPTION_LOCK_FILE)).expect("non-file lock path");
+    let home = temp.path().join("home");
+    fs::create_dir(&home).expect("home root");
+    fs::create_dir(home.join(MIGRATION_LOCK_FILE)).expect("non-file lock path");
 
-    let error = match acquire_adoption_lock(&adoption_root) {
+    let error = match acquire_named_lock(&home, MIGRATION_LOCK_FILE, "storage layout migration") {
         Ok(_) => panic!("non-file lock path must fail closed"),
         Err(error) => error,
     };
@@ -17,35 +17,6 @@ fn adoption_lock_rejects_an_existing_non_file_path() {
         format!("{error:#}").contains("ordinary non-symlink file")
             || format!("{error:#}").contains("ordinary non-reparse-point file"),
         "{error:#}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn ordinary_file_copy_preserves_the_opened_source_mode() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source = temp.path().join("source.db");
-    let destination = temp.path().join("destination.db");
-    fs::write(&source, b"durable state").expect("source contents");
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o600))
-        .expect("owner-only source mode");
-
-    copy_ordinary_file(&source, &destination).expect("copy ordinary file");
-
-    assert_eq!(
-        fs::read(&destination).expect("copied contents"),
-        b"durable state"
-    );
-    assert_eq!(
-        fs::metadata(&destination)
-            .expect("destination metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600,
-        "the post-copy mode check must retain the mode set before copying bytes"
     );
 }
 
@@ -61,12 +32,8 @@ fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     }
     fs::write(deepest.join("payload.txt"), b"payload").expect("nested source file");
 
-    let copy_error = copy_ordinary_tree(&source, &temp.path().join("destination"))
-        .expect_err("copy must fail closed instead of recursively traversing unbounded input");
-    assert!(format!("{copy_error:#}").contains("depth"));
-
     let validation_error = validate_ordinary_tree(&source)
-        .expect_err("validation must share the copy traversal depth bound");
+        .expect_err("validation must fail closed instead of traversing unbounded input");
     assert!(format!("{validation_error:#}").contains("depth"));
 
     let content_error = directory_has_content(&source)
@@ -97,42 +64,38 @@ fn symlinked_legacy_database_is_rejected_without_source_mutation() {
     fs::write(&external, b"outside").expect("external database");
     symlink(&external, legacy.join("reborn-local-dev.db")).expect("legacy symlink");
 
-    let error = adopt_layout(
-        &home,
-        embedded_single_user_requirement(),
-        confirmed_options(),
-    )
-    .expect_err("symlink must not be followed");
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("symlink must not be followed");
 
     assert!(error.to_string().contains("non-symlink file"));
     assert!(legacy.join("reborn-local-dev.db").is_symlink());
-    assert!(
-        !temp
-            .path()
-            .join("runtime")
-            .join(ADOPTION_DIR)
-            .join(JOURNAL_FILE)
-            .exists()
-    );
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+    assert!(!temp.path().join("state").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn adoption_rejects_a_symlinked_runtime_ancestor_before_any_write() {
+fn migration_rejects_a_symlinked_runtime_ancestor_before_any_write() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
     let legacy = temp.path().join("local-dev");
     seed_legacy_embedded_store(&legacy);
     let outside = temp.path().join("outside-runtime");
     fs::create_dir(&outside).expect("outside runtime");
     symlink(&outside, temp.path().join("runtime")).expect("runtime symlink");
 
-    let error = adopt_layout(
+    let candidates = match admit_startup_layout(&home, requirement).expect("classify") {
+        StartupLayoutAdmission::MigrationRequired(candidates) => candidates,
+        StartupLayoutAdmission::Ready(_) => panic!("legacy home cannot be ready"),
+    };
+    let error = migrate_legacy_layout(
         &home,
-        embedded_single_user_requirement(),
-        confirmed_options(),
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        candidates,
     )
     .expect_err("runtime symlink must not be followed");
 
@@ -146,134 +109,6 @@ fn adoption_rejects_a_symlinked_runtime_ancestor_before_any_write() {
             .expect("outside remains readable")
             .next()
             .is_none(),
-        "adoption must not create runtime artifacts through a symlink"
+        "migration must not create runtime artifacts through a symlink"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn recovery_rejects_a_symlinked_snapshot_ancestor_before_source_mutation() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = reborn_home(temp.path());
-    let requirement = embedded_single_user_requirement();
-    let legacy = temp.path().join("local-dev");
-    seed_legacy_embedded_store(&legacy);
-    let paths = RebornStoragePaths::from_home(&home);
-    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
-    fs::create_dir_all(&adoption_root).expect("adoption root");
-    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
-    let candidate = candidates.first().expect("one candidate");
-    let journal = AdoptionJournal::new(candidate, requirement, None);
-    write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
-    let outside = temp.path().join("outside-snapshots");
-    fs::create_dir(&outside).expect("outside snapshots");
-    symlink(&outside, adoption_root.join(SNAPSHOT_DIR)).expect("snapshot symlink");
-
-    let error = adopt_layout(&home, requirement, confirmed_options())
-        .expect_err("snapshot symlink must not be followed during recovery");
-
-    assert!(
-        format!("{error:#}").contains("ordinary non-symlink directory"),
-        "{error:#}"
-    );
-    assert!(legacy.join("reborn-local-dev.db").is_file());
-    assert!(
-        fs::read_dir(&outside)
-            .expect("outside remains readable")
-            .next()
-            .is_none(),
-        "recovery must not snapshot through a symlink"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn recovery_rejects_a_symlinked_snapshot_leaf_before_inventory_read() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = reborn_home(temp.path());
-    let requirement = embedded_single_user_requirement();
-    let legacy = temp.path().join("local-dev");
-    seed_legacy_embedded_store(&legacy);
-    let paths = RebornStoragePaths::from_home(&home);
-    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
-    fs::create_dir_all(&adoption_root).expect("adoption root");
-    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
-    let candidate = candidates.first().expect("one candidate");
-    let snapshot = candidate.snapshot_root(&adoption_root);
-    snapshot_source(candidate, &snapshot).expect("snapshot source");
-    let preserved_snapshot = temp.path().join("preserved-snapshot");
-    fs::rename(&snapshot, &preserved_snapshot).expect("preserve real snapshot");
-    let outside = temp.path().join("outside-snapshot");
-    fs::create_dir(&outside).expect("outside snapshot");
-    symlink(&outside, &snapshot).expect("snapshot leaf symlink");
-    let mut journal = AdoptionJournal::new(candidate, requirement, None);
-    journal.phase = AdoptionPhase::SnapshotOwned;
-    write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
-
-    let error = adopt_layout(&home, requirement, confirmed_options())
-        .expect_err("snapshot leaf symlink must be rejected before inventory traversal");
-
-    assert!(
-        format!("{error:#}").contains("ordinary non-symlink directory"),
-        "{error:#}"
-    );
-    assert!(
-        fs::read_dir(&outside)
-            .expect("outside remains readable")
-            .next()
-            .is_none(),
-        "recovery must not traverse a symlinked snapshot leaf"
-    );
-    assert!(preserved_snapshot.join("reborn-local-dev.db").is_file());
-}
-
-#[cfg(unix)]
-#[test]
-fn replay_rejects_a_swapped_symlinked_staging_child_before_install() {
-    use std::os::unix::fs::symlink;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = reborn_home(temp.path());
-    let requirement = embedded_single_user_requirement();
-    let legacy = temp.path().join("local-dev");
-    seed_legacy_embedded_store(&legacy);
-    let paths = RebornStoragePaths::from_home(&home);
-    let adoption_root = paths.runtime_root().join(ADOPTION_DIR);
-    fs::create_dir_all(&adoption_root).expect("adoption root");
-    let candidates = inspect_legacy_candidates(temp.path()).expect("inspect source");
-    let candidate = candidates.first().expect("one candidate");
-    let snapshot = candidate.snapshot_root(&adoption_root);
-    snapshot_source(candidate, &snapshot).expect("snapshot source");
-    let staging = adoption_root.join(STAGING_DIR);
-    fs::create_dir(&staging).expect("staging root");
-    let outside = temp.path().join("outside-state");
-    fs::create_dir(&outside).expect("outside state");
-    symlink(&outside, staging.join("state")).expect("swapped staging state");
-    fs::create_dir(staging.join("system")).expect("staging system");
-    let mut journal = AdoptionJournal::new(candidate, requirement, None);
-    fs::write(staging.join(STAGING_OWNER_FILE), &journal.operation_id)
-        .expect("journal-owned staging marker");
-    journal.phase = AdoptionPhase::Staged;
-    write_journal(&adoption_root.join("journal.toml"), &journal).expect("journal");
-
-    let error = adopt_layout(&home, requirement, confirmed_options())
-        .expect_err("replay must reject a swapped symlink before rename");
-
-    assert!(
-        format!("{error:#}").contains("ordinary non-symlink directory"),
-        "{error:#}"
-    );
-    assert!(
-        fs::read_dir(&outside)
-            .expect("outside remains readable")
-            .next()
-            .is_none(),
-        "staged replay must not write through a swapped child"
-    );
-    assert!(!temp.path().join("state").exists());
-    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
 }

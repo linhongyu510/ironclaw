@@ -183,7 +183,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// Re-measured 42_989 -> 43_265 on 2026-08-14 after the current
 /// profile-stable storage review changes, using
 /// `bash scripts/ci/check-composition-budget.sh --print`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_265;
+/// Re-measured 43_265 -> 43_170 on 2026-08-18 after replacing the journaled
+/// storage-layout adoption engine with the rename-based boot migrator
+/// (adoption store verifiers evicted from composition).
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_170;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 837 Arc<dyn> (governed prod, excl slack/extension_host)".

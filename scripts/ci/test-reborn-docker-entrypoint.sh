@@ -30,7 +30,7 @@ mkdir -p "${WORK}/bin"
 cat > "${WORK}/bin/ironclaw" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" > "${IRONCLAW_STUB_ARGV_PATH}"
-printf '%s\n' "${IRONCLAW_REBORN_STORAGE_CUTOVER:-}" > "${IRONCLAW_STUB_CUTOVER_PATH}"
+printf '%s\n' "${IRONCLAW_REBORN_STORAGE_MIGRATION:-}" > "${IRONCLAW_STUB_MIGRATION_PATH}"
 exit 0
 STUB
 chmod +x "${WORK}/bin/ironclaw"
@@ -55,11 +55,11 @@ run_entrypoint() {
     # validates the path prefix before it decides that.
     export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
     export IRONCLAW_STUB_ARGV_PATH="${home}/argv"
-    export IRONCLAW_STUB_CUTOVER_PATH="${home}/cutover"
+    export IRONCLAW_STUB_MIGRATION_PATH="${home}/migration-policy"
     # Keep the Railway persistence guard out of the way.
     unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
     unset IRONCLAW_REBORN_SERVE_HOST IRONCLAW_REBORN_SERVE_PORT PORT
-    unset IRONCLAW_REBORN_STORAGE_CUTOVER
+    unset IRONCLAW_REBORN_STORAGE_MIGRATION
     for assignment in "$@"; do
       export "${assignment?}"
     done
@@ -150,16 +150,16 @@ expect_present enabled_true 'signing_secret_env' "$out"
 expect_present enabled_true 'bot_token_env' "$out"
 
 # 4. Railway uses the same entrypoint, receives a network-reachable host, and
-#    forwards one-time storage-cutover authority to `ironclaw serve`.
+#    forwards the operator's storage-migration policy override to `ironclaw serve`.
 out="$(run_entrypoint railway_volume/ironclaw-reborn "$LEGACY_DISABLED" \
   "IRONCLAW_REBORN_HOME=" \
   "RAILWAY_ENVIRONMENT=production" \
   "RAILWAY_VOLUME_MOUNT_PATH=${WORK}/railway_volume" \
-  "IRONCLAW_REBORN_STORAGE_CUTOVER=legacy-layout-v1")"
+  "IRONCLAW_REBORN_STORAGE_MIGRATION=manual")"
 railway_argv="$(cat "${WORK}/railway_volume/ironclaw-reborn/argv")"
-railway_cutover="$(cat "${WORK}/railway_volume/ironclaw-reborn/cutover")"
+railway_policy="$(cat "${WORK}/railway_volume/ironclaw-reborn/migration-policy")"
 expect_literal_present railway_startup 'serve --host 0.0.0.0 --port 3000' "$railway_argv"
-expect_present railway_startup '^legacy-layout-v1$' "$railway_cutover"
+expect_present railway_startup '^manual$' "$railway_policy"
 
 # An image-level host value would look like an operator override to the
 # entrypoint and silently defeat its container-reachable default.

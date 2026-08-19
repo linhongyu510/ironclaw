@@ -28,8 +28,6 @@ pub enum RebornBuildError {
     EventStore(#[from] ironclaw_event_store::RebornEventStoreError),
     #[error("reborn secret store build failed")]
     Secret(#[from] ironclaw_secrets::SecretError),
-    #[error("reborn existing encrypted state verification failed")]
-    SecretStateVerification(#[source] ironclaw_secrets::SecretStoreError),
     #[error("reborn filesystem build failed")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn libSQL runtime build failed")]

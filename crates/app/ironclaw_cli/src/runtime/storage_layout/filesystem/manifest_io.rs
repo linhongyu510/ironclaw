@@ -43,30 +43,6 @@ pub(in super::super) fn admit_manifest(
     }
 }
 
-pub(in super::super) fn read_journal(path: &Path) -> anyhow::Result<AdoptionJournal> {
-    let contents = read_utf8_file_no_follow(path)?;
-    let journal: AdoptionJournal = toml::from_str(&contents)
-        .map_err(|error| anyhow!("parse adoption journal {}: {error}", path.display()))?;
-    if journal.schema_version != JOURNAL_SCHEMA_VERSION {
-        bail!(
-            "unsupported layout adoption journal schema_version {}; expected {}",
-            journal.schema_version,
-            JOURNAL_SCHEMA_VERSION
-        );
-    }
-    journal.validate_source_requirement()?;
-    let _ = journal.validated_workspace()?;
-    Ok(journal)
-}
-
-pub(in super::super) fn write_journal(
-    path: &Path,
-    journal: &AdoptionJournal,
-) -> anyhow::Result<()> {
-    let contents = toml::to_string(journal).context("serialize adoption journal")?;
-    write_atomic_synced(path, &contents, true)
-}
-
 pub(in super::super) fn write_atomic_synced(
     path: &Path,
     contents: &str,

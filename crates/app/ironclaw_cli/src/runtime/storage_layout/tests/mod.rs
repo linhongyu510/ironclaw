@@ -12,11 +12,10 @@ use ironclaw_config::{
     DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
     LegacyStorageSource, RebornHome, TenancyModel, WorkspaceAccessFloor,
 };
-use ironclaw_host_api::ids::{TenantId, TenantUserWorkspaceKey, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
-use super::test_support::*;
 use super::*;
-use super::{admission::*, adoption::*, filesystem::*, locks::*, model::*};
+use super::{admission::*, filesystem::*, locks::*, model::*, mover::*};
 
 pub(super) fn embedded_single_user_requirement() -> LayoutRequirement {
     LayoutRequirement {
@@ -29,182 +28,41 @@ pub(super) fn embedded_single_user_requirement() -> LayoutRequirement {
 }
 
 #[test]
-fn startup_adoption_authority_requires_the_exact_versioned_cutover_value() {
-    let missing = StartupAdoptionAuthority::from_environment_value(None)
-        .expect_err("missing deployment authority fails closed");
-    assert!(missing.to_string().contains(StartupAdoptionAuthority::ENV));
-
-    let malformed = StartupAdoptionAuthority::from_environment_value(Some("true"))
-        .expect_err("generic truthy values do not authorize migration");
-    assert!(
-        malformed
-            .to_string()
-            .contains(StartupAdoptionAuthority::LEGACY_LAYOUT_V1)
+fn storage_migration_policy_defaults_to_automatic_and_rejects_unknown_values() {
+    assert_eq!(
+        StorageMigrationPolicy::from_environment_value(None).expect("default policy"),
+        StorageMigrationPolicy::Automatic
     );
-
-    StartupAdoptionAuthority::from_environment_value(Some(
-        StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
-    ))
-    .expect("the versioned cutover value authorizes this one migration protocol");
-}
-
-#[test]
-fn automatic_startup_cutover_lock_serializes_competing_new_replicas() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = reborn_home(temp.path());
-    let requirement = embedded_single_user_requirement();
-    let legacy = temp.path().join("local-dev");
-    seed_legacy_embedded_store(&legacy);
-    let authority = StartupAdoptionAuthority::from_environment_value(Some(
-        StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
-    ))
-    .expect("cutover authority");
-
-    let _permit = prepare_automatic_adoption(&home, requirement, authority)
-        .expect("first new replica owns the cutover");
-    let contention = match prepare_automatic_adoption(&home, requirement, authority) {
-        Ok(_) => panic!("second new replica must fail before verification and mutation"),
-        Err(error) => error,
-    };
-
-    assert!(contention.to_string().contains("automatic storage cutover"));
-    assert!(legacy.join(DB_FILE).is_file());
-    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
-    assert!(
-        !temp
-            .path()
-            .join("runtime")
-            .join(ADOPTION_DIR)
-            .join(JOURNAL_FILE)
-            .exists()
+    assert_eq!(
+        StorageMigrationPolicy::from_environment_value(Some(StorageMigrationPolicy::AUTOMATIC))
+            .expect("explicit automatic"),
+        StorageMigrationPolicy::Automatic
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn automatic_cutover_holder_subprocess() {
-    let Ok(home_path) = std::env::var("IRONCLAW_TEST_CUTOVER_HOME") else {
-        return;
-    };
-    let ready = std::env::var("IRONCLAW_TEST_CUTOVER_READY").expect("cutover ready path");
-    let release = std::env::var("IRONCLAW_TEST_CUTOVER_RELEASE").expect("cutover release path");
-    let home = reborn_home(std::path::Path::new(&home_path));
-    let authority = StartupAdoptionAuthority::from_environment_value(Some(
-        StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
-    ))
-    .expect("cutover authority");
-    let _permit = prepare_automatic_adoption(&home, embedded_single_user_requirement(), authority)
-        .expect("subprocess holds automatic cutover lock");
-    fs::write(ready, b"ready").expect("signal held cutover lock");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !std::path::Path::new(&release).is_file() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        std::path::Path::new(&release).is_file(),
-        "parent did not release cutover holder within the bounded test interval"
+    assert_eq!(
+        StorageMigrationPolicy::from_environment_value(Some(StorageMigrationPolicy::MANUAL))
+            .expect("explicit manual"),
+        StorageMigrationPolicy::Manual
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn automatic_cutover_lock_serializes_separate_processes_and_reuses_its_inode() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = reborn_home(temp.path());
-    let requirement = embedded_single_user_requirement();
-    let legacy = temp.path().join("local-dev");
-    seed_legacy_embedded_store(&legacy);
-    let ready = temp.path().join("cutover-ready");
-    let release = temp.path().join("cutover-release");
-    let test_binary = std::env::current_exe().expect("test binary");
-    let mut child = Command::new(test_binary)
-        .args([
-            "--exact",
-            "runtime::storage_layout::tests::automatic_cutover_holder_subprocess",
-            "--nocapture",
-        ])
-        .env("IRONCLAW_TEST_CUTOVER_HOME", temp.path())
-        .env("IRONCLAW_TEST_CUTOVER_READY", &ready)
-        .env("IRONCLAW_TEST_CUTOVER_RELEASE", &release)
-        .spawn()
-        .expect("spawn automatic cutover holder");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !ready.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        ready.is_file(),
-        "cutover holder reached its critical section"
-    );
-    let authority = StartupAdoptionAuthority::from_environment_value(Some(
-        StartupAdoptionAuthority::LEGACY_LAYOUT_V1,
-    ))
-    .expect("cutover authority");
-    let contention = match prepare_automatic_adoption(&home, requirement, authority) {
-        Ok(_) => panic!("a separate process must serialize automatic cutover"),
-        Err(error) => error,
-    };
-    assert!(
-        contention.to_string().contains("automatic storage cutover"),
-        "{contention:#}"
-    );
-    assert!(legacy.join(DB_FILE).is_file());
-    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
-    assert!(
-        !temp
-            .path()
-            .join("runtime")
-            .join(ADOPTION_DIR)
-            .join(JOURNAL_FILE)
-            .exists()
-    );
-
-    fs::write(&release, b"release").expect("release cutover holder");
-    let status = child.wait().expect("wait for released cutover holder");
-    assert!(status.success(), "cutover holder exits cleanly");
-    let _permit = prepare_automatic_adoption(&home, requirement, authority)
-        .expect("the persistent lock inode is reusable after process exit");
-}
-
-pub(super) fn external_single_user_requirement() -> LayoutRequirement {
-    LayoutRequirement {
-        durable_state: DurableStateKind::ExternalPostgres,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::SingleUser,
-            workspace_access_floor: WorkspaceAccessFloor::SingleTrustedOperator,
-        },
-    }
-}
-
-pub(super) fn embedded_multi_user_requirement() -> LayoutRequirement {
-    LayoutRequirement {
-        durable_state: DurableStateKind::EmbeddedLibSql,
-        security: DeploymentSecurityEnvelope {
-            tenancy: TenancyModel::MultiUser,
-            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
-        },
-    }
-}
-
-pub(super) fn confirmed_options() -> AdoptOptions {
-    AdoptOptions {
-        confirm_processes_stopped: true,
-        confirm_backup_snapshot: true,
-        workspace_import: None,
-    }
+    let error = StorageMigrationPolicy::from_environment_value(Some("true"))
+        .expect_err("generic truthy values are not a policy");
+    assert!(error.to_string().contains(StorageMigrationPolicy::ENV));
 }
 
 #[cfg(any(unix, windows))]
 #[test]
 fn advisory_lock_holder_subprocess() {
-    let Ok(adoption_root) = std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_ROOT") else {
+    let Ok(lock_root) = std::env::var("IRONCLAW_TEST_MIGRATION_LOCK_ROOT") else {
         return;
     };
-    let ready = std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_READY").expect("lock holder ready path");
+    let ready = std::env::var("IRONCLAW_TEST_MIGRATION_LOCK_READY").expect("lock holder ready");
     let release =
-        std::env::var("IRONCLAW_TEST_ADOPTION_LOCK_RELEASE").expect("lock holder release path");
-    let _lock = acquire_adoption_lock(std::path::Path::new(&adoption_root))
-        .expect("subprocess holds adoption lock");
+        std::env::var("IRONCLAW_TEST_MIGRATION_LOCK_RELEASE").expect("lock holder release");
+    let _lock = acquire_named_lock(
+        std::path::Path::new(&lock_root),
+        MIGRATION_LOCK_FILE,
+        "storage layout migration",
+    )
+    .expect("subprocess holds migration lock");
     fs::write(ready, b"ready").expect("signal held lock");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::path::Path::new(&release).is_file() && Instant::now() < deadline {
@@ -220,8 +78,8 @@ fn advisory_lock_holder_subprocess() {
 #[test]
 fn advisory_lock_recovers_after_a_terminated_process() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let adoption_root = temp.path().join("layout-adoption");
-    fs::create_dir(&adoption_root).expect("adoption root");
+    let lock_root = temp.path().join("home");
+    fs::create_dir(&lock_root).expect("lock root");
     let ready = temp.path().join("lock-ready");
     let test_binary = std::env::current_exe().expect("test binary");
     let mut child = Command::new(test_binary)
@@ -230,10 +88,10 @@ fn advisory_lock_recovers_after_a_terminated_process() {
             "runtime::storage_layout::tests::advisory_lock_holder_subprocess",
             "--nocapture",
         ])
-        .env("IRONCLAW_TEST_ADOPTION_LOCK_ROOT", &adoption_root)
-        .env("IRONCLAW_TEST_ADOPTION_LOCK_READY", &ready)
+        .env("IRONCLAW_TEST_MIGRATION_LOCK_ROOT", &lock_root)
+        .env("IRONCLAW_TEST_MIGRATION_LOCK_READY", &ready)
         .env(
-            "IRONCLAW_TEST_ADOPTION_LOCK_RELEASE",
+            "IRONCLAW_TEST_MIGRATION_LOCK_RELEASE",
             temp.path().join("lock-release"),
         )
         .spawn()
@@ -243,31 +101,20 @@ fn advisory_lock_recovers_after_a_terminated_process() {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(ready.is_file(), "lock holder reached its critical section");
-    let contention = match acquire_adoption_lock(&adoption_root) {
-        Ok(_) => panic!("live lock holder prevents concurrent adoption"),
-        Err(error) => error,
-    };
+    let contention =
+        match acquire_named_lock(&lock_root, MIGRATION_LOCK_FILE, "storage layout migration") {
+            Ok(_) => panic!("live lock holder prevents concurrent migration"),
+            Err(error) => error,
+        };
     assert!(
-        !format!("{contention:#}").is_empty(),
-        "contention exposes a diagnostic error"
+        format!("{contention:#}").contains("storage layout migration"),
+        "{contention:#}"
     );
     child.kill().expect("terminate lock holder");
     let _status = child.wait().expect("reap terminated lock holder");
 
-    let _lock = acquire_adoption_lock(&adoption_root)
+    let _lock = acquire_named_lock(&lock_root, MIGRATION_LOCK_FILE, "storage layout migration")
         .expect("OS advisory lock is released after a holder process is terminated");
-}
-
-pub(super) fn workspace_import(
-    source: std::path::PathBuf,
-    confirmed: bool,
-) -> WorkspaceImportOptions {
-    WorkspaceImportOptions {
-        source,
-        tenant: TenantId::new("tenant-a").expect("tenant id"),
-        user: UserId::new("user-a").expect("user id"),
-        confirmed,
-    }
 }
 
 pub(super) fn reborn_home(path: &std::path::Path) -> RebornHome {
@@ -303,7 +150,22 @@ pub(super) fn seed_legacy_embedded_store(root: &std::path::Path) {
     .expect("seed legacy libSQL store");
 }
 
-mod admission_adoption;
+/// Backdate every mtime-bearing file of a seeded legacy root so recency
+/// ranking can order candidates deterministically.
+pub(super) fn age_legacy_store(root: &std::path::Path, seconds: u64) {
+    let stamp = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+    for entry in fs::read_dir(root).expect("read legacy root") {
+        let entry = entry.expect("legacy entry");
+        if entry.file_type().expect("entry type").is_file() {
+            let file = fs::OpenOptions::new()
+                .append(true)
+                .open(entry.path())
+                .expect("open for timestamp");
+            file.set_modified(stamp).expect("backdate mtime");
+        }
+    }
+}
+
+mod admission;
 mod filesystem_security;
-mod recovery;
-mod workspace;
+mod mover_migration;

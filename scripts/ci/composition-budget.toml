@@ -221,7 +221,7 @@ observed_date = "2026-08-08"
 # preflight-then-migrate adoption seam into composition. These are deployment
 # assembly responsibilities; the extension host now receives only the neutral
 # `RootFilesystem` contract. Measured on this tree with the gate itself.
-loc_ceiling = 43293
+loc_ceiling = 43170
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to

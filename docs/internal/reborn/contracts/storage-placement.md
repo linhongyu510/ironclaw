@@ -45,12 +45,13 @@ leaf. `runtime/` is durable provider/process bookkeeping, while cache and
 temporary invocation data remain disposable and must never be treated as
 authoritative state.
 
-For deployment-authorized automatic adoption, fail-closed ambiguity,
-interruption recovery, retained snapshots, and old-binary rollback, see
-[the storage-layout operator runbook](../storage-layout-adoption.md). A legacy
-source never authorizes its own migration: startup requires the exact
-versioned cutover attestation after all old replicas are stopped, and external
-workspace ownership remains an explicit manual decision.
+For automatic boot-time migration, fail-closed ambiguity, interruption
+recovery, and old-binary rollback, see
+[the storage-layout operator runbook](../storage-layout-adoption.md).
+Migration is guarded mechanically — an advisory home lock plus a live-writer
+probe on the embedded database — and never merges candidates: a losing
+populated source stays in place untouched and is named in the retained
+`runtime/layout-migration.toml` provenance record.
 
 The rule is hybrid:
 
