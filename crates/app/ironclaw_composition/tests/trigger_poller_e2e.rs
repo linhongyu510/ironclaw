@@ -76,7 +76,6 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 
 fn trigger_execution_contract(goal: impl Into<String>) -> Value {
     json!({
-        "version": 1,
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
@@ -2245,7 +2244,6 @@ async fn structured_trigger_creation_rejects_capability_pinning_and_missing_skil
         json!({
             "name": "structured-required-capability",
             "execution_contract": {
-                "version": 1,
                 "goal": "Use a pinned capability",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
@@ -2274,7 +2272,6 @@ async fn structured_trigger_creation_rejects_capability_pinning_and_missing_skil
         json!({
             "name": "structured-allowed-capability",
             "execution_contract": {
-                "version": 1,
                 "goal": "Use a pinned capability surface",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
@@ -2305,7 +2302,6 @@ async fn structured_trigger_creation_rejects_capability_pinning_and_missing_skil
         json!({
             "name": "structured-missing-skill",
             "execution_contract": {
-                "version": 1,
                 "goal": "Use a missing skill",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",

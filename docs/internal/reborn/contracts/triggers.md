@@ -80,10 +80,11 @@ The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as t
 
 ### 3.3 Structured execution contracts
 
-New trigger creation requires a versioned `execution_contract`; the create
-surface does not accept or advertise the legacy raw `prompt` field. A
-structured contract stores canonical JSON in `execution_spec_json` and stores
-its rendered prompt alongside it.
+New trigger creation requires a structured `execution_contract`; the create
+surface does not accept or advertise either the legacy raw `prompt` field or a
+caller-selected contract version. The host assigns the current durable version
+before validation. The resulting contract stores canonical JSON in
+`execution_spec_json` and stores its rendered prompt alongside it.
 
 This is a new-write rule, not a destructive migration. Existing rows with a
 raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
@@ -93,13 +94,14 @@ The durable v1 contract contains a goal, one or more success criteria, output
 instructions, no-result text, required skill names, and legacy/internal fields
 for a capability allowlist and explicit capability-evidence requirements. The
 model-facing `trigger_create` surface neither advertises nor accepts the two
-capability-ID fields. New model-authored routines therefore store an absent
-allowlist and no explicit capability requirements, allowing each future run to
-discover the capabilities needed for that run. The trigger domain validates
-and renders the contract before persistence. Production creation resolves
-required skills through the normal skill selector before writing the trigger.
-The scheduler continues to submit the frozen prompt; only the neutral execution
-policy crosses the trusted-trigger turn boundary.
+capability-ID fields or the durable version field. New model-authored routines
+therefore store v1, an absent allowlist, and no explicit capability
+requirements, allowing each future run to discover the capabilities needed for
+that run. The trigger domain validates and renders the contract before
+persistence. Production creation resolves required skills through the normal
+skill selector before writing the trigger. The scheduler continues to submit
+the frozen prompt; only the neutral execution policy crosses the trusted-trigger
+turn boundary.
 
 New `trigger_create` calls must explicitly select
 `execution_contract.policy.result_delivery`; omission is a model-visible input

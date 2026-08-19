@@ -812,7 +812,6 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
             unexpected_fields(
                 contract,
                 &[
-                    "version",
                     "goal",
                     "success_criteria",
                     "output_instructions",

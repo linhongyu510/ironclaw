@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecordValidationKind};
 
-const EXECUTION_SPEC_VERSION: u16 = 1;
 const MAX_GOAL_BYTES: usize = 4 * 1024;
 const MAX_SUCCESS_CRITERIA: usize = 32;
 const MAX_SUCCESS_CRITERIA_BYTES: usize = 8 * 1024;
@@ -36,11 +35,14 @@ pub struct TriggerExecutionSpec {
 }
 
 impl TriggerExecutionSpec {
+    pub const VERSION: u16 = 1;
+
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.version != EXECUTION_SPEC_VERSION {
+        if self.version != Self::VERSION {
             return invalid(format!(
-                "unsupported execution spec version {}; expected {EXECUTION_SPEC_VERSION}",
-                self.version
+                "unsupported execution spec version {}; expected {}",
+                self.version,
+                Self::VERSION,
             ));
         }
         validate_text("goal", &self.goal, MAX_GOAL_BYTES)?;

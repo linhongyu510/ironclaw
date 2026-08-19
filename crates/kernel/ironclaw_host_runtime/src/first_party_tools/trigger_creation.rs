@@ -23,7 +23,6 @@ struct TriggerCreateWireInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TriggerExecutionContractInput {
-    version: u16,
     goal: String,
     success_criteria: Vec<String>,
     output_instructions: String,
@@ -42,7 +41,7 @@ struct TriggerExecutionPolicyInput {
 impl From<TriggerExecutionContractInput> for TriggerExecutionSpec {
     fn from(input: TriggerExecutionContractInput) -> Self {
         Self {
-            version: input.version,
+            version: Self::VERSION,
             goal: input.goal,
             success_criteria: input.success_criteria,
             output_instructions: input.output_instructions,

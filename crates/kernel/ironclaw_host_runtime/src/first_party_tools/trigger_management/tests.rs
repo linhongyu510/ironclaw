@@ -6,7 +6,6 @@ use super::*;
 fn execution_contract(goal: impl Into<String>) -> Value {
     let goal = goal.into();
     json!({
-        "version": 1,
         "goal": goal,
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
@@ -469,7 +468,6 @@ fn trigger_create_input_accepts_cron_schedule() {
     let input = serde_json::json!({
         "name": "daily",
         "execution_contract": {
-            "version": 1,
             "goal": "Check mail",
             "success_criteria": ["Report the mail check result"],
             "output_instructions": "Return a concise summary",
@@ -514,7 +512,6 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -549,7 +546,6 @@ fn trigger_create_input_rejects_model_authored_capability_ids() {
     let required = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -562,7 +558,6 @@ fn trigger_create_input_rejects_model_authored_capability_ids() {
     let allowed = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -588,12 +583,36 @@ fn trigger_create_input_rejects_model_authored_capability_ids() {
 }
 
 #[test]
+fn trigger_create_input_rejects_model_authored_contract_version() {
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "result_delivery": "deliver" }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+        Ok(_) => panic!("the host, not the model, must select the contract version"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unknown field `version`"),
+        "the rejected field should be identifiable: {error}"
+    );
+}
+
+#[test]
 fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
     let both = serde_json::json!({
         "name": "invalid",
         "prompt": "legacy",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failures",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -622,7 +641,6 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -670,7 +688,6 @@ async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",

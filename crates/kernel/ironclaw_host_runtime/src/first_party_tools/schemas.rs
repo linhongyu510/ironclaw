@@ -941,9 +941,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "execution_contract": {
                     "type": "object",
-                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Future runs discover capabilities dynamically; required skills must activate before the first model call.",
+                    "description": "Structured contract rendered into the frozen future-run prompt and persisted using the host's current contract version. Describe the task itself, never the act of creating or scheduling it. Future runs discover capabilities dynamically; required skills must activate before the first model call.",
                     "properties": {
-                        "version": { "const": 1 },
                         "goal": {
                             "type": "string",
                             "minLength": 1,
@@ -980,7 +979,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                             "additionalProperties": false
                         }
                     },
-                    "required": ["version", "goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
+                    "required": ["goal", "success_criteria", "output_instructions", "no_result_text", "policy"],
                     "additionalProperties": false
                 },
                 "schedule": {
@@ -1228,13 +1227,18 @@ mod tests {
         assert_eq!(
             schema["properties"]["execution_contract"]["required"],
             serde_json::json!([
-                "version",
                 "goal",
                 "success_criteria",
                 "output_instructions",
                 "no_result_text",
                 "policy"
             ])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]
+                .get("version")
+                .is_none(),
+            "the host must select the durable execution-contract version"
         );
         assert!(
             schema["properties"]["execution_contract"]["properties"]
