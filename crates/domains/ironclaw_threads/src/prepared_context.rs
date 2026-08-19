@@ -18,8 +18,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_host_api::prepared_context::PreparedTurnDeclarations;
 use ironclaw_host_api::turn::AcceptedMessageRef;
+use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
 use ironclaw_llm::agent_message::{
     AGENT_MESSAGE_TEXT_PART_MAX_BYTES, AgentMessage, AgentMessageRole, ContentPart,
     validate_agent_messages,
@@ -28,23 +28,73 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+};
 use crate::{
     AttachmentRef, MessageKind, MessageStatus, SessionThreadError, ThreadMessageId,
     ThreadMessageRecord, ThreadScope,
 };
+use ironclaw_host_api::ids::ProviderToolName;
+use ironclaw_llm::agent_message::{ToolCallContent, ToolResultOutcome};
+
+/// Provider identity stamped on SEEDED tool-history envelopes. The model
+/// gateway's replay-identity gate carves this exact value out so a seeded
+/// tool round replays as a faithful tool_use/tool_result exchange; every
+/// other mismatched identity still degrades to the summary-style user
+/// message. Seeded envelopes are host-normalized: `signature` is forced
+/// `None` so caller-authored history can never smuggle provider replay
+/// artifacts.
+pub const PREPARED_SEED_PROVIDER_ID: &str = "prepared-context-seed";
+
+/// Preview budget for a seeded tool result's model observation: one durable
+/// record-read window, mirroring the loop's own first-look preview size.
+const PREPARED_SEED_PREVIEW_MAX_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+
+/// Provider-metadata text budget for seeded `response_reasoning`
+/// (mirrors `ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES`).
+const PREPARED_SEED_REASONING_MAX_BYTES: usize = ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES;
 
 /// Current schema version for [`PreparedContextRecord`] rows.
 pub const PREPARED_CONTEXT_RECORD_SCHEMA_VERSION: u32 = 1;
 
+/// Serialized-size cap for a declared `response_format` JSON Schema output
+/// contract. Chosen at the same scale as [`AGENT_MESSAGE_TEXT_PART_MAX_BYTES`]
+/// (the transcript's own per-part text budget): the schema is journaled with
+/// the rest of the declarations and, unlike ordinary transcript text, is
+/// compiled into a `jsonschema` validator once per RUN
+/// (`ironclaw_loop_host::structured_result::validator_for`) — an unbounded
+/// caller-supplied schema is request-triggered CPU/memory amplification, so
+/// it gets the same budget as the other untrusted-content parts rather than
+/// riding the raw 14 MiB chat-body cap. Reserve space for the host-owned
+/// structured-output guidance that wraps this schema in a loop inline message;
+/// that message has the same 64 KiB content bound.
+const OUTPUT_GUIDANCE_RESERVE_BYTES: usize = 1024;
+pub const PREPARED_OUTPUT_SCHEMA_MAX_BYTES: usize =
+    AGENT_MESSAGE_TEXT_PART_MAX_BYTES - OUTPUT_GUIDANCE_RESERVE_BYTES;
+
+/// Nesting-depth cap for a declared `response_format` JSON Schema output
+/// contract, mirroring [`ironclaw_safety`]'s existing tool-argument depth
+/// bound (`PROVIDER_ARGUMENTS_MAX_DEPTH` / the validator's `MAX_DEPTH`).
+/// Measured iteratively over an explicit stack — never recursively — because
+/// the schema is untrusted request content and a recursive walk would let a
+/// pathologically deep (but small) schema exhaust the stack while merely
+/// being measured.
+pub const PREPARED_OUTPUT_SCHEMA_MAX_DEPTH: usize = 32;
+
 /// The prepared-context accept request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedContextRequest {
-    /// Scope of the minted thread. `owner_user_id: None` is the unbound
-    /// default — the thread is structurally invisible to every owner-scoped
-    /// conversation listing. `Some(owner)` exists solely to preserve the
-    /// subagent child thread's owner-mirroring behavior (its evidence checks
-    /// read the child edge back under the parent's real-owner scope);
-    /// product callers must pass `None`.
+    /// Scope of the minted thread. Callers name a real owner: product
+    /// surfaces pass the authenticated caller (`UnboundTurnService` threads
+    /// its actor), and subagent spawn mirrors the parent thread's owner so
+    /// its evidence checks read the child edge back under the parent's
+    /// real-owner scope. The owner shards prepared threads per-user and is
+    /// NOT what hides them — invisibility to every owner-scoped
+    /// conversation listing comes from the unconditional `prepared_context`
+    /// metadata stamp. `owner_user_id: None` remains accepted for legacy
+    /// engine-level callers but lands the thread in the tenant system slot;
+    /// do not introduce new `None` producers.
     pub scope: ThreadScope,
     /// Acting identity recorded on the seeded user rows
     /// (run-acts-as-invoker).
@@ -61,11 +111,12 @@ pub struct PreparedContextRequest {
     pub declarations: PreparedTurnDeclarations,
     /// Replay key: retrying returns the same prepared context.
     pub idempotency_key: String,
-    /// Explicit thread id override. `None` (the norm) derives a deterministic
-    /// id from `(scope, idempotency_key)`; the subagent spawn path passes its
-    /// own `subagent-{child_run_id}` id because crash reconstruction and the
-    /// await-edge machinery reference that scheme.
-    pub thread_id: Option<ThreadId>,
+    /// The thread to mint, chosen by the caller and always server-generated
+    /// upstream (subagent spawn passes `subagent-{child_run_id}`; OpenAI-compat
+    /// passes the public completion id). Idempotent replay converges on this
+    /// id via the journaled record; the seeded ROW ids stay deterministic
+    /// functions of it so crashed retries converge row-by-row.
+    pub thread_id: ThreadId,
     /// Optional human-facing title and metadata for the minted thread (the
     /// subagent path stores its crash-reconstruction metadata here).
     pub title: Option<String>,
@@ -98,42 +149,7 @@ pub struct PreparedContextRecord {
     pub created_at: DateTime<Utc>,
 }
 
-/// Deterministic thread id for a prepared-context accept: a pure function of
-/// `(scope, idempotency_key)`, so a crash-retry converges on the same thread
-/// (no orphans) and the same key under a different scope mints a different
-/// thread.
-pub(crate) fn prepared_thread_id(
-    request: &PreparedContextRequest,
-) -> Result<ThreadId, SessionThreadError> {
-    if let Some(thread_id) = &request.thread_id {
-        return Ok(thread_id.clone());
-    }
-    unbound_thread_id(&request.scope, &request.idempotency_key)
-}
-
-pub(crate) fn unbound_thread_id(
-    scope: &ThreadScope,
-    idempotency_key: &str,
-) -> Result<ThreadId, SessionThreadError> {
-    let scope_bytes = serde_json::to_vec(scope)
-        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"prepared-context:v1\0");
-    hasher.update(&scope_bytes);
-    hasher.update(b"\0");
-    hasher.update(idempotency_key.as_bytes());
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(32);
-    for byte in digest.iter().take(16) {
-        use std::fmt::Write as _;
-        let _ = write!(&mut hex, "{byte:02x}");
-    }
-    ThreadId::new(format!("unbound-{hex}")).map_err(|error| {
-        SessionThreadError::GeneratedThreadId(format!("unbound thread id invalid: {error}"))
-    })
-}
-
-/// Deterministic message id for seeded row `index` of a unbound thread, so
+/// Deterministic message id for seeded row `index` of an unbound thread, so
 /// a crashed retry re-writes the same rows instead of duplicating them
 /// (precedent: the capability display preview's derived message ids).
 pub(crate) fn prepared_seed_message_id(thread_id: &ThreadId, index: usize) -> ThreadMessageId {
@@ -154,6 +170,47 @@ pub(crate) fn accepted_prepared_message_ref(
     AcceptedMessageRef::new(format!("msg:{message_id}")).map_err(|error| {
         SessionThreadError::Backend(format!("accepted unbound message ref invalid: {error}"))
     })
+}
+
+/// Metadata key stamped onto every thread the accept door mints, so
+/// owner-scoped listings can exclude prepared-context (unbound/subagent)
+/// threads without a schema change.
+pub const PREPARED_CONTEXT_METADATA_MARKER_KEY: &str = "prepared_context";
+
+/// Stamp the caller's metadata (if any) with the prepared-context marker.
+/// Non-object metadata is rejected — the marker must be able to coexist with
+/// whatever the caller stored (the subagent path keeps its
+/// crash-reconstruction fields here).
+pub(crate) fn stamped_metadata_json(
+    metadata_json: Option<&str>,
+) -> Result<String, SessionThreadError> {
+    let mut object = match metadata_json {
+        None => serde_json::Map::new(),
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return Err(invalid("metadata_json must be a JSON object")),
+        },
+    };
+    object.insert(
+        PREPARED_CONTEXT_METADATA_MARKER_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Ok(serde_json::Value::Object(object).to_string())
+}
+
+/// Listing-side predicate: prepared-context threads are working state, not
+/// conversations, and stay out of owner-scoped listings. Matches the stamp
+/// on every door-minted thread plus the pre-marker subagent metadata shape
+/// (`"kind":"subagent"`) so pre-existing child threads hide too.
+pub fn record_is_prepared_context_hidden(record: &crate::SessionThreadRecord) -> bool {
+    record
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|value| {
+            value.get(PREPARED_CONTEXT_METADATA_MARKER_KEY) == Some(&serde_json::Value::Bool(true))
+                || value.get("kind").and_then(serde_json::Value::as_str) == Some("subagent")
+        })
 }
 
 fn invalid(reason: impl Into<String>) -> SessionThreadError {
@@ -177,43 +234,136 @@ pub(crate) fn validate_prepared_context_request(
     if request.actor_id.is_empty() {
         return Err(invalid("actor_id must not be empty"));
     }
-    if request.messages.is_empty() {
+    validate_prepared_seed_content(&request.system_prompt, &request.messages)?;
+    validate_output_contract(&request.declarations.output)
+}
+
+/// Validate a declared output contract's JSON Schema against the door's size
+/// and nesting bounds, fail-closed before any state is minted. This is the
+/// ONE authoritative check: `ironclaw_openai_compat::prepared_turn::parse_response_format`
+/// calls [`validate_output_schema`] directly, in-process, before its own
+/// idempotency reservation — the same in-process-call pattern
+/// `validate_prepared_seed_content` already uses — so there is no mirrored
+/// bound to drift.
+pub fn validate_output_contract(output: &OutputContract) -> Result<(), SessionThreadError> {
+    output
+        .validate()
+        .map_err(|reason| invalid(format!("invalid output contract: {reason}")))?;
+    match output {
+        OutputContract::AssistantMessage | OutputContract::JsonObject => Ok(()),
+        OutputContract::JsonSchema { schema, .. } => validate_output_schema(schema),
+    }
+}
+
+/// Bounds-check a declared JSON Schema value: serialized size and nesting
+/// depth. See [`PREPARED_OUTPUT_SCHEMA_MAX_BYTES`] and
+/// [`PREPARED_OUTPUT_SCHEMA_MAX_DEPTH`] for why these bounds exist.
+pub fn validate_output_schema(schema: &serde_json::Value) -> Result<(), SessionThreadError> {
+    let serialized = serde_json::to_string(schema)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    if serialized.len() > PREPARED_OUTPUT_SCHEMA_MAX_BYTES {
+        return Err(invalid(format!(
+            "response_format json_schema exceeds {PREPARED_OUTPUT_SCHEMA_MAX_BYTES} bytes"
+        )));
+    }
+    if json_value_max_depth(schema) > PREPARED_OUTPUT_SCHEMA_MAX_DEPTH {
+        return Err(invalid(format!(
+            "response_format json_schema exceeds {PREPARED_OUTPUT_SCHEMA_MAX_DEPTH} levels of nesting"
+        )));
+    }
+    Ok(())
+}
+
+/// Iterative (explicit-stack) nesting-depth measurement over untrusted JSON.
+/// No recursion: an adversarial deeply-nested-but-small schema must not be
+/// able to blow the call stack while its depth is merely being measured.
+fn json_value_max_depth(value: &serde_json::Value) -> usize {
+    let mut max_depth = 0usize;
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(value, 1)];
+    while let Some((current, depth)) = stack.pop() {
+        max_depth = max_depth.max(depth);
+        match current {
+            serde_json::Value::Array(items) => {
+                stack.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    max_depth
+}
+
+/// The content-deterministic half of the accept door's validation: message
+/// shape, byte budgets, tool pairing, and provider-grammar seedability.
+/// Product surfaces call THIS (the one authoritative validator) before
+/// reserving idempotency state, so a body the door would refuse never burns
+/// a caller's key — and there is no mirrored copy to drift.
+pub fn validate_prepared_seed_content(
+    system_prompt: &str,
+    messages: &[AgentMessage],
+) -> Result<(), SessionThreadError> {
+    if messages.is_empty() {
         return Err(invalid(
             "messages must not be empty; the last message is the accepted pin",
         ));
     }
-    if request.system_prompt.len() > AGENT_MESSAGE_TEXT_PART_MAX_BYTES {
+    if system_prompt.len() > AGENT_MESSAGE_TEXT_PART_MAX_BYTES {
         return Err(invalid(format!(
             "system_prompt exceeds {AGENT_MESSAGE_TEXT_PART_MAX_BYTES} bytes"
         )));
     }
-    validate_agent_messages(&request.messages)
+    validate_agent_messages(messages)
         .map_err(|error| invalid(format!("invalid message list: {error}")))?;
-    // Seeding constraint (first increment): tool-interaction and reasoning
-    // parts are valid vocabulary but have no faithful seeded-transcript
-    // representation yet — they land with the OpenAI-compat adoption.
-    // Rejected loudly here so nothing is silently dropped.
-    for message in &request.messages {
+    // Seeded tool history is journaled as provider replay metadata, so every
+    // caller-supplied identity fragment must satisfy the provider grammars
+    // BEFORE any state is minted (validate-before-mint discipline: the
+    // filesystem backend ensures the thread between validation and seeding).
+    for message in messages {
+        let has_tool_call = message
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::ToolCall(_)));
         for part in &message.content {
             match part {
-                ContentPart::ToolCall(_) | ContentPart::ToolResult(_) => {
+                ContentPart::ToolCall(call) => {
+                    ironclaw_safety::validate_provider_token(&call.call_id, "tool call id", 512)
+                        .map_err(|error| {
+                            invalid(format!("tool call id is not seedable: {error}"))
+                        })?;
+                    seeded_provider_tool_name(&call.capability)?;
+                }
+                // Reasoning has exactly one storage slot in the transcript:
+                // the provider envelope of a tool-call turn. A final answer's
+                // reasoning would be silently dropped — reject instead.
+                ContentPart::Reasoning { .. } if !has_tool_call => {
                     return Err(invalid(
-                        "tool-interaction parts are not seedable yet; \
-                         land tool history with the OpenAI-compat adoption",
+                        "reasoning parts are seedable only on assistant messages \
+                         that also carry a tool call",
                     ));
                 }
-                ContentPart::Reasoning { .. } => {
-                    return Err(invalid(
-                        "reasoning parts are not seedable yet; \
-                         land provider reasoning with the OpenAI-compat adoption",
-                    ));
-                }
-                ContentPart::Text { .. } | ContentPart::Image { .. } | ContentPart::File { .. } => {
-                }
+                ContentPart::Reasoning { .. }
+                | ContentPart::ToolResult(_)
+                | ContentPart::Text { .. }
+                | ContentPart::Image { .. }
+                | ContentPart::File { .. } => {}
             }
         }
     }
     Ok(())
+}
+
+/// Provider-facing tool name derived from the capability id, using the same
+/// `.` -> `__` mapping the live tool surface renders.
+fn seeded_provider_tool_name(
+    capability: &ironclaw_host_api::ids::CapabilityId,
+) -> Result<ProviderToolName, SessionThreadError> {
+    ProviderToolName::for_capability(capability).map_err(|error| {
+        invalid(format!(
+            "tool call capability {capability} has no provider-safe tool name: {error}"
+        ))
+    })
 }
 
 fn seeded_text_and_attachments(parts: &[ContentPart]) -> (String, Vec<AttachmentRef>) {
@@ -234,22 +384,159 @@ fn seeded_text_and_attachments(parts: &[ContentPart]) -> (String, Vec<Attachment
     (sections.join("\n\n"), attachments)
 }
 
-/// Build the seeded transcript rows (validation must already have passed).
-/// Sequences are left at 0 for the backend to assign in order; ids and
-/// timestamps are final.
-pub(crate) fn prepared_seed_rows(
+/// One accepted seeding: the transcript rows plus the durable tool-result
+/// records (full outcome bytes keyed by their seeded result refs) the
+/// backend must persist beside them so `builtin.result_read` paging
+/// resolves seeded references exactly like live ones.
+pub(crate) struct PreparedSeed {
+    pub(crate) rows: Vec<ThreadMessageRecord>,
+    pub(crate) tool_result_records: Vec<(String, Vec<u8>)>,
+}
+
+/// Deterministic result ref for seeded tool-history row `index`, so a
+/// crashed accept retry converges on the same durable record key.
+fn seeded_result_ref(thread_id: &ThreadId, index: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"prepared-context-tool-result:v1\0");
+    hasher.update(thread_id.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(index.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(32);
+    for byte in digest.iter().take(16) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    format!("result:seed.{hex}")
+}
+
+fn truncated_at_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// Full outcome bytes + a bounded textual preview for one seeded tool result.
+fn seeded_outcome_bytes_and_preview(
+    outcome: &ToolResultOutcome,
+) -> Result<(Vec<u8>, String), SessionThreadError> {
+    let text = match outcome {
+        ToolResultOutcome::Text { text } => text.clone(),
+        ToolResultOutcome::Json { value } => value.to_string(),
+        ToolResultOutcome::Artifacts { attachments } => attachments
+            .iter()
+            .map(|attachment| {
+                format!(
+                    "[attachment id={id} ({mime})]",
+                    id = attachment.id,
+                    mime = attachment.mime_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let preview = truncated_at_char_boundary(&text, PREPARED_SEED_PREVIEW_MAX_BYTES).to_string();
+    Ok((text.into_bytes(), preview))
+}
+
+/// A held assistant tool call awaiting its later tool-result message.
+struct PendingSeededCall {
+    call: ToolCallContent,
+    turn_ordinal: usize,
+    reasoning: Option<String>,
+}
+
+/// Build one seeded tool-result row's envelopes. The provider identity is
+/// the host-owned [`PREPARED_SEED_PROVIDER_ID`] sentinel and `signature` is
+/// forced `None`: seeded history replays as a faithful tool round through
+/// the gateway's sentinel carve-out, but can never impersonate a real
+/// provider route's replay artifacts.
+fn seeded_tool_result_row_parts(
+    pending: PendingSeededCall,
+    result: &ironclaw_llm::agent_message::ToolResultContent,
+    result_ref: String,
+) -> Result<(String, ProviderToolCallReferenceEnvelope, Vec<u8>), SessionThreadError> {
+    let (full_bytes, preview) = seeded_outcome_bytes_and_preview(&result.outcome)?;
+    let summary_text = format!("seeded tool result ({} bytes)", full_bytes.len());
+    // silent-ok: a summary that fails strict safe-summary validation degrades
+    // to the fixed redaction-marker label; the real tool output still reaches
+    // the model via the result reference / observation.
+    let safe_summary = ToolResultSafeSummary::new(summary_text.clone())
+        .unwrap_or_else(|_| ToolResultSafeSummary::redacted_tool_result_summary());
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "status": if result.is_error { "error" } else { "success" },
+        "summary": summary_text,
+        "detail": {
+            "kind": "result_reference",
+            "result_ref": result_ref,
+            "byte_len": full_bytes.len(),
+            "preview": preview,
+        },
+        "trust": "untrusted_tool_output",
+    });
+    let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+        result_ref,
+        safe_summary,
+        Some(observation),
+    )
+    .map_err(|error| invalid(format!("seeded tool result envelope invalid: {error}")))?;
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: PREPARED_SEED_PROVIDER_ID.to_string(),
+        provider_model_id: "seeded".to_string(),
+        provider_turn_id: format!("seed_turn.{}", pending.turn_ordinal),
+        provider_call_id: result.call_id.clone(),
+        provider_tool_name: seeded_provider_tool_name(&pending.call.capability)?,
+        capability_id: pending.call.capability.clone(),
+        arguments: pending.call.arguments.clone(),
+        response_reasoning: pending.reasoning.map(|text| {
+            truncated_at_char_boundary(&text, PREPARED_SEED_REASONING_MAX_BYTES).to_string()
+        }),
+        reasoning: None,
+        signature: None,
+    };
+    provider_call
+        .validate()
+        .map_err(|error| invalid(format!("seeded provider call metadata invalid: {error}")))?;
+    let content = serde_json::to_string(&envelope)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    Ok((content, provider_call, full_bytes))
+}
+
+/// Build the seeded transcript rows and durable tool-result records
+/// (validation must already have passed). Sequences are left at 0 for the
+/// backend to assign in order; ids and timestamps are final.
+///
+/// Assistant tool-call turns follow the live transcript's storage shape:
+/// there is NO persisted assistant tool-call row — the whole round is
+/// synthesized at replay from the provider envelope stored on the
+/// tool-result row. An assistant message that carries only tool calls
+/// therefore seeds no assistant row at all.
+pub(crate) fn prepared_seed(
     request: &PreparedContextRequest,
     thread_id: &ThreadId,
     now: DateTime<Utc>,
-) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+) -> Result<PreparedSeed, SessionThreadError> {
     let mut rows = Vec::with_capacity(request.messages.len() + 1);
+    let mut tool_result_records = Vec::new();
+    let mut pending_calls: std::collections::HashMap<String, PendingSeededCall> =
+        std::collections::HashMap::new();
+    let mut next_turn_ordinal = 0usize;
     let mut index = 0usize;
-    let mut push_row = |kind: MessageKind,
-                        status: MessageStatus,
-                        actor_id: Option<String>,
-                        content: String,
-                        attachments: Vec<AttachmentRef>| {
-        rows.push(ThreadMessageRecord {
+
+    fn blank_row(
+        thread_id: &ThreadId,
+        index: usize,
+        now: DateTime<Utc>,
+        kind: MessageKind,
+        status: MessageStatus,
+    ) -> ThreadMessageRecord {
+        ThreadMessageRecord {
             message_id: prepared_seed_message_id(thread_id, index),
             thread_id: thread_id.clone(),
             sequence: 0,
@@ -257,54 +544,130 @@ pub(crate) fn prepared_seed_rows(
             status,
             created_at: Some(now),
             updated_at: Some(now),
-            actor_id,
+            actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
             turn_id: None,
             turn_run_id: None,
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(content),
-            attachments,
+            content: None,
+            attachments: Vec::new(),
             redaction_ref: None,
-        });
-        index += 1;
-    };
+        }
+    }
 
     if !request.system_prompt.is_empty() {
-        push_row(
+        let mut row = blank_row(
+            thread_id,
+            index,
+            now,
             MessageKind::System,
             MessageStatus::Finalized,
-            None,
-            request.system_prompt.clone(),
-            Vec::new(),
         );
+        row.content = Some(request.system_prompt.clone());
+        rows.push(row);
+        index += 1;
     }
     for message in &request.messages {
-        let (content, attachments) = seeded_text_and_attachments(&message.content);
-        crate::contract::validate_attachment_refs(&attachments)?;
         match message.role {
-            AgentMessageRole::User => push_row(
-                MessageKind::User,
-                MessageStatus::Accepted,
-                Some(request.actor_id.clone()),
-                content,
-                attachments,
-            ),
-            AgentMessageRole::Assistant => push_row(
-                MessageKind::Assistant,
-                MessageStatus::Finalized,
-                None,
-                content,
-                attachments,
-            ),
-            // Rejected by validation above; unreachable by construction.
+            AgentMessageRole::User => {
+                let (content, attachments) = seeded_text_and_attachments(&message.content);
+                crate::contract::validate_attachment_refs(&attachments)?;
+                let mut row = blank_row(
+                    thread_id,
+                    index,
+                    now,
+                    MessageKind::User,
+                    MessageStatus::Accepted,
+                );
+                row.actor_id = Some(request.actor_id.clone());
+                row.content = Some(content);
+                row.attachments = attachments;
+                rows.push(row);
+                index += 1;
+            }
+            AgentMessageRole::Assistant => {
+                let (content, attachments) = seeded_text_and_attachments(&message.content);
+                crate::contract::validate_attachment_refs(&attachments)?;
+                let tool_calls: Vec<&ToolCallContent> = message
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::ToolCall(call) => Some(call),
+                        _ => None,
+                    })
+                    .collect();
+                if !tool_calls.is_empty() {
+                    let turn_ordinal = next_turn_ordinal;
+                    next_turn_ordinal += 1;
+                    let mut reasoning = message.content.iter().find_map(|part| match part {
+                        ContentPart::Reasoning { reasoning } => reasoning.display_text(),
+                        _ => None,
+                    });
+                    for call in &tool_calls {
+                        pending_calls.insert(
+                            call.call_id.clone(),
+                            PendingSeededCall {
+                                call: (*call).clone(),
+                                turn_ordinal,
+                                reasoning: reasoning.take(),
+                            },
+                        );
+                    }
+                }
+                if !content.is_empty() || !attachments.is_empty() {
+                    let mut row = blank_row(
+                        thread_id,
+                        index,
+                        now,
+                        MessageKind::Assistant,
+                        MessageStatus::Finalized,
+                    );
+                    row.content = Some(content);
+                    row.attachments = attachments;
+                    rows.push(row);
+                    index += 1;
+                }
+            }
             AgentMessageRole::Tool => {
-                return Err(invalid("tool messages are not seedable yet"));
+                let result = message
+                    .content
+                    .iter()
+                    .find_map(|part| match part {
+                        ContentPart::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .ok_or_else(|| invalid("tool message carries no tool_result part"))?;
+                let pending = pending_calls.remove(&result.call_id).ok_or_else(|| {
+                    invalid(format!(
+                        "tool result {:?} pairs with no seeded tool call",
+                        result.call_id
+                    ))
+                })?;
+                let result_ref = seeded_result_ref(thread_id, index);
+                let (content, provider_call, full_bytes) =
+                    seeded_tool_result_row_parts(pending, result, result_ref.clone())?;
+                let mut row = blank_row(
+                    thread_id,
+                    index,
+                    now,
+                    MessageKind::ToolResultReference,
+                    MessageStatus::Finalized,
+                );
+                row.tool_result_ref = Some(result_ref.clone());
+                row.tool_result_provider_call = Some(provider_call);
+                row.content = Some(content);
+                rows.push(row);
+                index += 1;
+                tool_result_records.push((result_ref, full_bytes));
             }
         }
     }
-    Ok(rows)
+    Ok(PreparedSeed {
+        rows,
+        tool_result_records,
+    })
 }
 
 /// Validate a stored record against a replaying request. Returns the replay
@@ -328,7 +691,7 @@ pub(crate) fn replay_prepared_context(
     let accepted_message_ref = AcceptedMessageRef::new(record.accepted_message_ref.clone())
         .map_err(|error| {
             SessionThreadError::Backend(format!(
-                "stored unbound context carries an invalid accepted ref: {error}"
+                "stored prepared context carries an invalid accepted ref: {error}"
             ))
         })?;
     Ok(AcceptedPreparedContext {
@@ -479,34 +842,27 @@ mod tests {
             }],
             declarations: PreparedTurnDeclarations::default(),
             idempotency_key: "unbound-key-1".to_string(),
-            thread_id: None,
+            thread_id: ThreadId::new("unbound-test-thread-1").expect("thread id"),
             title: None,
             metadata_json: None,
         }
     }
 
     #[test]
-    fn thread_and_message_ids_are_deterministic_per_scope_and_key() {
-        let first = unbound_thread_id(&scope(), "key-a").expect("thread id");
-        let second = unbound_thread_id(&scope(), "key-a").expect("thread id");
-        assert_eq!(first, second, "same scope+key converges on one thread");
-
-        let other_key = unbound_thread_id(&scope(), "key-b").expect("thread id");
-        assert_ne!(first, other_key, "a different key mints a different thread");
-
-        let mut other_scope = scope();
-        other_scope.owner_user_id =
-            Some(ironclaw_host_api::ids::UserId::new("user-x").expect("user"));
-        let cross_scope = unbound_thread_id(&other_scope, "key-a").expect("thread id");
-        assert_ne!(first, cross_scope, "scope is part of the identity");
-
+    fn seed_message_ids_are_deterministic_per_thread_and_index() {
+        let thread = ThreadId::new("unbound-test-determinism").expect("thread id");
+        let other = ThreadId::new("unbound-test-determinism-2").expect("thread id");
         assert_eq!(
-            prepared_seed_message_id(&first, 0),
-            prepared_seed_message_id(&first, 0)
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&thread, 0)
         );
         assert_ne!(
-            prepared_seed_message_id(&first, 0),
-            prepared_seed_message_id(&first, 1)
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&thread, 1)
+        );
+        assert_ne!(
+            prepared_seed_message_id(&thread, 0),
+            prepared_seed_message_id(&other, 0)
         );
     }
 
@@ -517,8 +873,10 @@ mod tests {
             role: AgentMessageRole::Assistant,
             content: vec![ContentPart::text("earlier answer")],
         });
-        let thread_id = unbound_thread_id(&request.scope, &request.idempotency_key).unwrap();
-        let rows = prepared_seed_rows(&request, &thread_id, Utc::now()).expect("rows");
+        let thread_id = request.thread_id.clone();
+        let rows = prepared_seed(&request, &thread_id, Utc::now())
+            .expect("rows")
+            .rows;
 
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].kind, MessageKind::System);
@@ -552,34 +910,244 @@ mod tests {
             Err(SessionThreadError::InvalidPreparedContext { .. })
         ));
 
-        let mut tool_bearing = request();
-        tool_bearing.messages = vec![
+        // Reasoning without a sibling tool call has no storage slot: reject.
+        let mut orphan_reasoning = request();
+        orphan_reasoning.messages.push(AgentMessage {
+            role: AgentMessageRole::Assistant,
+            content: vec![ContentPart::Reasoning {
+                reasoning: ironclaw_llm::ReasoningDetails::from_text("thought")
+                    .expect("non-empty reasoning"),
+            }],
+        });
+        assert!(matches!(
+            validate_prepared_context_request(&orphan_reasoning),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+
+        // A tool call id outside the provider token grammar cannot be
+        // journaled as replay metadata: reject before any mint.
+        let mut bad_call_id = request();
+        bad_call_id.messages = tool_round_messages("call id with spaces", "web.search");
+        assert!(matches!(
+            validate_prepared_context_request(&bad_call_id),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+    }
+
+    fn tool_round_messages(call_id: &str, capability: &str) -> Vec<AgentMessage> {
+        vec![
+            AgentMessage {
+                role: AgentMessageRole::User,
+                content: vec![ContentPart::text("look this up")],
+            },
             AgentMessage {
                 role: AgentMessageRole::Assistant,
-                content: vec![ContentPart::ToolCall(
-                    ironclaw_llm::agent_message::ToolCallContent {
-                        call_id: "call-1".into(),
-                        capability: ironclaw_host_api::ids::CapabilityId::new("web.search")
-                            .expect("capability"),
-                        arguments: serde_json::json!({}),
+                content: vec![
+                    ContentPart::Reasoning {
+                        reasoning: ironclaw_llm::ReasoningDetails::from_text("I should search")
+                            .expect("non-empty reasoning"),
                     },
-                )],
+                    ContentPart::ToolCall(ironclaw_llm::agent_message::ToolCallContent {
+                        call_id: call_id.into(),
+                        capability: ironclaw_host_api::ids::CapabilityId::new(capability)
+                            .expect("capability"),
+                        arguments: serde_json::json!({"query": "release status"}),
+                    }),
+                ],
             },
             AgentMessage {
                 role: AgentMessageRole::Tool,
                 content: vec![ContentPart::ToolResult(
                     ironclaw_llm::agent_message::ToolResultContent {
-                        call_id: "call-1".into(),
+                        call_id: call_id.into(),
                         outcome: ironclaw_llm::agent_message::ToolResultOutcome::Text {
-                            text: "ok".into(),
+                            text: "the release went great".into(),
                         },
                         is_error: false,
                     },
                 )],
             },
-        ];
+            AgentMessage {
+                role: AgentMessageRole::User,
+                content: vec![ContentPart::text("now classify it")],
+            },
+        ]
+    }
+
+    #[test]
+    fn tool_history_seeds_replayable_tool_result_rows() {
+        let mut request = request();
+        request.messages = tool_round_messages("call_abc123", "web.search");
+        let thread_id = request.thread_id.clone();
+        validate_prepared_context_request(&request).expect("tool history validates");
+        let seed = prepared_seed(&request, &thread_id, Utc::now()).expect("seed");
+
+        // system + user + tool-result + trailing user; the pure tool-call
+        // assistant message seeds NO assistant row (live storage shape).
+        assert_eq!(seed.rows.len(), 4);
+        let tool_row = &seed.rows[2];
+        assert_eq!(tool_row.kind, MessageKind::ToolResultReference);
+        assert_eq!(tool_row.status, MessageStatus::Finalized);
+        let result_ref = tool_row.tool_result_ref.as_deref().expect("result ref");
+        assert!(result_ref.starts_with("result:seed."));
+        let provider_call = tool_row
+            .tool_result_provider_call
+            .as_ref()
+            .expect("provider call envelope");
+        assert_eq!(provider_call.provider_id, PREPARED_SEED_PROVIDER_ID);
+        assert_eq!(provider_call.provider_call_id, "call_abc123");
+        assert_eq!(provider_call.provider_tool_name.as_str(), "web__search");
+        assert_eq!(provider_call.capability_id.as_str(), "web.search");
+        assert_eq!(
+            provider_call.response_reasoning.as_deref(),
+            Some("I should search")
+        );
+        assert_eq!(
+            provider_call.signature, None,
+            "signature is host-forced None"
+        );
+        provider_call.validate().expect("envelope validates");
+
+        // The row content is a strict-parsable result envelope and the full
+        // outcome bytes land in the durable record set under the same ref.
+        let envelope = ToolResultReferenceEnvelope::from_json_str(
+            tool_row.content.as_deref().expect("content"),
+        )
+        .expect("strict envelope parse");
+        assert_eq!(envelope.result_ref, result_ref);
+        assert_eq!(seed.tool_result_records.len(), 1);
+        assert_eq!(seed.tool_result_records[0].0, result_ref);
+        assert_eq!(
+            seed.tool_result_records[0].1,
+            b"the release went great".to_vec()
+        );
+
+        // Determinism: a retry converges on identical refs and rows.
+        let again = prepared_seed(&request, &thread_id, Utc::now()).expect("seed again");
+        assert_eq!(
+            again.rows[2].tool_result_ref, tool_row.tool_result_ref,
+            "seeded result refs are deterministic"
+        );
+    }
+
+    #[test]
+    fn seeded_external_tool_provider_name_matches_the_live_lane() {
+        // The live external-tool lane (`ironclaw_loop_host::external_tool_capability`)
+        // advertises and matches the bare client-declared tool name for a
+        // capability id under the `external_tool.` namespace (e.g.
+        // `external_tool.lookup` -> tool name `lookup`), never the blanket
+        // `.` -> `__` encoding every other capability id gets. Seeded replay
+        // history must derive the SAME name or it names a tool no declared
+        // external tool matches (mirrors
+        // `external_tool_surface_maps_provider_name_to_capability_id` in
+        // `ironclaw_loop_host`).
+        let mut request = request();
+        request.messages = tool_round_messages("call_ext_1", "external_tool.lookup");
+        let thread_id = request.thread_id.clone();
+        validate_prepared_context_request(&request).expect("tool history validates");
+        let seed = prepared_seed(&request, &thread_id, Utc::now()).expect("seed");
+
+        let tool_row = &seed.rows[2];
+        let provider_call = tool_row
+            .tool_result_provider_call
+            .as_ref()
+            .expect("provider call envelope");
+        assert_eq!(provider_call.capability_id.as_str(), "external_tool.lookup");
+        assert_eq!(
+            provider_call.provider_tool_name.as_str(),
+            "lookup",
+            "seeded provider tool name must match the live external-tool lane's \
+             bare client-declared name, not a double-underscore encoding"
+        );
+    }
+
+    /// A deeply-nested-but-tiny schema is JSON's classic CPU/stack-amplification
+    /// shape: `[[[...]]]` many levels deep serializes to only a few hundred
+    /// bytes, so the byte cap alone would not catch it — the nesting-depth
+    /// cap is the check that does. Each wrap adds exactly one level, so
+    /// `nested_value(levels)` has `json_value_max_depth == levels + 1`
+    /// (the leaf itself sits at depth 1).
+    fn nested_value(levels: usize) -> serde_json::Value {
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..levels {
+            value = serde_json::json!([value]);
+        }
+        value
+    }
+
+    #[test]
+    fn oversized_schema_is_rejected_by_the_door() {
+        let big_enum: Vec<String> = (0..(PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+            .map(|i| format!("v{i:06}"))
+            .collect();
+        let schema = serde_json::json!({"type": "string", "enum": big_enum});
+        assert!(
+            serde_json::to_string(&schema).expect("serialize").len()
+                > PREPARED_OUTPUT_SCHEMA_MAX_BYTES
+        );
         assert!(matches!(
-            validate_prepared_context_request(&tool_bearing),
+            validate_output_schema(&schema),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+    }
+
+    #[test]
+    fn over_deep_schema_is_rejected_by_the_door() {
+        // depth == PREPARED_OUTPUT_SCHEMA_MAX_DEPTH + 1, one past the cap.
+        let schema = nested_value(PREPARED_OUTPUT_SCHEMA_MAX_DEPTH);
+        assert_eq!(
+            json_value_max_depth(&schema),
+            PREPARED_OUTPUT_SCHEMA_MAX_DEPTH + 1
+        );
+        assert!(matches!(
+            validate_output_schema(&schema),
+            Err(SessionThreadError::InvalidPreparedContext { .. })
+        ));
+    }
+
+    #[test]
+    fn boundary_size_and_depth_schemas_are_accepted() {
+        // Exactly at the depth cap.
+        let schema = nested_value(PREPARED_OUTPUT_SCHEMA_MAX_DEPTH - 1);
+        assert_eq!(
+            json_value_max_depth(&schema),
+            PREPARED_OUTPUT_SCHEMA_MAX_DEPTH
+        );
+        validate_output_schema(&schema).expect("boundary depth accepted");
+
+        // A comfortably small, shallow schema.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        });
+        validate_output_schema(&schema).expect("small schema accepted");
+
+        // Wired through the full request-level door too.
+        let mut req = request();
+        req.declarations.output = OutputContract::json_schema(schema);
+        validate_prepared_context_request(&req).expect("request-level door accepts it");
+    }
+
+    #[test]
+    fn assistant_message_output_contract_skips_schema_bounds() {
+        let mut req = request();
+        req.declarations.output = OutputContract::AssistantMessage;
+        validate_prepared_context_request(&req).expect("assistant message needs no schema");
+    }
+
+    #[test]
+    fn oversized_declared_schema_is_rejected_at_the_request_door() {
+        let big_enum: Vec<String> = (0..(PREPARED_OUTPUT_SCHEMA_MAX_BYTES / 8))
+            .map(|i| format!("v{i:06}"))
+            .collect();
+        let mut req = request();
+        req.declarations.output = OutputContract::JsonSchema {
+            name: "oversized_v1".to_string(),
+            schema: serde_json::json!({"type": "string", "enum": big_enum}),
+        };
+        assert!(matches!(
+            validate_prepared_context_request(&req),
             Err(SessionThreadError::InvalidPreparedContext { .. })
         ));
     }
@@ -587,7 +1155,7 @@ mod tests {
     #[test]
     fn replay_checks_key_and_actor_fail_closed() {
         let request = request();
-        let thread_id = unbound_thread_id(&request.scope, &request.idempotency_key).unwrap();
+        let thread_id = request.thread_id.clone();
         let record = PreparedContextRecord {
             schema_version: PREPARED_CONTEXT_RECORD_SCHEMA_VERSION,
             idempotency_key: request.idempotency_key.clone(),

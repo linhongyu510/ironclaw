@@ -149,7 +149,7 @@ engine behaves accordingly through profiles:
 | Steering mid-run | yes (profile-gated), drained by the running loop | no (profile-disabled) |
 | Gates | allowed — approval/auth surfaces exist (WebUI `gate.resolve`, channel approval replies) | not supported — non-gating surface; a gate is a typed `GateNotSupported` failure |
 | Run profile | conversation profiles (interactive, scheduled trigger, …) | `unbound_default` / `unbound_structured` (derived from `output`) |
-| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread — same machinery; internal, never listed |
+| Thread transcript | written by the run's thread-backed machinery, lease-fenced (exactly as today) | its own unbound, ownerless thread (✎ landed: caller-owned; see delta) — same machinery; internal, never listed |
 | Subagents | per profile | denied |
 | Typical `output` | `AssistantMessage` | either; suggestions use `JsonSchema` |
 
@@ -434,9 +434,10 @@ no vendor anything.
    identically for both lanes.
 8. **Thread transcripts are written by the run, not by output handlers.**
    The engine's thread-backed machinery persists messages lease-fenced
-   during the run (exactly as today) — for every run: a unbound turn's
-   transcript is its own unbound, ownerless thread, seeded at admission and
-   written by the same machinery, internal to the coordinator and never
+   during the run (exactly as today) — for every run: an unbound turn's
+   transcript is its own unbound, ownerless thread (✎ landed: caller-owned;
+   see delta), seeded at admission and written by the same machinery,
+   internal to the coordinator and never
    enumerated by conversation surfaces (those query by owner and binding).
    Output handling is about reply, never persistence.
 
@@ -468,9 +469,37 @@ implementation (no dual-read shim needed — old rows rehydrate under
 ignore-unknown-keys, and product routing reads conversation state). Two
 questions stay open until someone schedules it: (a) where the origin/surface
 metadata the loop host consumes for origin-gated prompt assets ends up
-(binding *refs* are workflow-side; origin metadata is engine-relevant); (b)
+(binding *refs* are workflow-side; origin metadata is engine-relevant —
+`ProductTurnContext.adapter`/`source_channel` still ride the submit and
+persisted run state, so §2's "the engine never holds vendor identifiers"
+cell reads with this exemption until (a) is scheduled); (b)
 the shim's lifetime and its regression coverage. No behavior changes either
 way — this is hygiene, not architecture.
+
+**✎ Landed with the surfaces PR (#7634): OpenAI-compat over the door.** The
+adoption shipped as a lane split rather than a wholesale rewrite of the
+route crate:
+
+- EVERY non-streaming request without declared client tools goes through
+  `accept_prepared_context` and an unbound run — no payload-shape
+  heuristic; the flatten hack (`openai_compat.chat_messages.v1`) serves
+  only the streaming and declared-tools conversation lanes. The completion
+  reports the run's effective model and provider-reported usage from run
+  state.
+- Streaming stays on the conversation lane wholesale (its projection
+  subscription is conversation-scoped); `stream=true` with a JSON output
+  contract is rejected loudly rather than half-honored. Unbound-run
+  streaming arrives with phase 2's run-observation façade, not before.
+- Requests declaring live client tools stay on the conversation lane: chat
+  completions are a stateless protocol (the client re-sends tool outputs as
+  seeded history on its next request), so the catalog park/resume flow —
+  which the engine supports on unbound runs — has no caller on this
+  surface. `PreparedTurnDeclarations.tools` stays empty here by decision,
+  not omission; the follow-up request's tool history seeds through the same
+  door.
+- No OpenAI parameter maps onto `TurnLimits` (the `max_tokens` family is
+  accepted and unmapped): the shipped limit set is call/invocation/wall-
+  clock ceilings, and no output-token engine seam exists.
 
 ## 8. Related documents
 
@@ -483,10 +512,10 @@ way — this is hygiene, not architecture.
 - [2026-08-11-channel-adapter-contract.md](2026-08-11-channel-adapter-contract.md)
   — the `ChannelIngress` / `ChannelReply` / `ChannelDelivery` split (#7477)
   the flows above consume.
-- `docs/reborn/contracts/conversation-binding.md` — binding resolution,
+- `docs/internal/reborn/contracts/conversation-binding.md` — binding resolution,
   idempotent accepted messages, `DeferredBusy`/`RejectedBusy` steering
   admission, sealed trusted trigger ingress.
-- `docs/reborn/contracts/events-projections.md` — the durable-vs-live event
+- `docs/internal/reborn/contracts/events-projections.md` — the durable-vs-live event
   planes and stream item vocabulary the observation façade standardizes.
-- `docs/reborn/contracts/approvals.md` — gate leases and resume, reached from
+- `docs/internal/reborn/contracts/approvals.md` — gate leases and resume, reached from
   conversation surfaces only.

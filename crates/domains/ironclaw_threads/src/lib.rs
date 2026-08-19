@@ -19,6 +19,7 @@ mod in_memory;
 mod prepared_context;
 mod service;
 mod stored_message;
+mod structured_finalization;
 mod summary_artifacts;
 mod title;
 mod tool_result_records;
@@ -47,11 +48,12 @@ pub use contract::{
     GoalStatement, InboundMessageReplayMetadata, LatestThreadMessageRequest,
     ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    PublishStructuredFinalizationMessageRequest, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadRecord, SummaryArtifact, SummaryKind, SummaryModelContextPolicy,
+    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
+    ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
     effective_tool_result_read_max_bytes,
 };
@@ -59,15 +61,28 @@ pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
 pub use prepared_context::{
-    AcceptedPreparedContext, PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PreparedContextRecord,
+    AcceptedPreparedContext, PREPARED_CONTEXT_METADATA_MARKER_KEY,
+    PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PREPARED_OUTPUT_SCHEMA_MAX_BYTES,
+    PREPARED_OUTPUT_SCHEMA_MAX_DEPTH, PREPARED_SEED_PROVIDER_ID, PreparedContextRecord,
     PreparedContextRequest, ThreadServicePreparedContextSource, read_declarations_for_run_scope,
+    record_is_prepared_context_hidden, validate_output_contract, validate_output_schema,
+    validate_prepared_seed_content,
+};
+pub use structured_finalization::{
+    PutStructuredFinalizationRequest, ReadStructuredFinalizationRequest,
+    StructuredFinalizationAccounting, StructuredFinalizationRecord, StructuredFinalizationUsage,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers
 // reach `AttachmentRef` through this crate without a direct `ironclaw_common`
 // dependency.
 pub use ironclaw_common::{AttachmentKind, AttachmentRef};
+// The accept door's own request type (`PreparedContextRequest.messages`) is
+// `Vec<AgentMessage>`; re-exposed so accept-door callers build seed messages
+// in the door's own vocabulary rather than reaching past it into `ironclaw_llm`.
+pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
 pub use tool_result_reference::{
-    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary,
 };

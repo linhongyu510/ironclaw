@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef};
 use ironclaw_loop_contracts::LoopFailureKind;
 
@@ -231,6 +232,12 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
             // Counted only by the unbound structured-output strategy; the
             // default family leaves it at rest.
             trailing_all_failed_batches: 0,
+            structured_result_recorded: state.stop_state.structured_result_recorded
+                || just_completed
+                    .capability_batch
+                    .observed_signatures
+                    .iter()
+                    .any(|signature| signature.name.as_str() == STRUCTURED_RESULT_CAPABILITY_ID),
             repeated_call_warning: state.stop_state.repeated_call_warning.clone(),
         };
 
@@ -502,6 +509,7 @@ mod tests {
 
     mod default_stop_condition_strategy {
         use ironclaw_host_api::ids::{CapabilityId, TenantId, ThreadId};
+        use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
         use ironclaw_host_api::turn::{
             LoopMessageRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         };
@@ -573,11 +581,13 @@ mod tests {
                     max_checkpoint_bytes: 64 * 1024,
                     require_final_checkpoint: false,
                     allow_no_reply_completion: false,
+                    before_model_checkpoint_interval: 1,
                 },
                 resource_budget_policy: ResourceBudgetPolicy {
                     tier: ResourceBudgetTier::new("default_stop_test_tier").expect("valid"),
                     max_model_calls: 32,
                     max_capability_invocations: 64,
+                    max_wall_clock_seconds: None,
                 },
                 personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
                 runtime_constraints: RuntimeProfileConstraints {
@@ -650,6 +660,33 @@ mod tests {
 
             assert_eq!(state.stop_state.turns_completed, 5);
             assert!(matches!(outcome, StopOutcome::Continue { .. }));
+        }
+
+        #[tokio::test]
+        async fn completed_structured_result_is_recorded_in_typed_stop_state() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let state = LoopExecutionState::initial_for_run(&test_run_context());
+            let summary = after_batch_with_capability_summary(CapabilityBatchTurnSummary {
+                invocation_count: 1,
+                terminate_hint_count: 1,
+                observed_signatures: vec![
+                    CapabilityCallSignature::from_call(
+                        CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID).expect("capability id"),
+                        &json!({"outcome": "nothing_to_report"}),
+                    )
+                    .expect("signature"),
+                ],
+            });
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert!(state.stop_state.structured_result_recorded);
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::GracefulStop
+                }
+            ));
         }
 
         #[tokio::test]

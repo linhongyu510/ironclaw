@@ -14,7 +14,11 @@ compat-preserving shape, the implementation went directly to the final
 contract:
 
 - **Naming**: "detached" became **unbound** (threads/profiles/families/
-  concurrency class) and the accept door is **`accept_prepared_context`**
+  concurrency class; the `unbound` per-class concurrency cap defaults to 4,
+  configurable via `[runner] max_concurrent_unbound_runs` /
+  `IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS`, where `0` means
+  unlimited — the same zero-sentinel every runner cap uses) and the accept
+  door is **`accept_prepared_context`**
   over a **`PreparedContextRequest`** with **`PreparedTurnDeclarations`**;
   the result tool is **`builtin.structured_result`**.
 - **Binding refs were deleted, not optionalized**: `SubmitTurnRequest`,
@@ -34,6 +38,97 @@ contract:
 - **Subagent spawn** lands directly on the shared accept door; its synthetic
   per-child binding refs, `mark_message_submitted` step, and await-edge ref
   plumbing were deleted in the same change.
+
+The follow-up surfaces PR (#7634) completed the switchover; the conformance
+audit against this draft recorded these further landed-vs-drafted deltas:
+
+- **Unbound threads are caller-owned, not ownerless**: the draft's
+  "unbound, ownerless thread" shipped, then was revised — the product lane
+  (`UnboundTurnService`) names its authenticated caller as the thread
+  owner (`ExplicitUser`). The owner keeps unbound threads sharded
+  per-user (never the tenant `__system__` storage slot, where every
+  deployment's completions would co-mingle with isolation resting only on
+  thread-id secrecy), makes `get_run_state` reject foreign-owner reads,
+  and gives owner-scoped retention/deletion a path to these rows.
+  Invisibility is unchanged: prepared threads are hidden from
+  conversation listings by the unconditional `prepared_context` metadata
+  stamp, never by ownerlessness. `TurnThreadOwner::Ownerless` remains a
+  supported engine state (subagent evidence paths and journal
+  reconstruction still traverse it); retiring it — and the equally
+  non-discriminating `ActorFallback` — is follow-up work gated on
+  legacy-journal compatibility (an omitted `thread_owner` key
+  deserializes as `ActorFallback`) and a per-owner concurrency-cap
+  decision (`max_running_per_owner` currently exempts owner-less process
+  snapshots).
+- **Thread-id visibility (§4.2/§9)**: on OpenAI-compat the server-minted
+  public completion id doubles as the unbound thread id on the wire. Ids are
+  always server-generated; isolation rests on owner scoping plus the
+  caller-scoped ref store, not on keeping the id secret. The run id rides
+  the ack; the public id is the HTTP caller's handle.
+- **Thread ids are caller-supplied (server-minted upstream)**: the drafted
+  `(scope, idempotency_key)`-derived thread id shipped, then both production
+  callers (subagent spawn, OpenAI-compat) overrode it, so the derivation was
+  deleted as dead code — `PreparedContextRequest.thread_id` is required.
+  Idempotent replay converges on the caller's id via the journaled record;
+  the seeded ROW ids stay deterministic functions of the thread id, which is
+  what makes crashed retries converge row-by-row.
+- **One validator, ordered before reservation**: product surfaces call the
+  accept door's own `validate_prepared_seed_content` (threads tier) on the
+  mapped seed BEFORE reserving idempotency state — there is no mirrored
+  bounds copy anywhere to drift.
+- **Seeded reasoning (§4.4)**: the accept door seeds reasoning as display
+  text on the provider envelope of a tool-call turn only (truncated to the
+  provider-metadata budget, `signature` forced `None`); reasoning on an
+  assistant message without a sibling tool call is rejected rather than
+  silently dropped. Opaque end-to-end reasoning round-trip stays a live
+  vocabulary seam, not a seeding capability.
+- **Artifact parts (§4.4)**: the ref-only vocabulary shipped as the existing
+  `ironclaw_common::AttachmentRef` (mirror-DTO ban); access goes through the
+  scoped filesystem under the run's thread resource scope. Unbound threads
+  are caller-owned, so that scope resolves to the caller's own identity
+  axis (see the caller-owned delta above).
+- **Result surface (§4.3)**: no `TurnRunResult`/`AgentOutput` DTO was
+  minted. The result surface is `SubmitTurnResponse` + `get_run_state`
+  (`TurnRunState` carries `model_usage` and `resolved_model_route`, which
+  product read-back reports as effective model + usage), with the output
+  interpreted against the journaled `OutputContract` product-side: the
+  validated structured payload read from the durable tool-result record, or
+  the finalized assistant text. The drafted terminal-shape validator had no
+  live seam (loop reply-finalization already guarantees the shape) and was
+  deleted rather than kept as dead vocabulary.
+- **Structured interception (§4.5)**: the host-owned synthetic result-tool
+  handler validates arguments against the journaled schema and durably
+  records the terminal output; `StructuredResultStopStrategy` completes the
+  run on that call's completed signature; reply admission's role is
+  rejecting plain-text finals with the repair hint; the model strategy
+  forces `tool_choice` onto the result tool on the repair retry after a
+  rejected text final (not proactively on every call).
+- **TurnLimits (§4.2/§9)**: the shipped narrowing set is
+  `max_model_calls`, `max_capability_invocations`, and
+  `max_wall_clock_seconds`, mapping onto `ResourceBudgetPolicy` and
+  enforced by the loop executor's budget stage as hard stops
+  (`model_call_limit` / `capability_invocation_limit` / `wall_clock_limit`
+  failure categories). Enforcement is charge-at-dispatch through one
+  typed chokepoint: a `BudgetLedger` on the loop state owns the per-run
+  counters (private fields; `try_charge_model_call` /
+  `try_charge_invocations` verdicts), so no model or capability dispatch
+  — first attempt, recovery retry, or batch member — can bypass
+  accounting. Exhausted verdicts map onto existing exits only: a model
+  retry converts to the outer-loop re-entry and the budget stage's
+  hard stop fires; an over-budget capability batch tail receives paired
+  blocked results; an exhausted capability retry is not re-dispatched. A per-run USD accountant and a max-output-tokens
+  knob were not built — no engine seam exists for either; OpenAI-compat's
+  `max_tokens` family is accepted and deliberately unmapped.
+- **Gate posture (§4.6)**: the unbound surface is the deployment surface
+  minus a fixed deny list plus the declared selection; approval/auth-policy
+  driven hiding was not built. The guarantee is the typed
+  `gate_not_supported` abort (gate kind rides the sanitized failure
+  detail — a unit failure kind, not a payload variant), with only the
+  external-tool gate parking. The external-tool park/resume exemption is
+  engine-level today: no shipped surface can yet place client tools on an
+  unbound run (OpenAI-compat keeps declared-tools requests on the
+  conversation lane), so whole-path coverage lands with the first surface
+  that does.
 
 ## Summary
 
@@ -61,7 +156,8 @@ become `Option`** — a conversation submission passes `Some` (today's values,
 unchanged); everything else passes `None`. The thread is the required unit
 of work; the binding is the optional relation that makes it a conversation.
 Unbound callers get a sibling of `accept_user_message` on the accept side:
-**`accept_prepared_context`** mints an **unbound, ownerless thread**, seeds
+**`accept_prepared_context`** mints an **unbound, ownerless thread**
+(✎ superseded: caller-owned — see the caller-owned delta above), seeds
 the caller's content (system prompt + messages) as its rows, journals the
 per-run declarations (tools, output contract, limits) beside it, and returns
 the thread + accepted ref — which then go through the *same* `submit_turn`
@@ -296,6 +392,9 @@ pub struct SubmitTurnRequest {
     /// ("subagent-source:{run_id}") only because these are required.
     pub source_binding_ref: Option<SourceBindingRef>,
     pub reply_target_binding_ref: Option<ReplyTargetBindingRef>,
+    // (✎ superseded: deleted, not optionalized — see deltas; these two
+    // fields carry no `Option` at all in the shipped request family. Reply
+    // routing lives purely in product-side conversation state.)
 
     pub requested_run_profile: Option<RunProfileRequest>,   // unchanged
     pub requested_model: Option<String>,                    // unchanged
@@ -305,7 +404,7 @@ pub struct SubmitTurnRequest {
 ```
 
 - `ResumeTurnRequest` carries the same two refs and optionalizes with it
-  (a unbound run resuming from an external-tool gate passes `None`).
+  (an unbound run resuming from an external-tool gate passes `None`).
 - The engine's posture toward the refs is unchanged: opaque pass-through,
   never parsed (boundary rule 3 in the companion doc). `None` simply means
   there is nothing to hand the delivery layer — which is correct: no
@@ -373,7 +472,8 @@ pub struct PreparedContextRequest {
 pub struct AcceptedUnboundContext {
     /// Held transiently by the trusted workflow to build the TurnScope for
     /// submit — never exposed to untrusted surfaces (ProductSurface
-    /// payloads cannot carry or name it), and unbound + ownerless, so no
+    /// payloads cannot carry or name it), and unbound + ownerless
+    /// (✎ superseded: caller-owned — see the caller-owned delta above), so no
     /// conversation surface can list it and no follow-up can route to it.
     pub thread_id: ThreadId,
     pub accepted_message_ref: AcceptedMessageRef,
@@ -439,7 +539,8 @@ one shared stack for both.
 
 **The helper is mint-seed-journal; the workflow then submits the ref.**
 Callers pass ordinary messages — inline text, attachments as `ArtifactRef`
-parts. The helper mints an **unbound, ownerless thread**, lands content
+parts. The helper mints an **unbound, ownerless thread**
+(✎ superseded: caller-owned — see the caller-owned delta above), lands content
 exactly the way accepted conversation messages land today (content refs
 into the transcript/content store — I5), seeds the messages as the thread's
 rows, journals the declarations beside them, and returns the pin. The
@@ -453,7 +554,7 @@ hand-rolled per caller.
 
 **Profiles are derived, not requested.** Every run resolves a
 `ResolvedRunProfile` at submit (I4), and admission derives it from what the
-accepted ref points at: a unbound-prepared context resolves the new
+accepted ref points at: an unbound-prepared context resolves the new
 unbound profiles (`unbound_structured` when the journaled `output` is a
 JSON schema, `unbound_default` otherwise — read from the declarations the
 helper stored); a conversation ref resolves exactly as today (`None` → the
@@ -488,7 +589,7 @@ idioms:
   - `unbound_structured` — `unbound_default` plus structured-output reply
     admission (§4.5).
 - **Materialization** (I1). There is exactly **one materialization path** —
-  the existing thread-backed context port — for both idioms: a unbound
+  the existing thread-backed context port — for both idioms: an unbound
   turn materializes from its own seeded thread. The canonical loop,
   compaction, checkpoints, recovery, and `LoopPromptBundleAuthority` apply
   unchanged and unforked. (Per-iteration re-materialization over a thread
@@ -995,7 +1096,7 @@ convention.
 | State | Owner |
 |---|---|
 | Conversation transcript and continuity | Thread store, via its binding (unchanged) |
-| Unbound turn transcript (seeded request + run output) | Its own unbound, ownerless thread — the same thread store as every run |
+| Unbound turn transcript (seeded request + run output) | Its own unbound, ownerless thread (✎ superseded: caller-owned — see the caller-owned delta above) — the same thread store as every run |
 | Run lifecycle, resolved profile, idempotency, result settlement | Process journal (unchanged — as every run today) |
 | Artifact bytes and authorization | Artifact/filesystem store (unchanged) |
 | Output schema | The execution request (journaled with it) |
@@ -1024,13 +1125,19 @@ convention.
   fields.
 
 - **Threads are the unit of work; a conversation is a thread with a
-  binding.** Unbound turns are runs on **unbound, ownerless threads**
-  minted by the coordinator at admission; the thread id stays internal
-  (the run id is the caller's handle). Each consequence replaces an
+  binding.** Unbound turns are runs on **unbound threads** (✎ landed
+  shape: caller-owned, not ownerless — the product lane threads its
+  authenticated caller as thread owner; see the caller-owned delta above)
+  minted and seeded by `accept_prepared_context` BEFORE submission —
+  admission only reads the journaled declarations back and derives the
+  profile (the run id is the caller's handle). Each consequence replaces an
   earlier design element: there is **no snapshot-backed context port** (one
-  materialization path), **no thread-kind flag** (binding-absence plus
-  ownerlessness is the classifier, and owner-scoped listings already exclude
-  such threads structurally), **no kernel scope changes**
+  materialization path), **no kernel thread-kind flag** (✎ landed shape: the
+  accept door stamps a `prepared_context` marker into the minted thread's
+  metadata and listings exclude on that ONE spelling — necessary because
+  subagent child threads mirror the parent's owner, so ownerless scoping
+  alone cannot classify them; the filesystem backend backfills the marker
+  onto pre-marker subagent rows once per scope), **no kernel scope changes**
   (`TurnScope`/`LoopRunContext` untouched), and the process journal keeps
   its existing role. Subagent child threads are the in-tree precedent, now
   codified rather than accidental.
@@ -1050,7 +1157,9 @@ convention.
   optional hygiene.
 - **`TurnLimits` maps onto the existing budget machinery** (iteration
   limit, wall clock, USD accountant, max output tokens) — nothing invented;
-  ceilings come from the profile.
+  ceilings come from the profile. (✎ superseded: not built — see deltas;
+  the shipped limit set is call/invocation/wall-clock ceilings only, and no
+  output-token engine seam exists.)
 - **Observation live-hint buffers reuse existing sizing** (the thread ring).
 - **Crate placement as tabled in §7**, finalized in PR review.
 - **Message bounds mirror today's transcript/content bounds** (§4.4) — no
@@ -1072,7 +1181,10 @@ convention.
    the same way so a burst of them cannot occupy every worker and delay live
    chats. Open: the default value, and whether interactive unbound callers
    (a user waiting on a panel) ever need a priority path — deferred until
-   there is latency data.
+   there is latency data. (✎ superseded: shipped with config default — see
+   deltas; the `unbound` per-class concurrency cap defaults to 4, configurable
+   via `[runner] max_concurrent_unbound_runs` /
+   `IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS`.)
 3. **Gate-resolve affordance:** a design sketch for the future revision that
    allows gating tools on unbound turns (actor model, rendering
    surface, lease semantics) — deliberately unresolved here.

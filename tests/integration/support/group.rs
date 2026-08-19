@@ -61,7 +61,8 @@ use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
-use ironclaw_event_log::DurableEventLog;
+use ironclaw_event_log::{DurableEventLog, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
@@ -247,6 +248,9 @@ pub(crate) struct GroupSharedStorage {
     /// Production RootFilesystem-backed event log used by the durable loop
     /// milestone sink when the measured workload opts in.
     pub(crate) durable_event_log: Option<Arc<dyn DurableEventLog>>,
+    /// Production-shaped non-blocking writer for `durable_event_log`. Retained
+    /// so read-back assertions can flush accepted events before replay.
+    pub(crate) durable_event_sink: Option<Arc<dyn NonBlockingEventSink>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -280,6 +284,13 @@ pub(crate) struct GroupSharedStorage {
     /// Read by `RebornThreadBuilder::build()` to decide whether to wire the
     /// real approval/auth interaction services into the thread's workflow.
     pub(crate) real_gate_dispatch_services: bool,
+    /// Task 5 (run-artifact-timings): the ONE `InMemoryDiagnosticStore` wired
+    /// into the group's ONE planned runtime as `prompt_diagnostic_sink`,
+    /// mirroring production's single-store shape (`runtime.rs:3455`,
+    /// `product_surface.rs:98`). Retained so `RebornIntegrationHarness::
+    /// diagnostic_store()` reads exactly what the loop actually recorded,
+    /// instead of a second throwaway instance nothing observes.
+    pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
 }
 
 impl GroupSharedStorage {
@@ -1013,24 +1024,27 @@ impl RebornIntegrationGroupBuilder {
         )?;
 
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-        let durable_event_log = if self.durable_milestone_event_store {
-            Some(
-                ironclaw_event_store::build_reborn_event_stores_from_root_filesystem(Arc::clone(
-                    &base.composite,
-                ))?
-                .events,
-            )
+        let (durable_event_log, durable_event_sink) = if self.durable_milestone_event_store {
+            let event_log = ironclaw_event_store::build_reborn_event_stores_from_root_filesystem(
+                Arc::clone(&base.composite),
+            )?
+            .events;
+            let event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+                Arc::clone(&event_log),
+                EventBatchConfig::default(),
+            ));
+            (Some(event_log), Some(event_sink))
         } else {
-            None
+            (None, None)
         };
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
-            if let Some(event_log) = &durable_event_log {
+            if let Some(event_sink) = &durable_event_sink {
                 let durable_scope =
                     DurableLoopHostMilestoneScope::from_thread_scope(&group_thread_scope)?;
                 Arc::new(FanOutLoopHostMilestoneSink(vec![
                     milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
                     Arc::new(DurableLoopHostMilestoneSink::new(
-                        Arc::clone(event_log),
+                        Arc::clone(event_sink),
                         durable_scope,
                     )),
                 ]))
@@ -1245,6 +1259,12 @@ impl RebornIntegrationGroupBuilder {
                 None => Arc::clone(&user_profile_source),
             };
         let reply_attachment_intent_port = capability.reply_attachment_intent_port();
+        // Production parity: ONE store, connected to the loop's diagnostic
+        // sinks and readable by product services — see runtime.rs:3455 and
+        // product_surface.rs:98. The previous inline `default()` was write-only,
+        // so nothing could observe what the loop recorded.
+        let diagnostic_store =
+            Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
         let parts = DefaultPlannedRuntimeParts {
             process_system: process_system.clone(),
             thread_service: runtime_thread_service,
@@ -1355,9 +1375,8 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
-            prompt_diagnostic_sink: Some(Arc::new(
-                ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default(),
-            )),
+            prompt_diagnostic_sink: Some(Arc::clone(&diagnostic_store)
+                as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>),
             reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
@@ -1397,6 +1416,7 @@ impl RebornIntegrationGroupBuilder {
                 user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 durable_event_log,
+                durable_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
@@ -1405,6 +1425,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
                 channel_connection: self.channel_connection,
+                diagnostic_store,
             }),
         })
     }

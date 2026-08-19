@@ -384,9 +384,11 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             accepted_message_ref: AcceptedMessageRef::new("msg:auth").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
             allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
+            execution_outcome: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
@@ -1561,7 +1563,7 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
 /// cannot share fakes. This test therefore cannot drive the full
 /// approval → auth two-service flow in a single binary. The cross-service
 /// loop is validated at the executor tier in
-/// `ironclaw_agent_loop::executor::tests::
+/// `ironclaw_agent_loop::executor::tests::auth_resume_identity::
 ///  auth_resume_after_approval_carries_resume_token_and_approval_request_id`.
 ///
 /// The strongest assertion available at THIS tier: verify that

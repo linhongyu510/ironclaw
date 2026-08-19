@@ -204,8 +204,6 @@ pub enum AgentMessageError {
     MissingToolCallId { index: usize },
     #[error("provider tool name {name:?} is not a normalized capability id: {reason}")]
     InvalidCapability { name: String, reason: String },
-    #[error("terminal output must be a single assistant message: {reason}")]
-    InvalidTerminalOutput { reason: String },
 }
 
 impl AgentMessageRole {
@@ -369,11 +367,26 @@ pub fn validate_agent_messages(messages: &[AgentMessage]) -> Result<(), AgentMes
     Ok(())
 }
 
+/// Byte caps for attachment metadata strings. The id is an opaque
+/// channel-provided token, the MIME type is bounded by RFC 6838 practice,
+/// and filenames/storage keys are single path segments — none of them are
+/// content carriers, so the caps only exclude abuse.
+const ATTACHMENT_ID_MAX_BYTES: usize = 256;
+const ATTACHMENT_MIME_TYPE_MAX_BYTES: usize = 255;
+const ATTACHMENT_FILENAME_MAX_BYTES: usize = 512;
+const ATTACHMENT_STORAGE_KEY_MAX_BYTES: usize = 1024;
+
 fn validate_attachment(index: usize, attachment: &AttachmentRef) -> Result<(), AgentMessageError> {
     if attachment.id.is_empty() {
         return Err(AgentMessageError::InvalidAttachment {
             index,
             reason: "attachment id must not be empty".to_string(),
+        });
+    }
+    if attachment.id.len() > ATTACHMENT_ID_MAX_BYTES {
+        return Err(AgentMessageError::InvalidAttachment {
+            index,
+            reason: format!("attachment id exceeds {ATTACHMENT_ID_MAX_BYTES} bytes"),
         });
     }
     if attachment.mime_type.is_empty() {
@@ -382,38 +395,40 @@ fn validate_attachment(index: usize, attachment: &AttachmentRef) -> Result<(), A
             reason: "attachment mime_type must not be empty".to_string(),
         });
     }
-    Ok(())
-}
-
-/// Terminal-output rules (design §4.3): assistant role; no `ToolCall` parts
-/// (no unresolved work); at least one `Text` or artifact part.
-pub fn validate_terminal_output_message(message: &AgentMessage) -> Result<(), AgentMessageError> {
-    if message.role != AgentMessageRole::Assistant {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: format!("role must be assistant, got {}", message.role.as_str()),
+    if attachment.mime_type.len() > ATTACHMENT_MIME_TYPE_MAX_BYTES {
+        return Err(AgentMessageError::InvalidAttachment {
+            index,
+            reason: format!("attachment mime_type exceeds {ATTACHMENT_MIME_TYPE_MAX_BYTES} bytes"),
         });
     }
-    if message
-        .content
-        .iter()
-        .any(|part| matches!(part, ContentPart::ToolCall(_)))
+    if let Some(filename) = &attachment.filename
+        && filename.len() > ATTACHMENT_FILENAME_MAX_BYTES
     {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: "terminal output may not carry unresolved tool calls".to_string(),
+        return Err(AgentMessageError::InvalidAttachment {
+            index,
+            reason: format!("attachment filename exceeds {ATTACHMENT_FILENAME_MAX_BYTES} bytes"),
         });
     }
-    let has_substance = message.content.iter().any(|part| {
-        matches!(
-            part,
-            ContentPart::Text { .. } | ContentPart::Image { .. } | ContentPart::File { .. }
-        )
-    });
-    if !has_substance {
-        return Err(AgentMessageError::InvalidTerminalOutput {
-            reason: "terminal output needs at least one text or artifact part".to_string(),
+    if let Some(storage_key) = &attachment.storage_key
+        && storage_key.len() > ATTACHMENT_STORAGE_KEY_MAX_BYTES
+    {
+        return Err(AgentMessageError::InvalidAttachment {
+            index,
+            reason: format!(
+                "attachment storage_key exceeds {ATTACHMENT_STORAGE_KEY_MAX_BYTES} bytes"
+            ),
         });
     }
-    validate_agent_messages(std::slice::from_ref(message))
+    if let Some(extracted) = &attachment.extracted_text
+        && extracted.len() > AGENT_MESSAGE_TEXT_PART_MAX_BYTES
+    {
+        return Err(AgentMessageError::TextPartTooLarge {
+            index,
+            bytes: extracted.len(),
+            max: AGENT_MESSAGE_TEXT_PART_MAX_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn attachment_pointer_line(attachment: &AttachmentRef) -> String {
@@ -814,41 +829,6 @@ mod tests {
         assert!(matches!(
             validate_agent_messages(std::slice::from_ref(&message)),
             Err(AgentMessageError::TextPartTooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn terminal_output_rules_are_enforced() {
-        validate_terminal_output_message(&AgentMessage {
-            role: AgentMessageRole::Assistant,
-            content: vec![ContentPart::text("final answer")],
-        })
-        .expect("plain assistant text is a valid terminal output");
-
-        assert!(matches!(
-            validate_terminal_output_message(&user_text("nope")),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
-        ));
-        assert!(matches!(
-            validate_terminal_output_message(&AgentMessage {
-                role: AgentMessageRole::Assistant,
-                content: vec![ContentPart::ToolCall(ToolCallContent {
-                    call_id: "c".into(),
-                    capability: capability("web.search"),
-                    arguments: serde_json::json!({}),
-                })],
-            }),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
-        ));
-        assert!(matches!(
-            validate_terminal_output_message(&AgentMessage {
-                role: AgentMessageRole::Assistant,
-                content: vec![ContentPart::Reasoning {
-                    reasoning: ReasoningDetails::from_text("only thoughts".to_string())
-                        .expect("non-empty reasoning"),
-                }],
-            }),
-            Err(AgentMessageError::InvalidTerminalOutput { .. })
         ));
     }
 

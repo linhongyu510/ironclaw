@@ -104,6 +104,9 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "policy_denied",
     "compaction_unavailable",
     "gate_not_supported",
+    "wall_clock_limit",
+    "model_call_limit",
+    "capability_invocation_limit",
     // Model recovery categories
     "model_transient",
     "model_context_overflow",
@@ -239,6 +242,9 @@ mod tests {
             ironclaw_loop_contracts::LoopFailureKind::PolicyDenied,
             ironclaw_loop_contracts::LoopFailureKind::CompactionUnavailable,
             ironclaw_loop_contracts::LoopFailureKind::GateNotSupported,
+            ironclaw_loop_contracts::LoopFailureKind::WallClockLimit,
+            ironclaw_loop_contracts::LoopFailureKind::ModelCallLimit,
+            ironclaw_loop_contracts::LoopFailureKind::CapabilityInvocationLimit,
         ] {
             assert!(
                 ALL_RUN_FAILURE_CATEGORIES.contains(&kind.as_str()),
