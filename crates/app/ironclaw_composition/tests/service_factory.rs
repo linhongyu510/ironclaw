@@ -1430,12 +1430,10 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
         json!({
             "name": "Daily production summary",
             "execution_contract": {
-                "version": 1,
                 "goal": "Summarize production state",
                 "success_criteria": ["Complete the requested task"],
                 "output_instructions": "Return a concise result",
                 "no_result_text": "No result",
-                "required_capability_ids": [],
                 "policy": { "result_delivery": "deliver" }
             },
             "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }

@@ -43,12 +43,10 @@ use reborn_support::{
 
 fn trigger_execution_contract(goal: impl Into<String>) -> serde_json::Value {
     serde_json::json!({
-        "version": 1,
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
         "no_result_text": "No result",
-        "required_capability_ids": [],
         "policy": { "result_delivery": "deliver" }
     })
 }
