@@ -106,8 +106,8 @@ pub async fn ensure_bundled_reborn_skills_installed_in(
 
 pub fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, RebornBuildError> {
     // Which bundled skills ship a `scripts/` directory, read from the embedded bundles rather than
-    // assumed. `portfolio` ships four Python scripts today, and reporting `has_scripts: false` for it
-    // would tell the Skills page it is a prose-only skill.
+    // assumed. Reporting `has_scripts: false` for any such bundle would tell the Skills page it is
+    // prose-only.
     let skills_with_scripts = embedded_reborn_skill_bundles()?
         .into_iter()
         .filter(|bundle| {
@@ -432,6 +432,53 @@ mod tests {
 
     use super::*;
 
+    const ARCHIVED_RUNTIME_SKILLS: &[&str] = &[
+        "ceo-setup",
+        "code-review",
+        "commitment-setup",
+        "content-creator-setup",
+        "developer-setup",
+        "github",
+        "github-workflow",
+        "linear",
+        "llm-council",
+        "local-test",
+        "new-project",
+        "parallel-pr-review",
+        "plan-mode",
+        "portfolio",
+        "project-setup",
+        "trader-setup",
+        "web-ui-test",
+    ];
+
+    #[test]
+    fn archived_runtime_skills_are_preserved_but_not_bundled() {
+        let bundled_names = embedded_reborn_skill_bundles()
+            .expect("parse embedded skills")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<HashSet<_>>();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|path| path.join("Cargo.lock").is_file() && path.join("skills").is_dir())
+            .expect("repository root");
+
+        for name in ARCHIVED_RUNTIME_SKILLS {
+            assert!(
+                !bundled_names.contains(*name),
+                "archived runtime skill {name} must not be model-triggerable"
+            );
+            assert!(
+                repo_root
+                    .join("docs/internal/archived-skills")
+                    .join(name)
+                    .join("SKILL.md")
+                    .is_file(),
+                "archived runtime skill {name} must remain available for parity restoration"
+            );
+        }
+    }
     /// Zero-legacy gate for embedded skill guidance: the Reborn binary embeds
     /// the repo `skills/` directory, so a skill teaching the retired v1
     /// automation tools (`routine_create` / `routine_list`) misdirects every
@@ -504,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_reborn_skills_include_current_repo_bundles_and_assets() {
+    async fn bundled_reborn_skills_include_current_repo_bundles() {
         let filesystem = InMemoryBackend::new();
         let system_skills_root = test_system_skills_root();
 
@@ -514,13 +561,13 @@ mod tests {
 
         assert!(
             filesystem
-                .stat(&test_skill_path("code-review/SKILL.md"))
+                .stat(&test_skill_path("coding/SKILL.md"))
                 .await
                 .is_ok()
         );
         assert!(
             filesystem
-                .stat(&test_skill_path("portfolio/scripts/backtest_strategy.py"))
+                .stat(&test_skill_path("routine-advisor/SKILL.md"))
                 .await
                 .is_ok()
         );
@@ -539,7 +586,7 @@ mod tests {
         assert!(
             filesystem
                 .stat(
-                    &VirtualPath::new("/system/skills/exact-system-skills/code-review/SKILL.md")
+                    &VirtualPath::new("/system/skills/exact-system-skills/coding/SKILL.md")
                         .expect("valid skill path"),
                 )
                 .await
@@ -567,7 +614,7 @@ mod tests {
     async fn bundled_reborn_skills_do_not_overwrite_unmanaged_system_skills() {
         let filesystem = InMemoryBackend::new();
         let system_skills_root = test_system_skills_root();
-        let skill_md = test_skill_path("code-review/SKILL.md");
+        let skill_md = test_skill_path("coding/SKILL.md");
         filesystem
             .put(
                 &skill_md,
@@ -582,7 +629,7 @@ mod tests {
             .expect("install bundled skills");
 
         assert_eq!(
-            bundled_skill_file(&filesystem, "code-review/SKILL.md").await,
+            bundled_skill_file(&filesystem, "coding/SKILL.md").await,
             b"operator-owned"
         );
     }
@@ -591,7 +638,7 @@ mod tests {
     async fn bundled_reborn_skills_skip_unchanged_managed_dirs() {
         let filesystem = InMemoryBackend::new();
         let system_skills_root = test_system_skills_root();
-        let skill_md = test_skill_path("code-review/SKILL.md");
+        let skill_md = test_skill_path("coding/SKILL.md");
 
         ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root)
             .await
@@ -622,13 +669,13 @@ mod tests {
     async fn bundled_reborn_skills_replace_changed_managed_dirs() {
         let filesystem = InMemoryBackend::new();
         let system_skills_root = test_system_skills_root();
-        let skill_dir = test_skill_path("code-review");
-        let skill_md = test_skill_path("code-review/SKILL.md");
+        let skill_dir = test_skill_path("coding");
+        let skill_md = test_skill_path("coding/SKILL.md");
 
         ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root)
             .await
             .expect("install bundled skills");
-        let bundled_skill_md = bundled_skill_file(&filesystem, "code-review/SKILL.md").await;
+        let bundled_skill_md = bundled_skill_file(&filesystem, "coding/SKILL.md").await;
         filesystem
             .put(
                 &skill_md,
@@ -639,7 +686,7 @@ mod tests {
             .expect("write old skill");
         filesystem
             .put(
-                &test_skill_path("code-review/OLD_SENTINEL"),
+                &test_skill_path("coding/OLD_SENTINEL"),
                 Entry::bytes(b"old".to_vec()),
                 CasExpectation::Any,
             )
@@ -652,12 +699,12 @@ mod tests {
             .expect("replace bundled skills");
 
         assert_eq!(
-            bundled_skill_file(&filesystem, "code-review/SKILL.md").await,
+            bundled_skill_file(&filesystem, "coding/SKILL.md").await,
             bundled_skill_md
         );
         assert!(matches!(
             filesystem
-                .stat(&test_skill_path("code-review/OLD_SENTINEL"))
+                .stat(&test_skill_path("coding/OLD_SENTINEL"))
                 .await,
             Err(FilesystemError::NotFound { .. })
         ));

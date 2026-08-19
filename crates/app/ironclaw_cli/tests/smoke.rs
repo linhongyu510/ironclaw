@@ -1499,10 +1499,7 @@ fn skills_list_reports_reborn_skill_data() {
     );
     assert!(stdout.contains("configured:"), "stdout: {stdout}");
     assert!(stdout.contains("source: standalone"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("- code-review (system)"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("- coding (system)"), "stdout: {stdout}");
     assert!(
         stdout.contains("- catalog-helper (user)"),
         "stdout: {stdout}"
@@ -1510,9 +1507,7 @@ fn skills_list_reports_reborn_skill_data() {
     assert!(!stdout.contains("not-wired"), "stdout: {stdout}");
     assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
     assert!(
-        !reborn_home
-            .join("system/skills/code-review/SKILL.md")
-            .exists(),
+        !reborn_home.join("system/skills/coding/SKILL.md").exists(),
         "skills list should report bundled skills without installing them"
     );
     assert!(
@@ -1594,7 +1589,7 @@ fn skills_list_json_reports_reborn_skill_data() {
         "json: {json}"
     );
     assert_eq!(json["source"], "standalone");
-    assert_skill_source(&json, "code-review", "system");
+    assert_skill_source(&json, "coding", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
     assert_eq!(
@@ -6614,9 +6609,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
         "stderr should warn about degraded stub-gateway boot; got: {stderr}"
     );
     assert!(
-        reborn_home
-            .join("system/skills/code-review/SKILL.md")
-            .is_file(),
+        reborn_home.join("system/skills/coding/SKILL.md").is_file(),
         "runtime bootstrap should install bundled Reborn skills"
     );
 }
