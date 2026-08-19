@@ -36,14 +36,21 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    /// The per-recipient record bound this store enforces. It is the
+    /// deduplication window as well as the size bound, so it is configuration
+    /// the caller states rather than a constant compiled into the store.
+    capacity: usize,
 }
 
 impl<F> NotificationInboxStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self { filesystem }
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, capacity: usize) -> Self {
+        Self {
+            filesystem,
+            capacity,
+        }
     }
 
     async fn get_snapshot(
@@ -76,6 +83,7 @@ where
         let scope = notification_resource_scope(&request.recipient);
         let path = notification_inbox_path()?;
         let recipient = request.recipient.clone();
+        let capacity = self.capacity;
         cas_update(
             self.filesystem.as_ref(),
             &scope,
@@ -110,7 +118,7 @@ where
                         let record = existing.clone();
                         return Ok(CasApply::no_op(snapshot, record));
                     }
-                    if snapshot.notifications.len() >= NOTIFICATION_INBOX_MAX_RECORDS
+                    if snapshot.notifications.len() >= capacity
                         && !evict_oldest_closed_record(&mut snapshot)
                     {
                         return Err(NotificationInboxError::InvalidRequest {

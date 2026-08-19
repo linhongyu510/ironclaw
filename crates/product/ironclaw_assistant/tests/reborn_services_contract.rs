@@ -14317,9 +14317,13 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    let inbox = Arc::new(NotificationInboxStore::new(Arc::new(
-        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
-    )));
+    let inbox = Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ));
 
     let actor = caller();
     let thread_id = ThreadId::new("thread-mutation-response").expect("thread");

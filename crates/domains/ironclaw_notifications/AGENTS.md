@@ -10,7 +10,12 @@
   an arbitrarily delayed retry as guaranteed deduplication.
 - Recipient scope is mandatory on every read and mutation.
 - Retention is explicit: never delete unread or unarchived records to make room.
-- The snapshot carries a 1,000-record bound, and that bound *is* the idempotency
+- The record bound is configuration the constructing caller states rather than a
+  constant compiled into the store: production states
+  `NOTIFICATION_INBOX_MAX_RECORDS`, and contract tests state a small one so the
+  behaviour below is provable without re-encoding a full snapshot thousands of
+  times.
+- That bound is 1,000 records in production, and it *is* the idempotency
   window: a publish at the bound reclaims the oldest record that is both
   resolved and archived, and a later retry for a reclaimed id is admitted as a
   new record rather than recognised as a duplicate. When nothing is closed the

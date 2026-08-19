@@ -27,6 +27,12 @@ use tokio::sync::Mutex;
 
 const TEST_ROOT: &str = "/engine/tenants/test/users/test/notifications";
 
+/// The bound the capacity tests configure. Publishing to the ceiling is O(n^2)
+/// in the snapshot — every CAS round-trip re-encodes every record — so proving
+/// the contract at the production ceiling costs minutes without saying anything
+/// the bound below does not.
+const TEST_CAPACITY: usize = 8;
+
 fn scoped<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>> {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/notifications").expect("alias"),
@@ -64,7 +70,8 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
 #[tokio::test]
 async fn notification_inbox_is_durable_paginated_and_idempotent() {
     let backend = Arc::new(InMemoryBackend::new());
-    let first = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let first =
+        NotificationInboxStore::new(scoped(Arc::clone(&backend)), NOTIFICATION_INBOX_MAX_RECORDS);
     let first_request = request("notification-1", 1_700_000_001);
     first
         .publish(first_request.clone())
@@ -118,7 +125,7 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .await
         .expect("publish second");
 
-    let reopened = NotificationInboxStore::new(scoped(backend));
+    let reopened = NotificationInboxStore::new(scoped(backend), NOTIFICATION_INBOX_MAX_RECORDS);
     let page = reopened
         .list(ListNotificationsRequest {
             recipient: recipient(),
@@ -155,7 +162,7 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
 #[tokio::test]
 async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(backend));
+    let store = NotificationInboxStore::new(scoped(backend), NOTIFICATION_INBOX_MAX_RECORDS);
     store
         .publish(request("notification-lifecycle", 1_700_000_001))
         .await
@@ -317,7 +324,7 @@ async fn unwired_notification_store_fails_closed_for_reads_and_writes() {
 #[tokio::test]
 async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
     for limit in [0, NOTIFICATION_PAGE_LIMIT_MAX + 1] {
         assert!(matches!(
             store
@@ -332,7 +339,7 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
         ));
     }
 
-    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+    for index in 0..TEST_CAPACITY {
         store
             .publish(request(
                 &format!("notification-capacity-{index}"),
@@ -357,7 +364,7 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
     ));
 
     let racing = Arc::new(VersionRacingBackend::new(Arc::new(InMemoryBackend::new())));
-    let racing_store = NotificationInboxStore::new(scoped(Arc::clone(&racing)));
+    let racing_store = NotificationInboxStore::new(scoped(Arc::clone(&racing)), TEST_CAPACITY);
     racing.arm(TEST_ROOT, 1).await;
     racing_store
         .publish(request("notification-cas-retry", 1_700_010_000))
@@ -387,7 +394,8 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
 #[tokio::test]
 async fn a_repeated_mutation_reports_that_nothing_changed() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store =
+        NotificationInboxStore::new(scoped(Arc::clone(&backend)), NOTIFICATION_INBOX_MAX_RECORDS);
     store
         .publish(request("settled", 1_700_000_000))
         .await
@@ -445,11 +453,11 @@ async fn a_repeated_mutation_reports_that_nothing_changed() {
 #[tokio::test]
 async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
 
     // Fill to capacity, then close every record the way a user who worked
     // through the inbox would: resolved by the producer, archived by the user.
-    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+    for index in 0..TEST_CAPACITY {
         let id = format!("closed-{index}");
         store
             .publish(request(&id, 1_700_000_000 + index as i64))
@@ -526,7 +534,7 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
     );
     assert_eq!(
         ids.len(),
-        NOTIFICATION_INBOX_MAX_RECORDS,
+        TEST_CAPACITY,
         "reclaiming keeps the snapshot at its bound rather than growing past it"
     );
 }
@@ -534,9 +542,9 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
 #[tokio::test]
 async fn a_retry_for_a_reclaimed_id_is_a_new_record_not_a_duplicate() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
 
-    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+    for index in 0..TEST_CAPACITY {
         let id = format!("closed-{index}");
         store
             .publish(request(&id, 1_700_000_000 + index as i64))
@@ -575,11 +583,11 @@ async fn a_retry_for_a_reclaimed_id_is_a_new_record_not_a_duplicate() {
 #[tokio::test]
 async fn a_full_inbox_of_open_records_still_refuses_rather_than_dropping_one() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
 
     // Nothing is archived, so there is no closed record to reclaim. Refusing is
     // correct here: evicting an open record would lose an actionable gate.
-    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+    for index in 0..TEST_CAPACITY {
         store
             .publish(request(
                 &format!("open-{index}"),
@@ -598,7 +606,8 @@ async fn a_full_inbox_of_open_records_still_refuses_rather_than_dropping_one() {
 #[tokio::test]
 async fn a_notification_cannot_point_its_action_at_another_thread() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    let store =
+        NotificationInboxStore::new(scoped(Arc::clone(&backend)), NOTIFICATION_INBOX_MAX_RECORDS);
 
     let mut mismatched = request("action-mismatch", 1_700_000_000);
     mismatched.action = NotificationAction::OpenThread {
@@ -638,7 +647,7 @@ async fn notification_inbox_persists_across_libsql_reopen() {
         );
         let root = Arc::new(LibSqlRootFilesystem::new(database).expect("build root filesystem"));
         root.run_migrations().await.expect("run migrations");
-        let store = NotificationInboxStore::new(scoped(root));
+        let store = NotificationInboxStore::new(scoped(root), NOTIFICATION_INBOX_MAX_RECORDS);
         store
             .publish(request("notification-libsql", 1_700_000_001))
             .await
@@ -653,7 +662,7 @@ async fn notification_inbox_persists_across_libsql_reopen() {
     );
     let root = Arc::new(LibSqlRootFilesystem::new(database).expect("reopen root filesystem"));
     root.run_migrations().await.expect("rerun migrations");
-    let reopened = NotificationInboxStore::new(scoped(root));
+    let reopened = NotificationInboxStore::new(scoped(root), NOTIFICATION_INBOX_MAX_RECORDS);
     let page = reopened
         .list(ListNotificationsRequest {
             recipient: recipient(),
