@@ -10,6 +10,8 @@ mock_bin="${fixture_root}/bin"
 apt_calls="${fixture_root}/apt-calls"
 update_count="${fixture_root}/update-count"
 sleep_calls="${fixture_root}/sleep-calls"
+install_count="${fixture_root}/install-count"
+mirror_edits="${fixture_root}/mirror-edits"
 mkdir -p "${mock_bin}"
 
 cat > "${mock_bin}/sudo" <<'MOCK'
@@ -34,6 +36,15 @@ case "${command_name}" in
   find)
     exit 0
     ;;
+  test)
+    [[ "$*" == "-f /etc/apt/apt-mirrors.txt" ]]
+    ;;
+  grep)
+    [[ " $* " == *" azure.archive.ubuntu.com "* ]]
+    ;;
+  sed)
+    printf '%s\n' "$*" >> "${MIRROR_EDITS}"
+    ;;
   apt-get)
     printf '%s\n' "apt-get $*" >> "${APT_CALLS}"
     if [[ " $* " == *" update "* ]]; then
@@ -43,6 +54,16 @@ case "${command_name}" in
       fi
       count=$((count + 1))
       printf '%s\n' "${count}" > "${APT_UPDATE_COUNT}"
+      [[ "${count}" -gt 1 ]]
+      exit
+    fi
+    if [[ " $* " == *" install "* ]]; then
+      count=0
+      if [[ -f "${APT_INSTALL_COUNT}" ]]; then
+        count="$(<"${APT_INSTALL_COUNT}")"
+      fi
+      count=$((count + 1))
+      printf '%s\n' "${count}" > "${APT_INSTALL_COUNT}"
       [[ "${count}" -gt 1 ]]
       exit
     fi
@@ -64,8 +85,10 @@ chmod +x "${mock_bin}/sudo" "${mock_bin}/sleep"
 
 PATH="${mock_bin}:${PATH}" \
 APT_CALLS="${apt_calls}" \
+APT_INSTALL_COUNT="${install_count}" \
 APT_UPDATE_COUNT="${update_count}" \
 APT_TIMEOUT_CALLS="${fixture_root}/apt-timeout-calls" \
+MIRROR_EDITS="${mirror_edits}" \
 SLEEP_CALLS="${sleep_calls}" \
   bash "${installer}" clang mold
 
@@ -75,8 +98,8 @@ if [[ "$(grep -Fxc -- "apt-get ${apt_options} update" "${apt_calls}")" -ne 2 ]];
   cat "${apt_calls}" >&2
   exit 1
 fi
-if ! grep -Fxq -- "apt-get ${apt_options} install -y clang mold" "${apt_calls}"; then
-  echo "apt install must use the same bounded acquisition policy" >&2
+if [[ "$(grep -Fxc -- "apt-get ${apt_options} install -y clang mold" "${apt_calls}")" -ne 2 ]]; then
+  echo "apt install must retry once with the same bounded acquisition policy" >&2
   cat "${apt_calls}" >&2
   exit 1
 fi
@@ -86,13 +109,17 @@ if [[ "$(grep -Fxc -- "timeout --kill-after=5s 120s apt-get ${apt_options} updat
   cat "${timeout_calls}" >&2
   exit 1
 fi
-if ! grep -Fxq -- "timeout --kill-after=5s 300s apt-get ${apt_options} install -y clang mold" "${timeout_calls}"; then
+if [[ "$(grep -Fxc -- "timeout --kill-after=5s 300s apt-get ${apt_options} install -y clang mold" "${timeout_calls}")" -ne 2 ]]; then
   echo "apt install must have a 300-second whole-command deadline" >&2
   cat "${timeout_calls}" >&2
   exit 1
 fi
-if [[ "$(cat "${sleep_calls}")" != "5" ]]; then
-  echo "outer apt retry backoff changed unexpectedly" >&2
+if ! grep -Fq -- "azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g /etc/apt/apt-mirrors.txt" "${mirror_edits}"; then
+  echo "GitHub's Azure mirror list must fall back to Ubuntu's canonical archive" >&2
+  exit 1
+fi
+if [[ "$(cat "${sleep_calls}")" != $'5\n5' ]]; then
+  echo "outer apt retry backoffs changed unexpectedly" >&2
   exit 1
 fi
 

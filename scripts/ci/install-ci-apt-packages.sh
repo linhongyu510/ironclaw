@@ -19,6 +19,18 @@ while IFS= read -r -d '' source_file; do
   fi
 done < <(sudo find /etc/apt -type f \( -name "*.list" -o -name "*.sources" \) -print0)
 
+# GitHub's mirror list currently points at azure.archive.ubuntu.com, which can
+# accept a package download and then stop making progress for the rest of the
+# job. Use Ubuntu's canonical archive so retries reach an independent mirror.
+ubuntu_mirror_list=/etc/apt/apt-mirrors.txt
+if sudo test -f "${ubuntu_mirror_list}" && \
+  sudo grep -q "azure.archive.ubuntu.com" "${ubuntu_mirror_list}"; then
+  echo "Replacing unavailable Azure Ubuntu mirror with archive.ubuntu.com" >&2
+  sudo sed -i \
+    's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+    "${ubuntu_mirror_list}"
+fi
+
 # Even with broken sources removed, the remaining mirrors occasionally return
 # transient errors or accept a connection without ever completing it. Bound
 # every acquisition so the outer retry loop can recover instead of consuming
@@ -47,4 +59,18 @@ if [ "${update_ok}" != true ]; then
   exit 1
 fi
 
-run_apt 300s install -y "$@"
+install_ok=false
+for attempt in 1 2; do
+  if run_apt 300s install -y "$@"; then
+    install_ok=true
+    break
+  fi
+  if [ "${attempt}" -lt 2 ]; then
+    echo "apt-get install failed (attempt ${attempt}/2); retrying in $((attempt * 5))s..." >&2
+    sleep "$((attempt * 5))"
+  fi
+done
+if [ "${install_ok}" != true ]; then
+  echo "apt-get install failed after 2 attempts" >&2
+  exit 1
+fi
