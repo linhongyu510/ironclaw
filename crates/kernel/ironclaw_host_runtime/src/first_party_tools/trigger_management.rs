@@ -446,7 +446,6 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    require_explicit_result_delivery(&input)?;
     let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
     let schedule_kind = parsed_input.schedule.kind();
@@ -511,26 +510,6 @@ async fn create_trigger(
     Ok(json!({
         "trigger": trigger_output(&record, &[], None, None),
     }))
-}
-
-fn require_explicit_result_delivery(input: &Value) -> Result<(), FirstPartyCapabilityError> {
-    let selection = input
-        .get("execution_contract")
-        .and_then(Value::as_object)
-        .and_then(|contract| contract.get("policy"))
-        .and_then(Value::as_object)
-        .and_then(|policy| policy.get("result_delivery"));
-    match selection {
-        Some(Value::String(_)) => Ok(()),
-        Some(_) => Err(invalid_trigger_input(vec![type_mismatch(
-            "execution_contract.policy.result_delivery",
-            "deliver or suppress_when_nothing_to_report",
-        )])),
-        None => Err(invalid_trigger_input(vec![
-            missing_required("execution_contract.policy.result_delivery")
-                .expected("deliver or suppress_when_nothing_to_report"),
-        ])),
-    }
 }
 
 async fn list_triggers(
@@ -821,21 +800,31 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
                 "execution_contract.unexpected_field",
                 &mut issues,
             );
-            if let Some(Value::Object(policy)) = contract.get("policy") {
-                unexpected_fields(
-                    policy,
-                    &["required_skills", "result_delivery"],
-                    "execution_contract.policy.unexpected_field",
-                    &mut issues,
-                );
-                if let Some(result_delivery) = policy.get("result_delivery")
-                    && !result_delivery.is_string()
-                {
-                    issues.push(type_mismatch(
-                        "execution_contract.policy.result_delivery",
-                        "deliver or suppress_when_nothing_to_report",
-                    ));
+            match contract.get("policy") {
+                None | Some(Value::Null) => issues.push(
+                    missing_required("execution_contract.policy.result_delivery")
+                        .expected("deliver or suppress_when_nothing_to_report"),
+                ),
+                Some(Value::Object(policy)) => {
+                    unexpected_fields(
+                        policy,
+                        &["required_skills", "result_delivery"],
+                        "execution_contract.policy.unexpected_field",
+                        &mut issues,
+                    );
+                    match policy.get("result_delivery") {
+                        None | Some(Value::Null) => issues.push(
+                            missing_required("execution_contract.policy.result_delivery")
+                                .expected("deliver or suppress_when_nothing_to_report"),
+                        ),
+                        Some(Value::String(_)) => {}
+                        Some(_) => issues.push(type_mismatch(
+                            "execution_contract.policy.result_delivery",
+                            "deliver or suppress_when_nothing_to_report",
+                        )),
+                    }
                 }
+                Some(_) => issues.push(type_mismatch("execution_contract.policy", "object")),
             }
         }
         Some(_) => issues.push(type_mismatch("execution_contract", "object")),
