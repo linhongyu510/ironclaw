@@ -1578,18 +1578,16 @@ fn map_notification_inbox_error(
         ironclaw_notifications::NotificationInboxError::AccessDenied => {
             ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
         }
-        ironclaw_notifications::NotificationInboxError::Backend { reason } => {
-            tracing::warn!(
-                reason = %reason,
-                "notification inbox backend unavailable at the product boundary"
-            );
+        // The bound reason is filesystem, CAS, and serde text: it carries host
+        // paths, mount internals, and payload fragments. This boundary logs the
+        // fixed category only, matching how every other backend mapping here
+        // discards its payload.
+        ironclaw_notifications::NotificationInboxError::Backend { .. } => {
+            tracing::warn!("notification inbox backend unavailable at the product boundary");
             ProductSurfaceError::service_unavailable(true)
         }
-        ironclaw_notifications::NotificationInboxError::Serialization { reason } => {
-            tracing::warn!(
-                reason = %reason,
-                "notification inbox serialization failed at the product boundary"
-            );
+        ironclaw_notifications::NotificationInboxError::Serialization { .. } => {
+            tracing::warn!("notification inbox serialization failed at the product boundary");
             ProductSurfaceError::internal()
         }
     }

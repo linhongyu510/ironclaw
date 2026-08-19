@@ -14323,8 +14323,13 @@ async fn notifications_unwired_backend_returns_retryable_service_unavailable() {
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
     assert!(
-        logs_contain("notification inbox store is not configured"),
-        "the bound backend cause must be logged before the product error is sanitized"
+        logs_contain("notification inbox backend unavailable at the product boundary"),
+        "the product boundary must log a fixed diagnostic category for inbox backend failures"
+    );
+    assert!(
+        !logs_contain("notification inbox store is not configured"),
+        "the bound backend reason carries filesystem, CAS, and serde text, so it must never \
+         reach the logs; log the fixed category instead"
     );
 }
 
