@@ -193,7 +193,10 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// authoritative re-capture, and this record moves with
 /// `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed` to the
 /// same figure in this commit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_440;
+/// Union re-measured on 2026-08-19 after merging main again (its own record
+/// had moved 41_991 -> 42_142 meanwhile). Re-captured with
+/// `bash scripts/ci/check-composition-budget.sh --print` on the merged tree.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_441;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 837 Arc<dyn> (governed prod, excl slack/extension_host)".
