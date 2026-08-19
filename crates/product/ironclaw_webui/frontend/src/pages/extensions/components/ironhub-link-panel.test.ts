@@ -138,7 +138,7 @@ test("an env override explains itself and promises no restart", () => {
     data: {
       register_url: "https://agent.example.com/api/ironhub/register",
       key_stored: true,
-      key_active: true,
+      key_active: false,
       env_override: true,
     },
   });
