@@ -889,9 +889,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // tenant/user-workspace identity vocabulary. Storage placement, bind
         // admission, and provider execution remain in filesystem, composition,
         // and sandbox owners.
-        // Union re-measured on the merged tree (2026-08-18); count read from
+        // + (2026-08-19, #7686): capability dispatch-result declarations
+        // retained beside main's provider-neutral output contracts.
+        // Union re-measured on the merged tree (2026-08-19); count read from
         // this test's own zero-ceiling failure message.
-        ("ironclaw_host_api", 20_398),
+        ("ironclaw_host_api", 20_447),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
