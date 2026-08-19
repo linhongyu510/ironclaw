@@ -220,9 +220,12 @@ fn collect_profile_imports(tree: &syn::UseTree, profile_scope: bool, imports: &m
             }
         }
         syn::UseTree::Rename(rename) => {
-            if rename.ident == REBORN_COMPOSITION_PROFILE {
-                imports.type_names.insert(rename.rename.to_string());
-            } else if profile_scope && rename.ident == "self" {
+            // `use …::RebornCompositionProfile as X` anywhere, and
+            // `use …::RebornCompositionProfile::{self as X}` inside the
+            // profile scope, both bind the profile type under a new name.
+            if rename.ident == REBORN_COMPOSITION_PROFILE
+                || (profile_scope && rename.ident == "self")
+            {
                 imports.type_names.insert(rename.rename.to_string());
             } else if profile_scope && imports.variant_names.contains(&rename.ident.to_string()) {
                 imports
