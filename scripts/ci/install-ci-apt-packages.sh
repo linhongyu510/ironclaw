@@ -20,10 +20,17 @@ while IFS= read -r -d '' source_file; do
 done < <(sudo find /etc/apt -type f \( -name "*.list" -o -name "*.sources" \) -print0)
 
 # Even with broken sources removed, the remaining mirrors occasionally return
-# transient errors, so retry `apt-get update` a few times before giving up.
+# transient errors or accept a connection without ever completing it. Bound
+# every acquisition so the outer retry loop can recover instead of consuming
+# the entire job timeout inside one `apt-get` call.
+apt_acquire_options=(
+  -o Acquire::http::Timeout=15
+  -o Acquire::https::Timeout=15
+  -o Acquire::Retries=2
+)
 update_ok=false
 for attempt in 1 2 3; do
-  if sudo apt-get update; then
+  if sudo apt-get "${apt_acquire_options[@]}" update; then
     update_ok=true
     break
   fi
@@ -35,4 +42,4 @@ if [ "${update_ok}" != true ]; then
   exit 1
 fi
 
-sudo apt-get install -y "$@"
+sudo apt-get "${apt_acquire_options[@]}" install -y "$@"
