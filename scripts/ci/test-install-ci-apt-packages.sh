@@ -18,6 +18,14 @@ set -euo pipefail
 
 command_name="$1"
 shift
+if [[ "${command_name}" == "timeout" ]]; then
+  printf '%s\n' "timeout $*" >> "${APT_TIMEOUT_CALLS}"
+  [[ "$1" == "--kill-after=5s" ]]
+  [[ "$2" == "120s" ]]
+  shift 2
+  command_name="$1"
+  shift
+fi
 case "${command_name}" in
   find)
     exit 0
@@ -53,6 +61,7 @@ chmod +x "${mock_bin}/sudo" "${mock_bin}/sleep"
 PATH="${mock_bin}:${PATH}" \
 APT_CALLS="${apt_calls}" \
 APT_UPDATE_COUNT="${update_count}" \
+APT_TIMEOUT_CALLS="${fixture_root}/apt-timeout-calls" \
 SLEEP_CALLS="${sleep_calls}" \
   bash "${installer}" clang mold
 
@@ -65,6 +74,10 @@ fi
 if ! grep -Fxq -- "apt-get ${apt_options} install -y clang mold" "${apt_calls}"; then
   echo "apt install must use the same bounded acquisition policy" >&2
   cat "${apt_calls}" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "${fixture_root}/apt-timeout-calls")" -ne 3 ]]; then
+  echo "every apt invocation must have a whole-command deadline" >&2
   exit 1
 fi
 if [[ "$(cat "${sleep_calls}")" != "5" ]]; then
