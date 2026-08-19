@@ -102,8 +102,17 @@ pub(crate) fn migrate_legacy_layout(
 }
 
 /// Rank populated candidates by most recent use and pick the winner. Losers
-/// are reported, never touched. An unorderable tie between distinct sources
-/// fails closed instead of guessing.
+/// are reported, never touched. An unorderable tie between the two candidates
+/// that actually compete fails closed instead of guessing.
+///
+/// A bare-home candidate is the byproduct of a fixed historical resolver bug
+/// rather than any released layout, so it ranks strictly below every real
+/// profile directory regardless of timestamps. Recency orders within each
+/// class. Keeping the classes partitioned — instead of demoting a bare-home
+/// entry only when it happened to tie — is what lets the tie guard run against
+/// the real neighbours: an earlier version swapped the top two on a tie and
+/// never re-checked, so a newer bare-home artifact beside two genuinely
+/// unorderable profile directories silently selected one of them.
 pub(super) fn select_migration_source(
     candidates: Vec<LegacyCandidate>,
 ) -> anyhow::Result<(LegacyCandidate, Vec<IgnoredCandidate>)> {
@@ -118,28 +127,26 @@ pub(super) fn select_migration_source(
             Ok((candidate, last_used))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    // Most recent first; a bare-home candidate is a defensive artifact of a
-    // fixed historical bug and never wins a timestamp tie against a real
-    // profile directory.
+    // Real profile directories first, then bare-home artifacts; most recent
+    // first within each class.
     ranked.sort_by_key(|(candidate, last_used)| {
         (
-            std::cmp::Reverse(*last_used),
             candidate.kind == LegacySourceKind::BareHome,
+            std::cmp::Reverse(*last_used),
         )
     });
-    if ranked.len() > 1 {
+    // The winner competes only with the next candidate of its own class, so a
+    // bare-home artifact never suppresses a tie between two profile roots.
+    let competing_neighbours = ranked.len() > 1
+        && (ranked[0].0.kind == LegacySourceKind::BareHome)
+            == (ranked[1].0.kind == LegacySourceKind::BareHome);
+    if competing_neighbours {
         let gap = ranked[0].1.duration_since(ranked[1].1).unwrap_or_default();
         if gap.as_secs() < TIE_WINDOW_SECS {
-            let first_is_bare = ranked[0].0.kind == LegacySourceKind::BareHome;
-            let second_is_bare = ranked[1].0.kind == LegacySourceKind::BareHome;
-            if first_is_bare && !second_is_bare {
-                ranked.swap(0, 1);
-            } else if first_is_bare == second_is_bare {
-                bail!(
-                    "multiple populated legacy sources were last used at nearly the same time; recency cannot pick one safely. Inspect and archive all but one of: {}",
-                    candidate_paths(&ranked.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>())
-                );
-            }
+            bail!(
+                "multiple populated legacy sources were last used at nearly the same time; recency cannot pick one safely. Inspect and archive all but one of: {}",
+                candidate_paths(&ranked.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>())
+            );
         }
     }
     let mut ranked = ranked.into_iter();

@@ -168,6 +168,72 @@ fn unordered_recency_tie_between_distinct_sources_fails_closed() {
 }
 
 #[test]
+fn newer_bare_home_artifact_does_not_mask_a_tie_between_two_profile_roots() {
+    // Regression: ranking used to demote a tied bare-home entry by swapping the
+    // top two and never re-checking, so a bare-home artifact that was merely
+    // newer than two genuinely unorderable profile directories silently
+    // selected one of them instead of failing closed.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let first = temp.path().join("local-dev");
+    let second = temp.path().join("hosted-single-tenant-volume");
+    seed_legacy_embedded_store(&first);
+    seed_legacy_embedded_store(&second);
+    // Both profile roots land inside the tie window of each other...
+    let tied = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+    for root in [&first, &second] {
+        for entry in fs::read_dir(root).expect("read legacy root") {
+            let entry = entry.expect("legacy entry");
+            if entry.file_type().expect("entry type").is_file() {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(entry.path())
+                    .expect("open for timestamp")
+                    .set_modified(tied)
+                    .expect("stamp mtime");
+            }
+        }
+    }
+    // ...while a bare-home artifact is strictly newer than both.
+    let key = ironclaw_secrets::keychain::generate_master_key_hex();
+    fs::write(temp.path().join(MASTER_KEY_FILE), key).expect("bare-home key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(
+            temp.path().join(MASTER_KEY_FILE),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("owner-only bare key");
+    }
+
+    let candidates = classify(&home, requirement);
+    assert_eq!(
+        candidates.len(),
+        3,
+        "two profile roots plus the bare artifact"
+    );
+    let error = migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        candidates,
+    )
+    .expect_err("a newer bare-home artifact must not mask the profile-root tie");
+
+    assert!(
+        error.to_string().contains("nearly the same time"),
+        "{error:#}"
+    );
+    assert!(first.join(DB_FILE).is_file());
+    assert!(second.join(DB_FILE).is_file());
+    assert!(temp.path().join(MASTER_KEY_FILE).is_file());
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+    assert!(!temp.path().join("state").exists());
+}
+
+#[test]
 fn bare_home_artifacts_lose_a_tie_against_a_real_profile_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
