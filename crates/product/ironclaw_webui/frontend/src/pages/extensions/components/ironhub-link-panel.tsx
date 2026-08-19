@@ -5,6 +5,7 @@ import { useT } from "../../../lib/i18n";
 import { Card } from "../../../design-system/card";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import {
   clearIronhubSharedKey,
   getIronhubLink,
@@ -14,6 +15,23 @@ import {
 const IRONHUB_LINK_QUERY_KEY = ["ironhub", "link"];
 const MIN_SHARED_KEY_LENGTH = 32;
 
+function CopyRegisterUrlButton({ url }) {
+  const t = useT();
+  const { copied, copy } = useCopyToClipboard();
+
+  return (
+    <button
+      type="button"
+      onClick={() => copy(url)}
+      aria-label={copied ? t("common.copied") : t("common.copy")}
+      title={copied ? t("common.copied") : t("common.copy")}
+      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--v2-panel-border)] text-iron-300 hover:border-white/20 hover:text-iron-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
+    >
+      <Icon name={copied ? "check" : "copy"} className="h-4 w-4" />
+    </button>
+  );
+}
+
 export function IronhubLinkPanel() {
   const t = useT();
   const queryClient = useQueryClient();
@@ -22,11 +40,11 @@ export function IronhubLinkPanel() {
   const link = useQuery({
     queryKey: IRONHUB_LINK_QUERY_KEY,
     queryFn: getIronhubLink,
-    retry: (_count, error) => error?.status !== 403,
+    retry: (count, error) => count < 1 && error?.status !== 403,
   });
 
   const save = useMutation({
-    mutationFn: () => setIronhubSharedKey(key),
+    mutationFn: () => setIronhubSharedKey(key.trim()),
     onSuccess: (next) => {
       queryClient.setQueryData(IRONHUB_LINK_QUERY_KEY, next);
       setKey("");
@@ -70,9 +88,12 @@ export function IronhubLinkPanel() {
             {t("ironhub.link.agentUrl")}
           </span>
           {status.register_url
-            ? (<code className="block break-all rounded-lg bg-[var(--v2-surface-muted)] px-3 py-2 text-xs">
-                {status.register_url}
-              </code>)
+            ? (<div className="flex items-start gap-2">
+                <code className="block min-w-0 flex-1 break-all rounded-lg bg-[var(--v2-surface-muted)] px-3 py-2 text-xs">
+                  {status.register_url}
+                </code>
+                <CopyRegisterUrlButton url={status.register_url} />
+              </div>)
             : (<p className="text-xs text-[var(--v2-text-muted)]">
                 {t("ironhub.link.agentUrlUnset")}
               </p>)}

@@ -9415,6 +9415,34 @@ async fn ironhub_shared_key_write_is_denied_without_the_operator_capability() {
     );
 }
 
+#[tokio::test]
+async fn ironhub_shared_key_clear_is_denied_without_the_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: false,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "a denied caller must never reach the product surface"
+    );
+}
+
 /// The IronHub link surface carries the deployment's shared key, so it follows
 /// the same rule as its operator siblings: a router built
 /// `without_operator_routes()` must not mount it at all, and a caller on such a

@@ -22,17 +22,28 @@ function panelSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { IronhubLinkPanel };`;
 }
 
-function renderPanel(query) {
+function renderPanel(query, options = {}) {
+  const captured = options.captured ?? {};
+  captured.mutations = [];
+  captured.sentKeys = [];
   const context = {
     Card() {},
     Button() {},
     Icon() {},
-    React: { useState: () => ["", () => {}] },
-    useQuery: () => query,
-    useMutation: () => ({ mutate: () => {}, isPending: false, error: null }),
+    React: { useState: () => [options.key ?? "", () => {}] },
+    useQuery: (queryOptions) => {
+      captured.query = queryOptions;
+      return query;
+    },
+    useMutation: (mutationOptions) => {
+      captured.mutations.push(mutationOptions);
+      return { mutate: () => {}, isPending: false, error: null };
+    },
     useQueryClient: () => ({ setQueryData: () => {} }),
     getIronhubLink: () => {},
-    setIronhubSharedKey: () => {},
+    setIronhubSharedKey: (value) => {
+      captured.sentKeys.push(value);
+    },
     clearIronhubSharedKey: () => {},
     globalThis: {},
     html(strings, ...values) {
@@ -176,8 +187,55 @@ test("the panel never renders key material", () => {
       register_url: "https://agent.example.com/api/ironhub/register",
       key_stored: true,
       key_active: true,
+      shared_key: "ihub_sk_TestSharedKey00000000000000000000",
     },
   });
   const text = renderedText(rendered).join(" ");
   assert.ok(!text.includes("ihub_sk_TestSharedKey"), "no key material may reach the DOM");
+});
+
+test("the shared key is trimmed before it reaches the API", () => {
+  const captured = {};
+  renderPanel(
+    {
+      isPending: false,
+      error: null,
+      data: {
+        register_url: "https://agent.example.com/api/ironhub/register",
+        key_stored: false,
+        key_active: false,
+      },
+    },
+    { captured, key: `  ${"k".repeat(40)}\n` },
+  );
+
+  const save = captured.mutations[0];
+  save.mutationFn();
+
+  assert.deepEqual(
+    captured.sentKeys,
+    ["k".repeat(40)],
+    "a pasted key with surrounding whitespace must be stored as the validated value",
+  );
+});
+
+test("the link query retries once and never retries a 403", () => {
+  const captured = {};
+  renderPanel(
+    {
+      isPending: false,
+      error: null,
+      data: {
+        register_url: "https://agent.example.com/api/ironhub/register",
+        key_stored: false,
+        key_active: false,
+      },
+    },
+    { captured },
+  );
+
+  const { retry } = captured.query;
+  assert.equal(retry(0, { status: 500 }), true, "the first failure retries");
+  assert.equal(retry(1, { status: 500 }), false, "a second failure gives up");
+  assert.equal(retry(0, { status: 403 }), false, "a non-operator is never retried");
 });
