@@ -169,7 +169,10 @@ use ironclaw_product_contracts::ironhub::{
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService,
 };
-use ironclaw_product_contracts::notification_inbox::NOTIFICATIONS_VIEW;
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID, NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
+    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
+};
 use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
@@ -14295,6 +14298,106 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_notifications::{
+        NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
+        NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
+        PublishNotificationRequest,
+    };
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("alias"),
+        VirtualPath::new("/engine/test/mutation-response").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let inbox = Arc::new(NotificationInboxStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
+    )));
+
+    let actor = caller();
+    let thread_id = ThreadId::new("thread-mutation-response").expect("thread");
+    inbox
+        .publish(PublishNotificationRequest {
+            id: NotificationId::new("notification-settled").expect("id"),
+            recipient: NotificationRecipient {
+                tenant_id: actor.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+            },
+            kind: NotificationKind::ApprovalRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: thread_id.clone(),
+                turn_run_id: None,
+                lifecycle_ref: None,
+            },
+            action: NotificationAction::OpenThread { thread_id },
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed a notification");
+
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_notification_inbox(inbox.clone());
+
+    async fn mark_read(services: &RebornServices) -> ProductNotificationMutationResponse {
+        let response = ProductSurface::invoke(
+            services,
+            caller(),
+            ProductSurfaceInvokeRequest {
+                operation_id: CapabilityId::new(NOTIFICATIONS_MARK_READ_COMMAND_ID)
+                    .expect("mark-read operation"),
+                input: serde_json::to_value(ProductNotificationMutationRequest {
+                    notification_id: "notification-settled".to_string(),
+                })
+                .expect("mutation input"),
+                activity_id: ActivityId::new(),
+            },
+        )
+        .await
+        .expect("mark-read succeeds");
+        serde_json::from_value(response.output).expect("mutation response")
+    }
+
+    // The command must report what the store changed. Answering `true` for the
+    // repeat would hand the client evidence of a durable write that never
+    // happened.
+    assert!(
+        mark_read(&services).await.updated,
+        "the first mark-read changes durable state"
+    );
+    assert!(
+        !mark_read(&services).await.updated,
+        "a notification that is already read reports no change"
+    );
+
+    let all_read = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID)
+                .expect("mark-all-read operation"),
+            input: serde_json::json!({}),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("mark-all-read succeeds");
+    let all_read: ProductNotificationMutationResponse =
+        serde_json::from_value(all_read.output).expect("mark-all-read response");
+    assert!(
+        !all_read.updated,
+        "nothing is unread, so mark-all-read reports no change"
+    );
 }
 
 #[tokio::test]

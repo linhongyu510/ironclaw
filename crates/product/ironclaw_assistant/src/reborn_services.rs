@@ -3015,25 +3015,35 @@ where
         // Terminal implementation of an authenticated ProductSurface command:
         // the recipient is always re-derived from the verified caller, never
         // accepted from the request body.
-        self.notification_inbox
+        // `updated` reports what the store actually changed. A repeated
+        // mark-read succeeds without changing anything, and answering `true`
+        // there would hand the client evidence of a durable write that never
+        // happened.
+        let outcome = self
+            .notification_inbox
             .mark_read(notification_mutation_request(&caller, request)?)
             .await
             .map_err(map_notification_inbox_error)?;
-        Ok(ProductNotificationMutationResponse { updated: true })
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
     }
 
     async fn mark_all_notifications_read(
         &self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
-        self.notification_inbox
+        let outcome = self
+            .notification_inbox
             .mark_all_read(MarkAllNotificationsReadRequest {
                 recipient: notification_recipient(&caller),
                 occurred_at: Utc::now(),
             })
             .await
             .map_err(map_notification_inbox_error)?;
-        Ok(ProductNotificationMutationResponse { updated: true })
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
     }
 
     async fn archive_notification(
@@ -3041,11 +3051,14 @@ where
         caller: ProductSurfaceCaller,
         request: ProductNotificationMutationRequest,
     ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
-        self.notification_inbox
+        let outcome = self
+            .notification_inbox
             .archive(notification_mutation_request(&caller, request)?)
             .await
             .map_err(map_notification_inbox_error)?;
-        Ok(ProductNotificationMutationResponse { updated: true })
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
     }
 
     /// Wire the generic channel-config configure port. Without it, the

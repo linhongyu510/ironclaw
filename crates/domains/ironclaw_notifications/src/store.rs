@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_INBOX_MAX_RECORDS,
     NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationMutationRequest, NotificationPage,
-    NotificationRecipient, NotificationRecord, NotificationSource, PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationMutationOutcome, NotificationMutationRequest,
+    NotificationPage, NotificationRecipient, NotificationRecord, NotificationSource,
+    PublishNotificationRequest,
 };
 
 const NOTIFICATION_INBOX_PATH: &str = "/notifications/inbox.json";
@@ -201,7 +202,7 @@ where
     async fn mark_read(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         mutate_notification(self, request, |record, occurred_at| {
             if record.read_at.is_some() {
                 return false;
@@ -215,7 +216,7 @@ where
     async fn mark_all_read(
         &self,
         request: MarkAllNotificationsReadRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         let scope = notification_resource_scope(&request.recipient);
         let path = notification_inbox_path()?;
         let recipient = request.recipient.clone();
@@ -235,7 +236,7 @@ where
                                 recipient,
                                 notifications: Vec::new(),
                             },
-                            (),
+                            NotificationMutationOutcome::AlreadySettled,
                         ));
                     };
                     validate_snapshot(&snapshot, &recipient)?;
@@ -250,9 +251,15 @@ where
                         }
                     }
                     if changed {
-                        Ok(CasApply::new(snapshot, ()))
+                        Ok(CasApply::new(
+                            snapshot,
+                            NotificationMutationOutcome::Applied,
+                        ))
                     } else {
-                        Ok(CasApply::no_op(snapshot, ()))
+                        Ok(CasApply::no_op(
+                            snapshot,
+                            NotificationMutationOutcome::AlreadySettled,
+                        ))
                     }
                 }
             },
@@ -264,7 +271,7 @@ where
     async fn resolve(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         mutate_notification(self, request, |record, occurred_at| {
             let occurred_at = occurred_at.max(record.created_at);
             if record.resolved_at.is_some() {
@@ -279,7 +286,7 @@ where
     async fn archive(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         mutate_notification(self, request, |record, occurred_at| {
             let occurred_at = occurred_at.max(record.created_at);
             if record.archived_at.is_some() {
@@ -296,7 +303,7 @@ async fn mutate_notification<F, M>(
     store: &NotificationInboxStore<F>,
     request: NotificationMutationRequest,
     mutation: M,
-) -> Result<(), NotificationInboxError>
+) -> Result<NotificationMutationOutcome, NotificationInboxError>
 where
     F: RootFilesystem,
     M: Fn(&mut NotificationRecord, DateTime<Utc>) -> bool + Send + Sync + Clone + 'static,
@@ -325,10 +332,16 @@ where
                     .find(|record| record.id == request.notification_id)
                     .ok_or(NotificationInboxError::NotificationNotFound)?;
                 if !mutation(record, request.occurred_at) {
-                    return Ok(CasApply::no_op(snapshot, ()));
+                    return Ok(CasApply::no_op(
+                        snapshot,
+                        NotificationMutationOutcome::AlreadySettled,
+                    ));
                 }
                 record.updated_at = record.updated_at.max(request.occurred_at);
-                Ok(CasApply::new(snapshot, ()))
+                Ok(CasApply::new(
+                    snapshot,
+                    NotificationMutationOutcome::Applied,
+                ))
             }
         },
     )
@@ -422,11 +435,16 @@ fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, Notifi
 
 /// Reclaim one slot from a full snapshot so a new event is never lost to the
 /// ceiling. Only a record the producer resolved *and* the recipient archived is
-/// eligible: it is terminal and already dismissed, so the sole stable-id reuse
-/// it can no longer absorb is a stale producer retry. An open record is never
-/// evicted — dropping one would lose an actionable gate, which is the very
-/// thing this inbox exists to deliver. Returns false when nothing is closed,
-/// leaving the write to fail rather than sacrificing live state.
+/// eligible; an open record is never evicted, because dropping one would lose
+/// an actionable gate, which is the very thing this inbox exists to deliver.
+/// Returns false when nothing is closed, leaving the write to fail rather than
+/// sacrificing live state.
+///
+/// Reclaiming ends deduplication for that id: the snapshot is the only record
+/// of it, so a later retry lands as a new record. The charter states the bound
+/// as the idempotency window for exactly this reason — widening it means
+/// persisting tombstones, which is a schema change with its own rollback
+/// review.
 fn evict_oldest_closed_record(snapshot: &mut NotificationInboxSnapshot) -> bool {
     let mut oldest: Option<(usize, DateTime<Utc>)> = None;
     for (index, record) in snapshot.notifications.iter().enumerate() {

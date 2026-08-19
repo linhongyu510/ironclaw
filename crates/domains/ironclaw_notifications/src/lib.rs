@@ -10,6 +10,7 @@ pub use types::{
     LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
     NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore,
     NotificationAction, NotificationId, NotificationInboxStorePort, NotificationKind,
-    NotificationMutationRequest, NotificationPage, NotificationRecipient, NotificationRecord,
-    NotificationSeverity, NotificationSource, PublishNotificationRequest,
+    NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
+    NotificationRecipient, NotificationRecord, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };

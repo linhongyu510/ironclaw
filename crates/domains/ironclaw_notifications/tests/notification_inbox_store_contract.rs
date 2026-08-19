@@ -19,8 +19,9 @@ use ironclaw_notifications::{
     LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
     NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore,
     NotificationAction, NotificationId, NotificationInboxError, NotificationInboxStore,
-    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
-    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationOutcome,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };
 use tokio::sync::Mutex;
 
@@ -384,6 +385,64 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
 }
 
 #[tokio::test]
+async fn a_repeated_mutation_reports_that_nothing_changed() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+    store
+        .publish(request("settled", 1_700_000_000))
+        .await
+        .expect("publish");
+    let mutation = NotificationMutationRequest {
+        recipient: recipient(),
+        notification_id: NotificationId::new("settled").expect("id"),
+        occurred_at: Utc.timestamp_opt(1_700_000_500, 0).single().expect("time"),
+    };
+
+    // The first call changes durable state; the repeat is a no-op inside CAS.
+    // Both succeed, so success alone cannot stand in for evidence of a write.
+    for (label, first, again) in [
+        (
+            "mark_read",
+            store.mark_read(mutation.clone()),
+            store.mark_read(mutation.clone()),
+        ),
+        (
+            "resolve",
+            store.resolve(mutation.clone()),
+            store.resolve(mutation.clone()),
+        ),
+        (
+            "archive",
+            store.archive(mutation.clone()),
+            store.archive(mutation.clone()),
+        ),
+    ] {
+        assert_eq!(
+            first.await.expect(label),
+            NotificationMutationOutcome::Applied,
+            "{label} changed durable state"
+        );
+        assert_eq!(
+            again.await.expect(label),
+            NotificationMutationOutcome::AlreadySettled,
+            "{label} repeated is reported as unchanged"
+        );
+    }
+
+    assert_eq!(
+        store
+            .mark_all_read(MarkAllNotificationsReadRequest {
+                recipient: recipient(),
+                occurred_at: Utc.timestamp_opt(1_700_001_000, 0).single().expect("time"),
+            })
+            .await
+            .expect("mark all read"),
+        NotificationMutationOutcome::AlreadySettled,
+        "nothing is unread, so mark-all-read reports no change"
+    );
+}
+
+#[tokio::test]
 async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
@@ -430,6 +489,87 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
         "the newest gate notification is the visible one"
     );
     assert_eq!(page.unread_count, 1, "only the new arrival is unread");
+
+    // Which record was reclaimed matters: dropping the newest closed record
+    // instead of the oldest would satisfy the capacity check just as well.
+    // The list is newest-first, so the oldest ids sit on the last page.
+    let mut ids = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list(ListNotificationsRequest {
+                recipient: recipient(),
+                limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                cursor,
+                include_archived: true,
+            })
+            .await
+            .expect("list including archived");
+        ids.extend(
+            page.notifications
+                .iter()
+                .map(|record| record.id.as_str().to_string()),
+        );
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert!(
+        !ids.iter().any(|id| id == "closed-0"),
+        "the oldest closed record is the one reclaimed"
+    );
+    assert!(
+        ids.iter().any(|id| id == "closed-1"),
+        "the next-oldest closed record survives"
+    );
+    assert_eq!(
+        ids.len(),
+        NOTIFICATION_INBOX_MAX_RECORDS,
+        "reclaiming keeps the snapshot at its bound rather than growing past it"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_for_a_reclaimed_id_is_a_new_record_not_a_duplicate() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+
+    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+        let id = format!("closed-{index}");
+        store
+            .publish(request(&id, 1_700_000_000 + index as i64))
+            .await
+            .expect("publish within capacity");
+        let mutation = NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: NotificationId::new(id.as_str()).expect("id"),
+            occurred_at: Utc
+                .timestamp_opt(1_700_500_000 + index as i64, 0)
+                .single()
+                .expect("time"),
+        };
+        store.resolve(mutation.clone()).await.expect("resolve");
+        store.archive(mutation).await.expect("archive");
+    }
+    store
+        .publish(request("gate-after-capacity", 1_800_000_000))
+        .await
+        .expect("reclaim");
+
+    // This is the acknowledged edge of the idempotency window, pinned so the
+    // behaviour is a decision rather than a surprise: `closed-0` left the
+    // snapshot, so a producer retry for it can no longer be recognised as a
+    // duplicate and lands as a fresh unread record.
+    let republished = store
+        .publish(request("closed-0", 1_800_000_001))
+        .await
+        .expect("a reclaimed id is publishable again");
+    assert!(
+        republished.read_at.is_none() && republished.archived_at.is_none(),
+        "the retry arrives as a new record, not the reclaimed one's lifecycle"
+    );
 }
 
 #[tokio::test]

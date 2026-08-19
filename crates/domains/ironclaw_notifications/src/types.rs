@@ -205,6 +205,22 @@ pub struct MarkAllNotificationsReadRequest {
     pub occurred_at: DateTime<Utc>,
 }
 
+/// Whether a mutation actually changed durable state. A repeated mark-read,
+/// resolve, or archive succeeds without changing anything, and a caller that
+/// reports success as a change would be inventing evidence the store never
+/// produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationMutationOutcome {
+    Applied,
+    AlreadySettled,
+}
+
+impl NotificationMutationOutcome {
+    pub fn applied(self) -> bool {
+        matches!(self, Self::Applied)
+    }
+}
+
 #[async_trait]
 pub trait NotificationInboxStorePort: Send + Sync {
     async fn publish(
@@ -220,22 +236,22 @@ pub trait NotificationInboxStorePort: Send + Sync {
     async fn mark_read(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError>;
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 
     async fn mark_all_read(
         &self,
         request: MarkAllNotificationsReadRequest,
-    ) -> Result<(), NotificationInboxError>;
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 
     async fn resolve(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError>;
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 
     async fn archive(
         &self,
         request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError>;
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 }
 
 #[derive(Debug, Default)]
@@ -260,28 +276,28 @@ impl NotificationInboxStorePort for NoopNotificationInboxStore {
     async fn mark_read(
         &self,
         _request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         Err(notification_store_unavailable())
     }
 
     async fn mark_all_read(
         &self,
         _request: MarkAllNotificationsReadRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         Err(notification_store_unavailable())
     }
 
     async fn resolve(
         &self,
         _request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         Err(notification_store_unavailable())
     }
 
     async fn archive(
         &self,
         _request: NotificationMutationRequest,
-    ) -> Result<(), NotificationInboxError> {
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         Err(notification_store_unavailable())
     }
 }
