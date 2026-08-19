@@ -445,7 +445,7 @@ mod bootstrap_tests {
             .expect("standalone bootstrap succeeds");
 
         assert!(
-            system_root.join("skills/code-review/SKILL.md").is_file(),
+            system_root.join("skills/coding/SKILL.md").is_file(),
             "bundled skills must be installed under system/skills"
         );
         assert!(
@@ -474,7 +474,7 @@ mod bootstrap_tests {
 
         assert!(error.to_string().contains("must not be a symlink"));
         assert!(
-            !outside_root.join("code-review").exists(),
+            !outside_root.join("coding").exists(),
             "a rejected skills-root symlink must not receive bundled content"
         );
     }
