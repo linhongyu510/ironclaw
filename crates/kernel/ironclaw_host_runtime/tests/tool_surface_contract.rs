@@ -913,6 +913,14 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             && trigger_goal_description.contains("without testing them during authoring"),
         "trigger_create goal schema should defer ordinary capability discovery to future fires"
     );
+    let trigger_policy_properties =
+        trigger_properties["execution_contract"]["properties"]["policy"]["properties"]
+            .as_object()
+            .expect("trigger policy properties");
+    assert!(
+        !trigger_policy_properties.contains_key("allowed_capability_ids"),
+        "model-authored triggers must not advertise future capability allowlists"
+    );
     assert!(
         !trigger_goal_description.contains("delivery_target_id"),
         "trigger_create goal schema must not reference the retired stored delivery target"

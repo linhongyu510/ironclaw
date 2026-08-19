@@ -142,7 +142,9 @@ fn trigger_create_description_bounds_authoring_preflight() {
         "create immediately",
         "do not execute",
         "do not guess",
+        "do not use shell as a fallback",
         "do not inspect environment secrets",
+        "do not call raw vendor apis",
         "future fire",
         "dynamically",
     ] {

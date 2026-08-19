@@ -1584,6 +1584,12 @@ fn replay_automation_preflight_outcomes() {
                         0,
                     )
                     .await;
+                    replay_automation_preflight(
+                        &AUTOMATION_PREFLIGHT_CUSTOM_TOOL_MISSING_TELEGRAM_SETUP,
+                        "needs_setup",
+                        0,
+                    )
+                    .await;
                 });
         })
         .expect("spawn automation preflight replay thread");

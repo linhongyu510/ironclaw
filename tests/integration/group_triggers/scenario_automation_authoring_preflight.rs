@@ -5,9 +5,9 @@ use super::reborn_support::assertions::ToolErrorClass;
 use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_triggers::TriggerSchedule;
 use serde_json::json;
 
-const ONCE_AT: &str = "2999-01-01T00:00:00";
 const READY_NAME: &str = "x-releases deployment status";
 const SLACK_TARGET: &str = "slack:channel:x-releases";
 const TARGETS_LIST: &str = "builtin.outbound_delivery_targets_list";
@@ -34,7 +34,7 @@ async fn ready_named_slack_channel(g: &RebornIntegrationGroup) -> HarnessResult<
                     "execution_contract": super::support::trigger_execution_contract(format!(
                         "Check deployment status, then deliver the summary with builtin__outbound_deliver to {SLACK_TARGET}"
                     )),
-                    "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
+                    "schedule": {"kind": "cron", "expression": "0 9 * * *", "timezone": "UTC"},
                 }),
             ),
             RebornScriptedReply::text("ready: created the deployment status routine"),
@@ -42,7 +42,7 @@ async fn ready_named_slack_channel(g: &RebornIntegrationGroup) -> HarnessResult<
         .build()
         .await?;
 
-    h.submit_turn("Every day, post deployment status in #x-releases")
+    h.submit_turn("Every day at 9 UTC, post deployment status in #x-releases")
         .await?;
     assert_authoring_contract_reached_model(&h)?;
     h.assert_reply_contains("ready:").await?;
@@ -69,6 +69,18 @@ async fn ready_named_slack_channel(g: &RebornIntegrationGroup) -> HarnessResult<
         return Err(
             format!("created trigger did not pin the resolved destination: {record:#?}").into(),
         );
+    }
+    match &record.schedule {
+        TriggerSchedule::Cron {
+            expression,
+            timezone,
+        } if expression == "0 9 * * *" && timezone == "UTC" => {}
+        schedule => {
+            return Err(format!(
+                "daily authoring must persist its recurring schedule: {schedule:#?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -198,7 +210,12 @@ fn assert_authoring_contract_reached_model(h: &RebornIntegrationHarness) -> Harn
     let properties = definition.parameters["properties"]
         .as_object()
         .ok_or("trigger_create parameters omitted properties")?;
-    if properties.contains_key("capability_ids") || properties.contains_key("capability_allowlist")
+    let policy_properties = properties["execution_contract"]["properties"]["policy"]["properties"]
+        .as_object()
+        .ok_or("trigger_create parameters omitted execution policy properties")?;
+    if policy_properties.contains_key("allowed_capability_ids")
+        || policy_properties.contains_key("capability_ids")
+        || policy_properties.contains_key("capability_allowlist")
     {
         return Err("authoring must not pin future capability ids or allowlists".into());
     }
