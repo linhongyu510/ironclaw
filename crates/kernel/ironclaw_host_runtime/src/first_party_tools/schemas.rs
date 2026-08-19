@@ -933,7 +933,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
-            "description": "Create a scheduled trigger from a structured execution contract. Existing stored legacy prompts remain runnable, but new triggers must use `execution_contract`.",
+            "description": "Create a scheduled trigger from a structured execution contract after bounded authoring preflight. Create immediately when schedule, contract, and persistence-critical destinations are complete; do not execute or test future work. Missing setup ends with one actionable setup instruction, and a missing essential value ends with one concise question. Existing stored legacy prompts remain runnable, but new triggers must use `execution_contract`.",
             "properties": {
                 "name": {
                     "type": "string",
@@ -947,7 +947,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "goal": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "The complete task for a future run with no memory of this conversation. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings; write requested integration reads or user-authorized actions into this goal explicitly. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
+                            "description": "The complete task for a future run with no memory of this conversation. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Those ordinary capabilities are discovered dynamically by the future fire; write requested integration reads or user-authorized actions into this goal explicitly without testing them during authoring. Include explicit external-delivery steps using builtin__outbound_deliver and target ids selected now from builtin__outbound_delivery_targets_list. A bare send-me request from the web app needs no external-delivery step; the final reply is recorded in the run thread."
                         },
                         "success_criteria": {
                             "type": "array", "minItems": 1, "maxItems": 32,
