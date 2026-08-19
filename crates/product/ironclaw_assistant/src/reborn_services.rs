@@ -1566,7 +1566,11 @@ fn map_notification_inbox_error(
     error: ironclaw_notifications::NotificationInboxError,
 ) -> ProductSurfaceError {
     match error {
-        ironclaw_notifications::NotificationInboxError::InvalidRequest { .. } => {
+        // Unlike the backend and serialization reasons below, this one is a
+        // fixed literal from this crate — never backend text — so it is safe to
+        // record before the boundary sanitizes the client-facing error.
+        ironclaw_notifications::NotificationInboxError::InvalidRequest { reason } => {
+            tracing::warn!(%reason, "notification inbox rejected a request at the product boundary");
             ProductSurfaceError::validation(
                 "notification",
                 ProductSurfaceValidationCode::InvalidValue,

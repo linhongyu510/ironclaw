@@ -109,7 +109,9 @@ where
                         let record = existing.clone();
                         return Ok(CasApply::no_op(snapshot, record));
                     }
-                    if snapshot.notifications.len() >= NOTIFICATION_INBOX_MAX_RECORDS {
+                    if snapshot.notifications.len() >= NOTIFICATION_INBOX_MAX_RECORDS
+                        && !evict_oldest_closed_record(&mut snapshot)
+                    {
                         return Err(NotificationInboxError::InvalidRequest {
                             reason: "notification inbox is at capacity",
                         });
@@ -416,6 +418,36 @@ fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, Notifi
             tenant_id_index_key()?,
             tenant_id_index_value(&snapshot.recipient),
         ))
+}
+
+/// Reclaim one slot from a full snapshot so a new event is never lost to the
+/// ceiling. Only a record the producer resolved *and* the recipient archived is
+/// eligible: it is terminal and already dismissed, so the sole stable-id reuse
+/// it can no longer absorb is a stale producer retry. An open record is never
+/// evicted — dropping one would lose an actionable gate, which is the very
+/// thing this inbox exists to deliver. Returns false when nothing is closed,
+/// leaving the write to fail rather than sacrificing live state.
+fn evict_oldest_closed_record(snapshot: &mut NotificationInboxSnapshot) -> bool {
+    let mut oldest: Option<(usize, DateTime<Utc>)> = None;
+    for (index, record) in snapshot.notifications.iter().enumerate() {
+        if record.archived_at.is_none() || record.resolved_at.is_none() {
+            continue;
+        }
+        let is_older = match oldest {
+            Some((_, created_at)) => record.created_at < created_at,
+            None => true,
+        };
+        if is_older {
+            oldest = Some((index, record.created_at));
+        }
+    }
+    match oldest {
+        Some((index, _)) => {
+            snapshot.notifications.remove(index);
+            true
+        }
+        None => false,
+    }
 }
 
 fn tenant_id_index_key() -> Result<IndexKey, NotificationInboxError> {

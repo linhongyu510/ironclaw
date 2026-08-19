@@ -384,6 +384,108 @@ async fn notification_inbox_enforces_limits_and_bounds_cas_retries() {
 }
 
 #[tokio::test]
+async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+
+    // Fill to capacity, then close every record the way a user who worked
+    // through the inbox would: resolved by the producer, archived by the user.
+    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+        let id = format!("closed-{index}");
+        store
+            .publish(request(&id, 1_700_000_000 + index as i64))
+            .await
+            .expect("publish within capacity");
+        let mutation = NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: NotificationId::new(id.as_str()).expect("id"),
+            occurred_at: Utc
+                .timestamp_opt(1_700_500_000 + index as i64, 0)
+                .single()
+                .expect("time"),
+        };
+        store.resolve(mutation.clone()).await.expect("resolve");
+        store.archive(mutation).await.expect("archive");
+    }
+
+    let arrival = request("gate-after-capacity", 1_800_000_000);
+    let arrival_id = arrival.id.clone();
+    store
+        .publish(arrival)
+        .await
+        .expect("a closed record is evicted so the newest gate still arrives");
+
+    let page = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 1,
+            cursor: None,
+            include_archived: false,
+        })
+        .await
+        .expect("list");
+    assert_eq!(
+        page.notifications.first().map(|record| record.id.clone()),
+        Some(arrival_id),
+        "the newest gate notification is the visible one"
+    );
+    assert_eq!(page.unread_count, 1, "only the new arrival is unread");
+}
+
+#[tokio::test]
+async fn a_full_inbox_of_open_records_still_refuses_rather_than_dropping_one() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+
+    // Nothing is archived, so there is no closed record to reclaim. Refusing is
+    // correct here: evicting an open record would lose an actionable gate.
+    for index in 0..NOTIFICATION_INBOX_MAX_RECORDS {
+        store
+            .publish(request(
+                &format!("open-{index}"),
+                1_700_000_000 + index as i64,
+            ))
+            .await
+            .expect("publish within capacity");
+    }
+
+    assert!(matches!(
+        store.publish(request("overflow", 1_800_000_000)).await,
+        Err(NotificationInboxError::InvalidRequest { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_notification_cannot_point_its_action_at_another_thread() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)));
+
+    let mut mismatched = request("action-mismatch", 1_700_000_000);
+    mismatched.action = NotificationAction::OpenThread {
+        thread_id: ThreadId::new("thread-somebody-else").expect("thread"),
+    };
+    assert!(
+        matches!(
+            store.publish(mismatched).await,
+            Err(NotificationInboxError::InvalidRequest { .. })
+        ),
+        "an action thread that differs from the source thread is rejected"
+    );
+}
+
+#[tokio::test]
+async fn a_lifecycle_reference_is_bounded_and_free_of_control_characters() {
+    assert!(LifecycleRef::new("gate-1").is_ok());
+    assert!(LifecycleRef::new(String::new()).is_err(), "empty");
+    assert!(LifecycleRef::new("gate\n1").is_err(), "control character");
+    assert!(LifecycleRef::new("x".repeat(512)).is_ok(), "at the bound");
+    assert!(
+        LifecycleRef::new("x".repeat(513)).is_err(),
+        "past the bound"
+    );
+}
+
+#[tokio::test]
 async fn notification_inbox_persists_across_libsql_reopen() {
     let directory = tempfile::tempdir().expect("temporary libSQL directory");
     let database_path = directory.path().join("notification-inbox.db");
