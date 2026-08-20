@@ -18,6 +18,9 @@
 use std::{collections::BTreeSet, path::Path as FsPath};
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
+use ironclaw_host_api::artifact::{
+    ArtifactAccessError, ArtifactReadTarget, ArtifactRef, ArtifactSelector,
+};
 use serde_json::Value;
 
 use super::super::config::{GREP_MAX_TOTAL_BYTES, MAX_READ_SIZE, MAX_VISITED_ENTRIES};
@@ -29,6 +32,21 @@ use super::{
     filesystem_denied, input_error, read_limit_exceeded, resolve_input_path,
     workspace_virtual_root,
 };
+
+/// Scheme of the durable tool-output artifacts `read` already resolves.
+///
+/// The pinned `grep` accepts internal URLs as search inputs
+/// (`parsePathSpecs`: "Internal URLs (`artifact://`, `skill://`, …) use the
+/// URL-aware splitter"), searching the whole resource and honoring any embedded
+/// line range as a match filter. Only `artifact://` is wired here because it is
+/// the only internal scheme this port resolves; the others remain the later
+/// slice this module's header describes.
+const ARTIFACT_SCHEME: &str = "artifact://";
+
+pub(super) fn is_artifact_url(path: &str) -> bool {
+    path.len() > ARTIFACT_SCHEME.len()
+        && path[..ARTIFACT_SCHEME.len()].eq_ignore_ascii_case(ARTIFACT_SCHEME)
+}
 
 const DEFAULT_FILE_LIMIT: usize = 20;
 const MULTI_FILE_PER_FILE_MATCHES: usize = 20;
@@ -123,6 +141,30 @@ pub(crate) async fn grep(
         let (path_part, sel) = split_path_and_sel(entry);
         let mut clean = path_part.to_string();
         let mut ranges: Option<Vec<LineRange>> = None;
+        if is_artifact_url(path_part) {
+            // Upstream accepts a selector on an internal URL and searches the
+            // whole resource, keeping any line range as a match filter. The
+            // verbatim/index display modes (`raw`, `conflicts`) carry no meaning
+            // for content search, so they are accepted and ignored rather than
+            // rejected the way a filesystem path rejects them.
+            if let Some(sel) = sel {
+                match parse_line_ranges(sel) {
+                    Ok(parsed) => ranges = parsed,
+                    Err(message) => {
+                        return Err(coding_error(
+                            CodingEngineErrorKind::InvalidSelector,
+                            message,
+                        ));
+                    }
+                }
+            }
+            specs.push(PathSpec {
+                original: entry.clone(),
+                clean,
+                ranges,
+            });
+            continue;
+        }
         if let Some(sel) = sel {
             if literal_exists(ctx, entry).await? {
                 clean = entry.clone();
@@ -161,6 +203,13 @@ pub(crate) async fn grep(
         });
     }
 
+    // Internal-URL targets carry no filesystem path, so they are searched on
+    // their own reader and never enter scope resolution, the line-range file
+    // check, or the missing-path accounting below.
+    let (artifact_specs, specs): (Vec<PathSpec>, Vec<PathSpec>) = specs
+        .into_iter()
+        .partition(|spec| is_artifact_url(&spec.clean));
+
     // Line-range selector targets must be single existing FILES (pinned
     // grep: the per-spec range check runs before generic path-missing
     // handling, so `gone.rs:1-5` reports the line-range message).
@@ -197,7 +246,9 @@ pub(crate) async fn grep(
     let mut missing_paths: Vec<String> = Vec::new();
     let mut resolved_targets: Vec<(String, Option<String>)> = Vec::new(); // (virtual path, glob)
     let mut is_directory = false;
-    if specs.len() == 1 {
+    if specs.is_empty() {
+        // Artifact-only search: there is no workspace scope to resolve.
+    } else if specs.len() == 1 {
         let spec = &specs[0];
         let (base_path, glob_filter, has_glob) = parse_search_path(&spec.clean);
         let Ok(resolved) = resolve_input_path(ctx, &base_path, FilesystemOperation::ReadFile)
@@ -263,7 +314,7 @@ pub(crate) async fn grep(
     // Line-range selector targets are validated above (before scope
     // resolution) so missing paths surface the pinned line-range message.
 
-    let is_multi_scope = resolved_targets.len() > 1 || is_directory;
+    let is_multi_scope = resolved_targets.len() + artifact_specs.len() > 1 || is_directory;
     let per_file_match_cap = if is_multi_scope {
         MULTI_FILE_PER_FILE_MATCHES
     } else {
@@ -310,6 +361,10 @@ pub(crate) async fn grep(
             .await?;
             all_hits.extend(hits);
         }
+    }
+    for spec in &artifact_specs {
+        let hits = search_artifact(ctx, spec, &compiled, &mut budget).await?;
+        all_hits.push(hits);
     }
     all_hits.sort_by(|a, b| a.display_path.cmp(&b.display_path));
 
@@ -442,6 +497,10 @@ pub(crate) async fn grep(
             }
             if let Some(tag) = &hits.snapshot_tag {
                 output_lines.push(format_hashline_header(&hits.display_path, tag));
+            } else if is_artifact_url(&hits.display_path) {
+                // Name the resource without offering an edit anchor: artifacts
+                // are immutable, so there is no snapshot tag to hand back.
+                output_lines.push(format!("[{}]", hits.display_path));
             }
             output_lines.extend(render_hits(hits));
         }
@@ -744,6 +803,34 @@ async fn search_file(
             break;
         }
     }
+    let hits = scan_lines(&text, compiled, ranges.as_deref());
+    let snapshot_tag = if hits.is_empty() {
+        None
+    } else {
+        let normalized = super::hashline::normalize_to_lf(&text);
+        Some(ctx.snapshots.record_and_return(
+            &CodingScopeKey::from_scope(&ctx.scope, ctx.run_id),
+            virtual_path.as_str(),
+            &normalized,
+        ))
+    };
+    Ok(FileHits {
+        display_path: display,
+        snapshot_tag,
+        lines: hits,
+    })
+}
+
+/// Scan one resource's text for matches plus the pinned context windows.
+///
+/// Shared by the filesystem and artifact search paths so both render identical
+/// match/context/gap rows: `grep.contextBefore` = 1, `grep.contextAfter` = 3,
+/// a `...` row at every gap, and an optional line-range match filter.
+fn scan_lines(
+    text: &str,
+    compiled: &regex::Regex,
+    ranges: Option<&[LineRange]>,
+) -> Vec<(u64, String, bool)> {
     let lines: Vec<&str> = text.split('\n').collect();
     // Precompute match positions so context detection is linear.
     let match_lines: BTreeSet<u64> = lines
@@ -756,7 +843,7 @@ async fn search_file(
     let mut last_emitted: Option<u64> = None;
     for (index, line) in lines.iter().enumerate() {
         let line_number = index as u64 + 1;
-        if let Some(ranges) = &ranges
+        if let Some(ranges) = ranges
             && !line_in_ranges(line_number, ranges)
         {
             continue;
@@ -786,20 +873,82 @@ async fn search_file(
         hits.push((line_number, (*line).to_string(), is_match));
         last_emitted = Some(line_number);
     }
-    let snapshot_tag = if hits.is_empty() {
-        None
-    } else {
-        let normalized = super::hashline::normalize_to_lf(&text);
-        Some(ctx.snapshots.record_and_return(
-            &CodingScopeKey::from_scope(&ctx.scope, ctx.run_id),
-            virtual_path.as_str(),
-            &normalized,
-        ))
-    };
+    hits
+}
+
+/// Search one durable tool-output artifact.
+///
+/// The pinned grep resolves internal URLs through its router and searches the
+/// whole resource, keeping any embedded line range as a match filter. Artifacts
+/// are immutable and have no workspace path, so no Hashline snapshot is
+/// recorded: an artifact is not editable, and handing back an edit anchor for
+/// one would invite a stale-anchor edit against a file that never existed.
+async fn search_artifact(
+    ctx: &CodingEngineContext,
+    spec: &PathSpec,
+    compiled: &regex::Regex,
+    budget: &mut GrepBudget,
+) -> Result<FileHits, CodingEngineError> {
+    let artifact_ref = spec
+        .clean
+        .parse::<ArtifactRef>()
+        .map_err(|error| coding_error(CodingEngineErrorKind::PathResolution, error.to_string()))?;
+    let reader = ctx.artifact_reader.as_ref().ok_or_else(|| {
+        coding_error(
+            CodingEngineErrorKind::Filesystem,
+            "No session - artifacts unavailable".to_string(),
+        )
+    })?;
+    // Same budget the bare `read` of an artifact uses, so a searchable window
+    // is the same size as a readable one.
+    let max_output_bytes = (super::read::DEFAULT_MAX_BYTES as u64)
+        .max(super::read::DEFAULT_MAX_LINES * super::read::BYTES_PER_LINE_BUDGET as u64);
+    let chunk = reader
+        .read(ArtifactReadTarget {
+            artifact_id: artifact_ref.id(),
+            selector: ArtifactSelector::Full,
+            max_output_bytes,
+        })
+        .await
+        .map_err(|error| {
+            let message = if error == ArtifactAccessError::OversizedUnsliced {
+                format!(
+                    "Artifact {} exceeds the search limit. Narrow it with a line range such as {}:1-2000, or read it in windows.",
+                    artifact_ref.id().get(),
+                    spec.clean
+                )
+            } else {
+                error.to_string()
+            };
+            coding_error(CodingEngineErrorKind::Filesystem, message)
+        })?
+        .ok_or_else(|| {
+            coding_error(
+                CodingEngineErrorKind::PathNotFound,
+                format!("Path not found: {}", spec.clean),
+            )
+        })?;
+    let next_total = budget.bytes_scanned.saturating_add(chunk.total_bytes);
+    if next_total > GREP_MAX_TOTAL_BYTES {
+        return Err(coding_error(
+            CodingEngineErrorKind::ResourceLimit,
+            "workspace grep exceeds the aggregate read limit",
+        ));
+    }
+    budget.bytes_scanned = next_total;
+    let text = String::from_utf8(chunk.content).map_err(|_| {
+        coding_error(
+            CodingEngineErrorKind::Filesystem,
+            format!(
+                "[Cannot search binary artifact '{}'; binary bytes cannot be returned in JSON output.]",
+                spec.clean
+            ),
+        )
+    })?;
     Ok(FileHits {
-        display_path: display,
-        snapshot_tag,
-        lines: hits,
+        display_path: spec.clean.clone(),
+        snapshot_tag: None,
+        lines: scan_lines(&text, compiled, spec.ranges.as_deref()),
     })
 }
 
@@ -970,6 +1119,88 @@ mod tests {
         assert_eq!(
             rows,
             vec![" 1:fn main() {}", "*2:match x {", "...", "*10:// tail"]
+        );
+    }
+
+    /// The selector splitter must not mistake an `artifact://N` authority for a
+    /// selector, and must still peel a real range off one.
+    #[test]
+    fn split_path_and_sel_keeps_artifact_urls_intact() {
+        assert_eq!(
+            split_path_and_sel("artifact://3"),
+            ("artifact://3", None),
+            "the scheme's own colon is not a selector"
+        );
+        assert_eq!(
+            split_path_and_sel("artifact://3:100-200"),
+            ("artifact://3", Some("100-200"))
+        );
+        assert_eq!(
+            split_path_and_sel("artifact://12:raw"),
+            ("artifact://12", Some("raw"))
+        );
+    }
+
+    #[test]
+    fn artifact_urls_are_recognized_case_insensitively() {
+        assert!(is_artifact_url("artifact://0"));
+        assert!(is_artifact_url("ARTIFACT://0"));
+        assert!(
+            !is_artifact_url("artifact://"),
+            "a scheme alone is not a ref"
+        );
+        assert!(!is_artifact_url("/workspace/artifact://0"));
+        assert!(!is_artifact_url("skill://fix-ci"));
+    }
+
+    /// Both search paths share one scanner, so an artifact renders the same
+    /// match/context/gap rows a file does.
+    #[test]
+    fn scan_lines_honors_ranges_and_context() {
+        let text = (1..=40)
+            .map(|n| {
+                if n == 20 {
+                    "needle\n".to_string()
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect::<String>();
+        let compiled = regex::Regex::new("needle").expect("regex");
+
+        let all = scan_lines(&text, &compiled, None);
+        let matched: Vec<u64> = all
+            .iter()
+            .filter(|(_, _, is_match)| *is_match)
+            .map(|(line, _, _)| *line)
+            .collect();
+        assert_eq!(matched, vec![20], "the single match is found");
+        assert!(
+            all.iter().any(|(line, _, _)| *line == 19),
+            "contextBefore=1 emits the preceding line"
+        );
+        assert!(
+            all.iter().any(|(line, _, _)| *line == 23),
+            "contextAfter=3 emits the third following line"
+        );
+        assert!(
+            !all.iter().any(|(line, _, _)| *line == 24),
+            "contextAfter stops at 3"
+        );
+
+        // An embedded line range is a match filter, not a re-numbering.
+        let filtered = scan_lines(
+            &text,
+            &compiled,
+            Some(&[LineRange {
+                start_line: 1,
+                end_line: Some(10),
+                open_ended: false,
+            }]),
+        );
+        assert!(
+            filtered.iter().all(|(_, _, is_match)| !*is_match),
+            "a range that excludes the match yields no match rows"
         );
     }
 }

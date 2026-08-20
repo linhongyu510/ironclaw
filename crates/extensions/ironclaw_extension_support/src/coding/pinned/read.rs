@@ -37,15 +37,15 @@ use super::{
 };
 
 /// Pinned `DEFAULT_MAX_LINES` (session/streaming-output.ts).
-const DEFAULT_MAX_LINES: u64 = 3000;
+pub(super) const DEFAULT_MAX_LINES: u64 = 3000;
 /// Pinned `DEFAULT_MAX_BYTES` (session/streaming-output.ts: 50KB).
-const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+pub(super) const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 /// `read.defaultLimit` for the issue #7392 target context: the rendered
 /// read prompt pins `DEFAULT_LIMIT: "3000"` (read.defaultLimit unset ->
 /// DEFAULT_MAX_LINES).
 const DEFAULT_LIMIT: u64 = 3000;
 /// Assumed bytes per line when scaling the byte budget with the line limit.
-const BYTES_PER_LINE_BUDGET: usize = 512;
+pub(super) const BYTES_PER_LINE_BUDGET: usize = 512;
 
 /// `formatBytes` from the pinned `packages/utils/src/format.ts`.
 fn format_bytes(bytes: u64) -> String {

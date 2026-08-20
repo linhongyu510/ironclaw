@@ -619,6 +619,149 @@ async fn read_artifact_bare_read_uses_3000_line_budget() {
     );
 }
 
+/// Regression (PinchBench): `grep` over a spilled artifact must search it, not
+/// report the URL as a missing filesystem path.
+///
+/// The model learns the `artifact://N` scheme from `read` — every spilled
+/// preview hands it one — and then reasonably searches inside it. All 14 such
+/// grep calls in the run failed with `Path not found: artifact://N`, because the
+/// engine resolved the URL against the workspace. The pinned grep accepts
+/// internal URLs as search inputs (`parsePathSpecs` names `artifact://`
+/// explicitly) and searches the whole resource.
+#[tokio::test]
+async fn grep_searches_a_spilled_artifact() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(GrepArtifactReader));
+
+    let result = ironclaw_extension_support::coding::pinned::grep(
+        &context,
+        json!({ "pattern": "needle", "path": "artifact://7" }),
+    )
+    .await
+    .expect("grep resolves an artifact URL");
+
+    let text = output(result);
+    assert!(
+        text.contains("artifact://7"),
+        "the artifact URL is the display path: {text}"
+    );
+    assert!(text.contains("needle"), "the match is reported: {text}");
+    assert!(
+        !text.contains("Path not found"),
+        "an artifact URL is not a missing workspace path: {text}"
+    );
+}
+
+/// An embedded line range is a match filter over the same resource, per the
+/// pinned comment ("still honor any embedded line range as a match filter").
+#[tokio::test]
+async fn grep_artifact_line_range_filters_matches() {
+    let fixture = Fixture::new();
+    let mut context = fixture.ctx();
+    context.artifact_reader = Some(Arc::new(GrepArtifactReader));
+
+    let excluded = ironclaw_extension_support::coding::pinned::grep(
+        &context,
+        json!({ "pattern": "needle", "path": "artifact://7:1-3" }),
+    )
+    .await
+    .expect("grep accepts a selector on an artifact URL");
+    assert!(
+        !output(excluded).contains("*5:"),
+        "a range that excludes the match reports no match row"
+    );
+
+    let included = ironclaw_extension_support::coding::pinned::grep(
+        &context,
+        json!({ "pattern": "needle", "path": "artifact://7:4-8" }),
+    )
+    .await
+    .expect("grep accepts a selector on an artifact URL");
+    assert!(
+        output(included).contains("needle"),
+        "a range that covers the match reports it"
+    );
+}
+
+/// Without a reader the failure must name the missing session rather than
+/// claiming the path does not exist.
+#[tokio::test]
+async fn grep_artifact_without_a_reader_reports_no_session() {
+    let fixture = Fixture::new();
+    let context = fixture.ctx();
+
+    let error = ironclaw_extension_support::coding::pinned::grep(
+        &context,
+        json!({ "pattern": "needle", "path": "artifact://7" }),
+    )
+    .await
+    .expect_err("no artifact reader is configured");
+    assert!(
+        error_message(&error).contains("artifacts unavailable"),
+        "unexpected error: {}",
+        error_message(&error)
+    );
+}
+
+struct GrepArtifactReader;
+
+#[async_trait]
+impl ScopedArtifactReader for GrepArtifactReader {
+    async fn read(
+        &self,
+        target: ArtifactReadTarget,
+    ) -> Result<Option<ArtifactReadChunk>, ArtifactAccessError> {
+        assert_eq!(
+            target.selector,
+            ArtifactSelector::Full,
+            "grep searches the whole resource and filters by range itself"
+        );
+        let content: String = (1..=8)
+            .map(|n| {
+                if n == 5 {
+                    "needle here\n".to_string()
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect();
+        let byte_len = content.len() as u64;
+        Ok(Some(ArtifactReadChunk {
+            content: content.into_bytes(),
+            content_type: "text/plain".to_string(),
+            total_bytes: byte_len,
+            total_lines: Some(8),
+            complete: true,
+        }))
+    }
+}
+
+/// `glob` has nothing to walk inside an immutable blob, so it must say that
+/// and point at the tools that do, rather than resolving the URL against the
+/// workspace and reporting a missing path.
+#[tokio::test]
+async fn glob_rejects_an_artifact_url_with_actionable_guidance() {
+    let fixture = Fixture::new();
+    let context = fixture.ctx();
+
+    let error = ironclaw_extension_support::coding::pinned::glob(
+        &context,
+        json!({ "path": "artifact://7" }),
+    )
+    .await
+    .expect_err("glob does not walk artifacts");
+    let message = error_message(&error);
+    assert!(
+        message.contains("not supported for internal URLs"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("grep") && message.contains("read"),
+        "the error must name the tools that do handle it: {message}"
+    );
+}
+
 /// Regression: a bare read of an artifact with more than 3000 lines renders
 /// the first 3000 and tells the model how to continue.
 #[tokio::test]

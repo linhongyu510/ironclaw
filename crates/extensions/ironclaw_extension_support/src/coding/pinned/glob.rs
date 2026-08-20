@@ -63,6 +63,22 @@ pub(crate) async fn glob(
         ));
     }
 
+    // Upstream `glob` routes internal URLs through its router but rejects glob
+    // metacharacters on them outright (`Glob patterns are not supported for
+    // internal URLs`, memory:// excepted). An artifact is one immutable blob,
+    // not a tree, so there is nothing to walk — say so instead of resolving the
+    // URL against the workspace and reporting a missing path.
+    for pattern in &raw_patterns {
+        if super::grep::is_artifact_url(pattern) {
+            return Err(coding_error(
+                CodingEngineErrorKind::Input,
+                format!(
+                    "Glob patterns are not supported for internal URLs: {pattern}. Use `read {pattern}` to inspect it, or `grep` to search it."
+                ),
+            ));
+        }
+    }
+
     let requested_limit = limit.unwrap_or(DEFAULT_LIMIT as f64);
     if !requested_limit.is_finite() || requested_limit <= 0.0 {
         return Err(coding_error(
