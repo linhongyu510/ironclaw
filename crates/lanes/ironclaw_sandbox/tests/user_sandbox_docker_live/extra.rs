@@ -521,6 +521,23 @@ async fn idle_stop_suspends_egress_and_preserves_the_private_network() {
     let retained_private_network = managed_network_ids(&user);
     assert_eq!(retained_private_network.len(), 1);
     assert!(initial_networks.contains(&retained_private_network[0]));
+    let audit_dir = temp
+        .path()
+        .join("sandbox-workspaces")
+        .join(".managed-egress")
+        .join("audit");
+    let preserved_audit = std::fs::read_dir(&audit_dir)
+        .expect("suspension preserves a proxy audit directory")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        });
+    assert!(
+        preserved_audit,
+        "proxy audit records must survive idle suspension"
+    );
 
     let resumed = transport
         .run_command(request(user.resource_scope(), "echo RECREATED_BUNDLE"))

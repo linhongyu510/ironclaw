@@ -96,6 +96,14 @@ if ! docker network inspect "$network" >/dev/null 2>&1; then
   fi
 fi
 
+mkdir -p "$material/audit"
+audit_log="$material/audit/proxy.log"
+if docker inspect "$proxy" >/dev/null 2>&1; then
+  if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
+    mv "$audit_log" "$audit_log.1"
+  fi
+  docker logs --timestamps "$proxy" 2>&1 | tail -c 4194304 >> "$audit_log" || true
+fi
 docker rm --force "$proxy" >/dev/null 2>&1 || true
 if docker network inspect "$upstream" >/dev/null 2>&1; then
   internal=$(docker network inspect --format '{{.Internal}}' "$upstream")

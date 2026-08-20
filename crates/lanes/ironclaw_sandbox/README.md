@@ -92,7 +92,11 @@ address, so other proxies on the shared network cannot use its allowlist or
 attribution identity. The proxy applies the configured hostname allowlist,
 rejects private-address destinations, preserves end-to-end TLS with SNI
 inspection, and writes a request audit trail correlated to the capability
-invocation. The local runtime resolves the proxy by immutable digest and pulls
+invocation. Before any managed proxy container is removed — idle suspension,
+retention, recycling, rollback, or orphan reconciliation — its structured
+request audit log is drained into a bounded per-proxy file under the
+managed-egress `audit/` directory, so egress evidence survives the container.
+The local runtime resolves the proxy by immutable digest and pulls
 an absent public image before startup. Workers address the proxy by its stable
 per-user container name; transient Docker subnet addresses do not enter the
 persistent worker's compatibility stamp. Railway preview sandboxes retain a

@@ -11,7 +11,7 @@ use bollard::{
     Docker,
     container::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
-        NetworkingConfig, RemoveContainerOptions, StartContainerOptions,
+        LogsOptions, NetworkingConfig, RemoveContainerOptions, StartContainerOptions,
     },
     image::CreateImageOptions,
     models::{
@@ -44,6 +44,8 @@ const SHARED_UPSTREAM_ROLE: &str = "shared-proxy-upstream-v1";
 const ISOLATED_GATEWAY_OPTION: &str = "com.docker.network.bridge.gateway_mode_ipv4";
 const ISOLATED_GATEWAY_MODE: &str = "isolated";
 const PROXY_TUNNEL_PORT: u16 = 3128;
+const PROXY_AUDIT_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+const PROXY_AUDIT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 /// Mirrors `ironclaw_network::is_private_or_loopback_ip`: every range that
 /// classifier rejects must appear here so an allowlisted hostname resolving
 /// into a non-public address is denied by the proxy exactly as the canonical
@@ -291,6 +293,8 @@ impl ManagedEgressRuntime {
             }
             ManagedNetworkStatus::Incompatible => {
                 remove_user_container_if_present(docker, &key.container_name()).await?;
+                self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+                    .await?;
                 remove_proxy_if_present(docker, &proxy_name).await?;
                 remove_network_if_present(docker, &network_name).await?;
                 create_bridge_network(docker, &network_name, network_labels, true).await?;
@@ -345,6 +349,8 @@ impl ManagedEgressRuntime {
                     upstream_network_name,
                 ) =>
             {
+                self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+                    .await?;
                 remove_proxy_if_present(docker, &proxy_name).await?;
                 self.create_proxy(
                     docker,
@@ -358,6 +364,8 @@ impl ManagedEgressRuntime {
             }
             Some(_) => {
                 remove_user_container_if_present(docker, &key.container_name()).await?;
+                self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+                    .await?;
                 remove_proxy_if_present(docker, &proxy_name).await?;
                 self.create_proxy(
                     docker,
@@ -583,6 +591,11 @@ impl ManagedEgressRuntime {
                 continue;
             }
             if let Some(id) = proxy.id.as_deref() {
+                let audit_name = key
+                    .as_ref()
+                    .map(RebornSandboxUserKey::proxy_name)
+                    .unwrap_or_else(|| id.to_string());
+                self.preserve_proxy_audit(docker, id, &audit_name).await?;
                 remove_proxy_if_present(docker, id).await?;
             }
             if let Some(key) = key {
@@ -620,13 +633,94 @@ impl ManagedEgressRuntime {
         Ok(())
     }
 
+    /// Drains the proxy container's structured audit log into a durable
+    /// per-proxy file under `<material_root>/audit/` before the container
+    /// (and with it Docker's `json-file` log) is deleted. Capture keeps the
+    /// most recent [`PROXY_AUDIT_CAPTURE_BYTES`]; the destination rotates
+    /// once past [`PROXY_AUDIT_ROTATE_BYTES`], bounding disk usage while
+    /// preserving recent egress evidence across suspension and retention.
+    async fn preserve_proxy_audit(
+        &self,
+        docker: &Docker,
+        container: &str,
+        audit_name: &str,
+    ) -> Result<(), RuntimeProcessError> {
+        let mut logs = docker.logs(
+            container,
+            Some(LogsOptions::<String> {
+                stdout: true,
+                stderr: true,
+                timestamps: true,
+                tail: "all".to_string(),
+                ..Default::default()
+            }),
+        );
+        let mut captured: Vec<u8> = Vec::new();
+        while let Some(chunk) = logs.next().await {
+            match chunk {
+                Ok(output) => {
+                    captured.extend_from_slice(&output.into_bytes());
+                    if captured.len() > PROXY_AUDIT_CAPTURE_BYTES {
+                        let excess = captured.len() - PROXY_AUDIT_CAPTURE_BYTES;
+                        captured.drain(..excess);
+                    }
+                }
+                Err(error) if docker_status(&error) == Some(404) => return Ok(()),
+                Err(error) => {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox proxy audit log read failed: {error}"
+                    )));
+                }
+            }
+        }
+        if captured.is_empty() {
+            return Ok(());
+        }
+        let audit_dir = self.material_root.join("audit");
+        create_material_directory(&audit_dir).await?;
+        let audit_path = audit_dir.join(format!("{audit_name}.log"));
+        if let Ok(metadata) = tokio::fs::metadata(&audit_path).await
+            && metadata.len() > PROXY_AUDIT_ROTATE_BYTES
+        {
+            let rotated = audit_dir.join(format!("{audit_name}.log.1"));
+            tokio::fs::rename(&audit_path, &rotated)
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox proxy audit log rotation failed: {error}"
+                    ))
+                })?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&audit_path)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox proxy audit log open failed: {error}"
+                ))
+            })?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &captured)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox proxy audit log write failed: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
     pub(super) async fn remove_proxy(
         &self,
         docker: &Docker,
         key: &RebornSandboxUserKey,
     ) -> Result<(), RuntimeProcessError> {
-        remove_proxy_if_present(docker, &key.proxy_name()).await?;
-        remove_material_directory(&self.material_root.join(key.proxy_name())).await
+        let proxy_name = key.proxy_name();
+        self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+            .await?;
+        remove_proxy_if_present(docker, &proxy_name).await?;
+        remove_material_directory(&self.material_root.join(proxy_name)).await
     }
 
     pub(super) async fn suspend_bundle(
