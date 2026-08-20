@@ -521,15 +521,17 @@ pub(super) async fn reconcile_labeled_user_containers(
             continue;
         };
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
-        if let Err(error) = registry.register_discovered_container(key.clone(), labels, stopped_at)
-        {
+        // Every valid labeled worker counts as live for orphan detection,
+        // even when the activity registry is at capacity: reconciliation
+        // must never treat a real worker's egress bundle as orphaned just
+        // because its entry did not fit.
+        discovered_keys.insert(key.clone());
+        if let Err(error) = registry.register_discovered_container(key, labels, stopped_at) {
             tracing::warn!(
                 ?error,
                 container_id = container.id.as_deref().unwrap_or("<unknown>"),
                 "sandbox user-container reconciliation reached registry capacity"
             );
-        } else {
-            discovered_keys.insert(key);
         }
     }
     if let Some(managed) = managed_egress
