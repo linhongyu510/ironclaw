@@ -46,6 +46,7 @@ const ISOLATED_GATEWAY_MODE: &str = "isolated";
 const PROXY_TUNNEL_PORT: u16 = 3128;
 const PROXY_AUDIT_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const PROXY_AUDIT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+const PROXY_AUDIT_DIR_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 /// Mirrors `ironclaw_network::is_private_or_loopback_ip`: every range that
 /// classifier rejects must appear here so an allowlisted hostname resolving
 /// into a non-public address is denied by the proxy exactly as the canonical
@@ -718,6 +719,7 @@ impl ManagedEgressRuntime {
                     "sandbox proxy audit log write failed: {error}"
                 ))
             })?;
+        enforce_audit_budget(&audit_dir, PROXY_AUDIT_DIR_BUDGET_BYTES).await?;
         Ok(())
     }
 
@@ -1335,6 +1337,56 @@ async fn create_material_directory(path: &std::path::Path) -> Result<(), Runtime
     })
 }
 
+/// Caps aggregate audit storage: when the directory exceeds `budget_bytes`,
+/// whole files are removed oldest-first (by modification time) until the
+/// total fits. Per-user audit files are already individually bounded by
+/// rotation; this bounds cardinality across `(tenant, user)` churn so audit
+/// retention cannot exhaust host disk.
+async fn enforce_audit_budget(
+    audit_dir: &std::path::Path,
+    budget_bytes: u64,
+) -> Result<(), RuntimeProcessError> {
+    let mut entries = Vec::new();
+    let mut dir = tokio::fs::read_dir(audit_dir).await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox proxy audit directory scan failed: {error}"
+        ))
+    })?;
+    while let Some(entry) = dir.next_entry().await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox proxy audit directory scan failed: {error}"
+        ))
+    })? {
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        entries.push((modified, metadata.len(), entry.path()));
+    }
+    let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
+    if total <= budget_bytes {
+        return Ok(());
+    }
+    entries.sort_by_key(|(modified, _, _)| *modified);
+    for (_, len, path) in entries {
+        if total <= budget_bytes {
+            break;
+        }
+        tokio::fs::remove_file(&path).await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit budget enforcement failed: {error}"
+            ))
+        })?;
+        total = total.saturating_sub(len);
+    }
+    Ok(())
+}
+
 async fn remove_material_directory(path: &std::path::Path) -> Result<(), RuntimeProcessError> {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
@@ -1500,5 +1552,28 @@ mod tests {
         };
         assert!(reason.contains("default-address-pools"));
         assert!(reason.contains("/etc/docker/daemon.json"));
+    }
+
+    #[tokio::test]
+    async fn audit_budget_removes_oldest_files_first() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, age_secs) in [("old.log", 300), ("mid.log", 200), ("new.log", 100)] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            let mtime = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(mtime))
+                .unwrap();
+        }
+
+        enforce_audit_budget(directory.path(), 250).await.unwrap();
+
+        assert!(!directory.path().join("old.log").exists());
+        assert!(directory.path().join("mid.log").exists());
+        assert!(directory.path().join("new.log").exists());
+
+        enforce_audit_budget(directory.path(), 250).await.unwrap();
+        assert!(directory.path().join("mid.log").exists());
+        assert!(directory.path().join("new.log").exists());
     }
 }

@@ -30,6 +30,7 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
     "files.pythonhosted.org",
     // Go
     "proxy.golang.org",
+    "sum.golang.org",
     // GitHub (source + release archives). Content hosts are enumerated
     // exactly: the managed-egress proxy cannot represent `*.` wildcards
     // with the canonical one-label semantics, so wildcard patterns fail
@@ -142,6 +143,7 @@ mod tests {
             "pypi.org",
             "files.pythonhosted.org",
             "proxy.golang.org",
+            "sum.golang.org",
             "github.com",
             "raw.githubusercontent.com",
             "objects.githubusercontent.com",
