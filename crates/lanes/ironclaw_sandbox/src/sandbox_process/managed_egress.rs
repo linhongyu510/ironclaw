@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    net::Ipv4Addr,
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -11,13 +10,10 @@ use bollard::{
     Docker,
     container::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
-        LogsOptions, NetworkingConfig, RemoveContainerOptions, StartContainerOptions,
+        LogsOptions, RemoveContainerOptions, StartContainerOptions,
     },
     image::CreateImageOptions,
-    models::{
-        EndpointIpamConfig, EndpointSettings, HealthConfig, HealthStatusEnum, HostConfig,
-        HostConfigLogConfig,
-    },
+    models::{HealthConfig, HealthStatusEnum, HostConfig, HostConfigLogConfig},
     network::{
         ConnectNetworkOptions, CreateNetworkOptions, DisconnectNetworkOptions,
         InspectNetworkOptions, ListNetworksOptions,
@@ -425,9 +421,13 @@ impl ManagedEgressRuntime {
         proxy_material_root: &std::path::Path,
     ) -> Result<String, RuntimeProcessError> {
         let proxy_config_path = proxy_material_root.join("proxy.yaml");
-        let proxy_ip = reserved_proxy_ip(docker, network_name).await?;
-        let proxy_config = render_proxy_config(&self.policy, &proxy_ip)?;
-        write_atomic_material_file(&proxy_config_path, proxy_config.as_bytes(), false).await?;
+        // The config binds listeners to this proxy's private-network address,
+        // which Docker assigns at start. Remove any retained config so the
+        // container's wait loop cannot exec against a previous address, then
+        // write the real one once the address is known: a rendered config is
+        // therefore never stale, and no endpoint IP has to be requested (the
+        // daemon rejects caller-specified IPs on auto-subnet networks).
+        remove_material_file(&proxy_config_path).await?;
         let binds = vec![docker_readonly_bind(
             proxy_material_root,
             PROXY_MATERIAL_ROOT,
@@ -435,8 +435,13 @@ impl ManagedEgressRuntime {
         let config = Config {
             image: Some(self.proxy_image.clone()),
             entrypoint: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            // The host writes this config after start (the bound address is
+            // only known then) by renaming into the bind-mounted directory. A
+            // `stat`-only guard can observe the new dentry before the file is
+            // openable, so require a successful open before exec — otherwise
+            // iron-proxy exits ENOENT and the proxy never becomes healthy.
             cmd: Some(vec![format!(
-                "while [ ! -s {PROXY_CONFIG_PATH} ]; do sleep 0.05; done; exec /usr/local/bin/iron-proxy -config {PROXY_CONFIG_PATH}"
+                "while [ ! -s {PROXY_CONFIG_PATH} ] || ! cat {PROXY_CONFIG_PATH} >/dev/null 2>&1; do sleep 0.05; done; exec /usr/local/bin/iron-proxy -config {PROXY_CONFIG_PATH}"
             )]),
             labels: Some(labels),
             healthcheck: Some(HealthConfig {
@@ -483,18 +488,7 @@ impl ManagedEgressRuntime {
             attach_stdout: Some(false),
             attach_stderr: Some(false),
             open_stdin: Some(false),
-            networking_config: Some(NetworkingConfig {
-                endpoints_config: HashMap::from([(
-                    network_name.to_string(),
-                    EndpointSettings {
-                        ipam_config: Some(EndpointIpamConfig {
-                            ipv4_address: Some(proxy_ip.clone()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )]),
-            }),
+            networking_config: None,
             ..Default::default()
         };
         docker
@@ -530,9 +524,31 @@ impl ManagedEgressRuntime {
             let _ = remove_proxy_if_present(docker, proxy_name).await;
             return Err(error);
         }
-        if let Err(error) = wait_proxy_ready(docker, proxy_name).await {
+        let inspected = inspect_proxy(docker, proxy_name).await?.ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox proxy disappeared immediately after start".to_string(),
+            )
+        })?;
+        let proxy_ip = match proxy_ip_on_network(&inspected, network_name) {
+            Ok(proxy_ip) => proxy_ip,
+            Err(error) => {
+                let _ = remove_proxy_if_present(docker, proxy_name).await;
+                return Err(error);
+            }
+        };
+        let proxy_config = render_proxy_config(&self.policy, &proxy_ip)?;
+        if let Err(error) =
+            write_atomic_material_file(&proxy_config_path, proxy_config.as_bytes(), false).await
+        {
             let _ = remove_proxy_if_present(docker, proxy_name).await;
             return Err(error);
+        }
+        if let Err(error) = wait_proxy_ready(docker, proxy_name).await {
+            let detail = proxy_failure_detail(docker, proxy_name).await;
+            let _ = remove_proxy_if_present(docker, proxy_name).await;
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "{error}{detail}"
+            )));
         }
         Ok(proxy_ip)
     }
@@ -950,58 +966,6 @@ fn proxy_ip_on_network(
             )
         })
 }
-async fn reserved_proxy_ip(
-    docker: &Docker,
-    network_name: &str,
-) -> Result<String, RuntimeProcessError> {
-    let network = docker
-        .inspect_network(network_name, None::<InspectNetworkOptions<&str>>)
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox private network address inspection failed: {error}"
-            ))
-        })?;
-    let subnet = network
-        .ipam
-        .and_then(|ipam| ipam.config)
-        .and_then(|configs| configs.into_iter().find_map(|config| config.subnet))
-        .ok_or_else(|| {
-            RuntimeProcessError::ExecutionFailed(
-                "sandbox private network has no IPv4 subnet".to_string(),
-            )
-        })?;
-    let (address, prefix) = subnet.split_once('/').ok_or_else(|| {
-        RuntimeProcessError::ExecutionFailed(
-            "sandbox private network has an invalid IPv4 subnet".to_string(),
-        )
-    })?;
-    let address = address.parse::<Ipv4Addr>().map_err(|error| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox private network subnet is not IPv4: {error}"
-        ))
-    })?;
-    let prefix = prefix.parse::<u32>().map_err(|error| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox private network prefix is invalid: {error}"
-        ))
-    })?;
-    if !(1..=30).contains(&prefix) {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox private network is too small to reserve a proxy address".to_string(),
-        ));
-    }
-    let mask = u32::MAX << (32 - prefix);
-    let network_address = u32::from(address) & mask;
-    let broadcast_address = network_address | !mask;
-    let candidate = network_address + 2;
-    if candidate >= broadcast_address {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox private network cannot reserve a proxy address".to_string(),
-        ));
-    }
-    Ok(Ipv4Addr::from(candidate).to_string())
-}
 
 fn proxy_is_ready(inspected: &bollard::models::ContainerInspectResponse) -> bool {
     let Some(state) = inspected.state.as_ref() else {
@@ -1023,6 +987,42 @@ async fn start_proxy_container(docker: &Docker, name: &str) -> Result<(), Runtim
         .map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!("sandbox proxy start failed: {error}"))
         })
+}
+
+/// Bounded startup diagnostics for a proxy that never became healthy: the
+/// container is about to be removed, so its exit status and last output are
+/// the only evidence an operator would otherwise lose.
+async fn proxy_failure_detail(docker: &Docker, name: &str) -> String {
+    let mut detail = String::new();
+    if let Ok(Some(inspected)) = inspect_proxy(docker, name).await
+        && let Some(state) = inspected.state
+    {
+        detail.push_str(&format!(
+            " (status {:?}, exit code {:?})",
+            state.status, state.exit_code
+        ));
+    }
+    let mut logs = docker.logs(
+        name,
+        Some(LogsOptions::<String> {
+            stdout: true,
+            stderr: true,
+            tail: "20".to_string(),
+            ..Default::default()
+        }),
+    );
+    let mut captured = String::new();
+    while let Some(Ok(chunk)) = logs.next().await {
+        captured.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
+        if captured.len() >= 2048 {
+            break;
+        }
+    }
+    let captured = captured.trim();
+    if !captured.is_empty() {
+        detail.push_str(&format!("; proxy output: {captured}"));
+    }
+    detail
 }
 
 async fn wait_proxy_ready(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
@@ -1389,6 +1389,15 @@ async fn enforce_audit_budget(
     Ok(())
 }
 
+async fn remove_material_file(path: &std::path::Path) -> Result<(), RuntimeProcessError> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox managed-egress material file cleanup failed: {error}"
+        ))),
+    }
+}
 async fn remove_material_directory(path: &std::path::Path) -> Result<(), RuntimeProcessError> {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
