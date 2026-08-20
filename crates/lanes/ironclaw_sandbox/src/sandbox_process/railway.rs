@@ -79,17 +79,31 @@ mkdir -p "$material/audit"
 chmod 700 "$material/audit"
 audit_log="$material/audit/proxy.log"
 audit_capture="$material/audit/.capture"
-if docker inspect "$proxy" >/dev/null 2>&1; then
+audit_cursor="$material/audit/.cursor"
+
+# Appends only records newer than the cursor, so back-to-back drains
+# (post-command and next-invocation) never duplicate audit entries.
+drain_proxy_audit() {
+  docker inspect "$proxy" >/dev/null 2>&1 || return 0
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
     mv "$audit_log" "$audit_log.1"
   fi
-  if ! docker logs --timestamps "$proxy" >"$audit_capture" 2>&1; then
-    printf '%s\n' "Railway sandbox proxy audit capture failed; leaving prior proxy for retry" >&2
-    exit 1
+  capture_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -s "$audit_cursor" ]; then
+    docker logs --timestamps --since "$(cat "$audit_cursor")" "$proxy" >"$audit_capture" 2>&1 || return 1
+  else
+    docker logs --timestamps "$proxy" >"$audit_capture" 2>&1 || return 1
   fi
   tail -c 4194304 "$audit_capture" >> "$audit_log"
   chmod 600 "$audit_log"
   rm -f "$audit_capture"
+  printf %s "$capture_start" > "$audit_cursor"
+  return 0
+}
+
+if ! drain_proxy_audit; then
+  printf '%s\n' "Railway sandbox proxy audit capture failed; leaving prior proxy for retry" >&2
+  exit 1
 fi
 docker rm --force "$proxy" >/dev/null 2>&1 || true
 if docker network inspect "$network" >/dev/null 2>&1; then
@@ -187,14 +201,7 @@ docker run \
   "$@"
 worker_status=$?
 set -e
-if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
-  mv "$audit_log" "$audit_log.1"
-fi
-if docker logs --timestamps "$proxy" >"$audit_capture" 2>&1; then
-  tail -c 4194304 "$audit_capture" >> "$audit_log"
-  chmod 600 "$audit_log"
-  rm -f "$audit_capture"
-else
+if ! drain_proxy_audit; then
   # The proxy and its Docker log survive; the next invocation's
   # fail-closed drain retries before any removal can destroy evidence.
   printf '%s\n' "Railway sandbox proxy audit capture failed after command exit" >&2
@@ -496,6 +503,7 @@ impl RailwayPreviewSandboxTransport {
         output_limit: usize,
         execution_error: &RuntimeProcessError,
     ) -> Result<(), RuntimeProcessError> {
+        self.salvage_proxy_audit(sandbox_id, output_limit).await;
         if let Err(cleanup_error) = self.destroy_sandbox(sandbox_id, output_limit).await {
             tracing::error!(
                 ?execution_error,
@@ -527,6 +535,43 @@ impl RailwayPreviewSandboxTransport {
             )
             .await
             .map(|_| ())
+    }
+
+    /// Best-effort: pull the egress audit tail out of a sandbox that is about
+    /// to be destroyed after a transport failure, and record it in host logs
+    /// (the only durable location once the outer sandbox is gone). Salvage
+    /// failure never blocks destruction — the sandbox is already suspect.
+    async fn salvage_proxy_audit(&self, sandbox_id: &str, output_limit: usize) {
+        const SALVAGE_SCRIPT: &str = "docker logs --timestamps ironclaw-reborn-proxy 2>&1 | tail -c 65536; tail -c 65536 /run/ironclaw-reborn-proxy/audit/proxy.log 2>/dev/null || true";
+        let salvage = self
+            .cli
+            .execute(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    RailwayCliOperation::ExecuteSandboxCommand,
+                    sandbox_exec_argv(
+                        &self.config,
+                        sandbox_id,
+                        REMOTE_CLEANUP_TIMEOUT,
+                        vec!["sh".into(), "-c".into(), SALVAGE_SCRIPT.into()],
+                    ),
+                    output_limit,
+                ),
+                REMOTE_CLEANUP_TIMEOUT,
+            )
+            .await;
+        match salvage {
+            Ok(output) => tracing::warn!(
+                sandbox_id,
+                audit_tail = %output.stdout,
+                "Railway sandbox egress audit salvaged before destruction"
+            ),
+            Err(error) => tracing::warn!(
+                ?error,
+                sandbox_id,
+                "Railway sandbox egress audit salvage failed before destruction"
+            ),
+        }
     }
 
     async fn shutdown_owned_sandboxes(&self) -> Result<(), RuntimeProcessError> {
