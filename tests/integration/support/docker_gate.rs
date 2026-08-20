@@ -42,3 +42,9 @@ pub fn configured_sandbox_image() -> String {
         .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
         .unwrap_or_else(|_| "ironclaw-worker:latest".to_string())
 }
+
+pub fn configured_sandbox_proxy_image() -> String {
+    std::env::var("IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE").unwrap_or_else(|_| {
+        ironclaw_sandbox::sandbox_process::DEFAULT_SANDBOX_PROXY_IMAGE.to_string()
+    })
+}

@@ -165,6 +165,7 @@ struct ActivityEntry {
     gate: Arc<tokio::sync::Mutex<()>>,
     expected_labels: Option<HashMap<String, String>>,
     recycle_required: bool,
+    stopped_at: Option<DateTime<Utc>>,
 }
 
 const MAX_TRACKED_USERS: usize = 4096;
@@ -210,9 +211,11 @@ impl SandboxActivityRegistry {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             expected_labels: None,
             recycle_required: false,
+            stopped_at: None,
         });
         entry.active_execs = entry.active_execs.saturating_add(1);
         entry.last_activity = Instant::now();
+        entry.stopped_at = None;
         Ok(SandboxActivityGuard {
             registry: Arc::clone(self),
             key: key.clone(),
@@ -255,10 +258,12 @@ impl SandboxActivityRegistry {
         &self,
         key: RebornSandboxUserKey,
         labels: HashMap<String, String>,
+        stopped_at: Option<DateTime<Utc>>,
     ) -> Result<(), RuntimeProcessError> {
         let mut state = self.lock();
         if let Some(entry) = state.get_mut(&key) {
             entry.expected_labels = Some(labels);
+            entry.stopped_at = stopped_at;
             return Ok(());
         }
         if state.len() >= MAX_TRACKED_USERS {
@@ -274,6 +279,7 @@ impl SandboxActivityRegistry {
                 gate: Arc::new(tokio::sync::Mutex::new(())),
                 expected_labels: Some(labels),
                 recycle_required: false,
+                stopped_at,
             },
         );
         Ok(())
@@ -289,7 +295,8 @@ impl SandboxActivityRegistry {
             .filter(|(_, entry)| {
                 entry.active_execs == 0
                     && !entry.recycle_required
-                    && now.saturating_duration_since(entry.last_activity) >= idle_timeout
+                    && (entry.stopped_at.is_some()
+                        || now.saturating_duration_since(entry.last_activity) >= idle_timeout)
             })
             .filter_map(|(key, entry)| {
                 entry
@@ -309,7 +316,31 @@ impl SandboxActivityRegistry {
         self.lock().get(key).is_some_and(|entry| {
             entry.active_execs == 0
                 && !entry.recycle_required
-                && now.saturating_duration_since(entry.last_activity) >= idle_timeout
+                && (entry.stopped_at.is_some()
+                    || now.saturating_duration_since(entry.last_activity) >= idle_timeout)
+        })
+    }
+
+    pub(crate) fn mark_stopped(&self, key: &RebornSandboxUserKey, now: DateTime<Utc>) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.stopped_at.get_or_insert(now);
+        }
+    }
+
+    pub(crate) fn retention_eligible(
+        &self,
+        key: &RebornSandboxUserKey,
+        now: DateTime<Utc>,
+        retention_timeout: Duration,
+    ) -> bool {
+        self.lock().get(key).is_some_and(|entry| {
+            entry.active_execs == 0
+                && !entry.recycle_required
+                && entry.stopped_at.is_some_and(|stopped_at| {
+                    now.signed_duration_since(stopped_at)
+                        .to_std()
+                        .is_ok_and(|elapsed| elapsed >= retention_timeout)
+                })
         })
     }
 
@@ -741,6 +772,40 @@ mod tests {
 
         set_last_activity(&registry, &key, Instant::now() - Duration::from_secs(60));
         assert!(registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn retention_starts_when_container_stops_and_resets_on_activity() {
+        let registry = Arc::new(SandboxActivityRegistry::new());
+        let key = test_key("t", "retention");
+        drop(registry.begin(&key).unwrap());
+        let stopped_at = Utc::now() - chrono::Duration::seconds(60);
+        registry.mark_stopped(&key, stopped_at);
+
+        assert!(registry.retention_eligible(&key, Utc::now(), Duration::from_secs(30)));
+
+        let guard = registry.begin(&key).unwrap();
+        drop(guard);
+        assert!(!registry.retention_eligible(&key, Utc::now(), Duration::ZERO));
+    }
+
+    #[test]
+    fn discovered_stopped_container_preserves_its_wall_clock_retention_age() {
+        let registry = SandboxActivityRegistry::new();
+        let key = test_key("t", "discovered-retention");
+        let stopped_at = Utc::now() - chrono::Duration::hours(25);
+
+        registry
+            .register_discovered_container(key.clone(), HashMap::new(), Some(stopped_at))
+            .unwrap();
+
+        assert_eq!(
+            registry
+                .sweep_candidates(Instant::now(), Duration::from_secs(60))
+                .len(),
+            1
+        );
+        assert!(registry.retention_eligible(&key, Utc::now(), Duration::from_secs(24 * 60 * 60)));
     }
 
     #[test]

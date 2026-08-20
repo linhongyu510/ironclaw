@@ -25,6 +25,7 @@ use user_sandbox_live::{
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
+const EGRESS_MARKER: &str = "SANDBOX_PROXY_EGRESS_OK";
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -36,6 +37,11 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         let image = docker_gate::configured_sandbox_image();
         if !docker_gate::docker_image_available(&image).await {
             eprintln!("SKIP: sandbox worker image {image:?} is not built");
+            return;
+        }
+        let proxy_image = docker_gate::configured_sandbox_proxy_image();
+        if !docker_gate::docker_image_available(&proxy_image).await {
+            eprintln!("SKIP: sandbox proxy image {proxy_image:?} is not available");
             return;
         }
 
@@ -56,7 +62,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             ),
             RebornScriptedReply::tool_call(
                 "builtin.shell",
-                json!({"command": "test \"$(cat /tmp/container-hostname.txt)\" = \"$(hostname)\" && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK"}),
+                json!({"command": format!("test \"$(cat /tmp/container-hostname.txt)\" = \"$(hostname)\" && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && python -c \"import urllib.request; response = urllib.request.urlopen('https://pypi.org', timeout=15); assert response.status == 200; response.close()\" && echo NON_ROOT_UID_OK && echo {EGRESS_MARKER}")}),
             ),
             RebornScriptedReply::text("ran in the sandbox"),
         ])
@@ -117,6 +123,10 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_tool_result_contains(EPHEMERAL_MARKER)
             .await
             .expect("container-local state persisted across shell calls");
+        harness
+            .assert_tool_result_contains(EGRESS_MARKER)
+            .await
+            .expect("full-turn shell egress traversed the managed proxy");
         harness
             .assert_reply_contains("ran in the sandbox")
             .await
