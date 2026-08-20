@@ -63,7 +63,15 @@ pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
 /// Canonical capability id of the HTML-to-PDF renderer.
 pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
-const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 8 * 1024;
+/// Inline preview budget for spilled coding output.
+///
+/// The host carries at most [`ARTIFACT_INLINE_PREVIEW_MAX_BYTES`] (24 KiB) of
+/// canonical result inline, and `ironclaw_capabilities::dispatch` tail-cuts the
+/// whole canonical JSON above that once a durable artifact exists. The raw
+/// budget therefore stays below the ceiling to leave headroom for JSON escaping
+/// (every newline doubles) plus the sibling `artifact_ref`/`total_bytes` fields,
+/// so a preview never reaches the layer that would silently shear its footer.
+const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 const MAX_DOCUMENT_EDIT_INPUT_BYTES: usize = 21 * 1024 * 1024;
 /// A 10 MiB source read can grow when rendered with Hashline anchors. Keep
 /// bounded headroom for that representation without allowing a grep over many
@@ -556,12 +564,14 @@ async fn artifact_backed_output(
         .await
         .map_err(artifact_write_error)?;
     let artifact_ref = ArtifactRef::new(handle.artifact_id());
-    let preview = artifact_preview(&raw_output, &artifact_ref);
-    let output = serde_json::json!({
-        "output": preview,
-        "artifact_ref": artifact_ref.to_string(),
-        "total_bytes": raw_len,
-    });
+    let preview = artifact_preview(&raw_output, &artifact_ref, request.capability_id.as_str());
+    object.insert("output".to_string(), serde_json::Value::String(preview));
+    object.insert(
+        "artifact_ref".to_string(),
+        serde_json::Value::String(artifact_ref.to_string()),
+    );
+    object.insert("total_bytes".to_string(), serde_json::json!(raw_len));
+    let output = serde_json::Value::Object(object);
     Ok((
         output,
         Some(PendingFirstPartyArtifact {
@@ -593,7 +603,29 @@ fn artifact_write_error(error: ArtifactWriteError) -> FirstPartyCapabilityError 
     FirstPartyCapabilityError::new(kind)
 }
 
-fn artifact_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
+/// Bound a spilled coding result for inline transport.
+///
+/// The shape is capability-aware because the two output families have opposite
+/// centres of gravity:
+///
+/// * Command output (`bash`) carries its exit-code and wall-time notices at the
+///   very end, so a head-only cut would drop the part the model reads first.
+///   That family keeps the pinned head+tail shape.
+/// * Document windows (`read`, `grep`, `glob`) are a contiguous span the model
+///   explicitly asked for. Eliding their middle returns a hole: the model then
+///   spends a second call re-reading the gap it was never told about, which is
+///   exactly the paging spiral measured on transcript-heavy tasks. That family
+///   gets a contiguous head plus the artifact selector to resume from, matching
+///   the engine's own `[… Use <artifact>:<line> to continue]` idiom rather than
+///   inventing a second continuation convention.
+fn artifact_preview(raw_output: &str, artifact_ref: &ArtifactRef, capability_id: &str) -> String {
+    if capability_id == CODING_BASH_CAPABILITY_ID {
+        return command_output_preview(raw_output, artifact_ref);
+    }
+    document_window_preview(raw_output, artifact_ref)
+}
+
+fn command_output_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
     let footer = format!("\n[raw output: {artifact_ref}]");
     let marker = "\n\n... [artifact output elided] ...\n\n";
     let content_budget = CODING_ARTIFACT_PREVIEW_MAX_BYTES
@@ -608,6 +640,32 @@ fn artifact_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
         &raw_output[..head_end],
         &raw_output[tail_start..],
         footer
+    )
+}
+
+/// Contiguous head plus a resume selector. Never elides the middle.
+fn document_window_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
+    // Reserve enough room that the rendered footer cannot push the preview past
+    // the budget once its counts are substituted.
+    const FOOTER_RESERVE_BYTES: usize = 160;
+    let content_budget = CODING_ARTIFACT_PREVIEW_MAX_BYTES.saturating_sub(FOOTER_RESERVE_BYTES);
+    let mut head_end = floor_char_boundary(raw_output, content_budget);
+    // Cut on a line boundary so the resumed selector starts a whole line and
+    // the visible tail is never a half-rendered Hashline row.
+    if let Some(last_newline) = raw_output[..head_end].rfind('\n') {
+        head_end = last_newline + 1;
+    }
+    let head = &raw_output[..head_end];
+    let remaining_bytes = raw_output.len().saturating_sub(head_end);
+    if remaining_bytes == 0 {
+        return head.to_string();
+    }
+    // Artifact selectors index the artifact's own lines, so the next unread
+    // line is one past the count fully contained in the head.
+    let next_line = head.lines().count().saturating_add(1);
+    format!(
+        "{head}\n[{remaining_bytes} more bytes in artifact. \
+         Use {artifact_ref}:{next_line} to continue]"
     )
 }
 

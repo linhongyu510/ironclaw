@@ -664,6 +664,97 @@ impl AccountedArtifactPersister for TestArtifactPersister {
     }
 }
 
+/// Minimal `ArtifactPersistencePort` for the coding spill path. Coding output
+/// above the inline ceiling allocates/appends/finalizes through this port
+/// (distinct from the kernel's accounted persister above), so a fixture
+/// without it cannot exercise a spilled preview at all.
+#[derive(Default)]
+struct TestArtifactStore {
+    bytes: tokio::sync::Mutex<Vec<u8>>,
+    content_type: tokio::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl ironclaw_host_api::artifact::ArtifactAccessPort for TestArtifactStore {
+    async fn read(
+        &self,
+        _request: ironclaw_host_api::artifact::ArtifactReadRequest,
+    ) -> Result<
+        Option<ironclaw_host_api::artifact::ArtifactReadChunk>,
+        ironclaw_host_api::artifact::ArtifactAccessError,
+    > {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::artifact::ArtifactPersistencePort for TestArtifactStore {
+    async fn allocate(
+        &self,
+        metadata: ArtifactWriteMetadata,
+    ) -> Result<ironclaw_host_api::artifact::ArtifactWriteHandle, ArtifactWriteError> {
+        let handle = ironclaw_host_api::artifact::ArtifactWriteHandle::new(
+            ArtifactId::new(0),
+            metadata.owner_scope.clone(),
+            metadata.namespace,
+        );
+        *self.content_type.lock().await = Some(metadata.content_type);
+        self.bytes.lock().await.clear();
+        Ok(handle)
+    }
+
+    async fn append(
+        &self,
+        _handle: &ironclaw_host_api::artifact::ArtifactWriteHandle,
+        chunk: &[u8],
+    ) -> Result<(), ArtifactWriteError> {
+        self.bytes.lock().await.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        handle: ironclaw_host_api::artifact::ArtifactWriteHandle,
+    ) -> Result<CompletedArtifact, ArtifactWriteError> {
+        let bytes = self.bytes.lock().await;
+        let content_type = self
+            .content_type
+            .lock()
+            .await
+            .clone()
+            .ok_or(ArtifactWriteError::InvalidHandle)?;
+        Ok(CompletedArtifact {
+            artifact_ref: ArtifactRef::new(handle.artifact_id()),
+            byte_len: u64::try_from(bytes.len()).map_err(|_| ArtifactWriteError::Storage)?,
+            total_lines: None,
+            content_type,
+            digest: ArtifactDigest::from_bytes(&bytes),
+        })
+    }
+}
+
+fn runtime_with_filesystem_and_artifacts<F>(filesystem: F) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
+    let artifacts = Arc::new(TestArtifactStore::default());
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_artifact_ports(artifacts.clone(), artifacts)
+    .with_accounted_artifact_persistence(Arc::new(TestArtifactPersister::default()))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
@@ -1024,5 +1115,77 @@ async fn a_relative_path_written_by_write_is_readable_by_read() {
             .expect("coding read returns text")
             .contains("staged"),
         "write and read must resolve one relative path to one place; got {read:?}"
+    );
+}
+
+/// Regression (PinchBench transcript tasks): a spilled `read` of an explicit
+/// contiguous line range must not come back with its middle deleted.
+///
+/// The old adapter preview kept a head and a tail and dropped everything
+/// between with a bare `... [artifact output elided] ...` marker that named no
+/// continuation. On a ~5,000-line transcript the model received ~24% of the
+/// lines it asked for, could not tell which span was missing, and burned a
+/// second call re-reading the gap — measured as 236 of 956 read calls eliding
+/// content across 52 of 147 benchmark tasks. The window must instead stay
+/// contiguous and name the artifact selector to resume from.
+#[tokio::test]
+async fn a_spilled_read_window_stays_contiguous_and_names_its_resume_selector() {
+    let temp = tempfile::tempdir().unwrap();
+    // Distinctive per-line payload so a deleted middle is detectable by content
+    // rather than by byte count alone.
+    let total_lines = 4_000usize;
+    let body: String = (1..=total_lines)
+        .map(|n| format!("line {n:05} {}\n", "transcript filler text".repeat(3)))
+        .collect();
+    std::fs::write(temp.path().join("transcript.md"), &body).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem_and_artifacts(filesystem);
+
+    let read = invoke_with_context(
+        &runtime,
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "transcript.md:95-700"}),
+        execution_context_with_mounts(coding_capability_ids(), mounts),
+    )
+    .await
+    .expect("a wide contiguous range must be readable");
+
+    let output = read["output"].as_str().expect("coding read returns text");
+    assert!(
+        read["artifact_ref"].is_string(),
+        "an oversized window must spill to a durable artifact; got {read:?}"
+    );
+    assert!(
+        !output.contains("artifact output elided"),
+        "a document window must never have its middle deleted; got:\n{output}"
+    );
+
+    // Every rendered line number present must be strictly consecutive: a hole
+    // is exactly what forced the model to re-read the gap.
+    let rendered: Vec<u64> = output
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter_map(|(number, _)| number.trim().parse::<u64>().ok())
+        .collect();
+    assert!(
+        rendered.len() > 1,
+        "the preview must carry numbered lines; got:\n{output}"
+    );
+    for pair in rendered.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0] + 1,
+            "rendered lines must stay contiguous, found a gap {} -> {} in:\n{output}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // The model must be told how to continue, in the engine's own selector
+    // idiom, rather than being left to guess the next window.
+    let artifact_ref = read["artifact_ref"].as_str().expect("artifact ref string");
+    assert!(
+        output.contains(&format!("Use {artifact_ref}:")) && output.contains("to continue"),
+        "a truncated window must name the artifact selector to resume from; got:\n{output}"
     );
 }
