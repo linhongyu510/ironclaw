@@ -1693,7 +1693,7 @@ impl RebornIntegrationHarness {
             .iter()
             .map(|result| {
                 let output = result.output.to_string();
-                let preview: String = output.chars().take(1024).collect();
+                let preview: String = output.chars().take(4096).collect();
                 format!("{}={preview}", result.capability_id.as_str())
             })
             .collect();
