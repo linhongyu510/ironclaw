@@ -78,11 +78,11 @@ chmod 600 "$invocation_path"
 mkdir -p "$material/audit"
 chmod 700 "$material/audit"
 audit_log="$material/audit/proxy.log"
+audit_capture="$material/audit/.capture"
 if docker inspect "$proxy" >/dev/null 2>&1; then
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
     mv "$audit_log" "$audit_log.1"
   fi
-  audit_capture="$material/audit/.capture"
   if ! docker logs --timestamps "$proxy" >"$audit_capture" 2>&1; then
     printf '%s\n' "Railway sandbox proxy audit capture failed; leaving prior proxy for retry" >&2
     exit 1
@@ -172,7 +172,8 @@ do
 done
 
 proxy_url="http://${proxy_ip}:3128"
-exec docker run \
+set +e
+docker run \
   --network "$network" \
   --dns "$proxy_ip" \
   --env IRONCLAW_REBORN_NETWORK_MODE=brokered \
@@ -184,6 +185,21 @@ exec docker run \
   --env NO_PROXY= \
   --env no_proxy= \
   "$@"
+worker_status=$?
+set -e
+if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
+  mv "$audit_log" "$audit_log.1"
+fi
+if docker logs --timestamps "$proxy" >"$audit_capture" 2>&1; then
+  tail -c 4194304 "$audit_capture" >> "$audit_log"
+  chmod 600 "$audit_log"
+  rm -f "$audit_capture"
+else
+  # The proxy and its Docker log survive; the next invocation's
+  # fail-closed drain retries before any removal can destroy evidence.
+  printf '%s\n' "Railway sandbox proxy audit capture failed after command exit" >&2
+fi
+exit "$worker_status"
 "#;
 
 /// Explicit, host-only configuration for the preview transport.

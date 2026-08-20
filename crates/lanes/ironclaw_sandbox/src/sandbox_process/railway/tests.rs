@@ -680,6 +680,12 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
             .contains("[ \"$internal\" != true ] || [ \"$gateway_mode\" != isolated ]"),
         "reused Railway private networks must be validated for isolated gateway mode"
     );
+    assert!(
+        !RAILWAY_MANAGED_EGRESS_WRAPPER.contains("exec docker run")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("worker_status=$?")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("exit \"$worker_status\""),
+        "the wrapper must regain control after the worker to drain the current invocation's audit"
+    );
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("network connect bridge"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("ca_path"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("SSL_CERT_FILE"));
