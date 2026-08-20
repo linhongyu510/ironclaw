@@ -447,6 +447,45 @@ async fn restart_removes_managed_egress_bundle_when_worker_is_missing() {
 }
 
 #[tokio::test]
+async fn sweeper_removes_managed_egress_bundle_after_worker_disappears() {
+    let Some((_image, _serial)) =
+        docker_worker_and_proxy_images("managed egress missing-worker cleanup").await
+    else {
+        return;
+    };
+    let user = TestScope::unique("egress-missing-worker");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([user.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+            .with_idle_timeout(Duration::from_millis(200))
+            .with_managed_egress_proxy()
+            .expect("managed egress policy is valid"),
+    )
+    .await
+    .expect("Docker transport connects");
+    transport
+        .run_command(request(user.resource_scope(), "echo BUNDLE_BEFORE_LOSS"))
+        .await
+        .expect("managed-egress command runs");
+    let worker = cleanup.capture(&user);
+    let proxy = managed_proxy_id(&user);
+    cleanup.container_ids.insert(proxy);
+
+    let removed = Command::new("docker")
+        .args(["rm", "--force", worker.id.as_str()])
+        .output()
+        .expect("docker removes the worker out from under the sweeper");
+    assert!(
+        removed.status.success(),
+        "worker removal failed: {removed:?}"
+    );
+
+    wait_for_managed_bundle_removal(&user, Duration::from_secs(10)).await;
+    transport.shutdown().await;
+}
+
+#[tokio::test]
 async fn stopped_managed_proxy_is_recreated_without_losing_bind_material() {
     let Some((_image, _serial)) =
         docker_worker_and_proxy_images("managed egress stopped proxy recovery").await

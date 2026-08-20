@@ -590,6 +590,20 @@ async fn sweep_idle_user_containers(
             }
         };
         let Some(inspected) = inspected else {
+            // The worker is gone (e.g. execution-driven recycle); the
+            // managed-egress bundle must not outlive this registry entry or
+            // the proxy and private network leak until the next transport
+            // reconnect runs orphan reconciliation.
+            if let Some(managed) = managed_egress
+                && let Err(error) = managed.remove_bundle(docker, &key, &name).await
+            {
+                tracing::debug!(
+                    ?error,
+                    container_name = name,
+                    "missing-worker sandbox egress cleanup failed"
+                );
+                continue;
+            }
             registry.forget_if_inactive(&key);
             continue;
         };
