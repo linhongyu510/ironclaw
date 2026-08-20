@@ -51,6 +51,71 @@ fn read_request(
     }
 }
 
+/// `write_key` means "one artifact per invocation", so allocations sharing a key
+/// adopt the same artifact rather than minting new ones.
+///
+/// That is the retry-idempotency contract the coding spill path relies on: a
+/// redispatched invocation re-adopts its existing write instead of duplicating
+/// it (`coding.rs` passes `write_key: Some(scope.invocation_id)`).
+///
+/// It also records the boundary condition. Adoption is only safe while one
+/// invocation produces one result. `invoke_capability_batch` executes its
+/// invocations sequentially and each mints its own `InvocationId`, so today no
+/// caller shares a key across distinct results. If a batch ever dispatches
+/// concurrently, or any caller reuses one invocation for several spills, those
+/// results would silently land in one artifact and every `artifact://N` handed
+/// to the model would resolve to the wrong bytes — such a caller needs a
+/// per-result write key, not the invocation id.
+#[tokio::test]
+async fn allocations_sharing_a_write_key_adopt_one_artifact() {
+    let store = Arc::new(
+        DurableToolArtifactStore::new(Arc::new(InMemoryBackend::new())).expect("artifact store"),
+    );
+    let namespace = ArtifactNamespaceId::from_root_run(RunId::new());
+    let owner = owner_scope();
+    let write_key = InvocationId::new();
+
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let handle = store
+            .allocate(ArtifactWriteMetadata {
+                write_key: Some(write_key),
+                owner_scope: owner.clone(),
+                namespace,
+                producer_capability_id: CapabilityId::new("builtin.read").expect("capability id"),
+                content_type: "text/plain".to_string(),
+                expected_bytes: None,
+            })
+            .await
+            .expect("allocate adopts the bound artifact");
+        ids.push(handle.artifact_id().get());
+    }
+    assert_eq!(
+        ids,
+        vec![0, 0, 0, 0],
+        "a shared write_key must re-adopt one artifact, not mint new ids"
+    );
+
+    // A different key is a different result and must get its own artifact, or
+    // idempotency would degenerate into a single artifact per namespace.
+    let other = store
+        .allocate(ArtifactWriteMetadata {
+            write_key: Some(InvocationId::new()),
+            owner_scope: owner,
+            namespace,
+            producer_capability_id: CapabilityId::new("builtin.read").expect("capability id"),
+            content_type: "text/plain".to_string(),
+            expected_bytes: None,
+        })
+        .await
+        .expect("allocate for a distinct write key");
+    assert_ne!(
+        other.artifact_id().get(),
+        0,
+        "a distinct write key must not adopt another invocation's artifact"
+    );
+}
+
 #[tokio::test]
 async fn finalized_artifact_supports_indexed_line_reads() {
     let store =
