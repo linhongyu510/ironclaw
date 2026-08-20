@@ -81,23 +81,31 @@ audit_log="$material/audit/proxy.log"
 audit_capture="$material/audit/.capture"
 audit_cursor="$material/audit/.cursor"
 
-# Appends only records newer than the cursor, so back-to-back drains
+# Appends only records strictly newer than the cursor. The cursor is the
+# last drained record's own RFC3339Nano timestamp (Docker emits fixed-width
+# UTC, so lexicographic comparison is chronological); the strict `$1 > c`
+# filter makes the boundary exclusive, so back-to-back drains
 # (post-command and next-invocation) never duplicate audit entries.
 drain_proxy_audit() {
   docker inspect "$proxy" >/dev/null 2>&1 || return 0
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
     mv "$audit_log" "$audit_log.1"
   fi
-  capture_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ -s "$audit_cursor" ]; then
-    docker logs --timestamps --since "$(cat "$audit_cursor")" "$proxy" >"$audit_capture" 2>&1 || return 1
+    cursor=$(cat "$audit_cursor")
+    docker logs --timestamps --since "$cursor" "$proxy" >"$audit_capture.raw" 2>&1 || return 1
+    awk -v c="$cursor" '$1 > c' "$audit_capture.raw" > "$audit_capture"
+    rm -f "$audit_capture.raw"
   else
     docker logs --timestamps "$proxy" >"$audit_capture" 2>&1 || return 1
   fi
+  last_record=$(tail -n 1 "$audit_capture" | cut -d' ' -f1)
   tail -c 4194304 "$audit_capture" >> "$audit_log"
   chmod 600 "$audit_log"
   rm -f "$audit_capture"
-  printf %s "$capture_start" > "$audit_cursor"
+  if [ -n "$last_record" ]; then
+    printf %s "$last_record" > "$audit_cursor"
+  fi
   return 0
 }
 

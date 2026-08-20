@@ -672,8 +672,11 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
     );
     assert!(
         RAILWAY_MANAGED_EGRESS_WRAPPER
-            .contains("docker logs --timestamps --since \"$(cat \"$audit_cursor\")\" \"$proxy\""),
-        "repeated drains must use the cursor so audit entries are not duplicated"
+            .contains("docker logs --timestamps --since \"$cursor\" \"$proxy\"")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("awk -v c=\"$cursor\" '$1 > c'")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("last_record=$(tail -n 1 \"$audit_capture\" | cut -d' ' -f1)"),
+        "repeated drains must use an exclusive record-timestamp cursor so audit entries are not duplicated"
     );
     assert!(
         RAILWAY_MANAGED_EGRESS_WRAPPER
