@@ -73,7 +73,9 @@ invocation_path=$material/invocation-id
 mkdir -p "$material"
 chmod 700 "$material"
 printf %s "$invocation_id" > "$invocation_path"
-chmod 600 "$invocation_path"
+# The proxy drops DAC_OVERRIDE and can run under a different host UID.
+# This is attribution metadata, not a credential.
+chmod 644 "$invocation_path"
 
 mkdir -p "$material/audit"
 chmod 700 "$material/audit"

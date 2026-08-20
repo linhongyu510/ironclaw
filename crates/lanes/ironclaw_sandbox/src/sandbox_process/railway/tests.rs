@@ -657,6 +657,10 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
     assert!(!argv.iter().any(|arg| arg.contains("docker.sock")));
     assert!(RAILWAY_MANAGED_EGRESS_WRAPPER.contains("proxy_url=\"http://${proxy_ip}:3128\""));
     assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains("chmod 644 \"$invocation_path\""),
+        "the capability-dropped proxy must be able to read attribution metadata across a host UID boundary"
+    );
+    assert!(
         RAILWAY_MANAGED_EGRESS_WRAPPER
             .contains("\"$proxy_image\" -config /run/ironclaw-proxy/proxy.yaml")
     );

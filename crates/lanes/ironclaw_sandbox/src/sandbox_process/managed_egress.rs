@@ -264,7 +264,10 @@ impl ManagedEgressRuntime {
                 ))
             })?
         {
-            write_atomic_material_file(&invocation_id_path, b"unassigned", true).await?;
+            // The proxy drops DAC_OVERRIDE and may not share the host process
+            // UID. This is attribution metadata, not a credential, so it must
+            // be world-readable across the read-only bind mount.
+            write_atomic_material_file(&invocation_id_path, b"unassigned").await?;
         }
         let network_labels = registry::build_user_container_launch_labels(
             NETWORK_LABEL_PREFIX,
@@ -407,8 +410,10 @@ impl ManagedEgressRuntime {
         bundle: &ManagedEgressBundle,
         invocation_id: &InvocationId,
     ) -> Result<(), RuntimeProcessError> {
+        // The capability-dropped proxy may not share the host process UID.
+        // Attribution metadata must remain readable across that boundary.
         let invocation_id = invocation_id.to_string();
-        write_atomic_material_file(&bundle.invocation_id_path, invocation_id.as_bytes(), true).await
+        write_atomic_material_file(&bundle.invocation_id_path, invocation_id.as_bytes()).await
     }
 
     async fn create_proxy(
@@ -538,7 +543,7 @@ impl ManagedEgressRuntime {
         };
         let proxy_config = render_proxy_config(&self.policy, &proxy_ip)?;
         if let Err(error) =
-            write_atomic_material_file(&proxy_config_path, proxy_config.as_bytes(), false).await
+            write_atomic_material_file(&proxy_config_path, proxy_config.as_bytes()).await
         {
             let _ = remove_proxy_if_present(docker, proxy_name).await;
             return Err(error);
@@ -1270,7 +1275,6 @@ fn docker_readonly_bind(
 async fn write_atomic_material_file(
     path: &std::path::Path,
     contents: &[u8],
-    private: bool,
 ) -> Result<(), RuntimeProcessError> {
     let path = path.to_path_buf();
     let contents = contents.to_vec();
@@ -1292,19 +1296,13 @@ async fn write_atomic_material_file(
             use std::os::unix::fs::PermissionsExt as _;
             temporary
                 .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(if private {
-                    0o600
-                } else {
-                    0o644
-                }))
+                .set_permissions(std::fs::Permissions::from_mode(0o644))
                 .map_err(|error| {
                     RuntimeProcessError::ExecutionFailed(format!(
                         "sandbox managed-egress material permissions failed: {error}"
                     ))
                 })?;
         }
-        #[cfg(not(unix))]
-        let _ = private;
         temporary.write_all(&contents).map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox managed-egress material file write failed: {error}"
@@ -1511,18 +1509,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn atomic_material_writer_replaces_an_existing_marker() {
+    async fn atomic_material_writer_replaces_a_proxy_readable_marker() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("invocation-id");
 
-        write_atomic_material_file(&marker, b"first", true)
-            .await
-            .unwrap();
-        write_atomic_material_file(&marker, b"second", true)
+        write_atomic_material_file(&marker, b"first").await.unwrap();
+        write_atomic_material_file(&marker, b"second")
             .await
             .unwrap();
 
-        assert_eq!(tokio::fs::read(marker).await.unwrap(), b"second");
+        assert_eq!(tokio::fs::read(&marker).await.unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = tokio::fs::metadata(marker)
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o644);
+        }
     }
 
     #[test]
