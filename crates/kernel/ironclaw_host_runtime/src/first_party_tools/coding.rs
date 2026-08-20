@@ -63,15 +63,15 @@ pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
 /// Canonical capability id of the HTML-to-PDF renderer.
 pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
-/// Inline preview budget for spilled coding output.
+/// Inline preview budget for a coding result that spilled to an artifact.
 ///
-/// The host carries at most [`ARTIFACT_INLINE_PREVIEW_MAX_BYTES`] (24 KiB) of
-/// canonical result inline, and `ironclaw_capabilities::dispatch` tail-cuts the
-/// whole canonical JSON above that once a durable artifact exists. The raw
-/// budget therefore stays below the ceiling to leave headroom for JSON escaping
-/// (every newline doubles) plus the sibling `artifact_ref`/`total_bytes` fields,
-/// so a preview never reaches the layer that would silently shear its footer.
-const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+/// Stays under [`ARTIFACT_INLINE_PREVIEW_MAX_BYTES`] because
+/// `ironclaw_capabilities::dispatch` tail-cuts the whole canonical JSON above
+/// that ceiling once a durable artifact exists — and that cut replaces the
+/// result object with a bare truncated string, so a preview which reaches it
+/// loses both its footer and its shape. The gap absorbs JSON escaping (every
+/// newline doubles) plus the sibling `artifact_ref`/`total_bytes` fields.
+const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 48 * 1024;
 const MAX_DOCUMENT_EDIT_INPUT_BYTES: usize = 21 * 1024 * 1024;
 /// A 10 MiB source read can grow when rendered with Hashline anchors. Keep
 /// bounded headroom for that representation without allowing a grep over many

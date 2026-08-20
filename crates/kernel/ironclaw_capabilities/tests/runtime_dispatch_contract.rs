@@ -22,8 +22,9 @@ use ironclaw_capabilities::{
 };
 use ironclaw_host_api::{
     artifact::{
-        AccountedArtifactPersister, ArtifactDigest, ArtifactId, ArtifactNamespaceId, ArtifactRef,
-        ArtifactWriteError, ArtifactWriteMetadata, CompletedArtifact,
+        ARTIFACT_INLINE_PREVIEW_MAX_BYTES, AccountedArtifactPersister, ArtifactDigest, ArtifactId,
+        ArtifactNamespaceId, ArtifactRef, ArtifactWriteError, ArtifactWriteMetadata,
+        CompletedArtifact,
     },
     authorized::Authorized,
     dispatch::{
@@ -113,7 +114,9 @@ async fn runtime_result_artifact_dispatcher_persists_once_and_bounds_transport()
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let namespace = ArtifactNamespaceId::from_root_run(RunId::new());
-    let full_output = json!({"content": "x".repeat(32 * 1024)});
+    // Sized off the ceiling itself, not a literal: the fixture only proves the
+    // bound fires if it actually exceeds it.
+    let full_output = json!({"content": "x".repeat(2 * ARTIFACT_INLINE_PREVIEW_MAX_BYTES)});
     let canonical = serde_json::to_vec(&full_output).unwrap();
     let canonical_len = u64::try_from(canonical.len()).unwrap();
     let expected_content_digest = ContentDigest::from_json_value(&full_output).unwrap();
@@ -156,7 +159,7 @@ async fn runtime_result_artifact_dispatcher_persists_once_and_bounds_transport()
         .output
         .as_str()
         .expect("transport is bounded preview");
-    assert!(preview.len() <= 24 * 1024);
+    assert!(preview.len() <= ARTIFACT_INLINE_PREVIEW_MAX_BYTES);
     assert!(u64::try_from(preview.len()).unwrap() < canonical_len);
     assert_eq!(
         result

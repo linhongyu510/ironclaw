@@ -16,7 +16,26 @@ use crate::{
 };
 
 /// Maximum canonical result content carried inline to the model.
-pub const ARTIFACT_INLINE_PREVIEW_MAX_BYTES: usize = 24 * 1024;
+///
+/// Sized against measured behavior rather than a round number. The two places
+/// that enforce it — the canonical bound in `ironclaw_capabilities::dispatch`
+/// and the inline-result validator in `ironclaw_loop_contracts` — both arrived
+/// with the artifact surface, so before it existed a tool result reached the
+/// model unbounded: a PinchBench baseline shows 78 `read` payloads above 24 KiB,
+/// median 46.5 KiB and maximum 75.4 KiB, at a higher pass rate and a third of
+/// the cost.
+///
+/// A smaller ceiling is not the cheaper choice. Context accumulates within a
+/// turn, so consuming a file of `F` bytes in windows of `C` costs roughly
+/// `F^2 / 2C` tokens: halving the payload doubles the tokens and the round
+/// trips. Measured across two runs of the same suite, 5.9x smaller payloads
+/// cost 2.53x the input tokens.
+///
+/// 64 KiB stays under the largest observed unbounded payload while bounding the
+/// two costs a larger ceiling really does carry: over-fetch noise that persists
+/// for the rest of the turn, and untrusted content (HTTP bodies, MCP and wasm
+/// results) entering model context in bigger slices.
+pub const ARTIFACT_INLINE_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 
 /// Numeric artifact identity within one spawn-tree namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

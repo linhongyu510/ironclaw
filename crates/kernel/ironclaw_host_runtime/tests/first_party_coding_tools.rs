@@ -1118,6 +1118,56 @@ async fn a_relative_path_written_by_write_is_readable_by_read() {
     );
 }
 
+/// Regression (PinchBench payload parity): an engine-bounded `read` window
+/// above the host's 24 KiB inline threshold must stay inline and whole.
+///
+/// Spilling is what activates the kernel's canonical bound, so routing large
+/// reads through an artifact capped payload per call far below what the
+/// pre-pinned `read_file` delivered (46.5 KiB median, 75.4 KiB max, no
+/// artifact). Because context accumulates, that shrinks payload and *raises*
+/// total tokens for the same file: measured 5.9x smaller payloads for 2.53x the
+/// input tokens.
+#[tokio::test]
+async fn an_engine_bounded_read_window_stays_inline_above_the_host_threshold() {
+    let temp = tempfile::tempdir().unwrap();
+    let body: String = (1..=4_000usize)
+        .map(|n| format!("line {n:05} {}\n", "transcript filler text".repeat(3)))
+        .collect();
+    std::fs::write(temp.path().join("transcript.md"), &body).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem_and_artifacts(filesystem);
+
+    // ~400 rendered lines: over the 24 KiB host threshold that used to force a
+    // spill, under the document inline ceiling.
+    let read = invoke_with_context(
+        &runtime,
+        CODING_READ_CAPABILITY_ID,
+        json!({"path": "transcript.md:100-700"}),
+        execution_context_with_mounts(coding_capability_ids(), mounts),
+    )
+    .await
+    .expect("an engine-bounded window must be readable");
+
+    let output = read["output"].as_str().expect("coding read returns text");
+    assert!(
+        output.len() > 24 * 1024,
+        "fixture must exceed the 24 KiB host inline threshold to be meaningful; got {} bytes",
+        output.len()
+    );
+    assert!(
+        read.get("artifact_ref").is_none(),
+        "an engine-bounded window must not spill: spilling is what caps the payload; got {read:?}"
+    );
+    assert!(
+        output.contains("line 00100 ") && output.contains("line 00500 "),
+        "the whole requested span must be delivered inline"
+    );
+    assert!(
+        !output.contains("artifact output elided"),
+        "a window delivered whole must carry no elision marker"
+    );
+}
+
 /// Regression (PinchBench transcript tasks): a spilled `read` of an explicit
 /// contiguous line range must not come back with its middle deleted.
 ///
@@ -1144,7 +1194,7 @@ async fn a_spilled_read_window_stays_contiguous_and_names_its_resume_selector() 
     let read = invoke_with_context(
         &runtime,
         CODING_READ_CAPABILITY_ID,
-        json!({"path": "transcript.md:95-700"}),
+        json!({"path": "transcript.md:100-2400"}),
         execution_context_with_mounts(coding_capability_ids(), mounts),
     )
     .await
