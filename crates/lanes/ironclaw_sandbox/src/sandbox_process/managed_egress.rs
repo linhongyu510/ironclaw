@@ -47,10 +47,12 @@ const PROXY_TUNNEL_PORT: u16 = 3128;
 const PROXY_AUDIT_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const PROXY_AUDIT_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
 const PROXY_AUDIT_DIR_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
-/// Mirrors `ironclaw_network::is_private_or_loopback_ip`: every range that
-/// classifier rejects must appear here so an allowlisted hostname resolving
-/// into a non-public address is denied by the proxy exactly as the canonical
-/// host enforcer would deny it (DNS-rebinding parity).
+/// Parity with `ironclaw_network`'s private-address classifier: every range
+/// that classifier rejects must appear here, so an allowlisted hostname
+/// resolving into a non-public address is denied by the proxy exactly as the
+/// canonical host enforcer would deny it (DNS-rebinding parity). This is
+/// proxy configuration data handed to the sidecar, not an in-crate address
+/// check — runtime crates must never classify addresses themselves.
 const DENIED_UPSTREAM_CIDRS: &[&str] = &[
     "0.0.0.0/8",
     "10.0.0.0/8",
