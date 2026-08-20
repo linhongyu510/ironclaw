@@ -673,6 +673,13 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
         RAILWAY_MANAGED_EGRESS_WRAPPER
             .contains("tail -c 4194304 \"$audit_capture\" >> \"$audit_log\"")
     );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "gateway_mode=$(docker network inspect --format '{{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}' \"$network\")"
+        ) && RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("[ \"$internal\" != true ] || [ \"$gateway_mode\" != isolated ]"),
+        "reused Railway private networks must be validated for isolated gateway mode"
+    );
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("network connect bridge"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("ca_path"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("SSL_CERT_FILE"));
