@@ -204,7 +204,11 @@ impl RailwayPreviewSandboxConfig {
             ))
         })?;
         let proxy_image = super::managed_egress::configured_proxy_image()?;
-        let proxy_posture = super::managed_egress::proxy_posture(&proxy_image, &policy)?;
+        let proxy_posture = super::managed_egress::proxy_posture(
+            &proxy_image,
+            &policy,
+            std::path::Path::new("/run/ironclaw-reborn-proxy"),
+        )?;
         let proxy_config_template =
             super::managed_egress::render_proxy_config(&policy, RAILWAY_PROXY_IP_TOKEN)?;
         Ok(Self {

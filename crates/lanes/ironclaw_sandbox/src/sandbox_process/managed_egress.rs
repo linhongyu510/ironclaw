@@ -44,6 +44,10 @@ const SHARED_UPSTREAM_ROLE: &str = "shared-proxy-upstream-v1";
 const ISOLATED_GATEWAY_OPTION: &str = "com.docker.network.bridge.gateway_mode_ipv4";
 const ISOLATED_GATEWAY_MODE: &str = "isolated";
 const PROXY_TUNNEL_PORT: u16 = 3128;
+/// Mirrors `ironclaw_network::is_private_or_loopback_ip`: every range that
+/// classifier rejects must appear here so an allowlisted hostname resolving
+/// into a non-public address is denied by the proxy exactly as the canonical
+/// host enforcer would deny it (DNS-rebinding parity).
 const DENIED_UPSTREAM_CIDRS: &[&str] = &[
     "0.0.0.0/8",
     "10.0.0.0/8",
@@ -51,13 +55,17 @@ const DENIED_UPSTREAM_CIDRS: &[&str] = &[
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
+    "192.0.2.0/24",
     "192.168.0.0/16",
     "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
     "224.0.0.0/4",
     "240.0.0.0/4",
     "::/128",
     "::1/128",
     "::ffff:0:0/96",
+    "2001:db8::/32",
     "fc00::/7",
     "fe80::/10",
     "ff00::/8",
@@ -85,6 +93,7 @@ impl ManagedEgressConfig {
                 "sandbox managed egress policy must deny private IP ranges".to_string(),
             ));
         }
+        reject_wildcard_targets(&policy)?;
         let proxy_image = configured_proxy_image()?;
         Ok(Self {
             proxy_image,
@@ -197,7 +206,7 @@ impl ManagedEgressRuntime {
         let proxy_image = resolve_proxy_image(docker, &config.proxy_image).await?;
         let material_root = config.material_root;
         create_material_directory(&material_root).await?;
-        let posture = proxy_posture(&proxy_image, &config.policy)?;
+        let posture = proxy_posture(&proxy_image, &config.policy, &material_root)?;
         Ok(Arc::new(Self {
             proxy_image,
             policy: config.policy,
@@ -1026,9 +1035,30 @@ async fn remove_network_if_present(docker: &Docker, name: &str) -> Result<(), Ru
     }
 }
 
+/// Rejects wildcard host patterns: iron-proxy globs match the apex and
+/// subdomains at any depth, which is strictly wider than
+/// [`ironclaw_network::target_matches_pattern`]'s exactly-one-label wildcard.
+/// A pattern that cannot be represented exactly fails closed.
+fn reject_wildcard_targets(policy: &NetworkPolicy) -> Result<(), RuntimeProcessError> {
+    if policy
+        .allowed_targets
+        .iter()
+        .any(|target| target.host_pattern.starts_with('*'))
+    {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox managed egress proxy cannot represent wildcard host patterns exactly \
+             (proxy globs also match the apex and deeper subdomains); enumerate exact \
+             hostnames instead"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn proxy_posture(
     proxy_image: &str,
     policy: &NetworkPolicy,
+    material_root: &std::path::Path,
 ) -> Result<String, RuntimeProcessError> {
     let policy_json = serde_json::to_vec(policy).map_err(|error| {
         RuntimeProcessError::ExecutionFailed(format!(
@@ -1038,6 +1068,8 @@ pub(super) fn proxy_posture(
     let mut hasher = Sha256::new();
     hasher.update(b"ironclaw-managed-egress-v3\0");
     hasher.update(proxy_image.as_bytes());
+    hasher.update([0]);
+    hasher.update(material_root.as_os_str().as_encoded_bytes());
     hasher.update([0]);
     hasher.update(policy_json);
     Ok(hex::encode(hasher.finalize()))
@@ -1068,6 +1100,7 @@ pub(super) fn render_proxy_config(
                 .to_string(),
         ));
     }
+    reject_wildcard_targets(policy)?;
     let dns_listen =
         serde_json::to_string(&format!("{proxy_ip}:53")).map_err(proxy_config_error)?;
     let http_listen =
@@ -1223,7 +1256,7 @@ mod tests {
                 },
                 NetworkTargetPattern {
                     scheme: None,
-                    host_pattern: "*.githubusercontent.com".to_string(),
+                    host_pattern: "objects.githubusercontent.com".to_string(),
                     port: None,
                 },
             ],
@@ -1241,13 +1274,17 @@ mod tests {
         assert!(rendered.contains("https_listen: \"172.28.10.2:443\""));
         assert!(rendered.contains("tunnel_listen: \"172.28.10.2:3128\""));
         assert!(rendered.contains("- \"github.com\""));
-        assert!(rendered.contains("- \"*.githubusercontent.com\""));
+        assert!(rendered.contains("- \"objects.githubusercontent.com\""));
         assert!(rendered.contains("upstream_deny_cidrs:"));
         for cidr in [
             "10.0.0.0/8",
             "127.0.0.0/8",
             "169.254.0.0/16",
+            "192.0.2.0/24",
+            "198.51.100.0/24",
+            "203.0.113.0/24",
             "::ffff:0:0/96",
+            "2001:db8::/32",
             "fc00::/7",
         ] {
             assert!(rendered.contains(cidr), "missing denied CIDR {cidr}");
@@ -1278,6 +1315,32 @@ mod tests {
         constrained.allowed_targets[0].scheme = None;
         constrained.allowed_targets[0].port = Some(443);
         assert!(render_proxy_config(&constrained, "172.28.10.2").is_err());
+
+        let mut wildcard = policy();
+        wildcard.allowed_targets[1].host_pattern = "*.githubusercontent.com".to_string();
+        let error = render_proxy_config(&wildcard, "172.28.10.2").unwrap_err();
+        assert!(
+            error.to_string().contains("wildcard host patterns"),
+            "wildcard must fail closed: {error}"
+        );
+        assert!(
+            ManagedEgressConfig::from_policy(wildcard, PathBuf::from("/tmp/egress")).is_err(),
+            "profile construction must reject wildcard targets"
+        );
+    }
+
+    #[test]
+    fn posture_binds_image_policy_and_material_root() {
+        let image = "sha256:proxy-image";
+        let base = proxy_posture(image, &policy(), std::path::Path::new("/a")).unwrap();
+        assert_eq!(
+            base,
+            proxy_posture(image, &policy(), std::path::Path::new("/a")).unwrap()
+        );
+        assert_ne!(
+            base,
+            proxy_posture(image, &policy(), std::path::Path::new("/b")).unwrap()
+        );
     }
 
     #[tokio::test]
