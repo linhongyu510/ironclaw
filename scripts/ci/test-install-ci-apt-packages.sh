@@ -1,126 +1,179 @@
 #!/usr/bin/env bash
+# Regression tests for the CI apt installer's hang handling.
+#
+# GitHub's Ubuntu image lists azure.archive.ubuntu.com as the priority:1 apt
+# mirror. During actions/runner-images incident #5183 that host started
+# accepting the TCP connection and then stalling mid-transfer instead of
+# failing, so `apt-get` blocked forever, the installer's retry loop (which only
+# fires on a non-zero exit) never ran, and jobs burned their whole 30-120 minute
+# cap. These tests pin the property that makes that impossible: every apt
+# invocation is bounded, so a hang becomes a fast, loud failure.
+#
+# Every apt invocation here is stubbed, so this runs in seconds and downloads
+# nothing.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-installer="${repo_root}/scripts/ci/install-ci-apt-packages.sh"
-fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/ironclaw-apt-installer.XXXXXX")"
-trap 'rm -rf -- "${fixture_root}"' EXIT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALLER="$SCRIPT_DIR/install-ci-apt-packages.sh"
+failures=0
 
-mock_bin="${fixture_root}/bin"
-apt_calls="${fixture_root}/apt-calls"
-update_count="${fixture_root}/update-count"
-sleep_calls="${fixture_root}/sleep-calls"
-install_count="${fixture_root}/install-count"
-mirror_edits="${fixture_root}/mirror-edits"
-mkdir -p "${mock_bin}"
+# How long a stubbed hang sleeps. Must exceed the per-attempt timeouts the
+# cases below pass in, so "bounded" and "hung" are distinguishable.
+STUB_HANG_SECONDS=120
 
-cat > "${mock_bin}/sudo" <<'MOCK'
+# Run the installer with a stubbed `sudo`, `apt-get`, and apt source tree.
+#
+# PATH is REPLACED, not prepended, so a real apt-get can never satisfy a lookup
+# and make a case silently exercise the wrong branch.
+run_installer() {
+    local mode="$1"
+    shift
+    local sandbox
+    sandbox="$(mktemp -d)"
+
+    # `sudo` that just runs the command. The installer must keep working when
+    # every privileged call is a plain exec.
+    cat >"$sandbox/sudo" <<'STUB'
 #!/usr/bin/env bash
-set -euo pipefail
+exec "$@"
+STUB
 
-command_name="$1"
-shift
-if [[ "${command_name}" == "timeout" ]]; then
-  printf '%s\n' "timeout $*" >> "${APT_TIMEOUT_CALLS}"
-  expected_deadline="120s"
-  if [[ " $* " == *" install "* ]]; then
-    expected_deadline="300s"
-  fi
-  [[ "$1" == "--kill-after=5s" ]]
-  [[ "$2" == "${expected_deadline}" ]]
-  shift 2
-  command_name="$1"
-  shift
-fi
-case "${command_name}" in
-  find)
-    exit 0
-    ;;
-  test)
-    [[ "$*" == "-f /etc/apt/apt-mirrors.txt" ]]
-    ;;
-  grep)
-    [[ " $* " == *" azure.archive.ubuntu.com "* ]]
-    ;;
-  sed)
-    printf '%s\n' "$*" >> "${MIRROR_EDITS}"
-    ;;
-  apt-get)
-    printf '%s\n' "apt-get $*" >> "${APT_CALLS}"
-    if [[ " $* " == *" update "* ]]; then
-      count=0
-      if [[ -f "${APT_UPDATE_COUNT}" ]]; then
-        count="$(<"${APT_UPDATE_COUNT}")"
-      fi
-      count=$((count + 1))
-      printf '%s\n' "${count}" > "${APT_UPDATE_COUNT}"
-      [[ "${count}" -gt 1 ]]
-      exit
-    fi
-    if [[ " $* " == *" install "* ]]; then
-      count=0
-      if [[ -f "${APT_INSTALL_COUNT}" ]]; then
-        count="$(<"${APT_INSTALL_COUNT}")"
-      fi
-      count=$((count + 1))
-      printf '%s\n' "${count}" > "${APT_INSTALL_COUNT}"
-      [[ "${count}" -gt 1 ]]
-      exit
-    fi
-    exit 0
-    ;;
-  *)
-    echo "unexpected sudo command: ${command_name}" >&2
-    exit 1
-    ;;
+    # `apt-get` whose behaviour is selected by APT_STUB_MODE. `update` and
+    # `install` are distinguished by scanning the args, because the installer
+    # passes -o options before the subcommand.
+    cat >"$sandbox/apt-get" <<STUB
+#!/usr/bin/env bash
+subcommand=""
+for arg in "\$@"; do
+    case "\$arg" in
+        update|install) subcommand="\$arg"; break ;;
+    esac
+done
+echo "apt-get \$subcommand" >>"\$APT_TEST_LOG"
+case "\$APT_STUB_MODE" in
+    happy) exit 0 ;;
+    hang_update)
+        [ "\$subcommand" = update ] && sleep $STUB_HANG_SECONDS
+        exit 0 ;;
+    hang_install)
+        [ "\$subcommand" = install ] && sleep $STUB_HANG_SECONDS
+        exit 0 ;;
+    flaky_update)
+        if [ "\$subcommand" = update ]; then
+            attempts=\$(grep -c "apt-get update" "\$APT_TEST_LOG")
+            [ "\$attempts" -lt 2 ] && exit 100
+        fi
+        exit 0 ;;
 esac
-MOCK
+exit 0
+STUB
 
-cat > "${mock_bin}/sleep" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "${SLEEP_CALLS}"
-MOCK
-chmod +x "${mock_bin}/sudo" "${mock_bin}/sleep"
+    chmod +x "$sandbox/sudo" "$sandbox/apt-get"
 
-PATH="${mock_bin}:${PATH}" \
-APT_CALLS="${apt_calls}" \
-APT_INSTALL_COUNT="${install_count}" \
-APT_UPDATE_COUNT="${update_count}" \
-APT_TIMEOUT_CALLS="${fixture_root}/apt-timeout-calls" \
-MIRROR_EDITS="${mirror_edits}" \
-SLEEP_CALLS="${sleep_calls}" \
-  bash "${installer}" clang mold
+    # A stand-in apt source tree, so the installer's Microsoft-source stripping
+    # is exercised without any risk of touching the real /etc/apt.
+    mkdir -p "$sandbox/etc-apt/sources.list.d"
+    printf 'deb http://packages.microsoft.com/repos/azure-cli noble main\n' \
+        >"$sandbox/etc-apt/sources.list.d/microsoft-prod.list"
+    printf 'deb http://azure.archive.ubuntu.com/ubuntu noble main\n' \
+        >"$sandbox/etc-apt/sources.list.d/ubuntu.list"
 
-apt_options="-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2"
-if [[ "$(grep -Fxc -- "apt-get ${apt_options} update" "${apt_calls}")" -ne 2 ]]; then
-  echo "apt update must be time-bounded on every retry" >&2
-  cat "${apt_calls}" >&2
-  exit 1
-fi
-if [[ "$(grep -Fxc -- "apt-get ${apt_options} install -y clang mold" "${apt_calls}")" -ne 2 ]]; then
-  echo "apt install must retry once with the same bounded acquisition policy" >&2
-  cat "${apt_calls}" >&2
-  exit 1
-fi
-timeout_calls="${fixture_root}/apt-timeout-calls"
-if [[ "$(grep -Fxc -- "timeout --kill-after=5s 120s apt-get ${apt_options} update" "${timeout_calls}")" -ne 2 ]]; then
-  echo "every apt update must have a 120-second whole-command deadline" >&2
-  cat "${timeout_calls}" >&2
-  exit 1
-fi
-if [[ "$(grep -Fxc -- "timeout --kill-after=5s 300s apt-get ${apt_options} install -y clang mold" "${timeout_calls}")" -ne 2 ]]; then
-  echo "apt install must have a 300-second whole-command deadline" >&2
-  cat "${timeout_calls}" >&2
-  exit 1
-fi
-if ! grep -Fq -- "azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g /etc/apt/apt-mirrors.txt" "${mirror_edits}"; then
-  echo "GitHub's Azure mirror list must fall back to Ubuntu's canonical archive" >&2
-  exit 1
-fi
-if [[ "$(cat "${sleep_calls}")" != $'5\n5' ]]; then
-  echo "outer apt retry backoffs changed unexpectedly" >&2
-  exit 1
+    local status=0
+    env -i \
+        PATH="$sandbox:/usr/bin:/bin" \
+        HOME="$sandbox" \
+        APT_TEST_LOG="$sandbox/log" \
+        APT_STUB_MODE="$mode" \
+        APT_SOURCES_DIR="$sandbox/etc-apt" \
+        APT_UPDATE_TIMEOUT=2s \
+        APT_INSTALL_TIMEOUT=2s \
+        APT_ATTEMPTS=2 \
+        bash "$INSTALLER" clang mold >"$sandbox/out" 2>&1 || status=$?
+
+    printf '%s' "$status" >"$sandbox/status"
+    last_status="$status"
+    last_output="$(cat "$sandbox/out")"
+    last_log="$(cat "$sandbox/log" 2>/dev/null || true)"
+    last_sandbox="$sandbox"
+}
+
+fail() {
+    echo "FAIL: $1" >&2
+    [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2
+    failures=$((failures + 1))
+}
+
+expect_status() {
+    local label="$1" want="$2"
+    if [ "$last_status" != "$want" ]; then
+        fail "$label: expected exit $want, got $last_status" "$last_output"
+    fi
+}
+
+expect_output_contains() {
+    local label="$1" needle="$2"
+    if ! grep -qF -- "$needle" <<<"$last_output"; then
+        fail "$label: output missing '$needle'" "$last_output"
+    fi
+}
+
+expect_faster_than() {
+    local label="$1" limit="$2" elapsed="$3"
+    if [ "$elapsed" -ge "$limit" ]; then
+        fail "$label: took ${elapsed}s, expected under ${limit}s (it hung)"
+    fi
+}
+
+time_installer() {
+    local start end
+    start="$(date +%s)"
+    run_installer "$@"
+    end="$(date +%s)"
+    elapsed=$((end - start))
+}
+
+# --- Case 1: `apt-get update` hangs -----------------------------------------
+# The incident case. Must fail fast rather than block until the job cap.
+time_installer hang_update
+expect_faster_than "update hang" "$STUB_HANG_SECONDS" "$elapsed"
+expect_status "update hang" 1
+expect_output_contains "update hang" "timed out"
+
+# --- Case 2: happy path ------------------------------------------------------
+time_installer happy
+expect_status "happy path" 0
+if ! grep -q "apt-get install" <<<"$last_log"; then
+    fail "happy path: install was never invoked" "$last_log"
 fi
 
-echo "CI apt installer contract passed"
+# --- Case 3: transient `apt-get update` failure is retried -------------------
+# The behaviour the original retry loop was written for; bounding must not
+# break it.
+time_installer flaky_update
+expect_status "transient failure" 0
+if [ "$(grep -c 'apt-get update' <<<"$last_log")" -lt 2 ]; then
+    fail "transient failure: update was not retried" "$last_log"
+fi
+
+# --- Case 4: `apt-get install` hangs -----------------------------------------
+# `install` had neither a retry nor a timeout, so it hung exactly like update.
+time_installer hang_install
+expect_faster_than "install hang" "$STUB_HANG_SECONDS" "$elapsed"
+expect_status "install hang" 1
+expect_output_contains "install hang" "timed out"
+
+# --- Case 5: Microsoft sources are still stripped ----------------------------
+# Pins the pre-existing behaviour that the bounding must not regress.
+run_installer happy
+if [ -e "$last_sandbox/etc-apt/sources.list.d/microsoft-prod.list" ]; then
+    fail "source stripping: packages.microsoft.com source was not removed"
+fi
+if [ ! -e "$last_sandbox/etc-apt/sources.list.d/ubuntu.list" ]; then
+    fail "source stripping: a non-Microsoft source was removed"
+fi
+
+if [ "$failures" -ne 0 ]; then
+    echo "$failures check(s) failed" >&2
+    exit 1
+fi
+echo "All install-ci-apt-packages.sh checks passed"
