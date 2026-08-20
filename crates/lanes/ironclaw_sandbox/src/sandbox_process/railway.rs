@@ -97,12 +97,20 @@ if ! docker network inspect "$network" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$material/audit"
+chmod 700 "$material/audit"
 audit_log="$material/audit/proxy.log"
 if docker inspect "$proxy" >/dev/null 2>&1; then
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
     mv "$audit_log" "$audit_log.1"
   fi
-  docker logs --timestamps "$proxy" 2>&1 | tail -c 4194304 >> "$audit_log" || true
+  audit_capture="$material/audit/.capture"
+  if ! docker logs --timestamps "$proxy" >"$audit_capture" 2>&1; then
+    printf '%s\n' "Railway sandbox proxy audit capture failed; leaving prior proxy for retry" >&2
+    exit 1
+  fi
+  tail -c 4194304 "$audit_capture" >> "$audit_log"
+  chmod 600 "$audit_log"
+  rm -f "$audit_capture"
 fi
 docker rm --force "$proxy" >/dev/null 2>&1 || true
 if docker network inspect "$upstream" >/dev/null 2>&1; then

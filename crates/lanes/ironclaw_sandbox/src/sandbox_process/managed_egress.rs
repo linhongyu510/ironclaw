@@ -678,6 +678,17 @@ impl ManagedEgressRuntime {
         }
         let audit_dir = self.material_root.join("audit");
         create_material_directory(&audit_dir).await?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&audit_dir, {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::Permissions::from_mode(0o700)
+        })
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit directory permissions failed: {error}"
+            ))
+        })?;
         let audit_path = audit_dir.join(format!("{audit_name}.log"));
         if let Ok(metadata) = tokio::fs::metadata(&audit_path).await
             && metadata.len() > PROXY_AUDIT_ROTATE_BYTES
@@ -691,16 +702,15 @@ impl ManagedEgressRuntime {
                     ))
                 })?;
         }
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&audit_path)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox proxy audit log open failed: {error}"
-                ))
-            })?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&audit_path).await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit log open failed: {error}"
+            ))
+        })?;
         tokio::io::AsyncWriteExt::write_all(&mut file, &captured)
             .await
             .map_err(|error| {

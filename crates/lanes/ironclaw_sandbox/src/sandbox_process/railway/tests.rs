@@ -665,10 +665,13 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
         RAILWAY_MANAGED_EGRESS_WRAPPER.contains("docker network connect \"$upstream\" \"$proxy\"")
     );
     assert!(
-        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
-            "docker logs --timestamps \"$proxy\" 2>&1 | tail -c 4194304 >> \"$audit_log\""
-        ),
-        "proxy audit records must be drained before the prior proxy is removed"
+        RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("if ! docker logs --timestamps \"$proxy\" >\"$audit_capture\" 2>&1; then"),
+        "proxy audit capture failure must abort before the prior proxy is removed"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("tail -c 4194304 \"$audit_capture\" >> \"$audit_log\"")
     );
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("network connect bridge"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("ca_path"));
