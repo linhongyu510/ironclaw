@@ -237,8 +237,8 @@ observed_date = "2026-08-08"
 # (~11 lines), predating that growth. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not summed.
 #
-# Re-measured 42198 -> 42447 on 2026-08-19 after rebasing onto main b6c33d33d.
-loc_ceiling = 42447
+# Re-measured 42198 -> 42386 on 2026-08-19 after rebasing onto main 5380a320d.
+loc_ceiling = 42386
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -249,7 +249,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42447
+loc_observed = 42386
 loc_observed_date = "2026-08-19"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -332,4 +332,4 @@ loc_observed_date = "2026-08-19"
 # 830 + 15 tolerance = 845, preserving zero hidden headroom.
 arc_dyn_ceiling = 830
 arc_dyn_tolerance = 15
-arc_dyn_observed = 845
+arc_dyn_observed = 844
