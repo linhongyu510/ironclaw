@@ -317,29 +317,7 @@ async fn failed_runtime_outcome_inlines_full_model_visible_cause() {
 }
 
 #[tokio::test]
-async fn unknown_runtime_outcome_inlines_message_before_summary_fallback() {
-    let cause = "legacy runtime failed at /workspace/project/input.json";
-    let outcome =
-        RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-            capability_id: CapabilityId::new("demo.legacy").unwrap(),
-            kind: "legacy_failure".to_string(),
-            message: Some(cause.to_string()),
-        });
-
-    let resolution = product_resolution(
-        &empty_product_result_filesystem(),
-        &resource_scope(),
-        InvocationId::new(),
-        outcome,
-    )
-    .await
-    .expect("unknown runtime outcome remains model-recoverable");
-
-    assert_eq!(model_visible_failure_text(&resolution), cause);
-}
-
-#[tokio::test]
-async fn missing_runtime_detail_uses_explicit_fallbacks() {
+async fn missing_runtime_failure_detail_uses_explicit_fallback() {
     let failed =
         RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
             CapabilityId::new("demo.read").unwrap(),
@@ -357,25 +335,6 @@ async fn missing_runtime_detail_uses_explicit_fallbacks() {
     assert_eq!(
         model_visible_failure_text(&failed_resolution),
         "capability invocation failed"
-    );
-
-    let unknown =
-        RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-            capability_id: CapabilityId::new("demo.legacy").unwrap(),
-            kind: "legacy_failure".to_string(),
-            message: None,
-        });
-    let unknown_resolution = product_resolution(
-        &empty_product_result_filesystem(),
-        &resource_scope(),
-        InvocationId::new(),
-        unknown,
-    )
-    .await
-    .expect("unknown runtime outcome remains model-recoverable");
-    assert_eq!(
-        model_visible_failure_text(&unknown_resolution),
-        ModelDiagnostic::unavailable().as_str()
     );
 }
 

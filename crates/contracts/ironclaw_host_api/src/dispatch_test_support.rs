@@ -101,6 +101,7 @@ impl TestDispatcher {
                 capability: request.invocation.capability.clone(),
                 required_secrets: Vec::new(),
                 credential_requirements: Vec::new(),
+                model_visible_cause: None,
             })
         })
     }
@@ -227,6 +228,7 @@ mod tests {
             capability: CapabilityId::new(cap).unwrap(),
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
+            model_visible_cause: None,
         }
     }
 
@@ -296,6 +298,7 @@ mod tests {
                     capability: req.invocation.capability.clone(),
                     required_secrets: Vec::new(),
                     credential_requirements: Vec::new(),
+                    model_visible_cause: None,
                 })
             } else {
                 Err(DispatchError::UnknownCapability {

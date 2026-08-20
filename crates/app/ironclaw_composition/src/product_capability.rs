@@ -433,25 +433,6 @@ async fn product_resolution(
                 diagnostic,
             ))
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            let diagnostic = unknown
-                .message
-                .as_deref()
-                .map(model_diagnostic)
-                .unwrap_or_else(|| ModelFailureDiagnostic::Diagnostic {
-                    text: ModelDiagnostic::unavailable(),
-                });
-            let summary = unknown
-                .message
-                .and_then(|value| SafeSummary::new(value).ok())
-                .unwrap_or_else(SafeSummary::placeholder);
-            Ok(recoverable_failure(
-                invocation_id,
-                FailureKind::from_tag(&unknown.kind),
-                summary,
-                diagnostic,
-            ))
-        }
     }
 }
 
@@ -541,7 +522,6 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
-        RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != requested {
         return Err(ProductSurfaceError::internal_from(

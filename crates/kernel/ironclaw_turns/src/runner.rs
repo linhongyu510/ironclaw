@@ -16,6 +16,13 @@ pub struct ClaimedTurnRun {
     pub spawn_tree_descendant_cap: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<crate::TurnRunId>,
+    /// Carried so a terminal metadata rewrite can restore it. `from_state`
+    /// rebuilds the metadata envelope without lineage, and the loop-exit path
+    /// writes that envelope on every terminal transition — without this the
+    /// provenance is erased the moment a run completes, and the derived
+    /// activation-streak caps read every historical run as untagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<crate::ActivationProvenance>,
     pub runner_id: TurnRunnerId,
     pub lease_token: TurnLeaseToken,
 }
