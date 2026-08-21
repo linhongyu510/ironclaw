@@ -1,4 +1,3 @@
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use ironclaw_filesystem::DiskFilesystem;
@@ -355,7 +354,7 @@ pub(crate) async fn bootstrap_standalone_host(
             reason: error.to_string(),
         }
     })?;
-    let filesystem = standalone_system_skills_filesystem(&system_root.join("skills"))?;
+    let filesystem = standalone_system_skills_filesystem(&system_root.join("skills")).await?;
     let system_skills_root = VirtualPath::new(SYSTEM_SKILLS_ROOT)?;
     ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
         &filesystem,
@@ -370,64 +369,25 @@ pub(crate) async fn bootstrap_standalone_host(
 ///
 /// The exact host root is validated before it is mounted so bundle installation cannot follow a
 /// symlink outside the standalone system tree.
-fn standalone_system_skills_filesystem(
+async fn standalone_system_skills_filesystem(
     system_skills_root: &Path,
 ) -> Result<DiskFilesystem, RebornBuildError> {
-    let system_skills_root =
-        prepare_disk_skill_storage_root(system_skills_root, "standalone system skills root")?;
     let virtual_system_skills_root = VirtualPath::new(SYSTEM_SKILLS_ROOT)?;
     let mut filesystem = DiskFilesystem::new();
     filesystem
-        .mount_local(
+        .mount_local_create(
             virtual_system_skills_root,
-            HostPath::from_path_buf(system_skills_root),
+            HostPath::from_path_buf(system_skills_root.to_path_buf()),
         )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
+        .await
+        .map_err(RebornBuildError::Filesystem)?;
     Ok(filesystem)
-}
-
-fn prepare_disk_skill_storage_root(
-    storage_root: &Path,
-    label: &str,
-) -> Result<PathBuf, RebornBuildError> {
-    reject_existing_symlink(storage_root, label)?;
-    std::fs::create_dir_all(storage_root).map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })?;
-    reject_existing_symlink(storage_root, label)?;
-    let metadata =
-        std::fs::metadata(storage_root).map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
-    if !metadata.is_dir() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: format!("{label} is not a directory: {}", storage_root.display()),
-        });
-    }
-    storage_root
-        .canonicalize()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })
-}
-
-fn reject_existing_symlink(path: &Path, label: &str) -> Result<(), RebornBuildError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(RebornBuildError::InvalidConfig {
-            reason: format!("{label} must not be a symlink: {}", path.display()),
-        }),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        }),
-    }
 }
 
 #[cfg(test)]
 mod bootstrap_tests {
+    use std::error::Error as _;
+
     use ironclaw_host_api::ids::UserId;
 
     use super::bootstrap_standalone_host;
@@ -435,7 +395,11 @@ mod bootstrap_tests {
     #[tokio::test]
     async fn bundled_skills_install_at_the_exact_system_skills_root() {
         let root = tempfile::tempdir().expect("tempdir");
-        let system_root = root.path().join("system");
+        let system_root = root
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .join("system");
         let owner = UserId::new("bootstrap-owner").expect("valid owner");
         std::fs::create_dir_all(system_root.join("prompts"))
             .expect("host-access system prompt root");
@@ -460,8 +424,9 @@ mod bootstrap_tests {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir().expect("tempdir");
-        let system_root = root.path().join("system");
-        let outside_root = root.path().join("outside-skills");
+        let base = root.path().canonicalize().expect("canonical tempdir");
+        let system_root = base.join("system");
+        let outside_root = base.join("outside-skills");
         let owner = UserId::new("bootstrap-owner").expect("valid owner");
         std::fs::create_dir_all(system_root.join("prompts"))
             .expect("host-access system prompt root");
@@ -472,7 +437,23 @@ mod bootstrap_tests {
             .await
             .expect_err("standalone bootstrap must not follow a symlinked skills root");
 
-        assert!(error.to_string().contains("must not be a symlink"));
+        assert!(matches!(error, crate::RebornBuildError::Filesystem(_)));
+        assert!(error.source().is_some());
+        assert!(error.source().and_then(std::error::Error::source).is_some());
+
+        assert_eq!(error.to_string(), "reborn filesystem build failed");
+        assert!(
+            error
+                .source()
+                .expect("filesystem source")
+                .to_string()
+                .contains("filesystem backend rejected local directory capability")
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains(outside_root.to_string_lossy().as_ref())
+        );
         assert!(
             !outside_root.join("coding").exists(),
             "a rejected skills-root symlink must not receive bundled content"

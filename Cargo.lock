@@ -4390,6 +4390,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "cap-fs-ext",
+ "cap-std",
  "deadpool 0.13.0",
  "deadpool-postgres",
  "ironclaw_host_api",
@@ -4397,6 +4399,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "libsql",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -4407,7 +4410,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

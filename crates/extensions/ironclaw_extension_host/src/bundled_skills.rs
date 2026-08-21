@@ -64,23 +64,6 @@ pub async fn ensure_bundled_reborn_skills_installed_in(
     system_skills_root: &VirtualPath,
 ) -> Result<(), RebornBuildError> {
     let bundled_skills = embedded_reborn_skill_bundles()?;
-    // Best-effort, and it must be: `RootFilesystem::create_dir_all` is documented as deprecated
-    // because "the entry plane infers directories from path prefixes" -- writing a leaf establishes
-    // its hierarchy. On the database backends it also cannot succeed for a root that is itself a
-    // mount: `create_dir_all("/system/skills")` walks up to `/system`, which is not a known virtual
-    // root, and fails with "virtual path must begin with a known root". That is exactly the
-    // production shape, where `/system/skills` is mounted straight onto the database, so insisting on
-    // it is what kept production from ever having a single built-in skill.
-    //
-    // Still attempted, because the disk backend does want the directory to exist up front.
-    if let Err(error) = create_dir_all(filesystem, system_skills_root).await {
-        tracing::debug!(
-            %error,
-            root = system_skills_root.as_str(),
-            "skill root directory not created explicitly; the backend infers directories from path \
-             prefixes"
-        );
-    }
     let install_lock = BundledSkillInstallLock::acquire(filesystem, system_skills_root).await?;
     let result = async {
         let bundled_names = bundled_skills
@@ -326,16 +309,6 @@ async fn write_marker(
                 marker_path
             ))
         })
-}
-
-async fn create_dir_all(
-    filesystem: &dyn RootFilesystem,
-    path: &VirtualPath,
-) -> Result<(), RebornBuildError> {
-    filesystem
-        .create_dir_all(path)
-        .await
-        .map_err(invalid_config)
 }
 
 async fn path_exists(

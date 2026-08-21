@@ -6,11 +6,13 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::{
     AtomicSubtreeEntry, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
-    FilesystemOperation, RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
+    FilesystemOperation, RecordVersion, RootFilesystem, VersionedEntry,
+    local_capability::{CapabilityWriteError, DiskDirectoryCapability, run_capability_blocking},
+    path_prefix_matches,
     root::validate_atomic_subtree_entries,
 };
 
@@ -32,6 +34,7 @@ pub struct DiskFilesystem {
 struct LocalMount {
     virtual_root: VirtualPath,
     host_root: PathBuf,
+    capability: DiskDirectoryCapability,
     /// When `true`, this mount is shared by many callers who are each only
     /// ever granted a single leaf subtree of it (one [`MountGrant`] target
     /// per caller, narrowed by the composition-layer `MountView` resolver —
@@ -65,6 +68,40 @@ impl DiskFilesystem {
         host_root: HostPath,
     ) -> Result<(), FilesystemError> {
         self.mount_local_impl(virtual_root, host_root, false)
+    }
+
+    /// Creates and admits a local mount without following path components,
+    /// retaining the opened directory capability for all later writes.
+    pub async fn mount_local_create(
+        &mut self,
+        virtual_root: VirtualPath,
+        host_root: HostPath,
+    ) -> Result<(), FilesystemError> {
+        if self
+            .mounts
+            .iter()
+            .any(|mount| mount.virtual_root.as_str() == virtual_root.as_str())
+        {
+            return Err(FilesystemError::MountConflict { path: virtual_root });
+        }
+        let host_path = host_root.as_path().to_path_buf();
+        let capability =
+            run_capability_blocking(move || DiskDirectoryCapability::admit_or_create(&host_path))
+                .await
+                .map_err(|error| {
+                    local_capability_error(
+                        virtual_root.clone(),
+                        FilesystemOperation::MountLocal,
+                        error,
+                    )
+                })?;
+        self.mounts.push(LocalMount {
+            virtual_root,
+            host_root: host_root.as_path().to_path_buf(),
+            capability,
+            leaf_scoped: false,
+        });
+        Ok(())
     }
 
     /// Mounts a host directory shared across many callers, each of whom is
@@ -114,10 +151,15 @@ impl DiskFilesystem {
                 reason: "host root is not a directory".to_string(),
             });
         }
+        let capability =
+            DiskDirectoryCapability::from_existing(&canonical_root).map_err(|error| {
+                local_capability_error(virtual_root.clone(), FilesystemOperation::MountLocal, error)
+            })?;
 
         self.mounts.push(LocalMount {
             virtual_root,
             host_root: canonical_root,
+            capability,
             leaf_scoped,
         });
         Ok(())
@@ -136,128 +178,12 @@ impl DiskFilesystem {
         Ok(canonical)
     }
 
-    async fn resolve_for_write(
-        &self,
-        path: &VirtualPath,
-        operation: FilesystemOperation,
-    ) -> Result<PathBuf, FilesystemError> {
-        let resolved = self.resolve_joined(path)?;
-
-        // `symlink_metadata` (lstat) reports whether a directory entry
-        // exists at this path at all, without following a final symlink —
-        // unlike `try_exists`, which follows symlinks and reports `false`
-        // for a *dangling* one (target missing). Using `try_exists` here
-        // would let a pre-existing dangling symlink fall through to the
-        // "brand new file in this leaf" bootstrap path below, which hands
-        // back an unchecked path through the symlink; `write_file`/
-        // `append_file` open with `O_CREAT` and the OS creates the file at
-        // wherever the symlink points, bypassing containment entirely.
-        match tokio::fs::symlink_metadata(&resolved.joined).await {
-            Ok(metadata) => {
-                match tokio::fs::canonicalize(&resolved.joined).await {
-                    Ok(canonical) => {
-                        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
-                        return Ok(canonical);
-                    }
-                    Err(error) if metadata.file_type().is_symlink() => {
-                        // The entry is a symlink whose target can't be
-                        // resolved (dangling, or a broken intermediate
-                        // component). Fail closed: we cannot verify
-                        // containment of a target we can't resolve, and
-                        // silently falling through would let a write
-                        // escape via the symlink.
-                        let _ = error;
-                        return Err(FilesystemError::SymlinkEscape { path: path.clone() });
-                    }
-                    Err(error) => return Err(io_error(path.clone(), operation, error)),
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(path.clone(), operation, error)),
-        }
-
-        let parent = resolved
-            .joined
-            .parent()
-            .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        ensure_existing_ancestor_contained(
-            path,
-            &resolved.containment_root,
-            resolved.bootstrap_root,
-            parent,
-            operation,
-        )
-        .await?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        let canonical_parent = tokio::fs::canonicalize(parent)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        // `joined` is constructed from validated virtual path segments under the
-        // backend root. If its canonical parent leaves the backend root, an
-        // existing symlink in the parent chain caused the escape.
-        ensure_contained(path, &resolved.containment_root, &canonical_parent, true)?;
-        // Re-root the final path on the canonicalized, containment-checked
-        // parent rather than returning `joined` (which still contains the
-        // un-canonicalized ancestor components). This narrows the TOCTOU
-        // window between the containment check and the eventual write — a
-        // later swap of an ancestor symlink does not change the path we hand
-        // back. Robust defense (openat / O_NOFOLLOW / cap-std) is tracked as a
-        // follow-up; see PR #2996 review.
-        let file_name = resolved
-            .joined
-            .file_name()
-            .ok_or_else(|| FilesystemError::PathOutsideMount { path: path.clone() })?;
-        Ok(canonical_parent.join(file_name))
-    }
-
-    async fn resolve_for_create_dir_all(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<PathBuf, FilesystemError> {
-        let resolved = self.resolve_joined(path)?;
-        ensure_existing_ancestor_contained(
-            path,
-            &resolved.containment_root,
-            resolved.bootstrap_root,
-            &resolved.joined,
-            FilesystemOperation::CreateDirAll,
-        )
-        .await?;
-        // Same residual TOCTOU window as `resolve_for_write` (see the
-        // comment at that function's re-rooting step): the ancestor check
-        // above and this `create_dir_all` are two syscalls, not one atomic
-        // operation, so a symlink swapped into the parent chain between
-        // them is not caught until the post-creation `ensure_contained`
-        // below — by which point `create_dir_all` may already have created
-        // directories at the swapped-in location. Closing this fully needs
-        // the same descriptor/capability-rooted traversal (openat /
-        // O_NOFOLLOW / cap-std) tracked as a follow-up in PR #2996 review;
-        // this function's defense-in-depth is the post-creation containment
-        // check, which still fails closed rather than silently succeeding.
-        tokio::fs::create_dir_all(&resolved.joined)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        let canonical = tokio::fs::canonicalize(&resolved.joined)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        ensure_contained(path, &resolved.containment_root, &canonical, true)?;
-        Ok(canonical)
-    }
-
     /// Resolves `path` to its host-side join point plus the containment
     /// invariant callers must enforce against it.
     ///
-    /// Bundled into one typed [`ResolvedMountPath`] — rather than a
-    /// positional tuple with `bootstrap_root` re-derived per caller — because
-    /// the three fields are one invariant, not three independent values: a
-    /// caller that threads `joined`/`containment_root` from one mount but
-    /// `bootstrap_root` from another (or forgets it for a leaf-scoped mount)
-    /// would silently reopen the bootstrap containment gap this type exists
-    /// to close. Computing all three together, once, in the one place that
-    /// knows which mount `path` resolved to removes that chance entirely.
-    fn resolve_joined(&self, path: &VirtualPath) -> Result<ResolvedMountPath<'_>, FilesystemError> {
+    /// Bundling the ambient read path and retained write capability prevents
+    /// callers from resolving those two sides against different mounts.
+    fn resolve_joined(&self, path: &VirtualPath) -> Result<ResolvedMountPath, FilesystemError> {
         let mount = self
             .mounts
             .iter()
@@ -272,6 +198,7 @@ impl DiskFilesystem {
             .trim_start_matches('/');
 
         let mut joined = mount.host_root.clone();
+        let mut relative = PathBuf::new();
         let mut containment_root = mount.host_root.clone();
         if tail.is_empty() {
             // A leaf-scoped mount has no safe containment root for the bare
@@ -285,6 +212,7 @@ impl DiskFilesystem {
         } else {
             for (index, segment) in tail.split('/').enumerate() {
                 joined.push(segment);
+                relative.push(segment);
                 if mount.leaf_scoped && index == 0 {
                     containment_root.push(segment);
                 }
@@ -292,8 +220,9 @@ impl DiskFilesystem {
         }
         Ok(ResolvedMountPath {
             joined,
+            relative,
+            capability: mount.capability.clone(),
             containment_root,
-            bootstrap_root: leaf_bootstrap_root(mount),
         })
     }
 }
@@ -302,18 +231,19 @@ impl DiskFilesystem {
 /// containment invariant every write/read caller must enforce against it —
 /// see [`DiskFilesystem::resolve_joined`] for why these three fields travel
 /// together instead of as a positional tuple.
-struct ResolvedMountPath<'a> {
+struct ResolvedMountPath {
     /// The host path `path` joins to under the mount's `host_root`,
     /// pre-canonicalization.
     joined: PathBuf,
+    /// Capability-relative path, never containing parent or root components.
+    relative: PathBuf,
+    /// Retained mount-root handle used by mutating operations.
+    capability: DiskDirectoryCapability,
     /// The boundary [`ensure_contained`] checks the canonicalized path
     /// against: `host_root` for an ordinary mount, or `host_root` plus the
     /// caller's own leaf segment for a [`LocalMount::leaf_scoped`] mount —
     /// see [`DiskFilesystem::resolve_joined`].
     containment_root: PathBuf,
-    /// `Some(host_root)` for a leaf-scoped mount, `None` otherwise — see
-    /// [`leaf_bootstrap_root`] for the bootstrap gap this covers.
-    bootstrap_root: Option<&'a Path>,
 }
 
 #[async_trait]
@@ -372,67 +302,52 @@ impl RootFilesystem for DiskFilesystem {
     ) -> Result<Vec<RecordVersion>, FilesystemError> {
         validate_local_atomic_subtree(prefix, &entries)?;
         let resolved = self.resolve_joined(prefix)?;
-        ensure_existing_ancestor_contained(
-            prefix,
-            &resolved.containment_root,
-            resolved.bootstrap_root,
-            &resolved.joined,
-            FilesystemOperation::CreateSubtreeAtomic,
-        )
-        .await?;
-
-        if tokio::fs::try_exists(&resolved.joined)
-            .await
-            .map_err(|error| {
-                io_error(
-                    prefix.clone(),
-                    FilesystemOperation::CreateSubtreeAtomic,
-                    error,
-                )
-            })?
-        {
-            return Err(FilesystemError::VersionMismatch {
+        let relative_prefix = resolved.relative;
+        let capability = resolved.capability;
+        let prefix_with_separator = format!("{}/", prefix.as_str().trim_end_matches('/'));
+        let entry_count = entries.len();
+        let mut relative_entries = Vec::with_capacity(entry_count);
+        for item in entries {
+            let relative = item
+                .path
+                .as_str()
+                .strip_prefix(&prefix_with_separator)
+                .ok_or_else(|| FilesystemError::PathOutsideMount {
+                    path: item.path.clone(),
+                })?;
+            relative_entries.push((PathBuf::from(relative), item.entry.body));
+        }
+        let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        match tokio::task::spawn_blocking(move || {
+            capability.create_subtree_atomic(&relative_prefix, relative_entries, counter)
+        })
+        .await
+        .map_err(|error| {
+            local_capability_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                std::io::Error::other(error),
+            )
+        })? {
+            Ok(()) => Ok(vec![RecordVersion::from_backend(0); entry_count]),
+            Err(CapabilityWriteError::Io(error)) => Err(local_capability_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )),
+            Err(CapabilityWriteError::SymlinkEscape) => Err(FilesystemError::SymlinkEscape {
+                path: prefix.clone(),
+            }),
+            Err(CapabilityWriteError::VersionMismatch) => Err(FilesystemError::VersionMismatch {
                 path: prefix.clone(),
                 expected: None,
                 found: Some(RecordVersion::from_backend(0)),
-            });
-        }
-
-        let parent = resolved
-            .joined
-            .parent()
-            .ok_or_else(|| FilesystemError::PathOutsideMount {
+            }),
+            Err(CapabilityWriteError::UnsupportedVersion) => Err(FilesystemError::Unsupported {
                 path: prefix.clone(),
-            })?;
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            io_error(
-                prefix.clone(),
-                FilesystemOperation::CreateSubtreeAtomic,
-                error,
-            )
-        })?;
-        let staging = unique_subtree_temp_path(prefix, parent, &resolved.joined)?;
-        tokio::fs::create_dir(&staging).await.map_err(|error| {
-            io_error(
-                prefix.clone(),
-                FilesystemOperation::CreateSubtreeAtomic,
-                error,
-            )
-        })?;
-
-        let result =
-            publish_local_atomic_subtree(prefix, &staging, &resolved.joined, parent, entries).await;
-
-        if result.is_err()
-            && let Err(error) = tokio::fs::remove_dir_all(&staging).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::debug!(
-                reason = %error,
-                "best-effort cleanup of atomic subtree staging directory failed"
-            );
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+            }),
         }
-        result
     }
 
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
@@ -487,22 +402,15 @@ impl RootFilesystem for DiskFilesystem {
     }
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        let resolved = self
-            .resolve_for_write(path, FilesystemOperation::AppendFile)
-            .await?;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .write(true)
-            .open(resolved)
+        let resolved = self.resolve_joined(path)?;
+        let relative = resolved.relative;
+        let capability = resolved.capability;
+        let bytes = bytes.to_vec();
+        run_capability_blocking(move || capability.append(&relative, &bytes))
             .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))?;
-        file.write_all(bytes)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))?;
-        file.flush()
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::AppendFile, error))
+            .map_err(|error| {
+                local_capability_error(path.clone(), FilesystemOperation::AppendFile, error)
+            })
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -633,7 +541,14 @@ impl RootFilesystem for DiskFilesystem {
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.resolve_for_create_dir_all(path).await.map(|_| ())
+        let resolved = self.resolve_joined(path)?;
+        let relative = resolved.relative;
+        let capability = resolved.capability;
+        run_capability_blocking(move || capability.create_dir_all(&relative))
+            .await
+            .map_err(|error| {
+                local_capability_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+            })
     }
 }
 
@@ -644,250 +559,54 @@ impl DiskFilesystem {
         bytes: &[u8],
         cas: CasExpectation,
     ) -> Result<(), FilesystemError> {
-        let resolved = self
-            .resolve_for_write(path, FilesystemOperation::WriteFile)
-            .await?;
-        if matches!(cas, CasExpectation::Absent)
-            && tokio::fs::try_exists(&resolved)
-                .await
-                .map_err(|error| io_error(path.clone(), FilesystemOperation::WriteFile, error))?
-        {
-            return Err(FilesystemError::VersionMismatch {
+        let resolved = self.resolve_joined(path)?;
+        let relative = resolved.relative;
+        let capability = resolved.capability;
+        let bytes = bytes.to_vec();
+        let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        match tokio::task::spawn_blocking(move || {
+            capability.atomic_write(&relative, &bytes, cas, counter)
+        })
+        .await
+        .map_err(|error| {
+            local_capability_error(
+                path.clone(),
+                FilesystemOperation::WriteFile,
+                std::io::Error::other(error),
+            )
+        })? {
+            Ok(()) => Ok(()),
+            Err(CapabilityWriteError::Io(error)) => Err(local_capability_error(
+                path.clone(),
+                FilesystemOperation::WriteFile,
+                error,
+            )),
+            Err(CapabilityWriteError::SymlinkEscape) => {
+                Err(FilesystemError::SymlinkEscape { path: path.clone() })
+            }
+            Err(CapabilityWriteError::VersionMismatch) => Err(FilesystemError::VersionMismatch {
                 path: path.clone(),
                 expected: None,
                 found: Some(RecordVersion::from_backend(0)),
-            });
-        }
-        atomic_write_file(path, &resolved, bytes, cas).await
-    }
-}
-
-async fn atomic_write_file(
-    virtual_path: &VirtualPath,
-    target: &Path,
-    bytes: &[u8],
-    cas: CasExpectation,
-) -> Result<(), FilesystemError> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| FilesystemError::PathOutsideMount {
-            path: virtual_path.clone(),
-        })?;
-    let temp = unique_temp_path(virtual_path, parent, target)?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
-    file.write_all(bytes)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
-    file.sync_all()
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
-    drop(file);
-
-    let install_result = match cas {
-        CasExpectation::Any => tokio::fs::rename(&temp, target)
-            .await
-            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
-        CasExpectation::Absent => publish_absent_temp(virtual_path, &temp, target).await,
-        CasExpectation::Version(_) => Err(FilesystemError::Unsupported {
-            path: virtual_path.clone(),
-            operation: FilesystemOperation::WriteFile,
-        }),
-    };
-
-    install_result?;
-    sync_parent_dir(virtual_path, parent).await
-}
-
-#[cfg(not(windows))]
-async fn publish_absent_temp(
-    virtual_path: &VirtualPath,
-    temp: &Path,
-    target: &Path,
-) -> Result<(), FilesystemError> {
-    match tokio::fs::hard_link(temp, target).await {
-        Ok(()) => {
-            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort cleanup of write temp file failed after publication"
-                );
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort cleanup of write temp file failed after CAS conflict"
-                );
-            }
-            Err(FilesystemError::VersionMismatch {
-                path: virtual_path.clone(),
-                expected: None,
-                found: Some(RecordVersion::from_backend(0)),
-            })
-        }
-        Err(error) => {
-            if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort cleanup of write temp file failed after hard-link error"
-                );
-            }
-            Err(io_error(
-                virtual_path.clone(),
-                FilesystemOperation::WriteFile,
-                error,
-            ))
-        }
-    }
-}
-
-#[cfg(windows)]
-async fn publish_absent_temp(
-    virtual_path: &VirtualPath,
-    temp: &Path,
-    target: &Path,
-) -> Result<(), FilesystemError> {
-    let temp_path = temp.to_path_buf();
-    let target_path = target.to_path_buf();
-    let publish =
-        tokio::task::spawn_blocking(move || move_file_absent_windows(&temp_path, &target_path))
-            .await
-            .map_err(|error| FilesystemError::Backend {
-                path: virtual_path.clone(),
+            }),
+            Err(CapabilityWriteError::UnsupportedVersion) => Err(FilesystemError::Unsupported {
+                path: path.clone(),
                 operation: FilesystemOperation::WriteFile,
-                reason: format!("Windows create-only publication task failed: {error}"),
-            })?;
-    match publish {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            if let Err(cleanup_error) = tokio::fs::remove_file(temp).await {
-                tracing::debug!(
-                    error = ?cleanup_error,
-                    "best-effort cleanup of write temp file failed after rename error"
-                );
-            }
-            if windows_target_exists_error(&error) {
-                Err(FilesystemError::VersionMismatch {
-                    path: virtual_path.clone(),
-                    expected: None,
-                    found: Some(RecordVersion::from_backend(0)),
-                })
-            } else {
-                Err(io_error(
-                    virtual_path.clone(),
-                    FilesystemOperation::WriteFile,
-                    error,
-                ))
-            }
+            }),
         }
     }
 }
 
-#[cfg(windows)]
-fn windows_target_exists_error(error: &std::io::Error) -> bool {
-    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
-
-    error
-        .raw_os_error()
-        .is_some_and(|code| code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32)
-}
-
-#[cfg(windows)]
-fn move_file_absent_windows(temp: &Path, target: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let temp = path_to_nul_terminated_wide(temp)?;
-    let target = path_to_nul_terminated_wide(target)?;
-    // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
-    // Omitting MOVEFILE_REPLACE_EXISTING makes an existing target a failure,
-    // preserving CasExpectation::Absent atomically on the same volume.
-    let moved = unsafe { MoveFileExW(temp.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+fn local_capability_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    source: std::io::Error,
+) -> FilesystemError {
+    FilesystemError::LocalCapability {
+        path,
+        operation,
+        source,
     }
-}
-
-#[cfg(windows)]
-fn path_to_nul_terminated_wide(path: &Path) -> std::io::Result<Vec<u16>> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let absolute = std::path::absolute(path)?;
-    let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
-    if wide.contains(&0) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path contains an interior NUL byte",
-        ));
-    }
-
-    normalize_windows_path_separators(&mut wide);
-    if !has_windows_namespace_prefix(&wide) {
-        wide = verbatim_windows_path(wide);
-    }
-    wide.push(0);
-    Ok(wide)
-}
-
-#[cfg(windows)]
-fn has_windows_namespace_prefix(wide: &[u16]) -> bool {
-    wide.len() >= 4
-        && is_windows_path_separator(wide[0])
-        && is_windows_path_separator(wide[1])
-        && (wide[2] == b'?' as u16 || wide[2] == b'.' as u16)
-        && is_windows_path_separator(wide[3])
-}
-
-#[cfg(windows)]
-fn normalize_windows_path_separators(wide: &mut [u16]) {
-    for code_unit in wide {
-        if *code_unit == b'/' as u16 {
-            *code_unit = b'\\' as u16;
-        }
-    }
-}
-
-#[cfg(windows)]
-fn verbatim_windows_path(wide: Vec<u16>) -> Vec<u16> {
-    if wide.len() >= 2 && is_windows_path_separator(wide[0]) && is_windows_path_separator(wide[1]) {
-        let mut prefixed: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
-        prefixed.extend_from_slice(&wide[2..]);
-        prefixed
-    } else if wide.len() >= 3 && wide[1] == b':' as u16 && is_windows_path_separator(wide[2]) {
-        let mut prefixed: Vec<u16> = r"\\?\".encode_utf16().collect();
-        prefixed.extend_from_slice(&wide);
-        prefixed
-    } else {
-        wide
-    }
-}
-
-#[cfg(windows)]
-fn is_windows_path_separator(code_unit: u16) -> bool {
-    code_unit == b'\\' as u16 || code_unit == b'/' as u16
-}
-
-fn unique_temp_path(
-    virtual_path: &VirtualPath,
-    parent: &Path,
-    target: &Path,
-) -> Result<PathBuf, FilesystemError> {
-    let name = target
-        .file_name()
-        .ok_or_else(|| FilesystemError::PathOutsideMount {
-            path: virtual_path.clone(),
-        })?
-        .to_string_lossy();
-    let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(".{name}.tmp.{counter}")))
 }
 
 fn validate_local_atomic_subtree(
@@ -904,185 +623,6 @@ fn validate_local_atomic_subtree(
         }
     }
     Ok(())
-}
-
-async fn materialize_local_atomic_subtree(
-    prefix: &VirtualPath,
-    staging: &Path,
-    entries: Vec<AtomicSubtreeEntry>,
-) -> Result<Vec<RecordVersion>, FilesystemError> {
-    let prefix_with_separator = format!("{}/", prefix.as_str().trim_end_matches('/'));
-    let mut versions = Vec::with_capacity(entries.len());
-    for item in entries {
-        let relative = item
-            .path
-            .as_str()
-            .strip_prefix(&prefix_with_separator)
-            .ok_or_else(|| FilesystemError::PathOutsideMount {
-                path: item.path.clone(),
-            })?;
-        let target = staging.join(relative);
-        let parent = target
-            .parent()
-            .ok_or_else(|| FilesystemError::PathOutsideMount {
-                path: item.path.clone(),
-            })?;
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            io_error(
-                item.path.clone(),
-                FilesystemOperation::CreateSubtreeAtomic,
-                error,
-            )
-        })?;
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .await
-            .map_err(|error| {
-                io_error(
-                    item.path.clone(),
-                    FilesystemOperation::CreateSubtreeAtomic,
-                    error,
-                )
-            })?;
-        file.write_all(&item.entry.body).await.map_err(|error| {
-            io_error(
-                item.path.clone(),
-                FilesystemOperation::CreateSubtreeAtomic,
-                error,
-            )
-        })?;
-        file.sync_all().await.map_err(|error| {
-            io_error(
-                item.path.clone(),
-                FilesystemOperation::CreateSubtreeAtomic,
-                error,
-            )
-        })?;
-        versions.push(RecordVersion::from_backend(0));
-    }
-    Ok(versions)
-}
-
-async fn publish_local_atomic_subtree(
-    prefix: &VirtualPath,
-    staging: &Path,
-    target: &Path,
-    parent: &Path,
-    entries: Vec<AtomicSubtreeEntry>,
-) -> Result<Vec<RecordVersion>, FilesystemError> {
-    let versions = materialize_local_atomic_subtree(prefix, staging, entries).await?;
-    tokio::fs::rename(staging, target).await.map_err(|error| {
-        io_error(
-            prefix.clone(),
-            FilesystemOperation::CreateSubtreeAtomic,
-            error,
-        )
-    })?;
-    sync_parent_dir_for_operation(prefix, parent, FilesystemOperation::CreateSubtreeAtomic).await?;
-    Ok(versions)
-}
-
-fn unique_subtree_temp_path(
-    virtual_path: &VirtualPath,
-    parent: &Path,
-    target: &Path,
-) -> Result<PathBuf, FilesystemError> {
-    let name = target
-        .file_name()
-        .ok_or_else(|| FilesystemError::PathOutsideMount {
-            path: virtual_path.clone(),
-        })?
-        .to_string_lossy();
-    let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // The counter is process-local. Include the PID so two IronClaw
-    // processes sharing one disk mount cannot choose the same staging tree
-    // and then have the loser clean up the winner's in-flight batch.
-    let process_id = std::process::id();
-    Ok(parent.join(format!(".{name}.subtree.tmp.{process_id}.{counter}")))
-}
-
-async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {
-    sync_parent_dir_for_operation(virtual_path, parent, FilesystemOperation::WriteFile).await
-}
-
-async fn sync_parent_dir_for_operation(
-    virtual_path: &VirtualPath,
-    parent: &Path,
-    operation: FilesystemOperation,
-) -> Result<(), FilesystemError> {
-    #[cfg(windows)]
-    {
-        // `tokio::fs::File::open` cannot open a Windows directory without
-        // `FILE_FLAG_BACKUP_SEMANTICS`. The file contents were already
-        // flushed before the atomic rename; Windows does not expose a
-        // portable parent-directory fsync equivalent through std/tokio.
-        let _ = (virtual_path, parent, operation);
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    let dir = tokio::fs::File::open(parent)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
-    #[cfg(not(windows))]
-    dir.sync_all()
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), operation, error))
-}
-
-/// For a [`LocalMount::leaf_scoped`] mount, the shared `host_root` one level
-/// above the caller's own leaf — the one ancestor
-/// [`ensure_existing_ancestor_contained`] must accept even though it sits
-/// outside the leaf's `containment_root`, because it is exactly what a
-/// brand-new leaf's nearest *existing* ancestor looks like before that leaf
-/// has ever been created (see the "reject brand-new leaf" fix this
-/// accompanies). `None` for an ordinary mount, where `containment_root` is
-/// already `host_root` and no such gap exists.
-fn leaf_bootstrap_root(mount: &LocalMount) -> Option<&Path> {
-    mount.leaf_scoped.then_some(mount.host_root.as_path())
-}
-
-/// Walks up from `candidate` to the nearest ancestor that actually exists on
-/// disk, canonicalizes it, and checks containment. Two shapes are accepted:
-/// the ordinary case (the existing ancestor is already under
-/// `containment_root`), and — for a leaf-scoped mount only — the bootstrap
-/// case where the existing ancestor is exactly `bootstrap_root`, the shared
-/// mount root one level above a leaf that does not exist yet. The bootstrap
-/// case is safe because the leaf segment itself is never caller-controlled
-/// (it comes from the server-computed `MountView` grant, not the caller's
-/// tail — see [`DiskFilesystem::resolve_joined`]); once the caller's own
-/// leaf directory is created, the caller of this function re-canonicalizes
-/// and re-checks containment against `containment_root` on the
-/// now-existing path, so the bootstrap exception never itself becomes the
-/// final containment decision.
-async fn ensure_existing_ancestor_contained(
-    virtual_path: &VirtualPath,
-    containment_root: &Path,
-    bootstrap_root: Option<&Path>,
-    candidate: &Path,
-    operation: FilesystemOperation,
-) -> Result<(), FilesystemError> {
-    let mut ancestor = candidate.to_path_buf();
-    while !tokio::fs::try_exists(&ancestor)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), operation, error))?
-    {
-        ancestor = ancestor
-            .parent()
-            .ok_or_else(|| FilesystemError::PathOutsideMount {
-                path: virtual_path.clone(),
-            })?
-            .to_path_buf();
-    }
-    let canonical = tokio::fs::canonicalize(&ancestor)
-        .await
-        .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
-    if bootstrap_root.is_some_and(|bootstrap_root| canonical == bootstrap_root) {
-        return Ok(());
-    }
-    ensure_contained(virtual_path, containment_root, &canonical, true)
 }
 
 /// Checks `candidate` (an already-canonicalized host path) is contained
@@ -1154,20 +694,6 @@ fn io_reason(error: std::io::Error) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_existing_target_errors_are_classified_without_a_follow_up_probe() {
-        use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
-
-        for code in [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS] {
-            let error = std::io::Error::from_raw_os_error(code as i32);
-            assert!(windows_target_exists_error(&error));
-        }
-        assert!(!windows_target_exists_error(
-            &std::io::Error::from_raw_os_error(5)
-        ));
-    }
 
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -1276,12 +802,8 @@ mod tests {
         );
     }
 
-    /// First-use path for a brand-new leaf: nothing under `host_root` exists
-    /// yet for this caller, so the nearest *existing* ancestor of the target
-    /// is the shared `host_root` itself, not the (not-yet-created)
-    /// containment root `host_root/<leaf>`. Regression for the bug where
-    /// `ensure_existing_ancestor_contained` rejected that shared root as an
-    /// escape, permanently blocking every new leaf's first write.
+    /// A retained shared-root capability may safely create the caller's
+    /// server-selected leaf without ambient-path bootstrap checks.
     #[tokio::test]
     async fn leaf_scoped_mount_creates_a_brand_new_leaf_on_first_write() {
         let storage = tempdir().unwrap();
@@ -1308,9 +830,7 @@ mod tests {
         assert_eq!(bytes, b"hello");
     }
 
-    /// Same first-use bootstrap, but through `create_dir_all` rather than
-    /// `write_file` — the two callers of `ensure_existing_ancestor_contained`
-    /// must both accept the shared `host_root` as a bootstrap ancestor.
+    /// Same first-use bootstrap through capability-relative `create_dir_all`.
     #[tokio::test]
     async fn leaf_scoped_mount_create_dir_all_bootstraps_a_brand_new_leaf() {
         let storage = tempdir().unwrap();

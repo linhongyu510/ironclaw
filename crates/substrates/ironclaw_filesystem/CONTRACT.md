@@ -48,6 +48,21 @@ boundary. The current rule is codified in
   pins which crates may link the driver at all.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
+- Local-disk mount admission and mutation capabilities
+  (`src/local_capability.rs`). `DiskFilesystem::mount_local_create` performs
+  blocking descriptor admission on Tokio's blocking pool, rejects a symlinked
+  mount root, creates missing descendants relative to an opened ordinary
+  ancestor, and retains the resulting directory handle. `write_file`,
+  `append_file`, `create_dir_all`, and `create_subtree_atomic` operate relative
+  to that handle; their child creation, temporary materialization, and atomic
+  publication cannot be redirected by later replacement of the ambient root or
+  one of its ancestors. Atomic subtree publication is no-replace: native
+  `renameat` flags provide that guarantee on supported Unix targets and Windows
+  rename provides it when the destination is absent. File contents are synced
+  before publication; on Windows the directory handle is not flushed because a
+  read-only directory handle can reject `FlushFileBuffers` after publication.
+  `FilesystemError::LocalCapability` keeps the underlying I/O source for trusted
+  diagnostics while its Display contract exposes only the virtual path.
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
   wrap the real backend in it (`SecretStore::ephemeral_over`,
