@@ -1,7 +1,8 @@
 //! Shared length-prefixed identity-key encoding plus SHA-256 digest used by
-//! [`super::scope_key::RebornSandboxScopeKey`]. The tenant/user workspace
-//! codec lives in `ironclaw_host_api::ids::TenantUserWorkspaceKey` so Docker,
-//! Railway, host-process, and filesystem consumers share one neutral identity.
+//! [`super::scope_key::RebornSandboxScopeKey`] and provider posture stamps.
+//! Tenant/user persistence identity is owned by
+//! `ironclaw_host_api::ids::TenantUserWorkspaceKey`, so Docker, Railway,
+//! host-process, and filesystem consumers share one neutral codec.
 
 use sha2::{Digest, Sha256};
 

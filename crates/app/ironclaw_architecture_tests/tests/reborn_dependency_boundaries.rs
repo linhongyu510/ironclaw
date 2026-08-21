@@ -807,7 +807,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // routing lives in the Slack package and the link decision in
         // ironclaw_extension_host. Count read from this test's own failure
         // message on the merged tree.
-        ("ironclaw_extension_contracts", 10_672),
+        // 10_672 -> 10_841 (2026-08-14, capability response normalization):
+        // ToolAdapter auth errors carry the neutral bounded provider diagnostic
+        // through the extension ABI. Parsing and model-safety behavior remain
+        // in runtime lanes and loop_host.
+        ("ironclaw_extension_contracts", 10_841),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -836,19 +840,6 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // its `with_channel_context` builder carry hydrated channel context on the
         // durable turn record. A DTO field only; the fetch and prompt framing live
         // in the slack package and loop_host. Count read from failure.
-        // Raised 18_974 -> 18_975 (2026-08-10, profile-stable state): the
-        // `/system/prompts` virtual-root declaration is neutral mount
-        // vocabulary. Mount assembly and filesystem access control remain in
-        // composition and ironclaw_filesystem.
-        // Raised 18_975 -> 19_081 (2026-08-10, profile-stable state Task 5):
-        // `TenantUserWorkspaceKey` preserves the released opaque tenant/user
-        // workspace identity as neutral host-api vocabulary. Host path
-        // construction, bind admission, and provider execution remain in
-        // composition and ironclaw_sandbox.
-        // 19_081 -> 19_087 (2026-08-10, profile-stable state review): document
-        // the persisted workspace-key codec and render its fixed digest without
-        // per-byte allocation. Identity vocabulary only; path ownership remains
-        // in filesystem/composition and sandbox admission.
         // 18_974 -> 18_994 (2026-08-10, main / #7076 takeover): the
         // `RuntimeCredentialTarget::Basic` declaration, username validation,
         // and wire-contract vocabulary; RFC 7617 composition remains in
@@ -882,18 +873,33 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `PreparedTurnDeclarations`, `OutputContract`, `TurnLimits`, the
         // `PreparedContextSource` admission-probe trait, and the
         // structured-result capability id constants. Neutral authority
-        // vocabulary only. Reviewed growth: immutable, provider-neutral
-        // output-contract DTOs belong beside the turn contract consumed
-        // across loop families.
-        // + (2026-08-14, profile-stable storage): the neutral system-mount and
-        // tenant/user-workspace identity vocabulary. Storage placement, bind
-        // admission, and provider execution remain in filesystem, composition,
-        // and sandbox owners.
-        // + (2026-08-19, #7686): capability dispatch-result declarations
-        // retained beside main's provider-neutral output contracts.
-        // Union re-measured on the merged tree (2026-08-19); count read from
-        // this test's own zero-ceiling failure message.
-        ("ironclaw_host_api", 20_447),
+        // vocabulary only.
+        // Union re-measured on the merged tree (2026-08-14); count read from
+        // this test's own failure message.
+        // Reviewed growth: immutable, provider-neutral output-contract DTOs
+        // belong beside the turn contract consumed across loop families.
+        // 20_156 -> 20_334 (2026-08-19, #7686 restack): capability dispatch-result
+        // declarations retained beside main's provider-neutral output contracts.
+        // 20_334 -> 20_481 (2026-08-14, capability response normalization):
+        // provider diagnostics and rejected-attempt accounting are neutral
+        // dispatch DTOs beside main's provider-neutral output contracts.
+        // Protocol decoding and settlement stay in their owning runtime crates;
+        // the count was re-measured on the merged tree.
+        // 20_481 -> 20_516 (2026-08-19, #7752 merge): +35 lines in `turn.rs`
+        // for `turn::ActivationProvenance`, the enum tagging why a run was
+        // created (Human / ParentAgent / System).
+        // It is turn vocabulary, and `ironclaw_turns` may not own turn
+        // vocabulary — a new turn type goes to `host_api` by that crate's own
+        // charter — so there is no lower crate to move it to. Pure DTO: three
+        // unit variants and a serde derive, no behavior. The 35-line delta is
+        // from the merged `turn.rs`; the resulting ceiling is re-captured from
+        // this test's own report, never counted by eye.
+        // 20_516 -> 20_678 (2026-08-21, profile-stable storage merge): the
+        // neutral system-mount and tenant/user-workspace identity vocabulary.
+        // Storage placement, bind admission, and provider execution remain in
+        // filesystem, composition, and sandbox owners. The union was measured
+        // from this test's own failure report after merging current main.
+        ("ironclaw_host_api", 20_678),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -1039,7 +1045,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Suggestions add a product-surface-neutral generate/list/start/dismiss
         // contract shared by WebUI and future channel adapters. The DTOs and
         // ProductSurface vocabulary belong here; no orchestration moved in.
-        ("ironclaw_product_contracts", 16_418),
+        // 16_192 -> 16_581 (2026-08-17, #7688 durable notification inbox plus
+        // suggestions):
+        // typed notification records, pagination, and lifecycle command DTOs.
+        // Storage and lifecycle behavior live in ironclaw_notifications;
+        // this crate only owns the authenticated ProductSurface wire contract.
+        ("ironclaw_product_contracts", 16_581),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
