@@ -75,6 +75,82 @@ run_gate() {
     fi
 }
 
+# Mirrors scripts/ci/quality_gate.sh:7-22's env scrub exactly (two copies —
+# below the rule-of-three threshold this repo's own discipline uses to decide
+# when duplication earns an extraction; if a third caller appears, factor
+# both into scripts/ci/lib/run-cargo-ci-env.sh).
+run_cargo_ci_scrubbed() {
+    env \
+        -u NEARAI_API_KEY \
+        -u NEARAI_BASE_URL \
+        -u NEARAI_SESSION_TOKEN \
+        -u NEARAI_PROVIDER_ID \
+        -u NEARAI_MODEL \
+        -u IRONCLAW_LLM_PROVIDER \
+        -u IRONCLAW_LLM_MODEL \
+        -u LLM_BACKEND \
+        IRONCLAW_DISABLE_OS_KEYCHAIN="${IRONCLAW_DISABLE_OS_KEYCHAIN:-1}" \
+        CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+        CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+        RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}" \
+        "$@"
+}
+
+queue_plan_listing() {
+    python3 - <<'PY'
+import json
+import subprocess
+import sys
+
+result = subprocess.run(
+    ["python3", "scripts/ci/reborn_pr_test_plan.py", "--event", "merge_group"],
+    capture_output=True,
+    text=True,
+)
+if result.returncode != 0:
+    sys.stderr.write(result.stderr)
+    sys.exit(1)
+plan = json.loads(result.stdout)
+print("merge-queue full plan (what the queue will run that this PR did not):")
+for bucket in plan["crate_buckets"]:
+    print(f"  crate bucket {bucket['name']}: {len(bucket['packages'])} packages")
+print(f"  root partitions: {plan['root_partitions']}")
+print(f"  integration lanes: {plan['integration_lanes']}")
+for key in ("run_group_tests", "run_qa_replay", "run_sandbox_docker"):
+    print(f"  {key}: {plan[key]}")
+PY
+}
+
+if [ "${queue_shape}" -eq 1 ]; then
+    # The three shapes the merge queue runs that PR CI skips (#7119 class;
+    # code_style.yml's queue/push branch, matrix flavors all-features/default,
+    # verified live 2026-08-21 — see Evidence). --locked + the scrubbed env
+    # match quality_gate.sh's CI-parity clippy exactly so a dirty local
+    # Cargo.lock or ambient LLM-backend env can't false-green this tool.
+    #
+    # Honesty about cost: the all-features shape alone measures ~5.8 min on
+    # the warm 2-core CI runner; a cold local run of all three can take well
+    # over 20 minutes and the --all-features shape needs Node 22 + pnpm for
+    # the WebUI bundle build.
+    run_gate "clippy (queue shape: all targets, all features)" \
+        run_cargo_ci_scrubbed cargo clippy --locked --all --tests --examples --all-features -- -D warnings
+    run_gate "clippy (queue shape: all targets, default features)" \
+        run_cargo_ci_scrubbed cargo clippy --locked --all --tests --examples -- -D warnings
+    run_gate "clippy (queue shape: production targets, default features)" \
+        run_cargo_ci_scrubbed cargo clippy --locked --all --lib --bins -- -D warnings
+    run_gate "planner full-plan listing (merge_group)" queue_plan_listing
+    echo
+    if [ "${#failures[@]}" -eq 0 ]; then
+        echo "preflight-gates --queue-shape: OK — queue-only shapes green"
+        exit 0
+    fi
+    echo "preflight-gates --queue-shape: ${#failures[@]} gate(s) FAILED:"
+    for f in "${failures[@]}"; do
+        echo "  - ${f}"
+    done
+    exit 1
+fi
+
 # --- Layer 1: script gates (seconds each) ----------------------------------
 run_gate "fmt check" cargo fmt --all -- --check
 run_gate "composition mass budget" bash scripts/ci/check-composition-budget.sh

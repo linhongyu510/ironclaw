@@ -124,7 +124,29 @@ run_preflight "$sandbox" --nonsense
 [ "$status" -eq 2 ] || { echo "FAIL: unknown flag exited $status, want 2" >&2; failures=$((failures+1)); }
 expect "unknown flag names itself" "$output" "unknown option: --nonsense"
 
-# (Note: the queue-shape assertions land in Task 2, appended before the final verdict block.)
+# 5. --queue-shape runs exactly the three queue clippy shapes + the planner
+#    full-plan listing, and NONE of the default gates.
+sandbox="$(make_sandbox)"; extra_env=()
+run_preflight "$sandbox" --queue-shape
+[ "$status" -eq 0 ] || { echo "FAIL: --queue-shape green run exited $status" >&2; failures=$((failures+1)); }
+log="$(cat "$sandbox/log")"
+expect "queue clippy shape 1: all-targets all-features" "$log" \
+    "cargo clippy --locked --all --tests --examples --all-features -- -D warnings"
+expect "queue clippy shape 2: all-targets default-features" "$log" \
+    "cargo clippy --locked --all --tests --examples -- -D warnings"
+expect "queue clippy shape 3: production-targets default-features" "$log" \
+    "cargo clippy --locked --all --lib --bins -- -D warnings"
+expect "planner full-plan listing invoked" "$log" \
+    "reborn_pr_test_plan.py --event merge_group"
+expect "bucket list rendered" "$output" "reborn-core"
+expect_absent "queue-shape skips default gates" "$log" "cargo fmt --all -- --check"
+
+# 6. --queue-shape collects all three clippy failures in one lap.
+sandbox="$(make_sandbox)"
+extra_env=(PREFLIGHT_FAIL_MATCH="clippy")
+run_preflight "$sandbox" --queue-shape
+[ "$status" -eq 1 ] || { echo "FAIL: --queue-shape with failing clippy exited $status" >&2; failures=$((failures+1)); }
+expect "all three shapes reported" "$output" "3 gate(s) FAILED"
 
 if [ "$failures" -gt 0 ]; then
     echo "test-preflight-gates: $failures assertion(s) failed" >&2
