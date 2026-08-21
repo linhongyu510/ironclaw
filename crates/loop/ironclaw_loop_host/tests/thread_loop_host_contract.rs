@@ -5207,6 +5207,91 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
     assert!(gateway.calls.lock().unwrap().is_empty());
 }
 
+/// Incident regression: ONE historical tool result that cannot be migrated into
+/// an artifact must degrade that single message, never abort the prompt.
+///
+/// A run whose transcript held a retired `result_reference` observation retried
+/// the same failing `project_legacy_result` on every loop iteration; the `?` at
+/// the call site turned it into `status=Failed failure=model_unavailable` and
+/// killed 113 of 190 benchmark attempts. Prompt construction must instead keep
+/// the message as its existing reference (the model can still re-read through
+/// the result ref) and let the model request go out.
+#[tokio::test]
+async fn model_port_degrades_one_unprojectable_tool_result_and_still_calls_the_model() {
+    let fixture = ThreadFixture::new().await;
+    let tool_result_ref = LoopMessageRef::new("msg:55555555-5555-5555-5555-555555555555").unwrap();
+    let envelope = ToolResultReferenceEnvelope::with_model_observation(
+        "result:unprojectable-history",
+        ToolResultSafeSummary::new("historical tool completed").unwrap(),
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "historical tool completed",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:unprojectable-history",
+                "byte_len": 58_823,
+            },
+            "trust": "untrusted_tool_output",
+        }),
+    )
+    .unwrap();
+    let envelope_content = serde_json::to_string(&envelope).unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("55555555-5555-5555-5555-555555555555").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
+        content: envelope_content.clone(),
+        image_attachments: Vec::new(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    // No legacy result service is bound to the store, so every projection of a
+    // retired-shape observation fails deterministically — the incident's shape.
+    let artifacts = Arc::new(
+        ironclaw_threads::DurableToolArtifactStore::new(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::new(),
+        ))
+        .expect("artifact store"),
+    );
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_legacy_result_artifacts(artifacts);
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            iteration: 0,
+            capability_view: None,
+            tool_choice: None,
+        })
+        .await
+        .expect("an unprojectable historical tool result must not abort the prompt");
+
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the model request must still go out");
+    assert_eq!(
+        calls[0].messages[0].tool_result_content,
+        Some(HostManagedToolResultContent::Reference { envelope }),
+        "the message keeps its existing reference and safe summary"
+    );
+}
+
 #[tokio::test]
 async fn model_port_rejects_missing_explicit_tool_result_reference_before_gateway_call() {
     let fixture = ThreadFixture::new().await;

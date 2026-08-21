@@ -3528,7 +3528,7 @@ where
                     error,
                 )
             })?;
-        let completed = artifacts
+        let projection = artifacts
             .project_legacy_result(ironclaw_threads::LegacyResultArtifactRequest {
                 owner_scope: ironclaw_host_api::artifact::ArtifactOwnerScope::from_resource_scope(
                     &self.run_context.scope.to_resource_scope(),
@@ -3539,16 +3539,27 @@ where
                 thread_id: self.run_context.thread_id.clone(),
                 result_ref: envelope.result_ref.clone(),
             })
-            .await
-            .map_err(|error| {
-                raw_agent_loop_host_error(
-                    "model_context",
-                    "project_legacy_result",
-                    AgentLoopHostErrorKind::Unavailable,
-                    "historical tool result could not be projected as an artifact",
-                    error,
-                )
-            })?;
+            .await;
+        // Fail soft: migrating a historical result into an artifact is an
+        // OPTIONAL upgrade of ONE transcript message. An un-projectable record
+        // (no durable tool result record backs a live capability result, for
+        // instance) must degrade that message to the reference it already is —
+        // the model keeps the safe summary and can still page the result ref —
+        // never abort the whole prompt build and terminalize the run.
+        let completed = match projection {
+            Ok(completed) => completed,
+            Err(error) => {
+                tracing::debug!(
+                    component = "model_context",
+                    operation = "project_legacy_result",
+                    result_ref = %envelope.result_ref,
+                    %error,
+                    "historical tool result could not be projected as an artifact; \
+                     keeping the existing reference"
+                );
+                return Ok(Some(HostManagedToolResultContent::Reference { envelope }));
+            }
+        };
         let artifact_ref = completed.artifact_ref.to_string();
         let model_observation = ModelVisibleToolObservation {
             schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
