@@ -199,8 +199,8 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_436;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
-/// 837 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 837;
+/// 845 Arc<dyn> (governed prod, excl slack/extension_host)".
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 845;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

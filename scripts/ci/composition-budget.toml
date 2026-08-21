@@ -321,9 +321,9 @@ loc_observed_date = "2026-08-19"
 # carrier/assembly sites route cancellation and milestone producers through one
 # `EventSink` seam. Production uses `CoalescingEventSink`; the overload fake
 # verifies lossless cancellation behavior.
-# Re-equalized on 2026-08-18 after merging main into the profile-stable storage
-# branch: the merged tree reports its governed sites below, and
-# ceiling + 15 tolerance preserves the designed zero-headroom effective ceiling.
-arc_dyn_ceiling = 822
+# Re-equalized on 2026-08-21 after the final main merge: the merged tree reports
+# 845 governed sites. Keep main's existing 830 + 15 effective ceiling rather
+# than lowering it below both main and this branch's unchanged observation.
+arc_dyn_ceiling = 830
 arc_dyn_tolerance = 15
-arc_dyn_observed = 837
+arc_dyn_observed = 845
