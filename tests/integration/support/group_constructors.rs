@@ -388,6 +388,30 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
+    /// Build the Docker-backed shell capability only after the group's
+    /// canonical binding has been resolved. The sandbox mount view and
+    /// container dispatch identity must be minted from that same binding;
+    /// constructing the profile earlier bakes the constructor's plain
+    /// `host-user` fixture into a run owned by the resolved opaque user id.
+    pub(crate) async fn build_with_sandbox_shell_capability(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let tenant_id = base.canonical_binding.tenant_id.clone();
+        let user_id = base.canonical_actor_user()?;
+        let agent_id = base
+            .canonical_binding
+            .agent_id
+            .clone()
+            .ok_or("sandbox shell canonical binding is missing an agent id")?;
+        let host_runtime = super::super::harness::profiles::sandbox_shell::sandbox_shell_tools(
+            tenant_id, user_id, agent_id,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
     /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
     pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;

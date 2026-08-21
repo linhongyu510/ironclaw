@@ -10,16 +10,18 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 
-pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+pub(crate) async fn sandbox_shell_tools(
+    tenant_id: TenantId,
+    user_id: UserId,
+    agent_id: AgentId,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
         ironclaw_composition::hosted_single_tenant_volume_sandboxed_runtime_policy()?;
-    let tenant_id = TenantId::new("tenant-itest")?;
-    let user_id = UserId::new("host-user")?;
     let options = HostRuntimeHarnessOptions::new(
         caller_workspace_mounts(&tenant_id, &user_id)?,
         Some(runtime_policy),
     )
-    .with_local_runtime_identity(tenant_id, AgentId::new("sandbox-shell-agent")?)
+    .with_local_runtime_identity(tenant_id, agent_id)
     .with_sandboxed_shell()
     .with_workspace_scoped_per_caller()
     .with_durable_capability_io();

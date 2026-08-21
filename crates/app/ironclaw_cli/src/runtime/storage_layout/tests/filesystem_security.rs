@@ -119,7 +119,8 @@ fn migration_rejects_a_symlinked_runtime_ancestor_before_any_write() {
     let requirement = embedded_single_user_requirement();
     let legacy = temp.path().join("local-dev");
     seed_legacy_embedded_store(&legacy);
-    let outside = temp.path().join("outside-runtime");
+    let outside_root = tempfile::tempdir().expect("outside tempdir");
+    let outside = outside_root.path().join("runtime");
     fs::create_dir(&outside).expect("outside runtime");
     symlink(&outside, temp.path().join("runtime")).expect("runtime symlink");
 

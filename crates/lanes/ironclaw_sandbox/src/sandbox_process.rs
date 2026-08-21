@@ -1351,16 +1351,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
+    async fn run_command_rejects_noncaller_workspace_mount_before_docker_io() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = test_support::transport(
-            docker,
-            RebornSandboxConfig::new(temp.path().join("workspaces")),
-        );
+        let workspace_root = temp.path().join("workspaces");
+        tokio::fs::create_dir(&workspace_root).await.unwrap();
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let transport = test_support::transport(docker, RebornSandboxConfig::new(workspace_root));
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
-            VirtualPath::new("/projects/app").unwrap(),
+            VirtualPath::new("/projects/workspace/users/not-current-caller").unwrap(),
             process_read_only_permissions(),
         )])
         .unwrap();
@@ -1377,7 +1378,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error}").contains("no trusted sandbox mount source"));
+        assert!(format!("{error}").contains("current caller workspace leaf"));
     }
     fn sandbox_scope() -> ResourceScope {
         ResourceScope::system()
