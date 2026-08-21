@@ -682,3 +682,47 @@ async fn spawned_child_run_byte_len_accumulates_and_trips_policy() {
          (PromptCompactionStep skips; PostCapabilityStage no longer emits it)"
     );
 }
+
+/// Incident regression: a completed result whose inline observation is larger
+/// than the retired 24 KiB `ModelResultPreview` bound but still inside the
+/// 64 KiB inline-observation cap must survive the `Outcome` collapse as an
+/// `InlineResult`.
+///
+/// When the two caps disagree, `result_preview_parts` silently drops the
+/// preview (`ModelResultPreview::redacted(..).ok()`) and
+/// `model_observation_from_outcome` then falls through to the RETIRED
+/// `result_reference` shape. Prompt construction later tries to migrate that
+/// shape into an artifact via `project_legacy_result`, which fails
+/// deterministically because live capability results never persist a tool
+/// result record — and the whole prompt build aborts the run.
+#[test]
+fn completed_outcome_over_retired_preview_cap_stays_inline() {
+    let content = "x".repeat(58_823);
+    let observation = ModelVisibleToolObservation {
+        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: "Tool completed; inline content contains the full result.".to_string(),
+        detail: ToolObservationDetail::InlineResult {
+            content: content.clone(),
+            byte_len: content.len() as u64,
+            item_count: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    };
+    let resolution = resolution::completed(
+        LoopResultRef::new("result:large-inline-provider-call").expect("valid result ref"),
+        "capability completed".to_string(),
+        ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+        false,
+        content.len() as u64,
+        None,
+        Some(observation.clone()),
+    );
+    let ironclaw_host_api::resolution::Resolution::Done(outcome) = resolution else {
+        panic!("completed result must produce a done outcome");
+    };
+
+    assert_eq!(model_observation_from_outcome(&outcome), Some(observation));
+}
