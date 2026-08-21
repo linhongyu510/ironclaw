@@ -345,6 +345,67 @@ async fn failed_domain_attempt_never_publishes_false_completion_records() {
 }
 
 #[tokio::test]
+async fn aggregate_completion_is_not_published_when_domain_completion_write_fails() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let lease = acquire_release_pair_lease(Arc::clone(&backend))
+        .await
+        .expect("startup acquires lease before domain validation");
+
+    // Pre-seed a conflicting domain completion record so that
+    // `write_domain_completion_records` hits its verification-on-conflict
+    // path and returns an error for the "threads" domain in the report
+    // below. This mirrors a real failure mode (e.g. a domain completion
+    // record left behind by an incompatible prior attempt).
+    let domain_path = virtual_path(&format!(
+        "{}/threads-v1.complete.json",
+        RC1_TO_1_1.domain_migration_root
+    ))
+    .expect("domain completion path");
+    let mismatched = DomainCompletionRecord {
+        schema: "release-pair-domain-completion-v1".to_string(),
+        source_release: RC1_TO_1_1.source_release.to_string(),
+        target_release: RC1_TO_1_1.target_release.to_string(),
+        domain: "not-threads".to_string(),
+        status: MigrationStatus::Complete,
+        completed_at: Utc::now(),
+        report: json!({"migrated": 999}),
+    };
+    let kind = RecordKind::new("release_pair_domain_completion").expect("domain completion kind");
+    let entry = Entry::record(kind, &serde_json::to_value(&mismatched).expect("serialize"))
+        .expect("domain completion entry");
+    backend
+        .put(&domain_path, entry, CasExpectation::Absent)
+        .await
+        .expect("seed mismatched domain completion");
+
+    let error = lease
+        .complete(json!({"threads": {"migrated": 1}}))
+        .await
+        .expect_err("mismatched domain completion record must fail completion");
+    assert!(matches!(
+        error,
+        ReleasePairMigrationError::UnsupportedReleasePair
+    ));
+
+    // The aggregate lease record must not read `Complete` after `complete()`
+    // returned an error: a false success record would tell operators (or a
+    // future `Drop`) that the migration finished when domain-level
+    // read-back verification never actually succeeded.
+    let stored = backend
+        .get(&migration_path(RC1_TO_1_1).expect("migration path"))
+        .await
+        .expect("read aggregate record")
+        .expect("aggregate record exists");
+    let record: MigrationRecord =
+        serde_json::from_slice(&stored.entry.body).expect("decode aggregate record");
+    assert_eq!(
+        record.status,
+        MigrationStatus::InProgress,
+        "a failed domain-completion write must not leave the aggregate record marked Complete"
+    );
+}
+
+#[tokio::test]
 async fn channel_reference_barrier_requires_the_same_canonical_thread() {
     let backend = InMemoryBackend::new();
     let tenant = TenantId::new("tenant-a").expect("tenant");

@@ -197,12 +197,24 @@ where
 
     pub(crate) async fn complete(mut self, report: Value) -> Result<(), ReleasePairMigrationError> {
         self.stop_heartbeat().await?;
+        // Domain completion records must be written and read-back verified
+        // BEFORE the aggregate record is mutated to `Complete` and persisted.
+        // If this ran after `replace()`, a failure here (filesystem I/O, or
+        // an incompatible domain record found on conflict) would leave a
+        // durable aggregate record that already claims `Complete` while
+        // `complete()` still returns `Err` and startup aborts. `Drop`'s
+        // failure-marking cleanup only fires while `finished_locally` is
+        // unset and `record.status == InProgress`, so publishing the
+        // aggregate record last keeps both true on this failure path and
+        // matches this module's stated invariant: a completion record is
+        // published only after domain-level read-back verification
+        // succeeds.
+        self.write_domain_completion_records(&report).await?;
         self.record.status = MigrationStatus::Complete;
         self.record.finished_at = Some(Utc::now());
         self.record.report = Some(report.clone());
         self.replace().await?;
         self.finished_locally = true;
-        self.write_domain_completion_records(&report).await?;
         Ok(())
     }
 
