@@ -222,7 +222,7 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 6 || 14 }}
       matrix:
         bucket: ${{ fromJSON(needs.changes.outputs.crate_buckets) }}
     steps:
@@ -462,7 +462,7 @@ jobs:
       RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 4 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 2 || 4 }}
       matrix:
         partition: ${{ fromJSON(needs.changes.outputs.root_partitions) }}
     steps:
@@ -708,7 +708,7 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 2 || 5 }}
       matrix:
         lane: ${{ fromJSON(needs.changes.outputs.integration_lanes) }}
     steps:

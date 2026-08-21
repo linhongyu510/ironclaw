@@ -2090,15 +2090,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertNotIn('coverage/${package}.lcov', workflow)
         self.assertIn(
-            "max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}",
+            "max-parallel: ${{ github.event_name == 'pull_request' && 6 || 14 }}",
             workflow,
         )
         self.assertIn(
-            "max-parallel: ${{ github.event_name == 'pull_request' && 1 || 4 }}",
+            "max-parallel: ${{ github.event_name == 'pull_request' && 2 || 4 }}",
             workflow,
         )
         self.assertIn(
-            "max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}",
+            "max-parallel: ${{ github.event_name == 'pull_request' && 2 || 5 }}",
             workflow,
         )
         self.assertIn("github.event.merge_group.base_sha", workflow)
