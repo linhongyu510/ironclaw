@@ -472,9 +472,10 @@ async fn sweeper_removes_managed_egress_bundle_after_worker_disappears() {
     let proxy = managed_proxy_id(&user);
     cleanup.container_ids.insert(proxy);
 
-    let removed = Command::new("docker")
+    let removed = tokio::process::Command::new("docker")
         .args(["rm", "--force", worker.id.as_str()])
         .output()
+        .await
         .expect("docker removes the worker out from under the sweeper");
     assert!(
         removed.status.success(),
@@ -744,14 +745,19 @@ async fn different_users_receive_distinct_private_networks_and_proxies() {
             .run_command(request(
                 scope.resource_scope(),
                 format!(
-                    "python -c \"import socket; socket.create_connection(('{gateway}', {host_port}), 1).close()\""
+                    "python -c \"import socket\ntry:\n socket.create_connection(('{gateway}', {host_port}), 1).close()\nexcept OSError:\n print('GATEWAY_ISOLATION_BLOCKED')\nelse:\n raise AssertionError('host gateway reachable')\""
                 ),
             ))
             .await
             .expect("worker gateway probe runs");
-        assert_ne!(
+        assert_eq!(
             probe.exit_code, 0,
-            "isolated private network must not reach a host wildcard listener"
+            "gateway isolation probe itself failed: {}",
+            probe.output
+        );
+        assert!(
+            probe.output.contains("GATEWAY_ISOLATION_BLOCKED"),
+            "isolated private network must reject the host wildcard listener"
         );
     }
     assert_ne!(first_proxy, second_proxy);
@@ -780,15 +786,20 @@ async fn different_users_receive_distinct_private_networks_and_proxies() {
         .args([
             "exec",
             first_proxy.as_str(),
-            "nc",
-            "-z",
+            "sh",
+            "-c",
+            "command -v nc >/dev/null || exit 91; if nc -z \"$1\" 3128; then exit 92; else echo PROXY_ISOLATION_BLOCKED; fi",
+            "isolation-probe",
             second_proxy.as_str(),
-            "3128",
         ])
         .output()
         .expect("first proxy probes second proxy over shared upstream");
     assert!(
-        !cross_user_proxy.status.success(),
+        cross_user_proxy.status.success(),
+        "proxy isolation probe itself failed: {cross_user_proxy:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&cross_user_proxy.stdout).contains("PROXY_ISOLATION_BLOCKED"),
         "proxy listener must bind only to its private worker network"
     );
 }

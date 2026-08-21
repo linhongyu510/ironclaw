@@ -91,7 +91,7 @@ audit_cursor="$material/audit/.cursor"
 drain_proxy_audit() {
   docker inspect "$proxy" >/dev/null 2>&1 || return 0
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
-    mv "$audit_log" "$audit_log.1"
+    mv "$audit_log" "$audit_log.$(date +%s).$$"
   fi
   if [ -s "$audit_cursor" ]; then
     cursor=$(cat "$audit_cursor")
@@ -553,7 +553,7 @@ impl RailwayPreviewSandboxTransport {
     /// (the only durable location once the outer sandbox is gone). Salvage
     /// failure never blocks destruction — the sandbox is already suspect.
     async fn salvage_proxy_audit(&self, sandbox_id: &str, output_limit: usize) {
-        const SALVAGE_SCRIPT: &str = "docker logs --timestamps ironclaw-reborn-proxy 2>&1 | tail -c 65536; tail -c 65536 /run/ironclaw-reborn-proxy/audit/proxy.log 2>/dev/null || true";
+        const SALVAGE_SCRIPT: &str = "docker logs --timestamps ironclaw-reborn-proxy 2>&1 | tail -c 65536; for audit_file in /run/ironclaw-reborn-proxy/audit/proxy.log.* /run/ironclaw-reborn-proxy/audit/proxy.log; do [ ! -f \"$audit_file\" ] || tail -c 65536 \"$audit_file\"; done";
         let salvage = self
             .cli
             .execute(

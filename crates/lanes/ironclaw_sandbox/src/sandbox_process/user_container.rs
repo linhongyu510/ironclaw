@@ -557,11 +557,15 @@ async fn discovered_stopped_at(
     let inspected = docker
         .inspect_container(id, None::<InspectContainerOptions>)
         .await
+        // silent-ok: Docker stop-time discovery retries on the next sweep when
+        // container inspection is unavailable.
         .ok()?;
     inspected
         .state?
         .finished_at?
         .parse::<DateTime<Utc>>()
+        // silent-ok: an unparseable Docker finished_at defers retention until
+        // a later sweep can re-read a valid daemon timestamp.
         .ok()
         .filter(|finished_at| *finished_at <= Utc::now())
 }

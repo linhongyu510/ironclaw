@@ -832,6 +832,7 @@ mod tests {
         let stopped_at = Utc::now() - chrono::Duration::seconds(60);
         registry.mark_stopped(&key, stopped_at);
 
+        assert!(!registry.retention_eligible(&key, Utc::now(), Duration::from_secs(3600)));
         assert!(registry.retention_eligible(&key, Utc::now(), Duration::from_secs(30)));
 
         let guard = registry.begin(&key).unwrap();
