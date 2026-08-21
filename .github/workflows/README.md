@@ -124,13 +124,18 @@ roll-up **job names**, never individual matrix jobs):
 | `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
-The 2026-07-30 queue-cost audit found only one retained `merge_group` sample
-for each candidate: Reborn E2E took 594 seconds and failed; Platform & Compat
-took 364 seconds and passed. Pull-request history was healthier (Reborn E2E
-p50/p95 877/1124 seconds; Platform & Compat 415/492 seconds), but one real queue
-sample—especially a failing E2E sample—is not enough evidence to alter the
-repository ruleset. Both checks therefore remain candidates. Refresh the
-workflow-run sample before promotion; a workflow being present on
+The 2026-08-21 queue-cost sample (200 queue runs, 40 tracked entries per
+workflow) found: Reborn E2E failed 5/40 + 4 cancelled (≈22.5% non-green,
+≈64 runner-minutes/entry); Code Style (already required) failed 11/40
+(27.5%); Platform & Compat was not separately sampled this session (prior
+single-sample: 364 seconds, passed, ≈10 runner-minutes/entry). A ~22.5%+
+non-green rate on a non-required check is not evidence for promoting it —
+promoting would bounce roughly 1 in 4-5 queue entries that merge fine today,
+directly against the queue's own "reds must drop" goal. Both checks remain
+candidates. The queue-runner-minute cost from `rust-reborn`'s frontend build
+was cut in-place (`SKIP_FRONTEND_BUILD`, no trigger change) rather than by
+narrowing `merge_group` coverage — see the CI-Contract invariant above.
+Refresh the workflow-run sample before promotion; a workflow being present on
 `merge_group` is not itself proof that it is safe to require.
 
 Rules for a roll-up job that is (or may become) required:
