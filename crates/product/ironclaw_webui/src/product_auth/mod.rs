@@ -1970,7 +1970,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         action::NetworkMethod,
-        decision::RuntimeCredentialAuthRequirement,
+        decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
         ids::{SecretHandle, VendorId},
     };
@@ -3348,7 +3348,9 @@ mod tests {
         let requirements = vec![RuntimeCredentialAuthRequirement {
             provider: VendorId::new("vendorco").expect("provider"),
             setup: Default::default(),
-            requester_extension: ExtensionId::new("vendorco-tools").expect("extension"),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("vendorco-tools").expect("extension"),
+            },
             provider_scopes: vec!["items:read".to_string()],
         }];
 

@@ -467,7 +467,9 @@ mod tests {
         let requirement = RuntimeCredentialAuthRequirement {
             provider: VendorId::new("hosted-provider").expect("vendor id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: fixture_extension_id(),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: fixture_extension_id(),
+            },
             provider_scopes: Vec::new(),
         };
         let operations =

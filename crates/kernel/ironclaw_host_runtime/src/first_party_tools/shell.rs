@@ -85,9 +85,11 @@ pub(super) async fn dispatch(
             scope: request.scope.clone(),
             mounts: request.mounts.clone(),
             command: parsed.command,
+            args: Vec::new(),
             workdir: parsed.workdir,
             timeout_secs: parsed.timeout_secs,
             extra_env: parsed.extra_env,
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await
         .map_err(process_error)?;
@@ -289,6 +291,10 @@ fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
         RuntimeProcessError::Timeout(duration) => (
             RuntimeDispatchErrorKind::Resource,
             format!("shell command timed out after {}s", duration.as_secs()),
+        ),
+        RuntimeProcessError::Cancelled => (
+            RuntimeDispatchErrorKind::Executor,
+            "shell execution cancelled".to_string(),
         ),
         RuntimeProcessError::ExecutionFailed(reason) => (
             RuntimeDispatchErrorKind::Executor,

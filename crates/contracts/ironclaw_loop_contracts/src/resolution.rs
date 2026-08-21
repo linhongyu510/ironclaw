@@ -914,6 +914,7 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         capability::RuntimeCredentialAccountSetup,
+        decision::RuntimeCredentialConsumer,
         dispatch::DispatchInputIssueCode,
         gate_record::GateRecord,
         ids::{ApprovalRequestId, CorrelationId, ExtensionId, VendorId},
@@ -935,7 +936,9 @@ mod tests {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
-            requester_extension: ExtensionId::new("github").unwrap(),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("github").unwrap(),
+            },
             provider_scopes: vec!["repo".to_string()],
         }
     }

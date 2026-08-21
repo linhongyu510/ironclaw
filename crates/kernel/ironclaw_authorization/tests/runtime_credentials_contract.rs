@@ -6,7 +6,7 @@ use ironclaw_host_api::{
         PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
         RuntimeCredentialRequirementSource,
     },
-    decision::{Decision, DenyReason, Obligation},
+    decision::{Decision, DenyReason, Obligation, RuntimeCredentialConsumer},
     http::RuntimeCredentialTarget,
     ids::{
         CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
@@ -230,7 +230,9 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
             provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
             provider_scopes: vec!["repo".to_string()],
-            requester_extension: ExtensionId::new("echo").unwrap(),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("echo").unwrap(),
+            },
         }]
     );
 }
@@ -279,8 +281,78 @@ async fn capability_access_preserves_oauth_product_auth_account_setup() {
             provider: VendorId::new("github").unwrap(),
             setup: oauth_setup,
             provider_scopes: vec!["repo".to_string()],
-            requester_extension: ExtensionId::new("echo").unwrap(),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("echo").unwrap(),
+            },
         }]
+    );
+}
+
+#[tokio::test]
+async fn process_sandbox_product_auth_credential_uses_sandbox_consumer() {
+    let slot = SecretHandle::new("github_runtime_token").unwrap();
+    let descriptor = CapabilityDescriptor {
+        id: CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID)
+            .unwrap(),
+        provider: ExtensionId::new("system.process_sandbox").unwrap(),
+        runtime: RuntimeKind::System,
+        effects: vec![
+            EffectKind::ExecuteCode,
+            EffectKind::SpawnProcess,
+            EffectKind::UseSecret,
+        ],
+        runtime_credentials: vec![RuntimeCredentialRequirement {
+            source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: VendorId::new("github").unwrap(),
+                setup: Default::default(),
+            },
+            provider_scopes: vec!["repo".to_string()],
+            ..runtime_credential(slot.clone(), github_audience(), true)
+        }],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        descriptor.effects.clone(),
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision, got {decision:?}");
+    };
+    assert_eq!(
+        obligations.as_slice(),
+        &[
+            Obligation::UseScopedMounts {
+                mounts: MountView::default(),
+            },
+            Obligation::InjectSandboxCredentialAccountOnce {
+                handle: slot,
+                provider: VendorId::new("github").unwrap(),
+                setup: Default::default(),
+                provider_scopes: vec!["repo".to_string()],
+                required: true,
+                audience: NetworkTargetPattern {
+                    scheme: Some(NetworkScheme::Https),
+                    host_pattern: "api.github.com".to_string(),
+                    port: None,
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+            },
+        ],
     );
 }
 

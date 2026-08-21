@@ -22,7 +22,10 @@ use ironclaw_capabilities::*;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, CapabilitySet, RuntimeCredentialAccountSetup},
-    decision::{Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement},
+    decision::{
+        Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement,
+        RuntimeCredentialConsumer,
+    },
     dispatch::{DispatchAuthRequirement, DispatchError},
     ids::{ExtensionId, SecretHandle, VendorId},
     resource::ResourceEstimate,
@@ -60,7 +63,9 @@ impl TrustAwareCapabilityDispatchAuthorizer for CredentialObligationAuthorizer {
                 provider: self.provider.clone(),
                 setup: self.setup.clone(),
                 provider_scopes: Vec::new(),
-                requester_extension: self.requester_extension.clone(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: self.requester_extension.clone(),
+                },
             }])
             .unwrap(),
         }
@@ -163,7 +168,9 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
                     provider: VendorId::new("mcp_provider").unwrap(),
                     setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-                    requester_extension: ExtensionId::new("mcp_ext").unwrap(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("mcp_ext").unwrap(),
+                    },
                     provider_scopes: Vec::new(),
                 }],
                 model_visible_cause: None,
@@ -325,14 +332,18 @@ async fn invoke_json_fails_without_auth_gate_when_credential_attribution_is_ambi
                         provider: VendorId::new("github").unwrap(),
                         setup: RuntimeCredentialAccountSetup::ManualToken,
                         provider_scopes: Vec::new(),
-                        requester_extension: ExtensionId::new("github").unwrap(),
+                        consumer: RuntimeCredentialConsumer::Extension {
+                            extension_id: ExtensionId::new("github").unwrap(),
+                        },
                     },
                     Obligation::InjectCredentialAccountOnce {
                         handle: SecretHandle::new("gitlab_pat").unwrap(),
                         provider: VendorId::new("gitlab").unwrap(),
                         setup: RuntimeCredentialAccountSetup::ManualToken,
                         provider_scopes: Vec::new(),
-                        requester_extension: ExtensionId::new("gitlab").unwrap(),
+                        consumer: RuntimeCredentialConsumer::Extension {
+                            extension_id: ExtensionId::new("gitlab").unwrap(),
+                        },
                     },
                 ])
                 .unwrap(),

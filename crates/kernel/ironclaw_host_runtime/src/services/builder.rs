@@ -518,6 +518,7 @@ where
         T: SecretStorePort + 'static,
     {
         self.component_types.secret_store = Some(ProductionComponentType::of::<T>());
+        let secret_store: Arc<dyn SecretStorePort> = secret_store;
         self.secret_store = Some(secret_store);
         self
     }
@@ -704,6 +705,11 @@ where
     where
         T: ProcessExecutor + 'static,
     {
+        self.process_sandbox_executor = Some(executor);
+        self
+    }
+
+    pub fn with_process_sandbox_executor_dyn(mut self, executor: Arc<dyn ProcessExecutor>) -> Self {
         self.process_sandbox_executor = Some(executor);
         self
     }

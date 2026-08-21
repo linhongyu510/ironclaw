@@ -23,9 +23,11 @@ fn request(scope: &ResourceScope, command: impl Into<String>) -> CommandExecutio
         scope: scope.clone(),
         mounts: None,
         command: command.into(),
+        args: Vec::new(),
         workdir: Some("/workspace".to_string()),
         timeout_secs: Some(300),
         extra_env: HashMap::new(),
+        cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
     }
 }
 

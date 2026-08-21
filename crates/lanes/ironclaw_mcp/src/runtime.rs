@@ -400,7 +400,9 @@ mod tests {
                 setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes
                 },
-                requester_extension: ExtensionId::new("google-drive").unwrap(),
+                consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("google-drive").unwrap(),
+                },
                 provider_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],
             }]
         );

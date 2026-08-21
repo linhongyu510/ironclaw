@@ -63,10 +63,13 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
         if let [requirement] = credential_requirements
             && requirement.setup == RuntimeCredentialAccountSetup::Pairing
         {
+            let Some(requester_extension) = requirement.consumer.extension_id() else {
+                return Ok(None);
+            };
             let Some(service) = self
                 .pairing
                 .as_ref()
-                .and_then(|registry| registry.get(requirement.requester_extension.as_str()))
+                .and_then(|registry| registry.get(requester_extension.as_str()))
             else {
                 return Ok(None);
             };

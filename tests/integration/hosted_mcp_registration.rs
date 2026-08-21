@@ -2168,7 +2168,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         &provider_vendor,
         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
         &[],
-        &requester,
+        Some(&requester),
     )
     .expect("runtime credential request");
     let account = services
@@ -2960,7 +2960,7 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
         &provider_vendor,
         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
         &[],
-        &requester,
+        Some(&requester),
     )
     .expect("runtime credential request");
     let account = services

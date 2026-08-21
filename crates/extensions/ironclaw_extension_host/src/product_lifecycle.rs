@@ -2886,7 +2886,7 @@ fn is_device_link_channel_requirement(
         && setup.auth_requirement.setup == RuntimeCredentialAccountSetup::DeviceLink
         && requirement.setup == RuntimeCredentialAccountSetup::DeviceLink
         && requirement.provider == setup.auth_requirement.provider
-        && requirement.requester_extension == setup.auth_requirement.requester_extension
+        && requirement.consumer == setup.auth_requirement.consumer
 }
 
 fn activation_success_message(
@@ -3391,7 +3391,9 @@ mod tests {
             auth_requirement: RuntimeCredentialAuthRequirement {
                 provider: VendorId::new(provider).expect("provider id"),
                 setup: RuntimeCredentialAccountSetup::DeviceLink,
-                requester_extension: extension_id.clone(),
+                consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                    extension_id: extension_id.clone(),
+                },
                 provider_scopes: Vec::new(),
             },
             connection_requirement:
@@ -3433,7 +3435,9 @@ mod tests {
         ));
 
         let unrelated_requester = RuntimeCredentialAuthRequirement {
-            requester_extension: ExtensionId::new("other-extension").expect("extension id"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("other-extension").expect("extension id"),
+            },
             ..channel_requirement.clone()
         };
         assert!(!is_device_link_channel_requirement(

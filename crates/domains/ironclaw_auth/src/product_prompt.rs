@@ -643,8 +643,10 @@ mod tests {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("acme").expect("vendor"),
             setup,
-            requester_extension: ironclaw_host_api::ids::ExtensionId::new("acme")
-                .expect("extension id"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ironclaw_host_api::ids::ExtensionId::new("acme")
+                    .expect("extension id"),
+            },
             provider_scopes: Vec::new(),
         }
     }

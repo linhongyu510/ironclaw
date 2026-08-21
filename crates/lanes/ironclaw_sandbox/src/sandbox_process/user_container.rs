@@ -225,6 +225,15 @@ pub(super) fn exec_helper_timeout_secs(timeout: Duration) -> Result<u64, Runtime
     Ok(seconds)
 }
 
+pub(super) struct UserContainerCommand {
+    pub(super) command: String,
+    pub(super) args: Vec<String>,
+    pub(super) workdir: ContainerWorkdir,
+    pub(super) env: Vec<String>,
+    pub(super) timeout: Duration,
+    pub(super) cancellation: ironclaw_host_api::process::CommandCancellationToken,
+}
+
 /// Executes a command while its user's lifecycle gate is held.
 ///
 /// The caller must retain that gate through any error or timeout recycle.
@@ -232,14 +241,20 @@ pub(super) async fn execute_in_user_container(
     transport: &RebornScopedSandboxCommandTransport,
     key: &RebornSandboxUserKey,
     container_name: &str,
-    command: String,
-    workdir: ContainerWorkdir,
-    env: Vec<String>,
-    timeout: Duration,
+    command: UserContainerCommand,
 ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+    let UserContainerCommand {
+        command,
+        args,
+        workdir,
+        env,
+        timeout,
+        cancellation,
+    } = command;
     let started_at = Instant::now();
     let helper_timeout_secs = exec_helper_timeout_secs(timeout)?;
     let outcome_nonce = uuid::Uuid::new_v4().to_string();
+    let helper_argv = exec_helper_argv(helper_timeout_secs, outcome_nonce.clone(), command, args);
     let created = transport
         .docker
         .create_exec(
@@ -249,12 +264,7 @@ pub(super) async fn execute_in_user_container(
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
                 tty: Some(false),
-                cmd: Some(vec![
-                    EXEC_HELPER.to_string(),
-                    helper_timeout_secs.to_string(),
-                    outcome_nonce.clone(),
-                    command,
-                ]),
+                cmd: Some(helper_argv),
                 privileged: Some(false),
                 working_dir: Some(workdir.into_string()),
                 env: Some(env),
@@ -348,18 +358,41 @@ pub(super) async fn execute_in_user_container(
         }
     };
 
-    match tokio::time::timeout(timeout.saturating_add(HOST_TIMEOUT_GRACE), run).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error @ RuntimeProcessError::Timeout(_))) => Err(error),
-        Ok(Err(error)) => {
+    let timed_run = tokio::time::timeout(timeout.saturating_add(HOST_TIMEOUT_GRACE), run);
+    tokio::pin!(timed_run);
+    tokio::select! {
+        outcome = &mut timed_run => match outcome {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error @ RuntimeProcessError::Timeout(_))) => Err(error),
+            Ok(Err(error)) => {
+                recycle_untrusted_user_container(transport, key, container_name).await;
+                Err(error)
+            }
+            Err(_) => {
+                recycle_untrusted_user_container(transport, key, container_name).await;
+                Err(RuntimeProcessError::Timeout(timeout))
+            }
+        },
+        () = cancellation.cancelled() => {
             recycle_untrusted_user_container(transport, key, container_name).await;
-            Err(error)
-        }
-        Err(_) => {
-            recycle_untrusted_user_container(transport, key, container_name).await;
-            Err(RuntimeProcessError::Timeout(timeout))
+            Err(RuntimeProcessError::Cancelled)
         }
     }
+}
+fn exec_helper_argv(
+    timeout_secs: u64,
+    outcome_nonce: String,
+    command: String,
+    args: Vec<String>,
+) -> Vec<String> {
+    let mut helper_argv = vec![
+        EXEC_HELPER.to_string(),
+        timeout_secs.to_string(),
+        outcome_nonce,
+        command,
+    ];
+    helper_argv.extend(args);
+    helper_argv
 }
 
 /// Recycles a container that cannot safely accept another command.
@@ -885,6 +918,18 @@ mod tests {
         assert!(output.contains("command wrote"));
         assert!(!output.ends_with("timeout\n"));
         assert!(parse_exec_outcome_trailer("ordinary output", nonce).is_err());
+    }
+    #[test]
+    fn zero_argument_commands_remain_direct_executable_invocations() {
+        assert_eq!(
+            exec_helper_argv(
+                30,
+                "nonce".to_string(),
+                "true;unexpected-command".to_string(),
+                Vec::new(),
+            ),
+            [EXEC_HELPER, "30", "nonce", "true;unexpected-command",]
+        );
     }
 
     #[test]

@@ -805,6 +805,92 @@ async fn different_users_receive_distinct_private_networks_and_proxies() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker, public Internet access, and IRONCLAW_TEST_GITHUB_TOKEN"]
+async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
+    let Some((_image, _serial)) =
+        docker_worker_and_proxy_images("sandbox GitHub credential canary").await
+    else {
+        return;
+    };
+    let Ok(token) = std::env::var("IRONCLAW_TEST_GITHUB_TOKEN") else {
+        eprintln!("SKIP: GitHub credential canary — IRONCLAW_TEST_GITHUB_TOKEN is unset");
+        return;
+    };
+    assert!(!token.is_empty(), "GitHub canary token must not be empty");
+
+    let scope = TestScope::unique("github-credential");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([scope.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+            .with_managed_egress_proxy()
+            .expect("managed egress policy is valid"),
+    )
+    .await
+    .expect("Docker transport connects");
+    let placeholder = format!(
+        "{}{}",
+        ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+        InvocationId::new()
+    );
+    let mut command = request(scope.resource_scope(), "gh");
+    command.args = vec![
+        "pr".to_string(),
+        "list".to_string(),
+        "--repo".to_string(),
+        "nearai/ironclaw".to_string(),
+        "--limit".to_string(),
+        "1".to_string(),
+        "--json".to_string(),
+        "number".to_string(),
+    ];
+    command
+        .extra_env
+        .insert("GH_TOKEN".to_string(), placeholder.clone());
+    let result = transport
+        .run_credentialed_command(
+            command,
+            vec![SandboxCommandCredential::new(
+                "GH_TOKEN".to_string(),
+                placeholder,
+                "api.github.com".to_string(),
+                "Authorization".to_string(),
+                Some("token ".to_string()),
+                token.clone(),
+            )],
+        )
+        .await
+        .expect("credentialed gh command reaches GitHub through the proxy");
+
+    assert_eq!(result.exit_code, 0, "gh command failed: {}", result.output);
+    assert!(serde_json::from_str::<serde_json::Value>(&result.output).is_ok());
+    assert!(!result.output.contains(&token));
+    let container = cleanup.capture(&scope);
+    let inspect = docker_command(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Config.Env}}",
+        &container.id,
+    ]);
+    assert!(inspect.status.success());
+    assert!(!String::from_utf8_lossy(&inspect.stdout).contains(&token));
+    let proxy_mount_probe = docker_command(&[
+        "container",
+        "exec",
+        &container.id,
+        "test",
+        "!",
+        "-e",
+        "/run/ironclaw-proxy",
+    ]);
+    assert!(
+        proxy_mount_probe.status.success(),
+        "proxy credential material must not be mounted in the command container"
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires public DNS and Internet access; run as a live egress canary"]
 async fn sandbox_profile_allows_allowlisted_https_through_proxy() {
     let Some((_image, _serial)) = docker_worker_and_proxy_images("sandbox egress canary").await

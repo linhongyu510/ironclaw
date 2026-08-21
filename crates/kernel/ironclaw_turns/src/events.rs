@@ -549,7 +549,7 @@ pub(crate) fn project_turn_events(
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        decision::RuntimeCredentialAuthRequirement,
+        decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
         ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId, VendorId},
     };
 
@@ -588,7 +588,9 @@ mod tests {
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
                     provider: VendorId::new("github").expect("provider"),
                     setup: Default::default(),
-                    requester_extension: ExtensionId::new("github").expect("extension"),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("github").expect("extension"),
+                    },
                     provider_scopes: vec!["repo".to_string()],
                 }],
             }),

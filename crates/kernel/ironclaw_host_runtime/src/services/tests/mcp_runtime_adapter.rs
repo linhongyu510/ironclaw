@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     dispatch::DispatchError,
     ids::{ExtensionId, VendorId},
     resource::{ResourceEstimate, RuntimeResourceBudget},
@@ -20,7 +20,9 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["repo".to_string()],
         },
-        requester_extension: ExtensionId::new("mcp").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("mcp").unwrap(),
+        },
         provider_scopes: vec!["repo".to_string()],
     };
     let adapter = McpRuntimeAdapter::from_executor(Arc::new(AuthRequiredMcpExecutor {

@@ -4,7 +4,8 @@ use ironclaw_auth::product_prompt::{AuthChallengeProvider, AuthChallengeView};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_host_api::{
-    capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
+    capability::RuntimeCredentialAccountSetup,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     ids::VendorId,
 };
 
@@ -209,7 +210,9 @@ async fn product_event_stream_projects_pairing_prompt_connection_context() {
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: VendorId::new("telegram").unwrap(),
         setup: RuntimeCredentialAccountSetup::Pairing,
-        requester_extension: ExtensionId::new("telegram").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("telegram").unwrap(),
+        },
         provider_scopes: Vec::new(),
     }];
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -337,7 +340,9 @@ async fn product_event_stream_uses_credential_requirement_for_manual_token_auth_
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: VendorId::new("github").unwrap(),
         setup: Default::default(),
-        requester_extension: ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("github").unwrap(),
+        },
         provider_scopes: Vec::new(),
     }];
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -431,7 +436,9 @@ async fn product_event_stream_keeps_retired_channel_pairing_requirement_generic(
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: VendorId::new("slack").unwrap(),
         setup: RuntimeCredentialAccountSetup::Retired,
-        requester_extension: ExtensionId::new("slack").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("slack").unwrap(),
+        },
         provider_scopes: Vec::new(),
     }];
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -520,7 +527,9 @@ async fn product_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_ur
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
         },
-        requester_extension: ExtensionId::new("google-calendar").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("google-calendar").unwrap(),
+        },
         provider_scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
     }];
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -700,7 +709,9 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["items:read".to_string()],
         },
-        requester_extension: ExtensionId::new("vendorco-tools").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("vendorco-tools").unwrap(),
+        },
         provider_scopes: vec!["items:read".to_string()],
     }];
 

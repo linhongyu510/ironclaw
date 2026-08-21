@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Timestamp,
     action::{NetworkPolicy, NetworkTargetPattern},
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     http::RuntimeCredentialTarget,
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
     invocation::InvocationOrigin,
@@ -298,6 +298,15 @@ impl RuntimeCredentialRequirement {
         &self,
         requester_extension: ExtensionId,
     ) -> Option<RuntimeCredentialAuthRequirement> {
+        self.product_auth_requirement_for_consumer(RuntimeCredentialConsumer::Extension {
+            extension_id: requester_extension,
+        })
+    }
+
+    pub fn product_auth_requirement_for_consumer(
+        &self,
+        consumer: RuntimeCredentialConsumer,
+    ) -> Option<RuntimeCredentialAuthRequirement> {
         let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
             &self.source
         else {
@@ -306,7 +315,7 @@ impl RuntimeCredentialRequirement {
         Some(RuntimeCredentialAuthRequirement {
             provider: provider.clone(),
             setup: setup.clone(),
-            requester_extension,
+            consumer,
             provider_scopes: self.provider_scopes.clone(),
         })
     }

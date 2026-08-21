@@ -66,7 +66,23 @@ pub enum Obligation {
         setup: RuntimeCredentialAccountSetup,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         provider_scopes: Vec<String>,
-        requester_extension: ExtensionId,
+        #[serde(
+            alias = "requester_extension",
+            deserialize_with = "deserialize_credential_consumer"
+        )]
+        consumer: RuntimeCredentialConsumer,
+    },
+    InjectSandboxCredentialAccountOnce {
+        handle: SecretHandle,
+        provider: VendorId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_scopes: Vec<String>,
+        #[serde(default)]
+        required: bool,
+        audience: crate::action::NetworkTargetPattern,
+        target: crate::http::RuntimeCredentialTarget,
     },
     FirstPartyCredentialStagedViaHostPort {
         capability_id: CapabilityId,
@@ -92,12 +108,24 @@ impl Obligation {
                 provider,
                 setup,
                 provider_scopes,
-                requester_extension,
+                consumer,
                 ..
             } => Some(RuntimeCredentialAuthRequirement {
                 provider: provider.clone(),
                 setup: setup.clone(),
-                requester_extension: requester_extension.clone(),
+                consumer: consumer.clone(),
+                provider_scopes: provider_scopes.clone(),
+            }),
+            Obligation::InjectSandboxCredentialAccountOnce {
+                provider,
+                setup,
+                provider_scopes,
+                required: true,
+                ..
+            } => Some(RuntimeCredentialAuthRequirement {
+                provider: provider.clone(),
+                setup: setup.clone(),
+                consumer: RuntimeCredentialConsumer::SandboxProcess,
                 provider_scopes: provider_scopes.clone(),
             }),
             _ => None,
@@ -110,9 +138,44 @@ pub struct RuntimeCredentialAuthRequirement {
     pub provider: VendorId,
     #[serde(default)]
     pub setup: RuntimeCredentialAccountSetup,
-    pub requester_extension: ExtensionId,
+    #[serde(
+        alias = "requester_extension",
+        deserialize_with = "deserialize_credential_consumer"
+    )]
+    pub consumer: RuntimeCredentialConsumer,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeCredentialConsumer {
+    Extension { extension_id: ExtensionId },
+    SandboxProcess,
+}
+
+impl RuntimeCredentialConsumer {
+    pub fn extension_id(&self) -> Option<&ExtensionId> {
+        match self {
+            Self::Extension { extension_id } => Some(extension_id),
+            Self::SandboxProcess => None,
+        }
+    }
+}
+
+fn deserialize_credential_consumer<'de, D>(
+    deserializer: D,
+) -> Result<RuntimeCredentialConsumer, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(extension_id) = value.as_str() {
+        return ExtensionId::new(extension_id)
+            .map(|extension_id| RuntimeCredentialConsumer::Extension { extension_id })
+            .map_err(serde::de::Error::custom);
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 /// Canonical obligation evaluation classes.
@@ -240,8 +303,9 @@ fn normalize_multi_inject<'a>(
 
 fn extract_inject_handle(obligation: &Obligation, kind: &ObligationKind) -> SecretHandle {
     match obligation {
-        Obligation::InjectSecretOnce { handle } => handle.clone(),
-        Obligation::InjectCredentialAccountOnce { handle, .. } => handle.clone(),
+        Obligation::InjectSecretOnce { handle }
+        | Obligation::InjectCredentialAccountOnce { handle, .. }
+        | Obligation::InjectSandboxCredentialAccountOnce { handle, .. } => handle.clone(),
         _ => unreachable!("extract_inject_handle called for {kind:?}"),
     }
 }
@@ -265,7 +329,10 @@ impl Obligation {
             Self::ReserveResources { .. } => ObligationKind::ReserveResources,
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
-            Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
+            Self::InjectCredentialAccountOnce { .. }
+            | Self::InjectSandboxCredentialAccountOnce { .. } => {
+                ObligationKind::InjectCredentialAccountOnce
+            }
             Self::FirstPartyCredentialStagedViaHostPort { .. } => {
                 ObligationKind::FirstPartyCredentialStagedViaHostPort
             }
@@ -286,7 +353,9 @@ mod tests {
             provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: vec!["repo".to_string()],
-            requester_extension: ExtensionId::new("github").unwrap(),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("github").unwrap(),
+            },
         }
     }
 
@@ -299,8 +368,50 @@ mod tests {
 
         assert_eq!(req.provider, VendorId::new("github").unwrap());
         assert_eq!(req.setup, RuntimeCredentialAccountSetup::ManualToken);
-        assert_eq!(req.requester_extension, ExtensionId::new("github").unwrap());
+        assert_eq!(
+            req.consumer,
+            RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("github").unwrap(),
+            }
+        );
         assert_eq!(req.provider_scopes, vec!["repo".to_string()]);
+    }
+
+    #[test]
+    fn sandbox_process_is_a_first_class_credential_consumer() {
+        let requirement = RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("github").unwrap(),
+            setup: RuntimeCredentialAccountSetup::ManualToken,
+            consumer: RuntimeCredentialConsumer::SandboxProcess,
+            provider_scopes: vec!["repo".to_string()],
+        };
+
+        assert_eq!(
+            serde_json::to_value(requirement).unwrap(),
+            serde_json::json!({
+                "provider": "github",
+                "setup": {"kind": "manual_token"},
+                "consumer": {"kind": "sandbox_process"},
+                "provider_scopes": ["repo"],
+            })
+        );
+    }
+
+    #[test]
+    fn legacy_requester_extension_decodes_as_extension_consumer() {
+        let requirement: RuntimeCredentialAuthRequirement =
+            serde_json::from_value(serde_json::json!({
+                "provider": "github",
+                "requester_extension": "github",
+            }))
+            .unwrap();
+
+        assert_eq!(
+            requirement.consumer,
+            RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("github").unwrap(),
+            }
+        );
     }
 
     #[test]

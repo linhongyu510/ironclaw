@@ -359,7 +359,9 @@ mod tests {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("slack").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("slack").expect("extension id"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("slack").expect("extension id"),
+            },
             provider_scopes: Vec::new(),
         }
     }
@@ -368,7 +370,9 @@ mod tests {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("google").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("gmail").expect("extension id"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("gmail").expect("extension id"),
+            },
             provider_scopes: Vec::new(),
         }
     }

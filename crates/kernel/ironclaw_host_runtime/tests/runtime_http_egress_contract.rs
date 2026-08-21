@@ -7,7 +7,7 @@ use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, Scope
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::CapabilitySet,
-    decision::Obligation,
+    decision::{Obligation, RuntimeCredentialConsumer},
     dispatch::CredentialStageError,
     http::{
         CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
@@ -2879,7 +2879,9 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
                     setup:
                         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
-                    requester_extension: ExtensionId::new("mcp").unwrap(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("mcp").unwrap(),
+                    },
                 },
             ],
         })

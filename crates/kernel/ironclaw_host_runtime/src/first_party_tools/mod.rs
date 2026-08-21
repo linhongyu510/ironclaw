@@ -35,7 +35,10 @@ use ironclaw_extension_support::coding::{
     CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
 };
 use ironclaw_host_api::{
-    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
+    capability::{
+        EffectKind, OriginGateMatrix, OriginGatePolicy, PROCESS_SANDBOX_CAPABILITY_ID,
+        PermissionMode,
+    },
     capability_profile::CapabilityProfileSchemaRef,
     dispatch::RuntimeDispatchErrorKind,
     error::HostApiError,
@@ -276,6 +279,44 @@ pub fn builtin_first_party_package_for_process_backend(
     let mut package = builtin_first_party_package()?;
     restrict_package_for_process_backend(&mut package, process_backend)?;
     Ok(package)
+}
+
+pub fn user_sandbox_process_package() -> Result<ExtensionPackage, ExtensionError> {
+    ExtensionPackage::from_manifest(
+        ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+            id: ExtensionId::new("system.process_sandbox")?,
+            name: "User sandbox process".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Host-mediated direct-argument user sandbox execution".to_string(),
+            source: ManifestSource::HostBundled,
+            requested_trust: RequestedTrustClass::SystemRequested,
+            descriptor_trust_default: TrustClass::Sandbox,
+            runtime: ExtensionRuntime::System {
+                service: "process_sandbox".to_string(),
+            },
+            host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
+            capabilities: vec![user_sandbox_process_manifest()?],
+            hooks: Vec::new(),
+        },
+        VirtualPath::new("/system/extensions/system.process_sandbox")?,
+    )
+}
+
+fn user_sandbox_process_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        PROCESS_SANDBOX_CAPABILITY_ID,
+        "Run a direct-argument process in the isolated user sandbox",
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::SpawnProcess,
+            EffectKind::UseSecret,
+            EffectKind::ExecuteCode,
+        ],
+        PermissionMode::Ask,
+        None,
+    )
 }
 
 fn restrict_package_for_process_backend(
@@ -1020,4 +1061,27 @@ fn coding_capability_metadata(capability_id: &str) -> Option<CodingCapabilityMet
         .iter()
         .copied()
         .find(|metadata| metadata.id == capability_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_sandbox_package_exposes_isolated_process_without_generic_network_privilege() {
+        let package = user_sandbox_process_package().unwrap();
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == PROCESS_SANDBOX_CAPABILITY_ID)
+            .expect("user-sandbox package must expose the direct-argument process capability");
+
+        assert!(descriptor.effects.contains(&EffectKind::UseSecret));
+        assert!(!descriptor.effects.contains(&EffectKind::Network));
+        assert!(
+            descriptor.runtime_credentials.is_empty(),
+            "credential authority is resolved per invocation from extension declarations"
+        );
+        assert!(descriptor.network_targets.is_empty());
+    }
 }

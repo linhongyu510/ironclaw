@@ -273,7 +273,7 @@ impl RailwayPreviewSandboxConfig {
         let proxy_posture = super::managed_egress::proxy_posture(
             &proxy_image,
             &policy,
-            std::path::Path::new("/run/ironclaw-reborn-proxy"),
+            b"/run/ironclaw-reborn-proxy",
         )?;
         let proxy_config_template =
             super::managed_egress::render_proxy_config(&policy, RAILWAY_PROXY_IP_TOKEN)?;
@@ -664,8 +664,22 @@ impl RailwayPreviewSandboxTransport {
         invocation: RailwayCliInvocation,
         deadline: Instant,
     ) -> Result<RailwayCliOutput, RuntimeProcessError> {
+        self.execute_cli_cancellable(
+            invocation,
+            deadline,
+            ironclaw_host_api::process::CommandCancellationToken::new(),
+        )
+        .await
+    }
+
+    async fn execute_cli_cancellable(
+        &self,
+        invocation: RailwayCliInvocation,
+        deadline: Instant,
+        cancellation: ironclaw_host_api::process::CommandCancellationToken,
+    ) -> Result<RailwayCliOutput, RuntimeProcessError> {
         self.cli
-            .execute(invocation, deadline_remaining(deadline)?)
+            .execute_cancellable(invocation, deadline_remaining(deadline)?, cancellation)
             .await
     }
 }
@@ -678,6 +692,9 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_request_environment(&request)?;
         reject_nul("command", &request.command)?;
+        for argument in &request.args {
+            reject_nul("command argument", argument)?;
+        }
         let workdir = validated_workdir(request.workdir.as_deref())?;
         let timeout = request_timeout(request.timeout_secs);
         let output_limit = DEFAULT_OUTPUT_LIMIT;
@@ -722,7 +739,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         // without first retrying a checkpoint.
         state.checkpoint_current = false;
         let output = self
-            .execute_cli(
+            .execute_cli_cancellable(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
                     RailwayCliOperation::ExecuteSandboxCommand,
@@ -735,12 +752,14 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
                             &railway_workspace_path(&key),
                             &workdir,
                             &request.command,
+                            &request.args,
                             &request.scope.invocation_id,
                         ),
                     ),
                     output_limit,
                 ),
                 deadline,
+                request.cancellation.clone(),
             )
             .await;
         let output = match output {
@@ -895,6 +914,15 @@ trait RailwayCli: Send + Sync {
         invocation: RailwayCliInvocation,
         timeout: Duration,
     ) -> Result<RailwayCliOutput, RuntimeProcessError>;
+
+    async fn execute_cancellable(
+        &self,
+        invocation: RailwayCliInvocation,
+        timeout: Duration,
+        _cancellation: ironclaw_host_api::process::CommandCancellationToken,
+    ) -> Result<RailwayCliOutput, RuntimeProcessError> {
+        self.execute(invocation, timeout).await
+    }
 }
 
 #[derive(Debug)]
@@ -1004,6 +1032,20 @@ impl RailwayCli for SystemRailwayCli {
         invocation: RailwayCliInvocation,
         timeout: Duration,
     ) -> Result<RailwayCliOutput, RuntimeProcessError> {
+        self.execute_cancellable(
+            invocation,
+            timeout,
+            ironclaw_host_api::process::CommandCancellationToken::new(),
+        )
+        .await
+    }
+
+    async fn execute_cancellable(
+        &self,
+        invocation: RailwayCliInvocation,
+        timeout: Duration,
+        cancellation: ironclaw_host_api::process::CommandCancellationToken,
+    ) -> Result<RailwayCliOutput, RuntimeProcessError> {
         let environment = railway_cli_environment()?;
         let cli_home = PrivateRailwayCliHome::create().await?;
         let operation = invocation.operation;
@@ -1015,7 +1057,8 @@ impl RailwayCli for SystemRailwayCli {
             .env("HOME", cli_home.path()?)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -1028,52 +1071,60 @@ impl RailwayCli for SystemRailwayCli {
         };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let result = tokio::time::timeout(timeout, async {
-            let stdout = async {
-                match stdout {
-                    Some(stream) => read_stream_bounded(stream, invocation.output_limit).await,
-                    None => Ok(String::new()),
+        let result = {
+            let timed_run = tokio::time::timeout(timeout, async {
+                let stdout = async {
+                    match stdout {
+                        Some(stream) => read_stream_bounded(stream, invocation.output_limit).await,
+                        None => Ok(String::new()),
+                    }
+                };
+                let stderr = async {
+                    match stderr {
+                        Some(stream) => read_stream_bounded(stream, invocation.output_limit).await,
+                        None => Ok(String::new()),
+                    }
+                };
+                let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
+                let status = status.map_err(|error| {
+                    tracing::error!(?error, "trusted Railway CLI process wait failed");
+                    RuntimeProcessError::ExecutionFailed(
+                        "Railway preview CLI command did not complete".to_string(),
+                    )
+                })?;
+                let stdout = stdout?;
+                let stderr = stderr?;
+                if !status.success() {
+                    return Err(railway_cli_status_error(
+                        operation,
+                        status.code(),
+                        &stderr,
+                        &environment,
+                        timeout,
+                    ));
                 }
-            };
-            let stderr = async {
-                match stderr {
-                    Some(stream) => read_stream_bounded(stream, invocation.output_limit).await,
-                    None => Ok(String::new()),
-                }
-            };
-            let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
-            let status = status.map_err(|error| {
-                tracing::error!(?error, "trusted Railway CLI process wait failed");
-                RuntimeProcessError::ExecutionFailed(
-                    "Railway preview CLI command did not complete".to_string(),
-                )
-            })?;
-            let stdout = stdout?;
-            let stderr = stderr?;
-            if !status.success() {
-                return Err(railway_cli_status_error(
-                    operation,
-                    status.code(),
-                    &stderr,
-                    &environment,
-                    timeout,
-                ));
-            }
-            Ok(RailwayCliOutput { stdout, stderr })
-        })
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(_) => {
-                if let Err(error) = child.kill().await {
-                    tracing::debug!(?error, "best-effort Railway CLI termination failed");
-                }
-                if let Err(error) = child.wait().await {
-                    tracing::debug!(?error, "best-effort Railway CLI reap failed");
-                }
-                Err(RuntimeProcessError::Timeout(timeout))
+                Ok(RailwayCliOutput { stdout, stderr })
+            });
+            tokio::pin!(timed_run);
+            tokio::select! {
+                outcome = &mut timed_run => match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(RuntimeProcessError::Timeout(timeout)),
+                },
+                () = cancellation.cancelled() => Err(RuntimeProcessError::Cancelled),
             }
         };
+        if matches!(
+            &result,
+            Err(RuntimeProcessError::Timeout(_) | RuntimeProcessError::Cancelled)
+        ) {
+            if let Err(error) = child.kill().await {
+                tracing::debug!(?error, "best-effort Railway CLI termination failed");
+            }
+            if let Err(error) = child.wait().await {
+                tracing::debug!(?error, "best-effort Railway CLI reap failed");
+            }
+        }
         cli_home.cleanup().await;
         result
     }
@@ -1252,6 +1303,7 @@ fn ephemeral_worker_argv(
     railway_workspace: &str,
     workdir: &str,
     model_command: &str,
+    model_args: &[String],
     invocation_id: &ironclaw_host_api::ids::InvocationId,
 ) -> Vec<String> {
     let mut worker = vec!["--rm".into()];
@@ -1264,10 +1316,9 @@ fn ephemeral_worker_argv(
         "--memory".into(),
         "512m".into(),
         config.worker_image.clone(),
-        "sh".into(),
-        "-c".into(),
         model_command.into(),
     ]);
+    worker.extend(model_args.iter().cloned());
     let mut args = vec![
         "sh".into(),
         "-c".into(),

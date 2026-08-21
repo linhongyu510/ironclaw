@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{dispatch::CredentialStageError, ids::SecretHandle};
+use ironclaw_host_api::{
+    decision::RuntimeCredentialConsumer, dispatch::CredentialStageError, ids::SecretHandle,
+};
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,
@@ -17,7 +19,11 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "github");
-        assert_eq!(request.requester_extension.as_str(), "github");
+        assert!(matches!(
+            request.consumer,
+            RuntimeCredentialConsumer::Extension { extension_id }
+                if extension_id.as_str() == "github"
+        ));
         self.result
             .clone()
             .map(|handle| RuntimeCredentialAccessSecret {

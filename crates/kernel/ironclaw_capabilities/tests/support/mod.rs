@@ -25,7 +25,10 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
         RuntimeCredentialAccountSetup,
     },
-    decision::{Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement},
+    decision::{
+        Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement,
+        RuntimeCredentialConsumer,
+    },
     dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
     host_port::HostPortCatalog,
     ids::{
@@ -123,7 +126,9 @@ impl HostPolicyFacts for MissingCredentialPolicyFacts {
             requirements: vec![RuntimeCredentialAuthRequirement {
                 provider: VendorId::new("test_provider").unwrap(),
                 setup: RuntimeCredentialAccountSetup::ManualToken,
-                requester_extension: ExtensionId::new("caller").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("caller").unwrap(),
+                },
                 provider_scopes: Vec::new(),
             }],
         }

@@ -160,9 +160,11 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "cargo check".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: Some(30),
                 extra_env: std::collections::HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .expect("named test port runs");
@@ -267,9 +269,11 @@ async fn local_resolver_uses_configured_sandbox_process_backend() {
             scope: ResourceScope::system(),
             mounts: None,
             command: "echo hi".to_string(),
+            args: Vec::new(),
             workdir: None,
             timeout_secs: None,
             extra_env: Default::default(),
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await
         .unwrap();

@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     capability_profile::CapabilityProfileSchemaRef,
     decision::{
         Decision, DenyReason, Obligation, ObligationKind, Obligations,
-        RuntimeCredentialAuthRequirement,
+        RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer,
     },
     dispatch::{
         DispatchAuthRequirement, DispatchError, DispatchFailureKind, DispatchInputIssueCode,
@@ -1847,7 +1847,9 @@ fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
-        requester_extension: ExtensionId::new("gmail").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("gmail").unwrap(),
+        },
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };
     let round_trip: RuntimeCredentialAuthRequirement =
@@ -1906,7 +1908,9 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
-        requester_extension: ExtensionId::new("gmail").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("gmail").unwrap(),
+        },
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };
     let with_requirement = DispatchError::AuthRequired {

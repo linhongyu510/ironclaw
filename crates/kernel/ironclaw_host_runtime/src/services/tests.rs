@@ -805,9 +805,11 @@ async fn inherited_env_runtime_policy_selects_inherited_local_process_port() {
             scope: sample_scope(),
             mounts: None,
             command: "printf '%s' \"$HOME\"".to_string(),
+            args: Vec::new(),
             workdir: Some(workdir.path().display().to_string()),
             timeout_secs: Some(5),
             extra_env: Default::default(),
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await
         .expect("command succeeds");
@@ -840,9 +842,11 @@ async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherit
             scope: sample_scope(),
             mounts: None,
             command: "printf '%s' \"$HOME\"".to_string(),
+            args: Vec::new(),
             workdir: Some(workdir.path().display().to_string()),
             timeout_secs: Some(5),
             extra_env: Default::default(),
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await
         .expect("command succeeds");

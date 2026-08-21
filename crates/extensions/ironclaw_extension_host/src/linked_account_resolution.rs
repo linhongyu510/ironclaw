@@ -117,7 +117,7 @@ impl LinkedAccountResolver for CredentialLinkedAccountResolver {
             &self.vendor,
             RuntimeCredentialAccountSetup::DeviceLink,
             &[],
-            &self.extension_id,
+            Some(&self.extension_id),
         )
         .map_err(|error| {
             debug!(error = ?error, "linked-account selection request could not be built");

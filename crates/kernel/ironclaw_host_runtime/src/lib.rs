@@ -115,6 +115,7 @@ pub use first_party_tools::{
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
     register_memory_tool_handler, register_native_memory_tools,
     register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
+    user_sandbox_process_package,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -149,7 +150,7 @@ pub use services::{
     ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
-    RegisteredRuntimeHealth,
+    RegisteredRuntimeHealth, SandboxTransportProcessExecutor,
 };
 pub use surface::{VisibleCapability, VisibleCapabilityAccess};
 /// Stable, validated idempotency key supplied by upper turn/loop services.

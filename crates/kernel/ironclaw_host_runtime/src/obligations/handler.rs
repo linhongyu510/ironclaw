@@ -23,9 +23,9 @@ use ironclaw_host_api::{
     action::NetworkPolicy,
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::{EffectKind, RuntimeCredentialAccountSetup},
-    decision::{Obligation, RuntimeCredentialAuthRequirement},
+    decision::{Obligation, RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     dispatch::{CapabilityDispatchResult, CredentialStageError},
-    ids::{AuditEventId, CapabilityId, ExtensionId, SecretHandle, VendorId},
+    ids::{AuditEventId, CapabilityId, SecretHandle, VendorId},
     mount::MountView,
     resource::{
         ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
@@ -39,7 +39,7 @@ use secrecy::ExposeSecret;
 
 use super::staged_handoffs::{
     NetworkObligationPolicyStore, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
+    RuntimeCredentialAccountResolver, RuntimeCredentialBindingPolicy, RuntimeSecretInjectionStore,
 };
 
 /// Built-in obligation handler for the current host-runtime slice.
@@ -300,7 +300,14 @@ impl BuiltinObligationHandler {
             return Ok(());
         }
         let Some(resolver) = &self.credential_account_resolver else {
-            return Err(secret_obligation_failed());
+            return if account_obligations
+                .iter()
+                .all(|obligation| !obligation.required)
+            {
+                Ok(())
+            } else {
+                Err(secret_obligation_failed())
+            };
         };
         let Some(secret_store) = &self.secret_store else {
             return Err(secret_obligation_failed());
@@ -310,34 +317,50 @@ impl BuiltinObligationHandler {
         };
 
         for obligation in account_obligations {
-            let access_secret = resolver
+            let access_secret = match resolver
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
                     provider: obligation.provider,
                     setup: obligation.setup,
                     provider_scopes: obligation.provider_scopes,
-                    requester_extension: obligation.requester_extension,
+                    consumer: &obligation.consumer,
                 })
                 .await
-                .map_err(|error| {
-                    credential_stage_error_to_obligation_error(error, Some(&obligation))
-                })?;
+            {
+                Ok(access_secret) => access_secret,
+                Err(CredentialStageError::AuthRequired) if !obligation.required => continue,
+                Err(error) => {
+                    return Err(credential_stage_error_to_obligation_error(
+                        error,
+                        Some(&obligation),
+                    ));
+                }
+            };
             // Retrieve and stage the resolved credential under the obligation's injection handle.
             // The access_secret names the material in the secret store; obligation.handle is
             // the slot name the WASM guest expects.
-            stage_credential_material(
+            if let Err(error) = stage_credential_material(
                 secret_store.as_ref(),
                 secret_injections,
-                &access_secret.scope,
-                &request.context.resource_scope,
-                request.capability_id,
-                &access_secret.handle,
-                obligation.handle,
+                CredentialMaterialStage {
+                    source_scope: &access_secret.scope,
+                    target_scope: &request.context.resource_scope,
+                    capability_id: request.capability_id,
+                    source: &access_secret.handle,
+                    target: obligation.handle,
+                    binding: obligation.binding.clone(),
+                },
             )
             .await
-            .map_err(|error| {
-                credential_stage_error_to_obligation_error(error, Some(&obligation))
-            })?;
+            {
+                if error == CredentialStageError::AuthRequired && !obligation.required {
+                    continue;
+                }
+                return Err(credential_stage_error_to_obligation_error(
+                    error,
+                    Some(&obligation),
+                ));
+            }
         }
 
         Ok(())
@@ -718,6 +741,7 @@ fn obligation_supported(phase: CapabilityObligationPhase, obligation: &Obligatio
         | Obligation::ApplyNetworkPolicy { .. }
         | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
+        | Obligation::InjectSandboxCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
@@ -747,7 +771,9 @@ struct CredentialAccountInjectionObligation<'a> {
     provider: &'a VendorId,
     setup: &'a RuntimeCredentialAccountSetup,
     provider_scopes: &'a [String],
-    requester_extension: &'a ExtensionId,
+    consumer: RuntimeCredentialConsumer,
+    required: bool,
+    binding: Option<RuntimeCredentialBindingPolicy>,
 }
 
 fn credential_account_injection_obligations(
@@ -761,13 +787,35 @@ fn credential_account_injection_obligations(
                 provider,
                 setup,
                 provider_scopes,
-                requester_extension,
+                consumer,
             } => Some(CredentialAccountInjectionObligation {
                 handle,
                 provider,
                 setup,
                 provider_scopes,
-                requester_extension,
+                consumer: consumer.clone(),
+                required: true,
+                binding: None,
+            }),
+            Obligation::InjectSandboxCredentialAccountOnce {
+                handle,
+                provider,
+                setup,
+                provider_scopes,
+                required,
+                audience,
+                target,
+            } => Some(CredentialAccountInjectionObligation {
+                handle,
+                provider,
+                setup,
+                provider_scopes,
+                consumer: RuntimeCredentialConsumer::SandboxProcess,
+                required: *required,
+                binding: Some(RuntimeCredentialBindingPolicy {
+                    audience: audience.clone(),
+                    target: target.clone(),
+                }),
             }),
             _ => None,
         })
@@ -779,7 +827,8 @@ fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHand
         .iter()
         .filter_map(|obligation| match obligation {
             Obligation::InjectSecretOnce { handle }
-            | Obligation::InjectCredentialAccountOnce { handle, .. } => Some(handle.clone()),
+            | Obligation::InjectCredentialAccountOnce { handle, .. }
+            | Obligation::InjectSandboxCredentialAccountOnce { handle, .. } => Some(handle.clone()),
             _ => None,
         })
         .collect()
@@ -802,7 +851,7 @@ fn credential_stage_error_to_obligation_error(
                     vec![RuntimeCredentialAuthRequirement {
                         provider: obligation.provider.clone(),
                         setup: obligation.setup.clone(),
-                        requester_extension: obligation.requester_extension.clone(),
+                        consumer: obligation.consumer.clone(),
                         provider_scopes: obligation.provider_scopes.to_vec(),
                     }]
                 })
@@ -812,50 +861,44 @@ fn credential_stage_error_to_obligation_error(
     }
 }
 
-/// Retrieve `source` from the secret store and stage the material under `target`
-/// in the injection store for the given capability invocation.
-///
-/// Used when the secret store key (`source`) differs from the runtime injection slot
-/// (`target`) — for example, when a product-auth account's backing secret is resolved
-/// to a concrete handle before being injected under the WASM guest's declared slot name.
-/// Lease → consume → insert the staged credential material.
-///
+struct CredentialMaterialStage<'a> {
+    source_scope: &'a ResourceScope,
+    target_scope: &'a ResourceScope,
+    capability_id: &'a CapabilityId,
+    source: &'a SecretHandle,
+    target: &'a SecretHandle,
+    binding: Option<RuntimeCredentialBindingPolicy>,
+}
+
 /// Mirrors [`crate::services::ProductAuthProviderRuntimePorts::stage_secret_once`]
-/// so the WASM `InjectCredentialAccountOnce` path and the first-party stager path
-/// (e.g. `ProductAuthRuntimeGsuiteCredentialStager`) share identical lease/consume
-/// semantics and `CredentialStageError` mapping. `SecretStoreError` variants for
-/// unknown/expired/revoked/consumed material map to
-/// [`CredentialStageError::AuthRequired`] via [`crate::services::stage_secret_error`];
-/// other failures map to [`CredentialStageError::Backend`].
+/// so account credentials use the same lease/consume semantics and error mapping.
 async fn stage_credential_material(
     secret_store: &dyn SecretStorePort,
     secret_injections: &RuntimeSecretInjectionStore,
-    source_scope: &ResourceScope,
-    target_scope: &ResourceScope,
-    capability_id: &CapabilityId,
-    source: &SecretHandle,
-    target: &SecretHandle,
+    stage: CredentialMaterialStage<'_>,
 ) -> Result<(), CredentialStageError> {
+    let CredentialMaterialStage {
+        source_scope,
+        target_scope,
+        capability_id,
+        source,
+        target,
+        binding,
+    } = stage;
     let lease = secret_store
         .lease_once(source_scope, source)
         .await
-        .map_err(|e| {
-            tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
-            crate::services::stage_secret_error(e)
+        .map_err(|error| {
+            tracing::debug!(%error, "stage_credential_material: lease_once failed");
+            crate::services::stage_secret_error(error)
         })?;
     let secret = secret_store
         .consume(source_scope, lease.id)
         .await
-        .map_err(|e| {
-            tracing::debug!(err = %e, "stage_credential_material: consume failed");
-            crate::services::stage_secret_error(e)
+        .map_err(|error| {
+            tracing::debug!(%error, "stage_credential_material: consume failed");
+            crate::services::stage_secret_error(error)
         })?;
-    // A "Configured" account whose resolved material is empty cannot
-    // authenticate anything; staging it would only let the guest fail later
-    // with an opaque `operation_failed` (e.g. an ironhub tool probing
-    // `secret-exists` sees an unusable slot and reports "API key not
-    // configured" as a generic domain failure). Surface the typed re-auth
-    // signal at authorization time instead so the model can act on it.
     if secret.expose_secret().is_empty() {
         tracing::debug!(
             handle = %target.as_str(),
@@ -863,12 +906,16 @@ async fn stage_credential_material(
         );
         return Err(CredentialStageError::AuthRequired);
     }
-    secret_injections
-        .insert(target_scope, capability_id, target, secret)
-        .map_err(|e| {
-            tracing::debug!(err = %e, "stage_credential_material: insert failed");
-            CredentialStageError::Backend
-        })
+    let inserted = match binding {
+        Some(binding) => {
+            secret_injections.insert_bound(target_scope, capability_id, target, secret, binding)
+        }
+        None => secret_injections.insert(target_scope, capability_id, target, secret),
+    };
+    inserted.map_err(|error| {
+        tracing::debug!(%error, "stage_credential_material: insert failed");
+        CredentialStageError::Backend
+    })
 }
 
 fn network_policy_obligation(
@@ -1264,7 +1311,10 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::RedactOutput => Some("redact_output"),
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
-        Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
+        Obligation::InjectCredentialAccountOnce { .. }
+        | Obligation::InjectSandboxCredentialAccountOnce { .. } => {
+            Some("inject_credential_account_once")
+        }
         Obligation::FirstPartyCredentialStagedViaHostPort { .. } => {
             Some("first_party_credential_staged_via_host_port")
         }

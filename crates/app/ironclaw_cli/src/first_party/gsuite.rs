@@ -315,7 +315,10 @@ mod tests {
         assert_eq!(credential_requirements.len(), 1);
         let requirement = &credential_requirements[0];
         assert_eq!(requirement.provider.as_str(), GOOGLE_PROVIDER_ID);
-        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement.consumer.extension_id().map(ExtensionId::as_str),
+            Some("gmail")
+        );
     }
 
     #[test]

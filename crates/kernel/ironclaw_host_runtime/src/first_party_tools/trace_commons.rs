@@ -24,7 +24,7 @@ use ironclaw_host_api::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     },
-    ids::{CapabilityId, SecretHandle},
+    ids::{CapabilityId, SecretHandle, TenantId, UserId},
     resource::{ResourceEstimate, ResourceProfile, ResourceScope},
     runtime::RuntimeKind,
 };
@@ -763,6 +763,21 @@ pub(crate) fn format_credits(report: &TraceCreditReport) -> Value {
 pub(super) async fn dispatch_profile_token(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    dispatch_profile_token_with_enrollment(request, |tenant_id, user_id| {
+        resolve_trace_credentials(tenant_id, user_id)
+            .map(|resolution| resolution.is_some())
+            .map_err(ProfileAttributionError::PolicyRead)
+    })
+    .await
+}
+
+async fn dispatch_profile_token_with_enrollment<F>(
+    request: &FirstPartyCapabilityRequest,
+    resolve_enrollment: F,
+) -> Result<Value, FirstPartyCapabilityError>
+where
+    F: FnOnce(&TenantId, &UserId) -> Result<bool, ProfileAttributionError>,
+{
     // Consent gate: minting persists a bearer profile-management credential.
     // The runtime approval gate (PermissionMode::Ask) can be auto-approved in
     // local-yolo, so this in-turn confirmed=true check is the hard fail-closed
@@ -796,17 +811,15 @@ pub(super) async fn dispatch_profile_token(
     // guard for the confirmed+enrolled mint path. Route through the shared
     // resolver so instance-only contributors (personal policy absent, instance
     // policy enabled) pass the gate instead of being falsely rejected.
-    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    match resolve_enrollment(&request.scope.tenant_id, &request.scope.user_id) {
+        Ok(true) => {}
+        Ok(false) => {
             return Ok(profile_token_error_value(
                 &ProfileAttributionError::NotEnrolled,
             ));
         }
         Err(error) => {
-            return Ok(profile_token_error_value(
-                &ProfileAttributionError::PolicyRead(error),
-            ));
+            return Ok(profile_token_error_value(&error));
         }
     }
 
@@ -969,6 +982,21 @@ fn profile_token_error_value(error: &ProfileAttributionError) -> Value {
 pub(super) async fn dispatch_profile_set(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    dispatch_profile_set_with_enrollment(request, |tenant_id, user_id| {
+        resolve_trace_credentials(tenant_id, user_id)
+            .map(|resolution| resolution.is_some())
+            .map_err(ProfileAttributionError::PolicyRead)
+    })
+    .await
+}
+
+async fn dispatch_profile_set_with_enrollment<F>(
+    request: &FirstPartyCapabilityRequest,
+    resolve_enrollment: F,
+) -> Result<Value, FirstPartyCapabilityError>
+where
+    F: FnOnce(&TenantId, &UserId) -> Result<bool, ProfileAttributionError>,
+{
     let input = parse_profile_set_input(&request.input)?;
 
     // Consent gate: publishing/updating the public community profile is a
@@ -989,16 +1017,16 @@ pub(super) async fn dispatch_profile_set(
     // Route the enrollment gate through the shared resolver so instance-only
     // contributors (personal policy absent, instance policy enabled) pass
     // instead of being falsely rejected as not enrolled.
-    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    match resolve_enrollment(&request.scope.tenant_id, &request.scope.user_id) {
+        Ok(true) => {}
+        Ok(false) => {
             return Ok(profile_set_error_value(
                 &CommunityProfileError::Attribution(ProfileAttributionError::NotEnrolled),
             ));
         }
         Err(error) => {
             return Ok(profile_set_error_value(
-                &CommunityProfileError::Attribution(ProfileAttributionError::PolicyRead(error)),
+                &CommunityProfileError::Attribution(error),
             ));
         }
     }
@@ -1847,7 +1875,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_profile_token_without_enrollment_returns_onboard_guidance() {
         let request = test_request(json!({ "confirmed": true }));
-        let result = dispatch_profile_token(&request).await.unwrap();
+        let result = dispatch_profile_token_with_enrollment(&request, |_, _| Ok(false))
+            .await
+            .unwrap();
         assert_eq!(result["minted"], json!(false));
         assert_eq!(result["error_code"], json!("NotEnrolled"));
         let message = result["message"].as_str().unwrap();
@@ -1864,7 +1894,9 @@ mod tests {
             "bio": "Trace Commons pilot contributor",
             "confirmed": true
         }));
-        let result = dispatch_profile_set(&request).await.unwrap();
+        let result = dispatch_profile_set_with_enrollment(&request, |_, _| Ok(false))
+            .await
+            .unwrap();
         assert_eq!(result["updated"], json!(false));
         assert_eq!(result["error_code"], json!("NotEnrolled"));
         let message = result["message"].as_str().unwrap();

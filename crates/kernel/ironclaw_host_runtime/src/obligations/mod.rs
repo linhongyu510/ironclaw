@@ -43,6 +43,8 @@ pub use staged_handoffs::{
 };
 
 pub(crate) use handler::secret_owner_scope;
+#[cfg(test)]
+pub(crate) use staged_handoffs::RuntimeCredentialBindingPolicy;
 pub(crate) use staged_handoffs::{
     NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
 };

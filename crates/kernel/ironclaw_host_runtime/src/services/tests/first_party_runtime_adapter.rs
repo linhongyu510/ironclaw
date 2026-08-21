@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ExtensionId, RunId, SecretHandle, UserId, VendorId},
     invocation::InvocationOrigin,
@@ -428,7 +428,9 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
-        requester_extension: ExtensionId::new("gmail").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("gmail").unwrap(),
+        },
         provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
     };
     let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());

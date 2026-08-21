@@ -30,7 +30,7 @@ use grammers_client::{
 use ironclaw_extension_contracts::tool_adapter::ToolError;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     dispatch::{
         DispatchAuthRequirement, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
         UntrustedProviderMessage,
@@ -132,7 +132,9 @@ pub(crate) fn auth_required() -> ToolError {
             credential_requirements: vec![RuntimeCredentialAuthRequirement {
                 provider,
                 setup: RuntimeCredentialAccountSetup::DeviceLink,
-                requester_extension,
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: requester_extension,
+                },
                 provider_scopes: Vec::new(),
             }],
             model_visible_cause: None,

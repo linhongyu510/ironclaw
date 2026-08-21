@@ -894,7 +894,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        ("ironclaw_host_api", 20_516),
+        // 20_516 -> 20_784 (2026-08-21, #7732 sandbox job execution): typed
+        // direct-argument sandbox command, credential-binding, and resource
+        // limit DTOs shared by the process manager, host runtime, and sandbox
+        // transport. Validation and execution remain in `ironclaw_sandbox`;
+        // this crate only owns the provider-neutral authority vocabulary.
+        ("ironclaw_host_api", 20_784),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

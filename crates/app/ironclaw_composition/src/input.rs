@@ -16,6 +16,7 @@ use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::ProcessConcurrencyLimits;
+use ironclaw_processes::ProcessExecutor;
 use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
@@ -105,13 +106,25 @@ pub(crate) struct OAuthDcrCallbackConfig {
     pub(crate) callback_origin: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
     UserSandbox {
         process_port: Arc<UserSandboxProcessPort>,
+        process_executor: Arc<dyn ProcessExecutor>,
     },
+}
+
+impl std::fmt::Debug for RebornRuntimeProcessBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => formatter.write_str("RebornRuntimeProcessBinding::None"),
+            Self::UserSandbox { .. } => formatter
+                .debug_struct("RebornRuntimeProcessBinding::UserSandbox")
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +153,11 @@ impl RebornRuntimeProcessBinding {
     }
 
     pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
-        Self::UserSandbox { process_port }
+        let process_executor: Arc<dyn ProcessExecutor> = process_port.clone();
+        Self::UserSandbox {
+            process_port,
+            process_executor,
+        }
     }
 
     pub(crate) fn validate_for_production_policy(

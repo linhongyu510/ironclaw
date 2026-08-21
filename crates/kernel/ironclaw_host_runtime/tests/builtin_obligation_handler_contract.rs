@@ -24,7 +24,7 @@ use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     audit::AuditStage,
     capability::{CapabilityDescriptor, CapabilitySet},
-    decision::{Decision, Obligation, Obligations},
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialConsumer},
     dispatch::CapabilityDispatchResult,
     host_port::HostPortCatalog,
     ids::{
@@ -1463,7 +1463,9 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
         provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        },
     }];
 
     let err = handler
@@ -1504,7 +1506,9 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
         provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: provider_scopes.clone(),
-        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        },
     }];
 
     let err = handler
@@ -1527,7 +1531,11 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     assert_eq!(credential_requirements.len(), 1);
     assert_eq!(credential_requirements[0].provider.as_str(), "github");
     assert_eq!(
-        credential_requirements[0].requester_extension.as_str(),
+        credential_requirements[0]
+            .consumer
+            .extension_id()
+            .expect("extension consumer")
+            .as_str(),
         "github"
     );
     assert_eq!(credential_requirements[0].provider_scopes, provider_scopes);
@@ -1568,7 +1576,9 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
         provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        },
     }];
 
     handler
@@ -1622,7 +1632,9 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
         provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        },
     }];
 
     handler
@@ -1664,7 +1676,9 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
         provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
+        },
     }];
 
     let err = handler
@@ -1687,7 +1701,11 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     assert_eq!(credential_requirements.len(), 1);
     assert_eq!(credential_requirements[0].provider.as_str(), "github");
     assert_eq!(
-        credential_requirements[0].requester_extension.as_str(),
+        credential_requirements[0]
+            .consumer
+            .extension_id()
+            .expect("extension consumer")
+            .as_str(),
         "github"
     );
 }

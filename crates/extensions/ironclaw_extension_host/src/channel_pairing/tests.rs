@@ -576,7 +576,9 @@ async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe()
         ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: ironclaw_host_api::ids::VendorId::new(EXT).expect("provider"),
             setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: ExtensionId::new(EXT).expect("extension"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new(EXT).expect("extension"),
+            },
             provider_scopes: Vec::new(),
         },
     ];

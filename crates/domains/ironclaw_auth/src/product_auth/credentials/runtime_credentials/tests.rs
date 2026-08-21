@@ -125,7 +125,7 @@ impl ProductAuthRuntimeCredentialResolver {
             request.provider,
             request.setup.clone(),
             request.provider_scopes,
-            request.requester_extension,
+            Some(request.requester_extension),
         )?;
         let account = self
             .accounts
@@ -1749,7 +1749,9 @@ async fn activation_preflight_maps_configured_account_without_access_secret_to_b
         vec![RuntimeCredentialAuthRequirement {
             provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
-            requester_extension: ExtensionId::new("github").unwrap(),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("github").unwrap(),
+            },
             provider_scopes: Vec::new(),
         }],
     )

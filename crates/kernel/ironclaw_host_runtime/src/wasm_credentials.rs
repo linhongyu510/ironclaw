@@ -159,6 +159,9 @@ impl RuntimeCredentialRestager {
         else {
             return Ok(());
         };
+        let consumer = ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+            extension_id: credential.requester_extension.clone(),
+        };
         let access_secret = self
             .account_resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -166,7 +169,7 @@ impl RuntimeCredentialRestager {
                 provider,
                 setup,
                 provider_scopes: &credential.provider_scopes,
-                requester_extension: &credential.requester_extension,
+                consumer: &consumer,
             })
             .await?;
         let lease = self

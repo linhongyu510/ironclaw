@@ -7,6 +7,7 @@
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 mod process_executor;
+pub use process_executor::SandboxTransportProcessExecutor;
 
 use std::sync::{Arc, Mutex};
 
@@ -159,7 +160,7 @@ where
     tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
-    user_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
+    user_sandbox_process_port: Option<Arc<UserSandboxProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -321,13 +322,16 @@ impl ProductAuthProviderRuntimePorts {
                     .credential_account_resolver
                     .as_ref()
                     .ok_or(ProductAuthCredentialStageError::Backend)?;
+                let consumer = ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                    extension_id: requester_extension.clone(),
+                };
                 let access_secret = resolver
                     .resolve_access_secret(crate::obligations::RuntimeCredentialAccountRequest {
                         scope,
                         provider,
                         setup,
                         provider_scopes: &requirement.provider_scopes,
-                        requester_extension,
+                        consumer: &consumer,
                     })
                     .await?;
                 self.stage_material_once(
@@ -619,8 +623,9 @@ where
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
         }
         if let Some(process_port) = &self.user_sandbox_process_port {
-            invocation_services_resolver = invocation_services_resolver
-                .with_user_sandbox_process_port(Arc::clone(process_port));
+            let process_port: Arc<dyn RuntimeProcessPort> = process_port.clone();
+            invocation_services_resolver =
+                invocation_services_resolver.with_user_sandbox_process_port(process_port);
         }
         if let Some(post_edit_check) = &self.post_edit_check {
             invocation_services_resolver =
@@ -717,13 +722,16 @@ where
         }
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_runtime = self.process_services.process_runtime();
-        let process_executor = Arc::new(HostProcessExecutor::new(
-            Arc::new(RuntimeDispatchProcessExecutor::new(
-                Arc::clone(&dispatcher),
-                ironclaw_capabilities::process_authorization_remint_port(process_runtime),
-            )),
-            self.process_sandbox_executor.clone(),
-        ));
+        let process_executor = Arc::new(
+            HostProcessExecutor::new(
+                Arc::new(RuntimeDispatchProcessExecutor::new(
+                    Arc::clone(&dispatcher),
+                    ironclaw_capabilities::process_authorization_remint_port(process_runtime),
+                )),
+                self.process_sandbox_executor.clone(),
+            )
+            .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
+        );
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
         let submission_lifecycle: Arc<dyn ironclaw_processes::ProcessSubmissionLifecycle> =
             lifecycle_process_store.clone();
@@ -856,6 +864,9 @@ where
         }
         if self.first_party_runtime_covers_declared_capabilities() {
             backends.push(RuntimeKind::FirstParty);
+        }
+        if self.process_sandbox_executor.is_some() {
+            backends.push(RuntimeKind::System);
         }
         backends
     }

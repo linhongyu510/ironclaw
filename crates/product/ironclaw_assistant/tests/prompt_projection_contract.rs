@@ -10,7 +10,7 @@ use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     ids::{ExtensionId, TenantId, ThreadId, UserId, VendorId},
 };
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
@@ -81,7 +81,9 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["repo:read".to_string()],
         },
-        requester_extension: ExtensionId::new("github").expect("extension"),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("github").expect("extension"),
+        },
         provider_scopes: vec!["repo:read".to_string()],
     }];
     let challenge = OAuthChallenge {

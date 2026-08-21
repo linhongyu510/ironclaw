@@ -6,7 +6,7 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::process::{
@@ -78,7 +78,7 @@ pub trait RuntimeProcessPort: Send + Sync {
 /// Tenant-isolated process port backed by a sandbox command transport.
 #[derive(Clone)]
 pub struct UserSandboxProcessPort {
-    transport: std::sync::Arc<dyn SandboxCommandTransport>,
+    transport: Arc<dyn SandboxCommandTransport>,
 }
 
 impl std::fmt::Debug for UserSandboxProcessPort {
@@ -91,8 +91,12 @@ impl std::fmt::Debug for UserSandboxProcessPort {
 }
 
 impl UserSandboxProcessPort {
-    pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
+    pub fn new(transport: Arc<dyn SandboxCommandTransport>) -> Self {
         Self { transport }
+    }
+
+    pub(crate) fn transport(&self) -> Arc<dyn SandboxCommandTransport> {
+        Arc::clone(&self.transport)
     }
 
     pub async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
@@ -243,6 +247,7 @@ impl RuntimeProcessPort for HostProcessPort {
             timeout,
             &request.extra_env,
             self.env_mode,
+            &request.cancellation,
         )
         .await?;
         // The command was rewritten alias->host before execution, so any host
@@ -269,6 +274,7 @@ async fn execute_local_command(
     timeout: Duration,
     extra_env: &HashMap<String, String>,
     env_mode: HostProcessEnvMode,
+    cancellation: &ironclaw_host_api::process::CommandCancellationToken,
 ) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -310,40 +316,49 @@ async fn execute_local_command(
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
 
-    let result = tokio::time::timeout(timeout, async {
-        let stdout_fut = async {
-            if let Some(out) = stdout_handle {
-                read_stream_capped(scope, out).await
-            } else {
-                Ok(StreamCapture::default())
-            }
-        };
+    let result = {
+        let timed_run = tokio::time::timeout(timeout, async {
+            let stdout_fut = async {
+                if let Some(out) = stdout_handle {
+                    read_stream_capped(scope, out).await
+                } else {
+                    Ok(StreamCapture::default())
+                }
+            };
 
-        let stderr_fut = async {
-            if let Some(err) = stderr_handle {
-                read_stream_capped(scope, err).await
-            } else {
-                Ok(StreamCapture::default())
-            }
-        };
+            let stderr_fut = async {
+                if let Some(err) = stderr_handle {
+                    read_stream_capped(scope, err).await
+                } else {
+                    Ok(StreamCapture::default())
+                }
+            };
 
-        let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
-        let status = wait_result.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!("Command execution failed: {error}"))
-        })?;
-        Ok::<_, RuntimeProcessError>((stdout?, stderr?, status.code().unwrap_or(-1)))
-    })
-    .await;
+            let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+            let status = wait_result.map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!("Command execution failed: {error}"))
+            })?;
+            Ok::<_, RuntimeProcessError>((stdout?, stderr?, status.code().unwrap_or(-1)))
+        });
+        tokio::pin!(timed_run);
+        tokio::select! {
+            outcome = &mut timed_run => match outcome {
+                Ok(result) => result,
+                Err(_) => Err(RuntimeProcessError::Timeout(timeout)),
+            },
+            () = cancellation.cancelled() => Err(RuntimeProcessError::Cancelled),
+        }
+    };
 
+    if matches!(
+        &result,
+        Err(RuntimeProcessError::Timeout(_) | RuntimeProcessError::Cancelled)
+    ) {
+        terminate_child_tree(&mut child).await;
+    }
     match result {
-        Ok(Ok((stdout, stderr, code))) => {
-            Ok((capture_command_output(scope, stdout, stderr)?, code))
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            terminate_child_tree(&mut child).await;
-            Err(RuntimeProcessError::Timeout(timeout))
-        }
+        Ok((stdout, stderr, code)) => Ok((capture_command_output(scope, stdout, stderr)?, code)),
+        Err(error) => Err(error),
     }
 }
 
@@ -444,9 +459,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "echo sandbox".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .unwrap();
@@ -464,9 +481,11 @@ mod tests {
             scope: ResourceScope::system(),
             mounts: None,
             command: "echo sandbox".to_string(),
+            args: Vec::new(),
             workdir: None,
             timeout_secs: None,
             extra_env: HashMap::new(),
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await
         .unwrap();
@@ -487,9 +506,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "echo sandbox".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .unwrap_err();
@@ -509,9 +530,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "echo sandbox".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .unwrap_err();
@@ -532,9 +555,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "echo sandbox".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .unwrap();
@@ -555,6 +580,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             HostProcessEnvMode::Scrubbed,
+            &ironclaw_host_api::process::CommandCancellationToken::new(),
         )
         .await
         .expect("command succeeds");
@@ -585,6 +611,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             HostProcessEnvMode::Scrubbed,
+            &ironclaw_host_api::process::CommandCancellationToken::new(),
         )
         .await
         .expect("command succeeds");
@@ -610,6 +637,7 @@ mod tests {
                 "inherited".to_string(),
             )]),
             HostProcessEnvMode::Inherited,
+            &ironclaw_host_api::process::CommandCancellationToken::new(),
         )
         .await
         .expect("command succeeds");
@@ -640,9 +668,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "printf '%s' \"$PWD\"".to_string(),
+                args: Vec::new(),
                 workdir: Some("/workspace/qa-coding-smoke".to_string()),
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .expect("command succeeds");
@@ -670,9 +700,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "printf 'saved to %s\\n' /workspace/out.pdf".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .expect("command succeeds");
@@ -693,9 +725,11 @@ mod tests {
                 scope: ResourceScope::system(),
                 mounts: None,
                 command: "mkdir -p /workspace/qa-coding-smoke && test -d /workspace/qa-coding-smoke && printf ok".to_string(),
+                args: Vec::new(),
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
             })
             .await
             .expect("command succeeds");

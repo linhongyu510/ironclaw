@@ -5,7 +5,7 @@
 
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
-    decision::{Decision, Obligation},
+    decision::{Decision, Obligation, RuntimeCredentialConsumer},
     dispatch::{CapabilityDispatchResult, DispatchAuthRequirement},
     ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     invocation::Actor,
@@ -50,7 +50,9 @@ fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
             credential_requirements: vec![RuntimeCredentialAuthRequirement {
                 provider: VendorId::new(provider).unwrap(),
                 setup: RuntimeCredentialAccountSetup::ManualToken,
-                requester_extension: ExtensionId::new(provider).unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new(provider).unwrap(),
+                },
                 provider_scopes: Vec::new(),
             }],
             model_visible_cause: None,
@@ -64,7 +66,9 @@ fn inject_credential_obligation(provider: &str) -> Obligation {
         provider: VendorId::new(provider).unwrap(),
         setup: RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ExtensionId::new(provider).unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new(provider).unwrap(),
+        },
     }
 }
 
@@ -211,6 +215,37 @@ struct SatisfiedPolicyFacts;
 
 #[async_trait::async_trait]
 impl HostPolicyFacts for SatisfiedPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _context: &ExecutionContext,
+        _action: crate::ports::PolicyAction,
+    ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
+        Vec::new()
+    }
+}
+struct InvocationCredentialPolicyFacts {
+    requirement: ironclaw_host_api::capability::RuntimeCredentialRequirement,
+}
+
+#[async_trait::async_trait]
+impl HostPolicyFacts for InvocationCredentialPolicyFacts {
+    async fn invocation_runtime_credentials(
+        &self,
+        _capability_id: &CapabilityId,
+        _input: &serde_json::Value,
+    ) -> Result<Vec<ironclaw_host_api::capability::RuntimeCredentialRequirement>, String> {
+        Ok(vec![self.requirement.clone()])
+    }
+
     async fn credential_presence(
         &self,
         _capability_id: &CapabilityId,
@@ -477,6 +512,74 @@ async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
     // No frozen fact → the bounded default TTL from authorize-time.
     assert!(authorized.deadline() >= before + WITNESS_DEFAULT_TTL);
     assert!(authorized.deadline() <= after + WITNESS_DEFAULT_TTL);
+}
+#[tokio::test]
+async fn invocation_credentials_enrich_only_the_authorized_descriptor_snapshot() {
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+        http::RuntimeCredentialTarget,
+    };
+
+    let registry = echo_registry();
+    let dispatcher =
+        ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
+            Err(DispatchError::UnknownCapability {
+                capability: req.invocation.capability.clone(),
+            })
+        });
+    let authorizer = AllowAuthorizer;
+    let trust_policy = StaticTrustPolicy;
+    let runtime_policy = permissive_runtime_policy();
+    let policy_facts = InvocationCredentialPolicyFacts {
+        requirement: RuntimeCredentialRequirement {
+            handle: SecretHandle::new("fixture_runtime_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: VendorId::new("fixture-vendor").unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+            },
+            provider_scopes: Vec::new(),
+            audience: NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.com".to_string(),
+                port: None,
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "Authorization".to_string(),
+                prefix: Some("token ".to_string()),
+            },
+            required: true,
+        },
+    };
+    let host = CapabilityHost::new(
+        &registry,
+        &dispatcher,
+        &authorizer,
+        &trust_policy,
+        &runtime_policy,
+        &policy_facts,
+    );
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+    let base = registry.get_capability(&capability_id).unwrap();
+
+    let enriched = host
+        .enrich_invocation_descriptor(base, &capability_id, &serde_json::json!({"message": "hi"}))
+        .await
+        .unwrap();
+
+    assert_eq!(enriched.runtime_credentials.len(), 1);
+    assert_eq!(
+        enriched.runtime_credentials[0].handle.as_str(),
+        "fixture_runtime_token"
+    );
+    assert!(
+        registry
+            .get_capability(&capability_id)
+            .unwrap()
+            .runtime_credentials
+            .is_empty(),
+        "per-invocation authority must not mutate the shared registry descriptor"
+    );
 }
 
 // When a persistent grant carrying an `expires_at` is adopted in the fold, the

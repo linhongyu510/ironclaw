@@ -8230,8 +8230,17 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
 /// mocked model reads the advertised workdir and runs the command through the real `builtin.shell`.
 /// Closes the half the sibling fixture cannot see: the path the model is TOLD. When that string was
 /// wrong, every command failed with `Failed to spawn command` and nothing noticed.
-#[tokio::test]
-async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
+#[test]
+fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
+    std::thread::Builder::new()
+        .name("skills-script-e2e".to_string())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(async {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
 
@@ -8300,6 +8309,11 @@ async fn the_model_runs_a_skills_script_from_the_workdir_the_body_advertises() {
     );
 
     runtime.shutdown().await.expect("thread two shutdown");
+                });
+        })
+        .expect("test thread spawns")
+        .join()
+        .expect("test thread completes");
 }
 
 /// A manifest with no `description:` must not become an invisible skill.

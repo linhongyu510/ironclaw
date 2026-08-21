@@ -400,7 +400,7 @@ fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        decision::RuntimeCredentialAuthRequirement,
+        decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
         dispatch::{
             DispatchAuthRequirement, DispatchFailureDetail, DispatchInputIssue,
             DispatchInputIssueCode, RuntimeDispatchErrorKind,
@@ -820,7 +820,9 @@ mod tests {
             setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             },
-            requester_extension: ExtensionId::new("gmail").unwrap(),
+            consumer: RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("gmail").unwrap(),
+            },
             provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         };
         let err = CapabilityInvocationError::from(DispatchError::AuthRequired {

@@ -30,7 +30,7 @@ use ironclaw_host_api::{
     capability::{
         CapabilityDescriptor, CapabilityGrant, EffectKind, RuntimeCredentialRequirementSource,
     },
-    decision::{Decision, DenyReason, Obligation, Obligations},
+    decision::{Decision, DenyReason, Obligation, Obligations, RuntimeCredentialConsumer},
     error::HostApiError,
     ids::{AgentId, CapabilityGrantId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     path::ScopedPath,
@@ -1097,16 +1097,27 @@ fn obligations_for_grant(
                     }
                 }
                 RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } => {
-                    // Mirror SecretHandle: only mandate the obligation when the credential is
-                    // required. An optional product-auth credential is skipped rather than
-                    // injected so that a missing account does not hard-fail dispatch.
-                    if credential.required {
+                    if descriptor.id.as_str()
+                        == ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID
+                    {
+                        obligations.push(Obligation::InjectSandboxCredentialAccountOnce {
+                            handle: credential.handle.clone(),
+                            provider: provider.clone(),
+                            setup: setup.clone(),
+                            provider_scopes: credential.provider_scopes.clone(),
+                            required: credential.required,
+                            audience: credential.audience.clone(),
+                            target: credential.target.clone(),
+                        });
+                    } else if credential.required {
                         obligations.push(Obligation::InjectCredentialAccountOnce {
                             handle: credential.handle.clone(),
                             provider: provider.clone(),
                             setup: setup.clone(),
                             provider_scopes: credential.provider_scopes.clone(),
-                            requester_extension: descriptor.provider.clone(),
+                            consumer: RuntimeCredentialConsumer::Extension {
+                                extension_id: descriptor.provider.clone(),
+                            },
                         });
                     }
                 }

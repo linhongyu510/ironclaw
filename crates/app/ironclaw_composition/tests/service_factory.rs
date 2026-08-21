@@ -520,7 +520,7 @@ async fn assert_production_services_ready_with_first_party_runtime(services: &Re
         .expect("production host runtime health should resolve");
     assert!(
         health.ready,
-        "production host runtime should report first-party backend ready"
+        "production host runtime should report first-party backend ready: {health:?}"
     );
     assert!(health.missing_runtime_backends.is_empty());
 }

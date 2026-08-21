@@ -7,7 +7,7 @@ use ironclaw_assistant::{
 };
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     ids::{ExtensionId, UserId, VendorId},
 };
 use ironclaw_product_contracts::account_setup::{
@@ -48,7 +48,7 @@ fn descriptor_with_display_name(
         auth_requirement: RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension).expect("valid provider id"),
             setup: RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: extension_id,
+            consumer: RuntimeCredentialConsumer::Extension { extension_id },
             provider_scopes: Vec::new(),
         },
         connection_requirement,

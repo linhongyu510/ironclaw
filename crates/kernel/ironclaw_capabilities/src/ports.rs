@@ -25,12 +25,13 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    capability::CapabilityGrant,
+    capability::{CapabilityGrant, RuntimeCredentialRequirement},
     decision::RuntimeCredentialAuthRequirement,
     ids::{CapabilityId, SecretHandle},
     resource::ResourceScope,
     scope::ExecutionContext,
 };
+use serde_json::Value;
 
 /// Presence of a capability's required credentials, read from the host secret
 /// store. A *fact*, not a decision.
@@ -68,7 +69,19 @@ pub enum PolicyAction {
 /// Host-mediated policy facts consumed by `authorize()`. **Facts only** — this
 /// port never decides; the kernel maps each fact into the sealed verdict.
 #[async_trait]
+
 pub trait HostPolicyFacts: Send + Sync {
+    /// Resolve invocation-selected credential requirements from host-owned
+    /// declarations. The returned facts are folded into a per-invocation
+    /// descriptor before policy runs; callers cannot declare credential
+    /// authority through model input alone.
+    async fn invocation_runtime_credentials(
+        &self,
+        _capability_id: &CapabilityId,
+        _input: &Value,
+    ) -> Result<Vec<RuntimeCredentialRequirement>, String> {
+        Ok(Vec::new())
+    }
     /// Whether the capability's required credentials are present for `scope`.
     ///
     /// Presence only — the pre-flight exists solely to order the auth gate ahead

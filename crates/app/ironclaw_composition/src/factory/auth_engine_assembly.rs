@@ -557,7 +557,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             request.provider,
             request.setup.clone(),
             request.provider_scopes,
-            request.requester_extension,
+            request.consumer.extension_id(),
         )?;
         let account = self
             .accounts
@@ -566,7 +566,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .map_err(|error| {
                 tracing::debug!(
                     provider = %request.provider,
-                    requester_extension = %request.requester_extension,
+                    requester_extension = ?request.consumer.extension_id(),
                     auth_error = ?error,
                     "runtime product-auth account selection failed"
                 );
@@ -574,7 +574,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             })?;
         tracing::debug!(
             provider = %request.provider,
-            requester_extension = %request.requester_extension,
+            consumer = ?request.consumer,
             has_access_secret = account.access_secret.is_some(),
             has_refresh_secret = account.refresh_secret.is_some(),
             status = ?account.status,
@@ -587,7 +587,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .map_err(|error| {
                 tracing::debug!(
                     provider = %request.provider,
-                    requester_extension = %request.requester_extension,
+                    consumer = ?request.consumer,
                     auth_error = ?error,
                     "runtime product-auth account refresh failed"
                 );
@@ -595,7 +595,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             })?;
         tracing::debug!(
             provider = %request.provider,
-            requester_extension = %request.requester_extension,
+            consumer = ?request.consumer,
             has_access_secret = account.access_secret.is_some(),
             has_refresh_secret = account.refresh_secret.is_some(),
             status = ?account.status,

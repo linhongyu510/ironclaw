@@ -20,7 +20,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     action::Action,
     capability::CapabilityDescriptor,
-    decision::{Decision, Obligation, Obligations},
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialConsumer},
     dispatch::CredentialStageError,
     ids::{CapabilityId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -592,7 +592,7 @@ impl RuntimeCredentialAccountResolver for TestProductAuthRuntimeCredentialResolv
             request.provider,
             request.setup.clone(),
             request.provider_scopes,
-            request.requester_extension,
+            request.consumer.extension_id(),
         )?;
         let account = self
             .accounts
@@ -722,7 +722,9 @@ impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
                     provider: provider.clone(),
                     setup: setup.clone(),
                     provider_scopes: credential.provider_scopes.clone(),
-                    requester_extension: descriptor.provider.clone(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: descriptor.provider.clone(),
+                    },
                 }),
             }
         }

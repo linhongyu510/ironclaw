@@ -11,7 +11,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    ids::{InvocationId, SecretHandle},
+    ids::{ExtensionId, InvocationId, SecretHandle},
     resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
@@ -60,11 +60,14 @@ impl OAuthGateFlowDriver {
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
         for requirement in request.requirements {
             let vendor = requirement.provider.as_str();
+            let Some(requester_extension) = requirement.consumer.extension_id() else {
+                continue;
+            };
             if self
                 .engine
                 .recipes()
                 .resolve(
-                    Some(&requirement.requester_extension),
+                    Some(requester_extension),
                     Some(request.owner_user_id),
                     vendor,
                 )
@@ -73,7 +76,10 @@ impl OAuthGateFlowDriver {
             {
                 continue;
             }
-            match self.challenge_for_requirement(request, requirement).await {
+            match self
+                .challenge_for_requirement(request, requirement, requester_extension)
+                .await
+            {
                 Ok(challenge) => return Ok(Some(challenge)),
                 // A resolvable-but-unconfigured vendor (e.g. missing operator
                 // client credentials) must not swallow the whole gate: fall
@@ -107,6 +113,7 @@ impl OAuthGateFlowDriver {
         &self,
         request: OAuthGateChallengeRequest<'_>,
         requirement: &RuntimeCredentialAuthRequirement,
+        requester_extension: &ExtensionId,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         let auth_scope = auth_scope_for_blocked_turn(request.scope, request.owner_user_id);
         let turn_run_ref = TurnRunRef::new(request.run_id.to_string())?;
@@ -120,7 +127,7 @@ impl OAuthGateFlowDriver {
                 request.flow_source,
                 query.clone(),
                 &provider,
-                &requirement.requester_extension,
+                requester_extension,
             )
             .await?
         {
@@ -134,7 +141,7 @@ impl OAuthGateFlowDriver {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: vendor.to_string(),
-                requester_extension: Some(requirement.requester_extension.clone()),
+                requester_extension: Some(requester_extension.clone()),
                 scope: auth_scope.clone(),
                 flow_id,
                 account_label: CredentialAccountLabel::new(vendor)?,
@@ -181,7 +188,7 @@ impl OAuthGateFlowDriver {
                     request.flow_source,
                     query,
                     &provider,
-                    &requirement.requester_extension,
+                    requester_extension,
                 )
                 .await?
                 .ok_or(AuthProductError::BackendConflict)?
@@ -544,7 +551,9 @@ mod tests {
                     setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: vec!["msg:read".to_string()],
                     },
-                    requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),
+                    consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("acme-messenger-fixture").unwrap(),
+                    },
                     provider_scopes: vec!["msg:read".to_string()],
                 },
             }
@@ -597,7 +606,7 @@ mod tests {
         assert_eq!(flow.provider.as_str(), "acmevendor");
         assert_eq!(
             flow.requester_extension.as_ref(),
-            Some(&fixture.requirement.requester_extension),
+            fixture.requirement.consumer.extension_id(),
             "the gate flow durably retains the extension whose recipe was resolved"
         );
         let AuthChallenge::OAuthUrl {
@@ -898,7 +907,9 @@ mod tests {
         let unknown_requirement = RuntimeCredentialAuthRequirement {
             provider: VendorId::new("unknownvendor").unwrap(),
             setup: Default::default(),
-            requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new("acme-messenger-fixture").unwrap(),
+            },
             provider_scopes: Vec::new(),
         };
         let serviceable = fixture.requirement.clone();

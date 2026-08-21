@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
-    decision::{Decision, Obligation, Obligations},
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialConsumer},
     ids::{ExtensionId, SecretHandle, VendorId},
     resource::ResourceEstimate,
     scope::ExecutionContext,
@@ -29,7 +29,9 @@ impl GithubHarnessAuthorizer {
                     setup:
                         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
-                    requester_extension: ExtensionId::new("github")?,
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("github")?,
+                    },
                 },
             ])?,
         })

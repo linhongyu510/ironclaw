@@ -270,7 +270,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         &VendorId::new("google").unwrap(),
         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         &[],
-        &ExtensionId::new("google-calendar").unwrap(),
+        Some(&ExtensionId::new("google-calendar").unwrap()),
     )
     .unwrap();
     let resolved = selector

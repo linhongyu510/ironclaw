@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     capability::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
-    decision::{Decision, Obligation, Obligations},
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialConsumer},
     dispatch::CredentialStageError,
     host_port::default_host_port_catalog,
     ids::{
@@ -71,7 +71,9 @@ macro_rules! github_wasm_services_for_test {
                     setup:
                         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
-                    requester_extension: ExtensionId::new("github").unwrap(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("github").unwrap(),
+                    },
                 },
             ])),
             ProcessServices::in_memory(),
@@ -116,7 +118,9 @@ macro_rules! google_wasm_services_for_test {
                         scopes: required_scopes.clone(),
                     },
                     provider_scopes: required_scopes.clone(),
-                    requester_extension: ExtensionId::new(package_id).unwrap(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new(package_id).unwrap(),
+                    },
                 },
             ])),
             ProcessServices::in_memory(),
@@ -195,7 +199,9 @@ async fn host_runtime_services_compact_github_search_preserves_pagination_and_eg
                 provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
-                requester_extension: ExtensionId::new("github").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("github").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -385,7 +391,9 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
                 provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
-                requester_extension: ExtensionId::new("github").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("github").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -480,7 +488,9 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
                     scopes: required_scopes.clone(),
                 },
                 provider_scopes: required_scopes.clone(),
-                requester_extension: ExtensionId::new("google-drive").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("google-drive").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -1017,7 +1027,14 @@ async fn host_runtime_services_maps_google_docs_sheets_and_slides_wasm_401_to_au
         assert_eq!(gate.credential_requirements.len(), 1);
         let requirement = &gate.credential_requirements[0];
         assert_eq!(requirement.provider, VendorId::new("google").unwrap());
-        assert_eq!(requirement.requester_extension.as_str(), package_id);
+        assert_eq!(
+            requirement
+                .consumer
+                .extension_id()
+                .expect("extension credential consumer")
+                .as_str(),
+            package_id
+        );
         assert_eq!(requirement.provider_scopes, required_scopes);
         assert_eq!(network.requests().len(), 1);
     }
@@ -1165,7 +1182,9 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
                 provider: VendorId::new("github").unwrap(),
                 setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
-                requester_extension: ExtensionId::new("github").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("github").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -1245,7 +1264,9 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
-                requester_extension: ExtensionId::new("slack").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("slack").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -1359,7 +1380,9 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
-                requester_extension: ExtensionId::new("slack").unwrap(),
+                consumer: RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("slack").unwrap(),
+                },
             },
         ])),
         ProcessServices::in_memory(),
@@ -2255,7 +2278,14 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "github");
-        assert_eq!(request.requester_extension.as_str(), "github");
+        assert_eq!(
+            request
+                .consumer
+                .extension_id()
+                .expect("extension credential consumer")
+                .as_str(),
+            "github"
+        );
         self.result
             .clone()
             .map(|handle| RuntimeCredentialAccessSecret {
@@ -2280,7 +2310,10 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "google");
         assert_eq!(
-            request.requester_extension,
+            request
+                .consumer
+                .extension_id()
+                .expect("extension credential consumer"),
             &self.expected_requester_extension
         );
         assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
@@ -2316,7 +2349,14 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "slack");
-        assert_eq!(request.requester_extension.as_str(), "slack");
+        assert_eq!(
+            request
+                .consumer
+                .extension_id()
+                .expect("extension credential consumer")
+                .as_str(),
+            "slack"
+        );
         assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
         self.result
             .clone()
@@ -2969,7 +3009,9 @@ macro_rules! slack_enrichment_services_for_test {
                         scopes: $scopes,
                     },
                     provider_scopes: $scopes,
-                    requester_extension: ExtensionId::new("slack").unwrap(),
+                    consumer: RuntimeCredentialConsumer::Extension {
+                        extension_id: ExtensionId::new("slack").unwrap(),
+                    },
                 },
             ])),
             ProcessServices::in_memory(),

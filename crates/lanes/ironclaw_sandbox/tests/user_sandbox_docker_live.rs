@@ -4,7 +4,7 @@ use std::{process::Command, sync::Arc, time::Duration};
 
 use ironclaw_host_api::{
     ids::InvocationId,
-    process::{RuntimeProcessError, SandboxCommandTransport},
+    process::{RuntimeProcessError, SandboxCommandCredential, SandboxCommandTransport},
 };
 use ironclaw_sandbox::{RebornSandboxConfig, RebornScopedSandboxCommandTransport};
 

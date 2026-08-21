@@ -165,6 +165,105 @@ async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() 
     );
 }
 
+#[derive(Debug)]
+struct SandboxCredentialResolver {
+    source_scope: ResourceScope,
+    source_handle: SecretHandle,
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for SandboxCredentialResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::dispatch::CredentialStageError>
+    {
+        assert_eq!(
+            request.consumer,
+            &ironclaw_host_api::decision::RuntimeCredentialConsumer::SandboxProcess
+        );
+        assert_eq!(request.provider.as_str(), "github");
+        Ok(RuntimeCredentialAccessSecret {
+            scope: self.source_scope.clone(),
+            handle: self.source_handle.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn sandbox_credential_obligation_stages_bound_material_for_process_executor() {
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let context = execution_context();
+    let capability_id =
+        CapabilityId::new(ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID).unwrap();
+    let source_handle = SecretHandle::new("github_access_token").unwrap();
+    let injection_handle = SecretHandle::new("github_runtime_token").unwrap();
+    secret_store
+        .put(
+            context.resource_scope.clone(),
+            source_handle.clone(),
+            SecretMaterial::from("github-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+    let services = BuiltinObligationServices::with_handoff_stores(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(NetworkObligationPolicyStore::new()),
+        secret_store,
+        secret_injections.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    )
+    .with_credential_account_resolver(Arc::new(SandboxCredentialResolver {
+        source_scope: context.resource_scope.clone(),
+        source_handle,
+    }));
+    let audience = NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: "api.github.com".to_string(),
+        port: None,
+    };
+    let target = ironclaw_host_api::http::RuntimeCredentialTarget::Header {
+        name: "Authorization".to_string(),
+        prefix: Some("token ".to_string()),
+    };
+    let obligations = vec![Obligation::InjectSandboxCredentialAccountOnce {
+        handle: injection_handle.clone(),
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: Default::default(),
+        provider_scopes: Vec::new(),
+        required: true,
+        audience: audience.clone(),
+        target: target.clone(),
+    }];
+
+    services
+        .obligation_handler()
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &obligations,
+        })
+        .await
+        .unwrap();
+
+    let (material, binding) = secret_injections
+        .take_bound(&context.resource_scope, &capability_id, &injection_handle)
+        .unwrap()
+        .expect("sandbox credential must be staged");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&material),
+        "github-secret"
+    );
+    assert_eq!(
+        binding,
+        Some(RuntimeCredentialBindingPolicy { audience, target })
+    );
+}
+
 // #5459 tenant-shared credential resolution: a caller's own secret wins;
 // otherwise the tenant-shared admin-managed scope; otherwise absent.
 #[tokio::test]

@@ -2,9 +2,11 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+
+use ironclaw_common::env_helpers::lock_env;
 
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},
@@ -28,6 +30,8 @@ struct FakeRailwayCli {
     failed_checkpoint_creates: AtomicUsize,
     failed_destroys: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
+    block_worker_exec: AtomicBool,
+    worker_started: tokio::sync::Notify,
     checkpoint_timeouts: Mutex<Vec<Duration>>,
     delay: Option<Duration>,
 }
@@ -47,6 +51,8 @@ impl FakeRailwayCli {
             failed_checkpoint_creates: AtomicUsize::new(0),
             failed_destroys: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
+            block_worker_exec: AtomicBool::new(false),
+            worker_started: tokio::sync::Notify::new(),
             checkpoint_timeouts: Mutex::new(Vec::new()),
             delay: None,
         }
@@ -73,6 +79,10 @@ impl FakeRailwayCli {
 
     fn fail_next_worker_exec(&self) {
         self.failed_worker_execs.store(1, Ordering::SeqCst);
+    }
+
+    fn block_next_worker_exec(&self) {
+        self.block_worker_exec.store(true, Ordering::SeqCst);
     }
 
     fn malform_next_worker_output(&self) {
@@ -239,9 +249,27 @@ impl RailwayCli for FakeRailwayCli {
             stderr: String::new(),
         })
     }
+
+    async fn execute_cancellable(
+        &self,
+        invocation: RailwayCliInvocation,
+        timeout: Duration,
+        cancellation: ironclaw_host_api::process::CommandCancellationToken,
+    ) -> Result<RailwayCliOutput, RuntimeProcessError> {
+        if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER)
+            && self.block_worker_exec.swap(false, Ordering::SeqCst)
+        {
+            self.invocations.lock().await.push(invocation);
+            self.worker_started.notify_one();
+            cancellation.cancelled().await;
+            return Err(RuntimeProcessError::Cancelled);
+        }
+        self.execute(invocation, timeout).await
+    }
 }
 
 fn config() -> RailwayPreviewSandboxConfig {
+    let _guard = lock_env();
     RailwayPreviewSandboxConfig::new("project-id", "environment-id").unwrap()
 }
 
@@ -258,9 +286,11 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
         },
         mounts: None,
         command: command.into(),
+        args: Vec::new(),
         workdir: None,
         timeout_secs: Some(10),
         extra_env: HashMap::new(),
+        cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
     }
 }
 
@@ -825,6 +855,42 @@ async fn failed_remote_worker_is_destroyed_before_return_and_reprovisioned() {
         .await
         .unwrap();
     assert_eq!(count_creates(&cli.invocations().await), 2);
+}
+
+#[tokio::test]
+async fn cancelled_remote_worker_is_destroyed_before_return() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.block_next_worker_exec();
+    let transport = Arc::new(RailwayPreviewSandboxTransport::with_cli(
+        config(),
+        cli.clone(),
+    ));
+    let command = request("tenant", "cancelled-user", "sleep");
+    let cancellation = command.cancellation.clone();
+    let worker_started = cli.worker_started.notified();
+    tokio::pin!(worker_started);
+
+    let execution = tokio::spawn({
+        let transport = Arc::clone(&transport);
+        async move { transport.run_command(command).await }
+    });
+    worker_started.await;
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), execution)
+        .await
+        .expect("cancelled Railway execution must stop promptly")
+        .expect("Railway execution task must not panic")
+        .expect_err("cancelled Railway execution must fail");
+
+    assert_eq!(error, RuntimeProcessError::Cancelled);
+    let invocations = cli.invocations().await;
+    assert!(invocations.iter().any(|call| {
+        call.args.starts_with(&["sandbox".into(), "destroy".into()])
+            && call
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--id", "sandbox-1"])
+    }));
 }
 
 #[tokio::test]

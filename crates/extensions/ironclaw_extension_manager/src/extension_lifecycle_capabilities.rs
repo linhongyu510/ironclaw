@@ -1859,7 +1859,10 @@ mod tests {
         assert_eq!(gate.credential_requirements.len(), 1);
         let requirement = &gate.credential_requirements[0];
         assert_eq!(requirement.provider.as_str(), "github");
-        assert_eq!(requirement.requester_extension.as_str(), "github");
+        assert_eq!(
+            requirement.consumer.extension_id().map(ExtensionId::as_str),
+            Some("github")
+        );
 
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
@@ -2051,7 +2054,10 @@ mod tests {
         assert_eq!(gate.credential_requirements.len(), 1);
         let requirement = &gate.credential_requirements[0];
         assert_eq!(requirement.provider.as_str(), "google");
-        assert_eq!(requirement.requester_extension.as_str(), "google-calendar");
+        assert_eq!(
+            requirement.consumer.extension_id().map(ExtensionId::as_str),
+            Some("google-calendar")
+        );
         assert_eq!(
             requirement
                 .provider_scopes
@@ -2095,7 +2101,10 @@ mod tests {
         );
         let requirement = &gate.credential_requirements[0];
         assert_eq!(requirement.provider.as_str(), "google");
-        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement.consumer.extension_id().map(ExtensionId::as_str),
+            Some("gmail")
+        );
         assert_eq!(
             requirement
                 .provider_scopes

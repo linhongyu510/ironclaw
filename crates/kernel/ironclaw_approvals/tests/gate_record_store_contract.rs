@@ -15,7 +15,7 @@ use ironclaw_approvals::*;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
+    decision::{RuntimeCredentialAuthRequirement, RuntimeCredentialConsumer},
     gate_record::GateRecord,
     ids::{ExtensionId, GateRef, InvocationId, ProjectId, ResultRef, TenantId, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -234,7 +234,9 @@ fn credential_requirement() -> RuntimeCredentialAuthRequirement {
     RuntimeCredentialAuthRequirement {
         provider: VendorId::new("github").unwrap(),
         setup: RuntimeCredentialAccountSetup::ManualToken,
-        requester_extension: ExtensionId::new("github").unwrap(),
+        consumer: RuntimeCredentialConsumer::Extension {
+            extension_id: ExtensionId::new("github").unwrap(),
+        },
         provider_scopes: vec!["repo".to_string()],
     }
 }

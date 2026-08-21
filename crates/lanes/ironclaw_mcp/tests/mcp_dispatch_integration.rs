@@ -6,6 +6,7 @@ use ironclaw_extension_registry::{
     HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_host_api::{
+    decision::RuntimeCredentialConsumer,
     host_port::HostPortCatalog,
     ids::{
         AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, TenantId, ThreadId,
@@ -126,8 +127,10 @@ async fn mcp_lane_auth_failure_returns_context_and_accounts_the_provider_attempt
                 VendorId::new("github").unwrap()
             );
             assert_eq!(
-                credential_requirements[0].requester_extension,
-                ExtensionId::new("github-mcp").unwrap()
+                credential_requirements[0].consumer,
+                RuntimeCredentialConsumer::Extension {
+                    extension_id: ExtensionId::new("github-mcp").unwrap(),
+                }
             );
             assert_eq!(
                 credential_requirements[0].provider_scopes,

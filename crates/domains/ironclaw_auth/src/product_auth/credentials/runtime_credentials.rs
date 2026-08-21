@@ -153,7 +153,7 @@ async fn configured_runtime_credential_account(
         &requirement.provider,
         requirement.setup.clone(),
         &requirement.provider_scopes,
-        &requirement.requester_extension,
+        requirement.consumer.extension_id(),
     )?;
     match accounts
         .select_unique_configured_runtime_account(request)
@@ -497,7 +497,7 @@ pub fn runtime_credential_account_selection_request(
     provider: &VendorId,
     setup: RuntimeCredentialAccountSetup,
     provider_scopes: &[String],
-    requester_extension: &ExtensionId,
+    requester_extension: Option<&ExtensionId>,
 ) -> Result<RuntimeCredentialAccountSelectionRequest, CredentialStageError> {
     let owner_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
     let provider = AuthProviderId::new(provider.as_str()).map_err(|e| {
@@ -521,9 +521,12 @@ pub fn runtime_credential_account_selection_request(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut selection = CredentialAccountSelectionRequest::new(owner_scope, provider);
+    if let Some(requester_extension) = requester_extension {
+        selection = selection.for_extension(requester_extension.clone());
+    }
     Ok(RuntimeCredentialAccountSelectionRequest::new(
-        CredentialAccountSelectionRequest::new(owner_scope, provider)
-            .for_extension(requester_extension.clone()),
+        selection,
         AuthProductScope::new(scope.clone(), AuthSurface::Api),
         setup,
         provider_scopes,

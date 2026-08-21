@@ -357,9 +357,11 @@ pub(crate) async fn run_post_edit_check(
             scope: scope.clone(),
             mounts: mounts.cloned(),
             command: config.command().to_string(),
+            args: Vec::new(),
             workdir,
             timeout_secs: Some(config.timeout().as_secs()),
             extra_env: HashMap::new(),
+            cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
         })
         .await;
     match outcome {
@@ -373,6 +375,7 @@ pub(crate) async fn run_post_edit_check(
             Some(value)
         }
         Err(RuntimeProcessError::Timeout(_)) => Some(json!({"timed_out": true})),
+        Err(RuntimeProcessError::Cancelled) => None,
         Err(RuntimeProcessError::ExecutionFailed(reason)) => {
             tracing::debug!(reason = %reason, "post-edit check could not run");
             None

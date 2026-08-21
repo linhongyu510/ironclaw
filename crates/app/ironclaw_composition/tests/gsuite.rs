@@ -835,7 +835,10 @@ async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth
         requirement.provider.as_str(),
         ironclaw_auth::GOOGLE_PROVIDER_ID
     );
-    assert_eq!(requirement.requester_extension.as_str(), "gmail");
+    assert_eq!(
+        requirement.consumer.extension_id().map(|id| id.as_str()),
+        Some("gmail")
+    );
     assert_eq!(
         requirement.provider_scopes,
         vec![GOOGLE_GMAIL_SEND_SCOPE.to_string()]

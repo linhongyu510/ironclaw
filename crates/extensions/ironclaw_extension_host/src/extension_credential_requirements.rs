@@ -115,7 +115,7 @@ fn can_merge_runtime_credential_auth_requirement(
     candidate: &RuntimeCredentialAuthRequirement,
 ) -> bool {
     existing.provider == candidate.provider
-        && existing.requester_extension == candidate.requester_extension
+        && existing.consumer == candidate.consumer
         && can_merge_runtime_credential_setup(&existing.setup, &candidate.setup)
 }
 

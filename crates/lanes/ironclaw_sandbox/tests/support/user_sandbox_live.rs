@@ -41,9 +41,11 @@ pub(crate) fn request(scope: ResourceScope, command: impl Into<String>) -> Comma
         scope,
         mounts: None,
         command: command.into(),
+        args: Vec::new(),
         workdir: Some("/workspace".to_string()),
         timeout_secs: Some(60),
         extra_env: HashMap::new(),
+        cancellation: ironclaw_host_api::process::CommandCancellationToken::new(),
     }
 }
 

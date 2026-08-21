@@ -2375,13 +2375,16 @@ async fn standalone_nearai_mcp_auto_bootstraps_from_injected_config() {
         thread_id: None,
         invocation_id: InvocationId::new(),
     };
+    let nearai_consumer = ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+        extension_id: ExtensionId::new("nearai").unwrap(),
+    };
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &sso_scope,
             provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
-            requester_extension: &ExtensionId::new("nearai").unwrap(),
+            consumer: &nearai_consumer,
         })
         .await
         .expect("SSO user should resolve host-managed NEAR AI credential");
@@ -3696,7 +3699,9 @@ fn pairing_account_setup_descriptor(extension_id: &str) -> ExtensionAccountSetup
         auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
             setup: RuntimeCredentialAccountSetup::Pairing,
-            requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),
+            consumer: ironclaw_host_api::decision::RuntimeCredentialConsumer::Extension {
+                extension_id: ExtensionId::new(extension_id).expect("requester extension id"),
+            },
             provider_scopes: Vec::new(),
         },
         connection_requirement: ironclaw_assistant::ChannelConnectionRequirement {
