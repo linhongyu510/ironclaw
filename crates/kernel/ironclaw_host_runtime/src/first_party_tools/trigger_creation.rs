@@ -6,6 +6,15 @@ use serde::{Deserialize, Deserializer};
 
 use crate::first_party_tools::trigger_management::TriggerScheduleInput;
 
+pub(super) const TRIGGER_EXECUTION_CONTRACT_FIELDS: &[&str] = &[
+    "goal",
+    "success_criteria",
+    "output_instructions",
+    "no_result_text",
+    "policy",
+];
+pub(super) const TRIGGER_EXECUTION_POLICY_FIELDS: &[&str] = &["required_skills", "result_delivery"];
+
 pub(super) struct TriggerCreateInput {
     pub(super) name: String,
     pub(super) schedule: TriggerScheduleInput,

@@ -1092,6 +1092,17 @@ pub enum RebornAutomationAssessmentStatus {
     RunFailed,
 }
 
+impl RebornAutomationAssessmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AppearsSuccessful => "appears_successful",
+            Self::NeedsAttention => "needs_attention",
+            Self::Unverified => "unverified",
+            Self::RunFailed => "run_failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationCapabilityEvidenceStatus {
@@ -1100,6 +1111,18 @@ pub enum RebornAutomationCapabilityEvidenceStatus {
     Missing,
     Incomplete,
     Unavailable,
+}
+
+impl RebornAutomationCapabilityEvidenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Missing => "missing",
+            Self::Incomplete => "incomplete",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2020,6 +2043,34 @@ pub enum SettingsToolPermissionState {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn automation_assessment_status_renderers_match_wire_tokens() {
+        for status in [
+            RebornAutomationAssessmentStatus::AppearsSuccessful,
+            RebornAutomationAssessmentStatus::NeedsAttention,
+            RebornAutomationAssessmentStatus::Unverified,
+            RebornAutomationAssessmentStatus::RunFailed,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize assessment status"),
+                json!(status.as_str())
+            );
+        }
+
+        for status in [
+            RebornAutomationCapabilityEvidenceStatus::Succeeded,
+            RebornAutomationCapabilityEvidenceStatus::Failed,
+            RebornAutomationCapabilityEvidenceStatus::Missing,
+            RebornAutomationCapabilityEvidenceStatus::Incomplete,
+            RebornAutomationCapabilityEvidenceStatus::Unavailable,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize evidence status"),
+                json!(status.as_str())
+            );
+        }
+    }
 
     /// The outbound-delivery display newtypes are the only fence between an
     /// operator-supplied target label and the browser that renders it, and the

@@ -30,7 +30,9 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-use super::trigger_creation::TriggerCreateInput;
+use super::trigger_creation::{
+    TRIGGER_EXECUTION_CONTRACT_FIELDS, TRIGGER_EXECUTION_POLICY_FIELDS, TriggerCreateInput,
+};
 use super::{
     FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_input_size, bounded_output_bytes,
     first_party_capability_manifest, input_error, resource_profile,
@@ -483,9 +485,9 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    require_explicit_result_delivery(&input)?;
     let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
+    require_explicit_result_delivery(&input)?;
     let schedule_kind = parsed_input.schedule.kind();
     let schedule = parsed_input
         .schedule
@@ -979,13 +981,7 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
         Some(Value::Object(contract)) => {
             unexpected_fields(
                 contract,
-                &[
-                    "goal",
-                    "success_criteria",
-                    "output_instructions",
-                    "no_result_text",
-                    "policy",
-                ],
+                TRIGGER_EXECUTION_CONTRACT_FIELDS,
                 "execution_contract.unexpected_field",
                 &mut issues,
             );
@@ -997,7 +993,7 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
                 Some(Value::Object(policy)) => {
                     unexpected_fields(
                         policy,
-                        &["required_skills", "result_delivery"],
+                        TRIGGER_EXECUTION_POLICY_FIELDS,
                         "execution_contract.policy.unexpected_field",
                         &mut issues,
                     );

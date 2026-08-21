@@ -650,37 +650,7 @@ pub trait EventProjectionService: Send + Sync {
         scope: ProjectionScope,
         run_ids: &[InvocationId],
         limit: usize,
-    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
-        if run_ids.is_empty() {
-            return Ok(CapabilityActivityProjectionWindow {
-                activities: Vec::new(),
-                truncated: false,
-            });
-        }
-        let snapshot = self
-            .snapshot(ProjectionRequest {
-                scope,
-                after: None,
-                limit,
-            })
-            .await?;
-        // Implementations that cannot filter before applying their snapshot
-        // bound must stay conservative when that bound is saturated.
-        let truncated = snapshot.capability_activities.len() >= limit;
-        let run_ids = run_ids.iter().copied().collect::<HashSet<_>>();
-        Ok(CapabilityActivityProjectionWindow {
-            activities: snapshot
-                .capability_activities
-                .into_iter()
-                .filter(|activity| {
-                    activity
-                        .run_id
-                        .is_some_and(|run_id| run_ids.contains(&run_id))
-                })
-                .collect(),
-            truncated,
-        })
-    }
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError>;
 }
 
 #[derive(Clone)]

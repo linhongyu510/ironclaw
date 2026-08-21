@@ -787,7 +787,13 @@ impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
                 MAX_PROJECTION_PAGE_LIMIT,
             )
             .await
-            .map_err(|_| TriggerRunEvidenceError::Unavailable)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "capability activity projection read failed"
+                );
+                TriggerRunEvidenceError::Unavailable
+            })?;
         if window.truncated {
             return Err(TriggerRunEvidenceError::Unavailable);
         }
