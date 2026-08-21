@@ -1576,14 +1576,18 @@ mod tests {
         let invocation_id = InvocationId::new();
         let capability_id = CapabilityId::new("ironclaw.memory.search").expect("capability id");
 
-        // Short strings serialize well over the preview cap.
-        const ITEM_COUNT: usize = 4000;
+        // Short strings serialize well over the preview cap. The truncation
+        // branch keys on `ARTIFACT_INLINE_PREVIEW_MAX_BYTES`, so the fixture
+        // must exceed THAT bound — a fixture sized against the smaller
+        // `TOOL_RESULT_RECORD_READ_MAX_BYTES` stays a complete inline result
+        // and never reaches the artifact-reference path under test.
+        const ITEM_COUNT: usize = 8000;
         let items: Vec<String> = (0..ITEM_COUNT).map(|i| format!("item-{i:04}")).collect();
         let output = serde_json::json!(items);
         let full_text = serde_json::to_string(&output).expect("serialize reference output");
         assert!(
-            full_text.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
-            "fixture must exceed the preview cap"
+            full_text.len() > ARTIFACT_INLINE_PREVIEW_MAX_BYTES,
+            "fixture must exceed the inline preview cap"
         );
 
         let write_result = capability_io
@@ -1648,9 +1652,8 @@ mod tests {
             )
             .await
             .expect("singleton input stages");
-        let singleton_output = serde_json::json!([
-            "x".repeat(ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES + 1000)
-        ]);
+        let singleton_output =
+            serde_json::json!(["x".repeat(ARTIFACT_INLINE_PREVIEW_MAX_BYTES + 1000)]);
         let singleton_write = capability_io
             .write_capability_result(CapabilityResultWrite {
                 receipt: None,
