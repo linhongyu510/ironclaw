@@ -670,6 +670,11 @@ REPO_CONFIG_TEST_OWNERS = {
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
+# Test crates that assert on every crate's sources and manifests via
+# filesystem scans (Cargo.toml declares only 2 dep edges), so the reverse-
+# dependency closure structurally cannot select them for a product change —
+# run 32291404351 / PR #6994 / fix 156288d4d is the measured miss.
+WORKSPACE_SCANNING_TEST_PACKAGES: tuple[str, ...] = ("ironclaw_architecture_tests",)
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
 SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
@@ -1328,6 +1333,15 @@ def build_plan(
     affected = (
         _affected_packages(production_packages, reverse) | direct_test_packages
     ) & canonical_set
+    if production_packages:
+        scanning_packages = set(WORKSPACE_SCANNING_TEST_PACKAGES) & canonical_set
+        if scanning_packages - affected:
+            affected |= scanning_packages
+            reasons.append(
+                "workspace scan: ironclaw_architecture_tests reads every "
+                "crate's sources from disk and has no dependency edge to "
+                "any of them, so it joins any production-package change"
+            )
     if changed_packages and not affected:
         raise ValueError(
             "changed packages are outside the canonical Reborn package set: "

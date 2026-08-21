@@ -1286,6 +1286,44 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
 
+    def test_production_change_schedules_the_workspace_scanning_architecture_tests(
+        self,
+    ) -> None:
+        """ironclaw_architecture_tests scans every crate's sources from disk but
+        depends on none of them, so the reverse-dependency closure structurally
+        cannot select it for a product change (run 32291404351 / PR #6994 / fix
+        156288d4d: a provider-name leak the queue's full plan caught that no
+        PR-time plan would have run).
+        """
+        plan = self.plan_real_owners(
+            ["crates/product/ironclaw_openai_compat/src/lib.rs"]
+        )
+        self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
+        self.assertTrue(
+            any("workspace scan" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
+        # Negative control: a package-owned test change cannot alter a scanned
+        # production source's contract, so it must not add the workspace-
+        # scanning architecture tests either — mirrors
+        # test_package_owned_test_change_does_not_run_reverse_dependents's
+        # philosophy.
+        test_only = self.plan_real_owners(
+            ["crates/product/ironclaw_openai_compat/tests/contract.rs"]
+        )
+        self.assertNotIn(
+            "ironclaw_architecture_tests", test_only["affected_packages"]
+        )
+
+    def test_workspace_scanning_packages_exist_in_the_real_tree(self) -> None:
+        """Fails loudly if a scanning package is renamed/deleted, so the
+        intersection-with-canonical-set in build_plan can never silently no-op
+        forever."""
+        for name in planner.WORKSPACE_SCANNING_TEST_PACKAGES:
+            with self.subTest(name=name):
+                planner.crate_directory(name, planner.ROOT)
+
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.
 
