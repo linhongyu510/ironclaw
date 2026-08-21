@@ -258,6 +258,22 @@ impl RebornStoragePaths {
     pub fn temp_root(&self) -> &Path {
         &self.temp_root
     }
+
+    /// Every direct canonical namespace beneath the installation root.
+    ///
+    /// Callers that admit, initialize, or migrate the layout iterate this
+    /// closed set instead of maintaining parallel namespace lists.
+    pub fn canonical_namespace_roots(&self) -> [&Path; 7] {
+        [
+            self.state_root(),
+            self.system_root(),
+            self.workspace_root(),
+            self.runtime_root(),
+            self.logs_root(),
+            self.cache_root(),
+            self.temp_root(),
+        ]
+    }
 }
 
 /// Versioned, persisted record of durable storage assumptions.
@@ -383,7 +399,12 @@ fn legacy_memory_provider_app_id_v1(storage_root: &Path) -> String {
 
 /// Stable implicit namespace for a canonical profile-agnostic installation.
 pub fn canonical_memory_provider_app_id(installation_root: &Path) -> String {
-    let digest = Sha256::digest(installation_root.as_os_str().as_encoded_bytes());
+    // RebornHome rejects parent components before this caller is reached. Rebuild
+    // the path from lexical components so harmless trailing/repeated separators
+    // and `.` spellings share one persisted identity, without canonicalizing the
+    // filesystem or resolving symlinks.
+    let normalized = installation_root.components().collect::<PathBuf>();
+    let digest = Sha256::digest(normalized.as_os_str().as_encoded_bytes());
     format!("ws-{}", hex::encode(digest))
 }
 

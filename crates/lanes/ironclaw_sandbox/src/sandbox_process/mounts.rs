@@ -70,7 +70,10 @@ pub(super) fn validate_mandatory_workspace_mount_view<'a>(
         RuntimeProcessError::ExecutionFailed(format!("sandbox mount view is invalid: {error}"))
     })?;
     let Some(grant) = mounts.mounts.first() else {
-        return Ok(None);
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox mount view must carry the mandatory /workspace caller workspace leaf"
+                .to_string(),
+        ));
     };
     if mounts.mounts.len() != 1 || grant.alias.as_str() != CONTAINER_WORKSPACE_ROOT {
         return Err(RuntimeProcessError::ExecutionFailed(
@@ -436,6 +439,22 @@ mod tests {
                     .display()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_mount_view_is_rejected_instead_of_granting_read_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let sources = RebornSandboxMountSources;
+        let scope = caller_scope();
+        let workspace = prepared_workspace(&temp, &scope).await;
+        let mounts = MountView { mounts: Vec::new() };
+
+        let error = sources
+            .prepare_container_binds(&workspace, &scope, Some(&mounts))
+            .await
+            .expect_err("an explicit empty authority view must fail closed");
+
+        assert!(format!("{error}").contains("mandatory /workspace"));
     }
 
     #[tokio::test]

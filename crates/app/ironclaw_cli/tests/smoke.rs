@@ -4533,12 +4533,16 @@ fn onboard_hosted_profile_initializes_home_without_opening_a_standalone_secret_s
     assert!(reborn_home.join("webui-token").is_file());
     assert!(reborn_home.join(".onboard-completed.json").is_file());
     assert!(
-        !reborn_home.join("state/reborn-local-dev.db").exists(),
+        !reborn_home
+            .join("state")
+            .join(ironclaw_composition::test_support::STANDALONE_DB_FILENAME)
+            .exists(),
         "hosted onboarding must not create a shadow standalone libSQL store"
     );
     assert!(
         !reborn_home
-            .join("state/.reborn-local-dev-secrets-master-key")
+            .join("state")
+            .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH)
             .exists(),
         "hosted onboarding must not create a standalone master-key cache"
     );
@@ -6174,7 +6178,8 @@ fn onboard_reports_suppressed_master_key_fallback_and_still_succeeds() {
     // not onboarding's.
     assert!(
         !reborn_home
-            .join("state/.reborn-local-dev-secrets-master-key")
+            .join("state")
+            .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH)
             .exists(),
         "onboard's suppressed keychain path must not write the dotfile itself"
     );
@@ -6204,7 +6209,7 @@ fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
     );
     let runtime_root = reborn_home.join("state");
     write_owner_only_test_file(
-        &runtime_root.join(".reborn-local-dev-secrets-master-key"),
+        &runtime_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
         &"a".repeat(64),
     );
 
@@ -6224,9 +6229,10 @@ fn onboard_master_key_provisioning_is_a_noop_once_a_dotfile_is_cached() {
         stdout.contains("master_key: cached dotfile already present"),
         "stdout must report the dotfile no-op: {stdout}"
     );
-    let dotfile_text =
-        std::fs::read_to_string(runtime_root.join(".reborn-local-dev-secrets-master-key"))
-            .expect("read cached dotfile");
+    let dotfile_text = std::fs::read_to_string(
+        runtime_root.join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH),
+    )
+    .expect("read cached dotfile");
     assert_eq!(
         dotfile_text,
         "a".repeat(64),

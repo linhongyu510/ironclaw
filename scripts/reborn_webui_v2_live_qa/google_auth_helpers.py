@@ -544,7 +544,7 @@ def _google_product_auth_preflight(
         "ready": False,
     }
     if not db_path.exists():
-        preflight["reason"] = "reborn local-dev db missing"
+        preflight["reason"] = "state/reborn-local-dev.db missing"
         return preflight
     account_pattern = (
         f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"

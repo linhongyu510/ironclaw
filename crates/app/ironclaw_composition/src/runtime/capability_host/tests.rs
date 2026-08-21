@@ -2572,6 +2572,8 @@ mod tests {
     async fn standalone_skill_activate_tool_loads_selected_skill_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("standalone");
+        let storage_paths =
+            ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
                 "standalone-skill-activate-owner",
@@ -2584,7 +2586,7 @@ mod tests {
         // correctly invisible now, so seeding to disk would make this test pass on nothing
         // (nearai/ironclaw#7168).
         crate::filesystem_assembly::write_database_file_for_test(
-            &storage_root.join("state"),
+            storage_paths.state_root(),
             "/tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
             skill_md(
                 "unit-activate-helper",
@@ -5160,6 +5162,8 @@ mod tests {
     async fn capability_port_skill_install_writes_user_skill_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
+        let storage_paths =
+            ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input_with_profile(
                 crate::RebornCompositionProfile::StandaloneUnrestricted,
@@ -5266,7 +5270,7 @@ mod tests {
         // (nearai/ironclaw#7168).
         assert!(
             crate::filesystem_assembly::database_file_bytes(
-                &storage_root.join("state"),
+                storage_paths.state_root(),
                 "/tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md",
             )
             .await

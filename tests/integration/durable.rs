@@ -41,7 +41,8 @@ use serde_json::json;
 
 #[test]
 fn sandbox_harness_supplies_the_canonical_workspaces_root() {
-    let paths = RebornStoragePaths::from_installation_root("/tmp/reborn-durable-workspace-root");
+    let installation_root = tempfile::tempdir().expect("temporary installation root");
+    let paths = RebornStoragePaths::from_installation_root(installation_root.path());
 
     assert_eq!(
         reborn_support::harness::sandbox_workspace_root(&paths),

@@ -738,6 +738,22 @@ pub(crate) async fn mount_default_database_roots(
         .map(|_| ())
 }
 
+#[cfg(feature = "test-support")]
+async fn reopen_canonical_filesystem(
+    installation_root: &Path,
+) -> Result<crate::filesystem_assembly::FilesystemAssembly, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
+    build_filesystem(
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
+        None,
+        None,
+        DurableStorageInput::EmbeddedLibsql,
+    )
+    .await
+}
+
 /// Test-only (T5 restart-survival seam): open a FRESH standalone root
 /// filesystem at an existing `storage_root`, for reconstructing the generic
 /// channel-identity store the way production boot does
@@ -749,15 +765,7 @@ pub(crate) async fn mount_default_database_roots(
 pub(crate) async fn open_standalone_root_filesystem_for_test(
     installation_root: &Path,
 ) -> Result<Arc<dyn RootFilesystem>, RebornBuildError> {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
-    let bundle = build_filesystem(
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     Ok(bundle.filesystem)
 }
 
@@ -772,15 +780,7 @@ pub(crate) async fn open_standalone_thread_service_for_test(
     Arc<ironclaw_threads::FilesystemSessionThreadService<CompositeRootFilesystem>>,
     RebornBuildError,
 > {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
-    let bundle = build_filesystem(
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     let scoped = crate::wrap_scoped(bundle.filesystem);
     Ok(Arc::new(
         ironclaw_threads::FilesystemSessionThreadService::new(scoped),
@@ -796,15 +796,7 @@ pub(crate) async fn open_standalone_skill_management_for_test(
     installation_root: &Path,
     owner_user_id: ironclaw_host_api::ids::UserId,
 ) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
-    let bundle = build_filesystem(
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     Ok(Arc::new(
         ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
             owner_user_id,
@@ -831,15 +823,7 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
     installation_root: &Path,
 ) -> Result<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>, RebornBuildError>
 {
-    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
-    let bundle = build_filesystem(
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
     let state_path = ExtensionInstallationStore::default_state_path().map_err(|error| {
         RebornBuildError::InvalidConfig {

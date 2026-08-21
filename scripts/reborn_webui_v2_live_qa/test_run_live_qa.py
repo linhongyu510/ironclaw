@@ -5862,6 +5862,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "fake-refresh-token",
             )
 
+    def test_google_product_auth_preflight_names_canonical_missing_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preflight = run_live_qa._google_product_auth_preflight(
+                Path(tmpdir) / "reborn-home",
+                "qa-user",
+            )
+
+        self.assertEqual(preflight["reason"], "state/reborn-local-dev.db missing")
+
     def test_google_runtime_token_refreshes_before_env_access_fallback(self):
         if importlib.util.find_spec("cryptography") is None:
             self.skipTest("cryptography is installed in the e2e venv, not system Python")

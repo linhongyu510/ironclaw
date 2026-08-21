@@ -309,6 +309,20 @@ fn storage_paths_are_derived_from_reborn_home_without_creating_directories() {
     assert_eq!(paths.logs_root(), expected_home.join("logs"));
     assert_eq!(paths.cache_root(), expected_home.join("cache"));
     assert_eq!(paths.temp_root(), expected_home.join("tmp"));
+    assert_eq!(
+        paths
+            .canonical_namespace_roots()
+            .map(|path| path.file_name().expect("namespace name")),
+        [
+            "state",
+            "system",
+            "workspaces",
+            "runtime",
+            "logs",
+            "cache",
+            "tmp"
+        ]
+    );
     assert!(
         !expected_home.exists(),
         "deriving pure layout paths must not create the Reborn home"
@@ -485,6 +499,22 @@ fn released_and_canonical_memory_provider_derivations_remain_distinct_and_stable
         ironclaw_config::canonical_memory_provider_app_id(root),
         "ws-f0d6f77ada36695664007e305f03546485e25e5f295cb273657c4370f4aaab01"
     );
+}
+
+#[test]
+fn canonical_memory_provider_derivation_normalizes_equivalent_path_spelling() {
+    let canonical = std::path::Path::new("/var/lib/ironclaw");
+    for equivalent in [
+        std::path::Path::new("/var/lib/ironclaw/"),
+        std::path::Path::new("/var//lib/./ironclaw"),
+    ] {
+        assert_eq!(
+            ironclaw_config::canonical_memory_provider_app_id(equivalent),
+            ironclaw_config::canonical_memory_provider_app_id(canonical),
+            "equivalent spelling must not create a second durable memory namespace: {}",
+            equivalent.display()
+        );
+    }
 }
 
 #[test]

@@ -1,15 +1,19 @@
 use std::{
     ffi::OsString,
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     path::{Component, Path},
     sync::Arc,
+    time::SystemTime,
 };
 
-use cap_fs_ext::DirExt as _;
+use cap_fs_ext::{
+    DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsMaybeDirExt as _,
+};
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
+use same_file::Handle;
 
 use crate::CasExpectation;
 
@@ -23,13 +27,43 @@ where
         .map_err(io::Error::other)?
 }
 
+pub(crate) async fn run_capability_access<T, F>(work: F) -> Result<T, CapabilityWriteError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CapabilityWriteError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| CapabilityWriteError::Io(io::Error::other(error)))?
+}
+
 #[derive(Debug, Clone)]
-pub(crate) struct DiskDirectoryCapability {
+pub struct DiskDirectoryCapability {
     directory: Arc<Dir>,
 }
 
+#[derive(Debug)]
+pub(crate) struct CapabilityDirectoryEntry {
+    pub(crate) name: OsString,
+    pub(crate) file_type: CapabilityFileType,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CapabilityFileType {
+    File,
+    Directory,
+    Other,
+}
+
+#[derive(Debug)]
+pub(crate) struct CapabilityMetadata {
+    pub(crate) file_type: CapabilityFileType,
+    pub(crate) len: u64,
+    pub(crate) modified: Option<SystemTime>,
+}
+
 impl DiskDirectoryCapability {
-    pub(crate) fn admit_or_create(path: &Path) -> io::Result<Self> {
+    pub fn admit_or_create(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -65,18 +99,182 @@ impl DiskDirectoryCapability {
         })
     }
 
+    pub(crate) fn open_existing_no_follow(path: &Path) -> io::Result<Self> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local capability root must be absolute",
+            ));
+        }
+        let (anchor, tail) = absolute_anchor_and_tail(path)?;
+        let mut directory = Dir::open_ambient_dir(anchor, ambient_authority())?;
+        for component in tail {
+            directory = directory.open_dir_nofollow(&component)?;
+        }
+        Ok(Self {
+            directory: Arc::new(directory),
+        })
+    }
+
+    pub(crate) fn directory(&self) -> &Dir {
+        self.directory.as_ref()
+    }
+
+    pub(crate) fn matches_existing_path(&self, path: &Path) -> io::Result<bool> {
+        let reopened = Self::open_existing_no_follow(path)?;
+        let retained = Handle::from_file(self.directory.try_clone()?.into_std_file())?;
+        let reopened = Handle::from_file(reopened.directory.try_clone()?.into_std_file())?;
+        Ok(retained == reopened)
+    }
+
     pub(crate) fn create_dir_all(&self, relative: &Path) -> io::Result<()> {
         self.open_or_create_directory(relative).map(|_| ())
     }
 
-    pub(crate) fn append(&self, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn read_file(
+        &self,
+        relative: &Path,
+        max_bytes: Option<usize>,
+    ) -> Result<Option<Vec<u8>>, CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
+        let (parent_path, file_name) = split_parent(relative)?;
+        let parent = self.open_existing_directory(parent_path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = parent.open_with(file_name, &options)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file").into());
+        }
+        if max_bytes.is_some_and(|limit| metadata.len() > limit as u64) {
+            return Ok(None);
+        }
+        let mut bytes = Vec::with_capacity(
+            max_bytes
+                .unwrap_or(metadata.len() as usize)
+                .min(metadata.len() as usize),
+        );
+        match max_bytes {
+            Some(limit) => {
+                file.take((limit as u64).saturating_add(1))
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > limit {
+                    return Ok(None);
+                }
+            }
+            None => {
+                file.read_to_end(&mut bytes)?;
+            }
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn list_dir_bounded(
+        &self,
+        relative: &Path,
+        max_entries: usize,
+    ) -> Result<Vec<CapabilityDirectoryEntry>, CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
+        let directory = self.open_existing_directory(relative)?;
+        let mut entries = Vec::new();
+        for entry in directory.read_dir(".")? {
+            if entries.len() >= max_entries {
+                break;
+            }
+            let entry = entry?;
+            entries.push(capability_directory_entry(entry)?);
+        }
+        Ok(entries)
+    }
+
+    pub(crate) fn list_dir_page(
+        &self,
+        relative: &Path,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<CapabilityDirectoryEntry>, CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
+        let directory = self.open_existing_directory(relative)?;
+        let mut page = std::collections::BTreeMap::<String, CapabilityDirectoryEntry>::new();
+        for entry in directory.read_dir(".")? {
+            let entry = capability_directory_entry(entry?)?;
+            let name = entry.name.to_string_lossy().to_string();
+            if after.is_some_and(|cursor| name.as_str() <= cursor) {
+                continue;
+            }
+            page.insert(name, entry);
+            if page.len() > max_entries {
+                page.pop_last();
+            }
+        }
+        Ok(page.into_values().collect())
+    }
+
+    pub(crate) fn metadata(
+        &self,
+        relative: &Path,
+    ) -> Result<CapabilityMetadata, CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
+        let metadata = if relative.as_os_str().is_empty() {
+            self.directory.metadata(".")?
+        } else {
+            let (parent_path, file_name) = split_parent(relative)?;
+            self.open_existing_directory(parent_path)?
+                .symlink_metadata(file_name)?
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(CapabilityWriteError::SymlinkEscape);
+        }
+        Ok(CapabilityMetadata {
+            file_type: if file_type.is_file() {
+                CapabilityFileType::File
+            } else if file_type.is_dir() {
+                CapabilityFileType::Directory
+            } else {
+                CapabilityFileType::Other
+            },
+            len: metadata.len(),
+            modified: metadata.modified().ok().map(|time| time.into_std()),
+        })
+    }
+
+    pub(crate) fn remove(&self, relative: &Path) -> Result<(), CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
+        let (parent_path, file_name) = split_parent(relative)?;
+        let parent = self.open_existing_directory(parent_path)?;
+        let metadata = parent.symlink_metadata(file_name)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CapabilityWriteError::SymlinkEscape);
+        }
+        if metadata.is_dir() {
+            parent.remove_dir_all(file_name)?;
+        } else {
+            parent.remove_file(file_name)?;
+        }
+        Ok(())
+    }
+
+    /// Creates and admits a descendant relative to this held directory.
+    /// No ambient pathname is reopened and symlink components are rejected.
+    pub fn create_dir_capability(&self, relative: &Path) -> io::Result<Self> {
+        let directory = self.open_or_create_directory(relative)?;
+        Ok(Self {
+            directory: Arc::new(directory),
+        })
+    }
+
+    pub(crate) fn append(&self, relative: &Path, bytes: &[u8]) -> Result<(), CapabilityWriteError> {
+        self.reject_symlink_components(relative)?;
         let (parent, file_name) = split_parent(relative)?;
         let parent = self.open_or_create_directory(parent)?;
         let mut options = OpenOptions::new();
         options.write(true).append(true).create(true);
+        options.follow(FollowSymlinks::No);
         let mut file = parent.open_with(file_name, &options)?;
         file.write_all(bytes)?;
-        file.sync_all()
+        file.sync_all()?;
+        Ok(())
     }
 
     pub(crate) fn atomic_write(
@@ -232,6 +430,39 @@ impl DiskDirectoryCapability {
         }
         Ok(directory)
     }
+
+    fn open_existing_directory(&self, relative: &Path) -> io::Result<Dir> {
+        let mut directory = self.directory.try_clone()?;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "capability-relative path contains a non-normal component",
+                ));
+            };
+            directory = directory.open_dir_nofollow(name)?;
+        }
+        Ok(directory)
+    }
+}
+
+fn capability_directory_entry(
+    entry: cap_std::fs::DirEntry,
+) -> Result<CapabilityDirectoryEntry, CapabilityWriteError> {
+    let file_type = entry.file_type()?;
+    if file_type.is_symlink() {
+        return Err(CapabilityWriteError::SymlinkEscape);
+    }
+    Ok(CapabilityDirectoryEntry {
+        name: entry.file_name(),
+        file_type: if file_type.is_file() {
+            CapabilityFileType::File
+        } else if file_type.is_dir() {
+            CapabilityFileType::Directory
+        } else {
+            CapabilityFileType::Other
+        },
+    })
 }
 
 #[derive(Debug)]
@@ -365,7 +596,15 @@ fn sync_directory(_directory: &Dir) -> io::Result<()> {
 
 #[cfg(not(windows))]
 fn sync_directory(directory: &Dir) -> io::Result<()> {
-    directory.try_clone()?.into_std_file().sync_all()
+    // On Linux cap-std retains directory capabilities as traversal-only
+    // `O_PATH` descriptors. Cloning and fsyncing that descriptor returns
+    // EBADF after publication has already succeeded. Re-open `.` relative to
+    // the retained capability with read access so the resulting descriptor is
+    // syncable, while preserving the no-ambient-path containment boundary.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No).maybe_dir(true);
+    directory.open_with(".", &options)?.into_std().sync_all()
 }
 
 #[cfg(windows)]
@@ -427,6 +666,36 @@ fn rename_subtree_absent(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Barrier};
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_creation_stays_with_admitted_parent_after_path_replacement() {
+        // macOS exposes `/var` as a symlink to `/private/var`; this primitive
+        // deliberately rejects every symlink component. Use the ordinary
+        // `/private/tmp` path so the fixture reaches the replacement race.
+        #[cfg(target_os = "macos")]
+        let temp = tempfile::Builder::new()
+            .tempdir_in("/private/tmp")
+            .expect("temporary root");
+        #[cfg(not(target_os = "macos"))]
+        let temp = tempfile::tempdir().expect("temporary root");
+        let admitted_path = temp.path().join("system");
+        let moved_path = temp.path().join("original-system");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&admitted_path).expect("system root");
+        std::fs::create_dir(&outside).expect("outside root");
+        let admitted = super::DiskDirectoryCapability::admit_or_create(&admitted_path)
+            .expect("admit system root");
+
+        std::fs::rename(&admitted_path, &moved_path).expect("replace admitted pathname");
+        std::os::unix::fs::symlink(&outside, &admitted_path).expect("replacement alias");
+
+        admitted
+            .create_dir_capability(std::path::Path::new("prompts/nested"))
+            .expect("descriptor-relative descendant creation");
+        assert!(moved_path.join("prompts/nested").is_dir());
+        assert!(!outside.join("prompts").exists());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_descriptor_work_does_not_stall_the_async_executor() {

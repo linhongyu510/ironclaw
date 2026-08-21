@@ -20,14 +20,19 @@ pub(crate) fn admit_startup_layout(
 
     let record_path = migration_record_path(&paths);
     if record_path.exists() {
-        // A record without a published manifest means a migration was
-        // interrupted. Renames leave nothing half-written, but the exact
-        // remaining step cannot be re-derived safely, so recovery is the
-        // operator's backup, never a guess.
-        bail!(
-            "layout migration record exists at {} but no layout manifest was published; the previous migration was interrupted. Restore the pre-migration backup of this home, then restart",
-            record_path.display()
-        );
+        let record = read_migration_record(&record_path)?;
+        if record.phase != MigrationPhase::Complete {
+            // Source renames may be incomplete. Recovery is the operator's
+            // backup, never a reconstruction from ambient filesystem state.
+            bail!(
+                "layout migration record exists at {} but no layout manifest was published; the previous migration was interrupted. Restore the pre-migration backup of this home, then restart",
+                record_path.display()
+            );
+        }
+        admit_manifest(&record.target_manifest, requirement)?;
+        validate_ready_namespace_roots(&paths)?;
+        write_manifest_last(home_path, &record.target_manifest)?;
+        return Ok(StartupLayoutAdmission::Ready(paths));
     }
 
     let candidates = inspect_legacy_candidates(home_path)?;
@@ -90,7 +95,7 @@ fn admit_existing_manifest(
     let record_path = migration_record_path(paths);
     if record_path.exists() {
         let record = read_migration_record(&record_path)?;
-        if record.phase != MigrationPhase::Complete {
+        if record.phase != MigrationPhase::Complete || record.target_manifest != manifest {
             bail!(
                 "ready layout manifest and migration record disagree at {}; refusing to open durable state",
                 record_path.display()
@@ -102,15 +107,7 @@ fn admit_existing_manifest(
 }
 
 fn validate_ready_namespace_roots(paths: &RebornStoragePaths) -> anyhow::Result<()> {
-    for namespace in [
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        paths.runtime_root(),
-        paths.logs_root(),
-        paths.cache_root(),
-        paths.temp_root(),
-    ] {
+    for namespace in paths.canonical_namespace_roots() {
         require_ordinary_directory(namespace)?;
     }
     Ok(())
@@ -162,15 +159,7 @@ pub(super) fn initialize_fresh_layout(
     requirement: LayoutRequirement,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(home).with_context(|| format!("create Reborn home {}", home.display()))?;
-    for path in [
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        paths.runtime_root(),
-        paths.logs_root(),
-        paths.cache_root(),
-        paths.temp_root(),
-    ] {
+    for path in paths.canonical_namespace_roots() {
         create_or_validate_direct_child(home, path)?;
         sync_directory(path)?;
     }

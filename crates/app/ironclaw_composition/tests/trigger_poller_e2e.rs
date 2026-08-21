@@ -1117,8 +1117,12 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
 /// mutation or platform keychain serialization.
 fn seed_test_secret_master_key(root: &Path) {
     let standalone_root = root.join("standalone");
-    std::fs::create_dir_all(&standalone_root).expect("standalone root");
-    let key_path = standalone_root.join(".reborn-local-dev-secrets-master-key");
+    let storage_paths =
+        ironclaw_config::RebornStoragePaths::from_installation_root(standalone_root);
+    std::fs::create_dir_all(storage_paths.state_root()).expect("standalone state root");
+    let key_path = storage_paths
+        .state_root()
+        .join(".reborn-local-dev-secrets-master-key");
     if !key_path.exists() {
         std::fs::write(key_path, TEST_SECRET_MASTER_KEY).expect("seed test secret master key");
     }

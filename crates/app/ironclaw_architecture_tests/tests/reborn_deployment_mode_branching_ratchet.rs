@@ -53,6 +53,7 @@ mod ratchet_support;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 // Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
 // the crate inventory, so the family move (PROPOSAL section 5) repoints them
@@ -123,10 +124,15 @@ fn enum_variant_names_from_workspace(path: &str, enum_name: &str) -> BTreeSet<St
 }
 
 fn reborn_composition_profile_variant_names() -> BTreeSet<String> {
-    enum_variant_names_from_workspace(
-        "crates/ironclaw_composition/src/root/profile.rs",
-        REBORN_COMPOSITION_PROFILE,
-    )
+    static VARIANTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    VARIANTS
+        .get_or_init(|| {
+            enum_variant_names_from_workspace(
+                "crates/ironclaw_composition/src/root/profile.rs",
+                REBORN_COMPOSITION_PROFILE,
+            )
+        })
+        .clone()
 }
 
 struct ProfileImports {

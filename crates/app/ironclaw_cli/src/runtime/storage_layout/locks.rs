@@ -26,7 +26,7 @@ pub(super) fn acquire_named_lock(
         let path = directory.join(file_name);
         require_ordinary_directory(directory)?;
         let mut file = open_migration_lock_file(&path)?;
-        fs2::FileExt::try_lock_exclusive(&file).with_context(|| {
+        fs4::FileExt::try_lock(&file).with_context(|| {
         format!(
             "another {operation} is holding advisory lock {}; wait for it to finish before retrying",
             path.display()

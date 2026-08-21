@@ -51,7 +51,10 @@ Set `IRONCLAW_REBORN_HOME` to one mounted installation directory. Its direct
 namespaces are `state/` (authoritative application state and the local cached
 master key), `system/` (host-managed extensions, prompts, and skills),
 `workspaces/` (tenant-plus-user leaves), and `runtime/` (provider/runtime
-bookkeeping). Do not add a deployment ID or the selected profile to this path.
+bookkeeping), plus the operational `logs/`, `cache/`, and `tmp/` namespaces.
+`logs/` is retained only according to the operator's logging policy; `cache/`
+and `tmp/` are disposable. None of these three is authoritative application
+state. Do not add a deployment ID or the selected profile to this path.
 
 When upgrading a populated legacy home, stop every old container before the
 new release starts (volume-backed services get recreate deploys, which already

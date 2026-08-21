@@ -60,6 +60,15 @@ On startup without a valid `layout.toml`, the binary classifies the home:
   key, symlinks, sidecars without the main database) → fail closed with the
   specific reason; nothing is selected or modified.
 
+Before a manifest exists, the installation root admits only the released
+profile directories, the canonical namespaces (empty until initialization or
+migration), the bare legacy database/key unit, and IronClaw's known operator
+files: `config.toml`, `providers.json`, `webui-token`, and
+`.onboard-completed.json` (plus the migration lock while admission holds it).
+Every other top-level file or directory fails closed, even when empty, so
+fresh initialization and bare-home migration cannot strand unknown content
+beside a newly published manifest.
+
 The migration itself, guarded by an advisory lock on the home and a POSIX
 record-lock probe against SQLite's locking ranges (which detects live readers,
 writers, and idle open WAL connections of any other process):
@@ -73,8 +82,13 @@ writers, and idle open WAL connections of any other process):
    (`legacy_memory_provider_app_id`).
 
 Renames are same-volume metadata operations: nothing is duplicated, nothing
-destroyed. A crash mid-migration leaves a record without a manifest; the next
-startup refuses with a restore-the-backup message rather than guessing.
+destroyed. The in-progress record persists the exact target manifest before
+the first rename. A crash while that record is still in progress refuses with
+a restore-the-backup message rather than guessing. If every move completed and
+the record was durably marked complete but the process crashed before the final
+manifest publication, startup admits that recorded target against the current
+request, validates every canonical namespace, and republishes only that exact
+manifest.
 
 ## Operator controls
 

@@ -29,15 +29,21 @@ config_file:  ~/.ironclaw/reborn/config.toml
 providers:    ~/.ironclaw/reborn/providers.json
 ```
 
-The durable namespaces are directly below that home:
+The canonical namespaces are directly below that home:
 
 ```text
 <IRONCLAW_REBORN_HOME>/
 ├── state/       # libSQL state and cached local master key when applicable
 ├── system/      # host-managed extensions, prompts, and skills
 ├── workspaces/  # persistent tenant/user workspace leaves
-└── runtime/     # provider/runtime bookkeeping and adoption recovery data
+├── runtime/     # provider/runtime bookkeeping and adoption recovery data
+├── logs/        # operational logs; retained per operator logging policy
+├── cache/       # disposable operational cache
+└── tmp/         # disposable temporary files
 ```
+
+`logs/`, `cache/`, and `tmp/` are operational namespaces, not authoritative
+application state.
 
 For a sandboxed request, only
 `workspaces/users/<tenant-user-digest>` is mounted as `/workspace`; the Reborn
@@ -328,7 +334,7 @@ Overrides are namespaced `IRONCLAW_REBORN_*`. The ones you're most likely to nee
 
 | Variable | Purpose |
 | --- | --- |
-| `IRONCLAW_REBORN_HOME` | Installation boundary for configuration and the direct `state/`, `system/`, `workspaces/`, and `runtime/` namespaces |
+| `IRONCLAW_REBORN_HOME` | Installation boundary for configuration and the direct `state/`, `system/`, `workspaces/`, `runtime/`, `logs/`, `cache/`, and `tmp/` namespaces |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile |
 | `IRONCLAW_REBORN_LOG` | Log level, for example `debug` |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Database URL when using the Postgres backend |

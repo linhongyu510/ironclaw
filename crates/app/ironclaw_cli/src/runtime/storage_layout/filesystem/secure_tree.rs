@@ -1,7 +1,5 @@
 use super::*;
 
-pub(in super::super) const MAX_ADOPTION_TREE_DEPTH: usize = 64;
-
 pub(in super::super) fn validate_master_key_source(path: &Path) -> anyhow::Result<File> {
     require_ordinary_file(path)?;
     let file = open_file_no_follow(path)?;
@@ -22,9 +20,9 @@ pub(in super::super) fn verify_master_key_policy(
             .with_context(|| format!("read {location} master key metadata at {}", path.display()))?
             .mode()
             & 0o777;
-        if mode != 0o600 {
+        if mode & 0o077 != 0 {
             bail!(
-                "{location} master key at {} must have owner-only mode 0600; found {mode:03o}",
+                "{location} master key at {} must not grant group or world permissions; found mode {mode:03o}",
                 path.display()
             );
         }
@@ -68,34 +66,6 @@ pub(in super::super) fn open_directory_no_follow(path: &Path) -> anyhow::Result<
     })
 }
 
-pub(in super::super) fn ensure_directory_path_matches_handle(
-    path: &Path,
-    handle: &File,
-) -> anyhow::Result<()> {
-    let reopened = open_directory_no_follow(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let original = handle
-            .metadata()
-            .with_context(|| format!("read opened directory metadata {}", path.display()))?;
-        let current = reopened
-            .metadata()
-            .with_context(|| format!("read reopened directory metadata {}", path.display()))?;
-        if original.dev() != current.dev() || original.ino() != current.ino() {
-            bail!(
-                "directory {} changed while adoption was traversing it; refusing to continue with a raced path",
-                path.display()
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (handle, reopened);
-    }
-    Ok(())
-}
-
 pub(in super::super) fn read_utf8_file_no_follow(path: &Path) -> anyhow::Result<String> {
     require_ordinary_file(path)?;
     let mut file = open_file_no_follow(path)?;
@@ -106,33 +76,7 @@ pub(in super::super) fn read_utf8_file_no_follow(path: &Path) -> anyhow::Result<
 }
 
 pub(in super::super) fn validate_ordinary_tree(path: &Path) -> anyhow::Result<()> {
-    validate_ordinary_tree_at_depth(path, 0)
-}
-
-fn validate_ordinary_tree_at_depth(path: &Path, depth: usize) -> anyhow::Result<()> {
-    ensure_adoption_tree_depth(path, depth)?;
-    let metadata =
-        fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "refusing symbolic link in adoption source: {}",
-            path.display()
-        );
-    }
-    if metadata.is_file() {
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        bail!("refusing non-ordinary source entry: {}", path.display());
-    }
-    let directory_handle = open_directory_no_follow(path)?;
-    for entry in
-        fs::read_dir(path).with_context(|| format!("read source directory {}", path.display()))?
-    {
-        let entry = entry.with_context(|| format!("read source entry under {}", path.display()))?;
-        validate_ordinary_tree_at_depth(&entry.path(), depth + 1)?;
-    }
-    ensure_directory_path_matches_handle(path, &directory_handle)
+    inspect_ordinary_tree(path).map(|_| ())
 }
 
 pub(in super::super) fn require_ordinary_file(path: &Path) -> anyhow::Result<()> {
@@ -179,48 +123,14 @@ pub(in super::super) fn directory_is_empty(path: &Path) -> anyhow::Result<bool> 
 }
 
 pub(in super::super) fn directory_has_content(path: &Path) -> anyhow::Result<bool> {
-    directory_has_content_at_depth(path, 0)
+    inspect_ordinary_tree(path)
 }
 
-fn directory_has_content_at_depth(path: &Path, depth: usize) -> anyhow::Result<bool> {
-    ensure_adoption_tree_depth(path, depth)?;
-    let metadata =
-        fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "refusing symbolic link in adoption candidate: {}",
-            path.display()
-        );
-    }
-    if metadata.is_file() {
-        return Ok(true);
-    }
-    if !metadata.is_dir() {
-        bail!(
-            "refusing non-ordinary adoption candidate entry: {}",
-            path.display()
-        );
-    }
-    for entry in fs::read_dir(path).with_context(|| format!("read directory {}", path.display()))? {
-        let entry = entry.with_context(|| format!("read entry under {}", path.display()))?;
-        if directory_has_content_at_depth(&entry.path(), depth + 1)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(in super::super) fn ensure_adoption_tree_depth(
-    path: &Path,
-    depth: usize,
-) -> anyhow::Result<()> {
-    if depth > MAX_ADOPTION_TREE_DEPTH {
-        bail!(
-            "adoption source tree exceeds maximum depth {MAX_ADOPTION_TREE_DEPTH} at {}",
-            path.display()
-        );
-    }
-    Ok(())
+fn inspect_ordinary_tree(path: &Path) -> anyhow::Result<bool> {
+    ironclaw_filesystem::inspect_ordinary_host_tree(
+        &ironclaw_host_api::path::HostPath::from_path_buf(path.to_path_buf()),
+    )
+    .with_context(|| format!("validate ordinary adoption source tree {}", path.display()))
 }
 
 pub(in super::super) fn sync_directory(path: &Path) -> anyhow::Result<()> {

@@ -427,15 +427,16 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("standalone");
+    let storage_paths = ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
     let skill_root = "/tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper";
     ironclaw_composition::test_support::write_standalone_database_file_for_test(
-        &storage_root.join("state"),
+        storage_paths.state_root(),
         &format!("{skill_root}/SKILL.md"),
         skill_md("policy-helper", "policy-helper", "Use policy guidance.").as_bytes(),
     )
     .await;
     ironclaw_composition::test_support::write_standalone_database_file_for_test(
-        &storage_root.join("state"),
+        storage_paths.state_root(),
         &format!("{skill_root}/references/policy.md"),
         b"filesystem policy",
     )

@@ -91,6 +91,15 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
         .join(sibling_key.digest_segment());
     std::fs::create_dir_all(&caller_leaf).expect("selected workspace leaf");
     std::fs::create_dir_all(&sibling_leaf).expect("sibling workspace leaf");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for private_namespace in [&workspace_root, &workspace_root.join("users")] {
+            std::fs::set_permissions(private_namespace, std::fs::Permissions::from_mode(0o700))
+                .expect("private workspace namespace");
+        }
+    }
     std::fs::create_dir_all(reborn_home.join("state")).expect("canonical state root");
     std::fs::create_dir_all(reborn_home.join("system")).expect("canonical system root");
     std::fs::write(
@@ -154,15 +163,16 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
                  assert Path('/.dockerenv').is_file()\n\
                  assert not Path('/var/run/docker.sock').exists()\n\
                  assert Path('/workspace/selected-leaf-sentinel.txt').read_text() == 'host-selected-leaf'\n\
-                 for relative in [\n\
-                     'reborn-home-sentinel.txt',\n\
-                     'state/reborn-state-sentinel.txt',\n\
-                     'state/.reborn-secrets-master-key',\n\
-                     'state/provider-credential-sentinel.txt',\n\
-                     'system/system-sentinel.txt',\n\
-                     'users/{sibling}/sibling-sentinel.txt',\n\
-                 ]:\n\
-                     assert not (Path('/workspace') / relative).exists(), relative\n\
+                 hidden_workspace_paths = [\n\
+                 'reborn-home-sentinel.txt',\n\
+                 'state/reborn-state-sentinel.txt',\n\
+                 'state/.reborn-secrets-master-key',\n\
+                 'state/provider-credential-sentinel.txt',\n\
+                 'system/system-sentinel.txt',\n\
+                 'users/{sibling}/sibling-sentinel.txt',\n\
+                 ]\n\
+                 visible_workspace_paths = [relative for relative in hidden_workspace_paths if (Path('/workspace') / relative).exists()]\n\
+                 assert not visible_workspace_paths, visible_workspace_paths\n\
                  forbidden_env = {{\n\
                      'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NEARAI_API_KEY',\n\
                      'RAILWAY_TOKEN', 'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID',\n\

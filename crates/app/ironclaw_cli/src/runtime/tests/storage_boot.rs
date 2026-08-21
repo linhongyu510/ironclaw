@@ -220,7 +220,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         }
         let before = layout_tree_snapshot(home);
 
-        let error = super::ensure_startup_layout(&config, RebornProfile::HostedSingleTenant)
+        let error = super::ensure_startup_layout(&config, RebornProfile::HostedSingleTenant, false)
             .expect_err("unsafe legacy state must fail closed");
 
         assert!(
@@ -247,7 +247,7 @@ fn manual_migration_policy_defers_startup_migration_without_mutation() {
     seed_legacy_embedded_store(&legacy);
     let before = layout_tree_snapshot(config.home().path());
 
-    let error = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+    let error = super::ensure_startup_layout(&config, RebornProfile::Standalone, false)
         .expect_err("manual policy defers boot-time migration");
 
     assert!(
@@ -271,7 +271,7 @@ fn automatic_startup_migrates_a_legacy_local_dev_home() {
     let legacy = config.home().path().join("local-dev");
     seed_legacy_embedded_store(&legacy);
 
-    let paths = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+    let paths = super::ensure_startup_layout(&config, RebornProfile::Standalone, false)
         .expect("automatic startup migration");
 
     assert!(paths.state_root().join("reborn-local-dev.db").is_file());
@@ -280,7 +280,7 @@ fn automatic_startup_migrates_a_legacy_local_dev_home() {
 
     // A second startup admits the migrated layout without further writes.
     let before = layout_tree_snapshot(config.home().path());
-    let readmitted = super::ensure_startup_layout(&config, RebornProfile::Standalone)
+    let readmitted = super::ensure_startup_layout(&config, RebornProfile::Standalone, false)
         .expect("ready admission after migration");
     assert_eq!(readmitted, paths);
     assert_eq!(layout_tree_snapshot(config.home().path()), before);

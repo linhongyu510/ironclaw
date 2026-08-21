@@ -86,8 +86,11 @@ binary rollback after migration requires restoring the pre-upgrade volume
 backup; old binaries cannot read the canonical layout.
 
 The volume is the durable IronClaw installation boundary. It holds the Reborn
-home's direct `state/`, `system/`, `workspaces/`, and `runtime/` namespaces,
-without a profile-named or deployment-id storage directory. It keeps
+home's direct `state/`, `system/`, `workspaces/`, `runtime/`, `logs/`, `cache/`,
+and `tmp/` namespaces, without a profile-named or deployment-id storage
+directory. `logs/` is retained only according to the operator's logging policy;
+`cache/` and `tmp/` are disposable, and none of these three is authoritative
+application state. The volume keeps
 libSQL-backed runtime/control-plane state and provider bookkeeping across a
 control-service restart. A Railway Sandbox checkpoint is only a snapshot of
 that sandbox's own filesystem; it does not replace authoritative IronClaw

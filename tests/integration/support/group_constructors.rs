@@ -45,6 +45,11 @@ async fn build_group_capability_with_base(
         .agent_id
         .clone()
         .ok_or("group product scope is missing an agent id")?;
+    // User-scoped fixtures and bundled extensions are published while the
+    // profile builds. Align the profile before that work so construction and
+    // dispatch use the same canonical actor rather than rewriting only the
+    // already-built harness afterward.
+    profile.user_id = actor_user.clone();
     profile.options = profile
         .options
         .with_local_runtime_identity(product_scope.tenant_id.clone(), agent_id);

@@ -61,6 +61,107 @@ fn local_dev_home_migrates_into_canonical_layout_and_reopens() {
 }
 
 #[test]
+fn completed_migration_record_republishes_its_exact_manifest_after_crash_window() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let candidates = classify(&home, requirement);
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        candidates,
+    )
+    .expect("migration");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    let expected = read_manifest(&manifest_path).expect("committed manifest");
+    fs::remove_file(&manifest_path).expect("simulate crash before manifest publication");
+
+    assert!(matches!(
+        admit_startup_layout(&home, requirement).expect("completed record resumes final publish"),
+        StartupLayoutAdmission::Ready(_)
+    ));
+    assert_eq!(
+        read_manifest(&manifest_path).expect("republished manifest"),
+        expected
+    );
+}
+
+#[test]
+fn completed_migration_record_does_not_reconstruct_manifest_from_changed_requirement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let candidates = classify(&home, requirement);
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        candidates,
+    )
+    .expect("migration");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    fs::remove_file(&manifest_path).expect("simulate crash before manifest publication");
+    let changed = LayoutRequirement {
+        durable_state: DurableStateKind::ExternalPostgres,
+        security: requirement.security,
+    };
+
+    let error = admit_startup_layout(&home, changed)
+        .expect_err("recovery must admit the recorded target against the current request");
+
+    assert!(error.to_string().contains("storage migration"), "{error:#}");
+    assert!(!manifest_path.exists());
+}
+
+#[test]
+fn completed_migration_record_rejects_a_different_published_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let candidates = classify(&home, requirement);
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        candidates,
+    )
+    .expect("migration");
+
+    let paths = RebornStoragePaths::from_home(&home);
+    let record_path = migration_record_path(&paths);
+    let mut record = read_migration_record(&record_path).expect("completed record");
+    record.target_manifest = LayoutManifest::new(LayoutRequirement {
+        durable_state: requirement.durable_state,
+        security: DeploymentSecurityEnvelope {
+            tenancy: requirement.security.tenancy,
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+        },
+    });
+    let contents = toml::to_string(&record).expect("serialize changed record");
+    write_atomic_synced(&record_path, &contents, true).expect("replace migration record");
+
+    let error = admit_startup_layout(&home, requirement)
+        .expect_err("published manifest must match completed migration provenance exactly");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ready layout manifest and migration record disagree"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn manual_policy_defers_migration_without_touching_the_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
@@ -396,8 +497,11 @@ fn migration_refuses_while_another_process_holds_the_legacy_database() {
     let requirement = embedded_single_user_requirement();
     let legacy = temp.path().join("local-dev");
     seed_legacy_embedded_store(&legacy);
-    let ready = temp.path().join("db-lock-ready");
-    let release = temp.path().join("db-lock-release");
+    // Synchronization sentinels are test-process state, not legacy home
+    // content. Keep them outside the fail-closed adoption root.
+    let synchronization = tempfile::tempdir().expect("synchronization directory");
+    let ready = synchronization.path().join("db-lock-ready");
+    let release = synchronization.path().join("db-lock-release");
     let test_binary = std::env::current_exe().expect("test binary");
     let mut child = Command::new(test_binary)
         .args([

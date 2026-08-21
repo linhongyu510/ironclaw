@@ -592,6 +592,14 @@ impl DeploymentConfig {
         self.workspace_scoped_per_caller
     }
 
+    /// Raise the deployment's workspace isolation floor for a host surface
+    /// that can introduce multiple callers. This is intentionally raise-only:
+    /// a host cannot weaken a profile that already requires per-caller scope.
+    pub fn with_workspace_scoped_per_caller(mut self, required: bool) -> Self {
+        self.workspace_scoped_per_caller = self.workspace_scoped_per_caller || required;
+        self
+    }
+
     pub fn storage_shape(&self) -> StorageShape {
         self.storage_shape
     }

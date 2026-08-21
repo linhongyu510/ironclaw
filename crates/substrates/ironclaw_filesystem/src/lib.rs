@@ -26,6 +26,7 @@ mod index;
 mod libsql;
 mod local;
 mod local_capability;
+mod ordinary_tree;
 mod postgres;
 #[cfg(feature = "test-support")]
 mod postgres_isolation;
@@ -51,6 +52,10 @@ pub use index::{
 };
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
+pub use local_capability::DiskDirectoryCapability;
+pub use ordinary_tree::{
+    MAX_ORDINARY_HOST_TREE_DEPTH, inspect_ordinary_host_tree, read_ordinary_host_file,
+};
 pub use postgres::{PostgresConnectionPool, PostgresRootFilesystem};
 #[cfg(feature = "test-support")]
 pub use postgres_isolation::{

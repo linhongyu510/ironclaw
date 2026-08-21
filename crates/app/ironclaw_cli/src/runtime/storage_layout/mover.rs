@@ -33,6 +33,9 @@ pub(crate) fn migrate_legacy_layout(
     let paths = RebornStoragePaths::from_home(home);
 
     let (winner, ignored) = select_migration_source(candidates)?;
+    let target_manifest = LayoutManifest::new(requirement).with_memory_provider_app_id(
+        ironclaw_config::legacy_memory_provider_app_id(&winner.source_root),
+    );
     admit_manifest(&LayoutManifest::new(winner.kind.requirement()), requirement)?;
 
     let _lock = acquire_named_lock(home_path, MIGRATION_LOCK_FILE, "storage layout migration")?;
@@ -53,15 +56,7 @@ pub(crate) fn migrate_legacy_layout(
         );
     }
 
-    for path in [
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        paths.runtime_root(),
-        paths.logs_root(),
-        paths.cache_root(),
-        paths.temp_root(),
-    ] {
+    for path in paths.canonical_namespace_roots() {
         create_or_validate_direct_child(home_path, path)?;
         sync_directory(path)?;
     }
@@ -71,6 +66,7 @@ pub(crate) fn migrate_legacy_layout(
         phase: MigrationPhase::InProgress,
         source: winner.kind,
         source_root: winner.source_root.clone(),
+        target_manifest: target_manifest.clone(),
         has_legacy_skills: winner.has_legacy_skills,
         ignored,
     };
@@ -81,10 +77,7 @@ pub(crate) fn migrate_legacy_layout(
     record.phase = MigrationPhase::Complete;
     write_migration_record(&paths, &record, true)?;
 
-    let manifest = LayoutManifest::new(requirement).with_memory_provider_app_id(
-        ironclaw_config::legacy_memory_provider_app_id(&winner.source_root),
-    );
-    write_manifest_last(home_path, &manifest)?;
+    write_manifest_last(home_path, &target_manifest)?;
 
     tracing::info!(
         source = winner.kind.label(),

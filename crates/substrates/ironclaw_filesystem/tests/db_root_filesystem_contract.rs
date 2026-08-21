@@ -2599,6 +2599,19 @@ mod postgres_tests {
     };
     use ironclaw_host_api::path::VirtualPath;
 
+    const REQUIRE_POSTGRES_TESTS_ENV: &str = "IRONCLAW_REQUIRE_POSTGRES_TESTS";
+
+    fn postgres_required() -> bool {
+        std::env::var_os(REQUIRE_POSTGRES_TESTS_ENV).is_some()
+    }
+
+    fn report_postgres_unavailable(stage: &'static str) {
+        if postgres_required() {
+            panic!("required Postgres filesystem test setup failed at stage={stage}");
+        }
+        eprintln!("skipping Postgres filesystem contract tests: stage={stage}");
+    }
+
     /// One container per test binary, started on first use.
     ///
     /// Kept alive for the process: dropping the handle stops the database out
@@ -2637,16 +2650,25 @@ mod postgres_tests {
                     .with_tag("16-alpine");
                 let container = match image.start().await {
                     Ok(container) => container,
-                    Err(error) => {
-                        eprintln!(
-                            "skipping Postgres filesystem contract tests: \
-                             docker/testcontainers unavailable ({error})"
-                        );
+                    Err(_) => {
+                        report_postgres_unavailable("start-testcontainer");
                         return None;
                     }
                 };
-                let host = container.get_host().await.ok()?;
-                let port = container.get_host_port_ipv4(5432).await.ok()?;
+                let host = match container.get_host().await {
+                    Ok(host) => host,
+                    Err(_) => {
+                        report_postgres_unavailable("resolve-testcontainer-host");
+                        return None;
+                    }
+                };
+                let port = match container.get_host_port_ipv4(5432).await {
+                    Ok(port) => port,
+                    Err(_) => {
+                        report_postgres_unavailable("resolve-testcontainer-port");
+                        return None;
+                    }
+                };
                 Some(ContainerUrl {
                     url: format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
                     _container: container,
@@ -2662,12 +2684,24 @@ mod postgres_tests {
             return None;
         }
         let url = postgres_url().await?;
-        let config = url.parse::<tokio_postgres::Config>().ok()?;
+        let config = match url.parse::<tokio_postgres::Config>() {
+            Ok(config) => config,
+            Err(_) => {
+                report_postgres_unavailable("parse-connection-url");
+                return None;
+            }
+        };
         let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-        deadpool_postgres::Pool::builder(manager)
+        match deadpool_postgres::Pool::builder(manager)
             .max_size(4)
             .build()
-            .ok()
+        {
+            Ok(pool) => Some(pool),
+            Err(_) => {
+                report_postgres_unavailable("build-connection-pool");
+                None
+            }
+        }
     }
 
     /// Installs the projection triggers once per binary, before tests race.
@@ -2864,7 +2898,10 @@ mod postgres_tests {
     async fn postgres_root() -> Option<(PostgresRootFilesystem, String)> {
         let pool = postgres_pool().await?;
         let fs = PostgresRootFilesystem::new(pool);
-        fs.run_migrations().await.ok()?;
+        if fs.run_migrations().await.is_err() {
+            report_postgres_unavailable("run-migrations");
+            return None;
+        }
         install_projection_once(&fs).await;
         // Unique per-test prefix under /secrets/leases (a known VirtualPath
         // root). Concurrent test runs against the same Postgres get

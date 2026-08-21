@@ -1,8 +1,24 @@
 use super::*;
 
+const UNMANIFESTED_HOME_FILES: &[&str] = &[
+    "config.toml",
+    "providers.json",
+    "webui-token",
+    ".onboard-completed.json",
+    MIGRATION_LOCK_FILE,
+];
+
+const UNMANIFESTED_HOME_DIRECTORIES: &[&str] = &[
+    "local-dev",
+    "hosted-single-tenant",
+    "hosted-single-tenant-volume",
+    "hosted-single-tenant-volume-sandboxed",
+];
+
 pub(in super::super) fn inspect_legacy_candidates(
     home: &Path,
 ) -> anyhow::Result<Vec<LegacyCandidate>> {
+    validate_unmanifested_home_shape(home)?;
     let sandbox_root = home.join("hosted-single-tenant-volume-sandboxed");
     if unreleased_sandbox_is_populated(&sandbox_root)? {
         bail!(
@@ -26,6 +42,57 @@ pub(in super::super) fn inspect_legacy_candidates(
         candidates.push(candidate);
     }
     Ok(candidates)
+}
+
+/// Reject content outside the closed grammar understood by fresh-layout and
+/// legacy-layout admission before either path can publish a manifest.
+///
+/// Known operator files remain at the installation root. Recognized legacy
+/// roots and empty canonical namespaces are validated by their typed callers
+/// below; this preflight only prevents arbitrary top-level content from being
+/// silently stranded beside a newly published `layout.toml`.
+fn validate_unmanifested_home_shape(home: &Path) -> anyhow::Result<()> {
+    let entries = match fs::read_dir(home) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read unmanifested Reborn home {}", home.display()));
+        }
+    };
+    let canonical_paths = RebornStoragePaths::from_installation_root(home);
+    let canonical_names = canonical_paths
+        .canonical_namespace_roots()
+        .map(|path| path.file_name());
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("read entry under Reborn home {}", home.display()))?;
+        let name = entry.file_name();
+        let path = entry.path();
+        if LIBSQL_DB_UNIT
+            .iter()
+            .chain(std::iter::once(&MASTER_KEY_FILE))
+            .chain(UNMANIFESTED_HOME_FILES.iter())
+            .any(|known| name == std::ffi::OsStr::new(known))
+        {
+            require_ordinary_file(&path)?;
+            continue;
+        }
+        if UNMANIFESTED_HOME_DIRECTORIES
+            .iter()
+            .any(|known| name == std::ffi::OsStr::new(known))
+            || canonical_names.contains(&Some(name.as_os_str()))
+        {
+            require_ordinary_directory(&path)?;
+            continue;
+        }
+        bail!(
+            "unknown entry `{}` in unmanifested Reborn home {}; initialization and adoption will not discard or reinterpret it",
+            name.to_string_lossy(),
+            home.display()
+        );
+    }
+    Ok(())
 }
 
 pub(in super::super) fn inspect_profile_root(
@@ -204,7 +271,13 @@ pub(in super::super) fn validate_legacy_tenant_skill_tree(
             .with_context(|| format!("read tenant entry under {}", tenants_root.display()))?;
         let tenant_path = tenant.path();
         require_ordinary_directory(&tenant_path)?;
-        let tenant_name = tenant.file_name().to_string_lossy().into_owned();
+        let tenant_name = tenant.file_name().into_string().map_err(|invalid_name| {
+            anyhow!(
+                "legacy skill tenant directory name under {} is not valid UTF-8 ({} bytes)",
+                tenants_root.display(),
+                invalid_name.len()
+            )
+        })?;
         TenantId::new(tenant_name.clone())
             .map_err(|error| anyhow!("invalid legacy skill tenant `{tenant_name}`: {error}"))?;
         let users_root = tenant_path.join("users");
@@ -233,7 +306,13 @@ pub(in super::super) fn validate_legacy_tenant_skill_tree(
                 user.with_context(|| format!("read user entry under {}", users_root.display()))?;
             let user_path = user.path();
             require_ordinary_directory(&user_path)?;
-            let user_name = user.file_name().to_string_lossy().into_owned();
+            let user_name = user.file_name().into_string().map_err(|invalid_name| {
+                anyhow!(
+                    "legacy skill user directory name under {} is not valid UTF-8 ({} bytes)",
+                    users_root.display(),
+                    invalid_name.len()
+                )
+            })?;
             UserId::new(user_name.clone())
                 .map_err(|error| anyhow!("invalid legacy skill user `{user_name}`: {error}"))?;
             let skills_root = user_path.join("skills");

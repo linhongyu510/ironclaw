@@ -514,11 +514,6 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 }
 
 impl RebornScopedSandboxCommandTransport {
-    #[cfg(test)]
-    pub(super) fn new(docker: Docker, config: RebornSandboxConfig) -> Self {
-        test_support::transport(docker, config)
-    }
-
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
         let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
         let docker = connect_docker().await?;
@@ -715,15 +710,6 @@ impl RebornScopedSandboxCommandTransport {
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
-        #[cfg(test)]
-        container_create_test_hook::run(&self.config.workspace_root);
-        revalidate_workspace_host_boundary(
-            self.config.workspace_root.clone(),
-            TenantUserWorkspaceKey::from_scope(&request.scope),
-            self.config.container_identity.workspace_mode(),
-            &workspace,
-        )
-        .await?;
         let activity = self.activity.begin(&user_key)?;
         let gate = self.activity.gate(&user_key).ok_or_else(|| {
             RuntimeProcessError::ExecutionFailed(
@@ -752,6 +738,15 @@ impl RebornScopedSandboxCommandTransport {
                     .set_invocation(bundle, &request.scope.invocation_id)
                     .await?;
             }
+            #[cfg(test)]
+            container_create_test_hook::run(&self.config.workspace_root);
+            revalidate_workspace_host_boundary(
+                self.config.workspace_root.clone(),
+                TenantUserWorkspaceKey::from_scope(&request.scope),
+                self.config.container_identity.workspace_mode(),
+                &workspace,
+            )
+            .await?;
             let launch = self.user_container_launch_config(
                 &request,
                 &resolved_image,

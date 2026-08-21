@@ -1,7 +1,9 @@
 //! Descriptor-relative admission of the one host workspace leaf a Docker
 //! sandbox may bind.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use ironclaw_host_api::{ids::TenantUserWorkspaceKey, process::RuntimeProcessError};
 
@@ -330,10 +332,11 @@ mod tests {
         process::{CommandExecutionRequest, SandboxCommandTransport},
         resource::ResourceScope,
     };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::super::{
         RebornSandboxConfig, RebornScopedSandboxCommandTransport, container_create_test_hook,
-        workspace_prepare_test_hook,
+        test_support, workspace_prepare_test_hook,
     };
     use super::*;
 
@@ -350,10 +353,62 @@ mod tests {
     }
 
     fn workspace_transport(workspace_root: &Path) -> RebornScopedSandboxCommandTransport {
-        RebornScopedSandboxCommandTransport::new(
+        test_support::transport(
             Docker::connect_with_http("http://127.0.0.1:2375", 1, bollard::API_DEFAULT_VERSION)
                 .expect("inert docker client configuration"),
             RebornSandboxConfig::new(workspace_root),
+        )
+    }
+
+    async fn workspace_transport_with_image_resolution_hook(
+        workspace_root: &Path,
+        on_image_resolution: Box<dyn FnOnce() + Send>,
+    ) -> (
+        RebornScopedSandboxCommandTransport,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake Docker listener");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("Docker image inspect request");
+            let mut request = vec![0_u8; 4096];
+            let read = stream
+                .read(&mut request)
+                .await
+                .expect("read Docker request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.contains("/images/"),
+                "unexpected Docker request: {request}"
+            );
+            on_image_resolution();
+
+            let body = r#"{"Id":"sha256:test-worker"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write Docker response");
+        });
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION)
+            .expect("fake Docker client");
+        (
+            test_support::transport(
+                docker,
+                RebornSandboxConfig::new(workspace_root).with_image("worker:test"),
+            ),
+            server,
         )
     }
 
@@ -621,7 +676,9 @@ mod tests {
             }),
         );
 
-        let error = workspace_transport(&workspace_root)
+        let (transport, image_server) =
+            workspace_transport_with_image_resolution_hook(&workspace_root, Box::new(|| {})).await;
+        let error = transport
             .run_command(CommandExecutionRequest {
                 scope,
                 mounts: None,
@@ -632,6 +689,7 @@ mod tests {
             })
             .await
             .expect_err("post-validation users swap must fail before Docker create");
+        image_server.await.expect("fake Docker server completes");
 
         drop(hook);
         assert!(
@@ -666,7 +724,9 @@ mod tests {
             }),
         );
 
-        let error = workspace_transport(&workspace_root)
+        let (transport, image_server) =
+            workspace_transport_with_image_resolution_hook(&workspace_root, Box::new(|| {})).await;
+        let error = transport
             .run_command(CommandExecutionRequest {
                 scope,
                 mounts: None,
@@ -677,6 +737,7 @@ mod tests {
             })
             .await
             .expect_err("replaced caller leaf must fail before Docker create");
+        image_server.await.expect("fake Docker server completes");
 
         drop(hook);
         assert!(
@@ -686,6 +747,52 @@ mod tests {
         assert!(
             !format!("{error}").contains("sandbox container create failed"),
             "Docker create must not run after final leaf identity changes: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn container_create_revalidates_after_worker_image_resolution() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scope = caller_scope();
+        let workspace_root = temp.path().join("workspaces");
+        let users_root = workspace_root.join("users");
+        let parked_users_root = workspace_root.join("users-before-image-resolution");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&workspace_root).expect("workspace root");
+        std::fs::create_dir(&outside).expect("outside root");
+
+        let users_root_for_server = users_root.clone();
+        let outside_for_server = outside.clone();
+        let (transport, server) = workspace_transport_with_image_resolution_hook(
+            &workspace_root,
+            Box::new(move || {
+                std::fs::rename(&users_root_for_server, &parked_users_root)
+                    .expect("park users root during image resolution");
+                symlink(&outside_for_server, &users_root_for_server)
+                    .expect("swap users root during image resolution");
+            }),
+        )
+        .await;
+
+        let error = transport
+            .run_command(CommandExecutionRequest {
+                scope,
+                mounts: None,
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect_err("workspace swap during image resolution must fail before Docker create");
+        server.await.expect("fake Docker server completes");
+
+        assert!(
+            format!("{error}").contains("trusted host workspace boundary"),
+            "final admission must follow image resolution: {error}"
         );
     }
 }

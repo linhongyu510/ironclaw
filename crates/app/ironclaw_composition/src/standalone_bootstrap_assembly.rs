@@ -86,9 +86,7 @@ pub(crate) async fn import_host_disk_skills_into_database(
             Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
             Err(error) => return Err(RebornBuildError::Filesystem(error)),
         }
-        let bytes = std::fs::read(&host_path).map_err(|error| {
-            snapshot_io_error("read legacy skill snapshot file", &host_path, error)
-        })?;
+        let bytes = read_legacy_skill_snapshot_file(&host_path)?;
         RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
         record_skill_disk_import(filesystem, &marker).await?;
         imported += 1;
@@ -260,7 +258,12 @@ fn validate_legacy_skill_snapshot_tree(storage_root: &Path) -> Result<(), Reborn
 
 fn validate_legacy_skill_snapshot_root(path: &Path) -> Result<(), RebornBuildError> {
     if validate_legacy_skill_snapshot_directory_if_present(path)? {
-        validate_legacy_skill_snapshot_entry(path)?;
+        ironclaw_filesystem::inspect_ordinary_host_tree(&HostPath::from_path_buf(
+            path.to_path_buf(),
+        ))
+        .map_err(|error| {
+            snapshot_io_error("validate ordinary legacy skill snapshot tree", path, error)
+        })?;
     }
     Ok(())
 }
@@ -300,34 +303,6 @@ fn validate_legacy_skill_snapshot_directory(path: &Path) -> Result<(), RebornBui
     }
 }
 
-fn validate_legacy_skill_snapshot_entry(path: &Path) -> Result<(), RebornBuildError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| snapshot_io_error("inspect legacy skill snapshot", path, error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(snapshot_symlink_error(path));
-    }
-    if metadata.is_file() {
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: format!(
-                "legacy skill snapshot entry is neither a regular file nor directory: {}",
-                path.display()
-            ),
-        });
-    }
-    let entries = std::fs::read_dir(path)
-        .map_err(|error| snapshot_io_error("read legacy skill snapshot directory", path, error))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            snapshot_io_error("read legacy skill snapshot directory entry", path, error)
-        })?;
-        validate_legacy_skill_snapshot_entry(&entry.path())?;
-    }
-    Ok(())
-}
-
 fn snapshot_symlink_error(path: &Path) -> RebornBuildError {
     RebornBuildError::InvalidConfig {
         reason: format!(
@@ -341,6 +316,11 @@ fn snapshot_io_error(context: &str, path: &Path, error: std::io::Error) -> Rebor
     RebornBuildError::InvalidConfig {
         reason: format!("failed to {context} at {}: {error}", path.display()),
     }
+}
+
+fn read_legacy_skill_snapshot_file(path: &Path) -> Result<Vec<u8>, RebornBuildError> {
+    ironclaw_filesystem::read_ordinary_host_file(&HostPath::from_path_buf(path.to_path_buf()))
+        .map_err(|error| snapshot_io_error("read legacy skill snapshot file", path, error))
 }
 
 /// Initializes standalone host content after storage roots are prepared.
@@ -469,7 +449,9 @@ mod skill_disk_import_tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{ids::UserId, path::VirtualPath};
 
-    use super::import_host_disk_skills_into_database;
+    use super::{
+        disk_skill_files, import_host_disk_skills_into_database, read_legacy_skill_snapshot_file,
+    };
 
     const TENANT: &str = "import-tenant";
     const USER: &str = "import-user";
@@ -696,6 +678,58 @@ mod skill_disk_import_tests {
                 .await
                 .is_err(),
             "a rejected snapshot must not import an outside subtree"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_skill_snapshot_import_rejects_a_tree_beyond_the_shared_depth_bound() {
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let filesystem = database_filesystem();
+        let mut deepest = storage
+            .path()
+            .join("tenants")
+            .join(TENANT)
+            .join("users")
+            .join(USER)
+            .join("skills");
+        std::fs::create_dir_all(&deepest).expect("skills root");
+        for level in 0..=ironclaw_filesystem::MAX_ORDINARY_HOST_TREE_DEPTH {
+            deepest = deepest.join(format!("level-{level}"));
+            std::fs::create_dir(&deepest).expect("nested skill directory");
+        }
+        std::fs::write(deepest.join("SKILL.md"), b"nested skill").expect("nested skill file");
+
+        let error = import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+            .await
+            .expect_err("an unbounded legacy snapshot must fail closed");
+
+        assert!(error.to_string().contains("depth"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collected_skill_file_replaced_by_symlink_is_rejected_at_verified_read() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("temp storage root");
+        seed_skill_on_disk(storage.path(), "replace-before-read");
+        let files = disk_skill_files(&storage.path().join("tenants"))
+            .expect("skill snapshot collection succeeds");
+        let (selected, _) = files
+            .into_iter()
+            .next()
+            .expect("seeded skill file is collected");
+        let outside = storage.path().join("outside.txt");
+        std::fs::write(&outside, b"outside bytes").expect("outside file");
+        std::fs::remove_file(&selected).expect("remove collected file");
+        symlink(&outside, &selected).expect("replace collected file with symlink");
+
+        let error = read_legacy_skill_snapshot_file(&selected)
+            .expect_err("verified read must reject the replacement symlink");
+
+        assert!(
+            error.to_string().contains("without following links"),
+            "{error}"
         );
     }
 

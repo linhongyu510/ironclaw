@@ -15,7 +15,15 @@ use super::{effective_profile, read_config_file, storage_layout};
 pub(super) fn storage_layout_requirement_for_profile(
     profile: RebornProfile,
 ) -> anyhow::Result<LayoutRequirement> {
-    let deployment = DeploymentConfig::for_profile(profile.into(), false);
+    storage_layout_requirement_for_profile_with_workspace_scope(profile, false)
+}
+
+fn storage_layout_requirement_for_profile_with_workspace_scope(
+    profile: RebornProfile,
+    require_per_caller_workspace: bool,
+) -> anyhow::Result<LayoutRequirement> {
+    let deployment = DeploymentConfig::for_profile(profile.into(), false)
+        .with_workspace_scoped_per_caller(require_per_caller_workspace);
     deployment.storage_layout_requirement().ok_or_else(|| {
         anyhow::anyhow!(
             "profile {} has no durable filesystem layout to migrate",
@@ -51,8 +59,12 @@ pub(crate) fn ensure_ready_layout_for_profile(
 pub(super) fn ensure_startup_layout(
     config: &RebornBootConfig,
     profile: RebornProfile,
+    require_per_caller_workspace: bool,
 ) -> anyhow::Result<RebornStoragePaths> {
-    let requirement = storage_layout_requirement_for_profile(profile)?;
+    let requirement = storage_layout_requirement_for_profile_with_workspace_scope(
+        profile,
+        require_per_caller_workspace,
+    )?;
     if profile == RebornProfile::MigrationDryRun {
         return storage_layout::inspect_ready_layout(config.home(), requirement);
     }

@@ -940,6 +940,8 @@ fn storage_layout_requirement_is_exhaustive_per_deployment_profile() {
         ),
     ];
 
+    assert_eq!(cases.len(), RebornCompositionProfile::all().len());
+
     for (profile, expected) in cases {
         assert_eq!(
             DeploymentConfig::for_profile(profile, true).storage_layout_requirement(),

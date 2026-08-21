@@ -23,6 +23,101 @@ fn fresh_home_initializes_canonical_namespaces_and_commits_manifest_last() {
 }
 
 #[test]
+fn fresh_home_with_unknown_file_fails_before_initialization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let unknown = temp.path().join("operator-notes.txt");
+    fs::write(&unknown, b"preserve me").expect("unknown file");
+
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("unknown home content must fail closed");
+
+    assert!(
+        error.to_string().contains("operator-notes.txt"),
+        "{error:#}"
+    );
+    assert_eq!(
+        fs::read(&unknown).expect("unknown file retained"),
+        b"preserve me"
+    );
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+    assert!(!temp.path().join("state").exists());
+}
+
+#[test]
+fn fresh_home_with_unknown_empty_directory_fails_before_initialization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let unknown = temp.path().join("archive");
+    fs::create_dir(&unknown).expect("unknown directory");
+
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("unknown empty directory must not be reinterpreted");
+
+    assert!(error.to_string().contains("archive"), "{error:#}");
+    assert!(unknown.is_dir());
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+}
+
+#[test]
+fn bare_home_candidate_with_unknown_content_fails_without_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    seed_legacy_embedded_store(temp.path());
+    let unknown = temp.path().join("unclassified-state.bin");
+    fs::write(&unknown, b"unknown").expect("unknown state");
+
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("bare-home migration must reject extra content");
+
+    assert!(
+        error.to_string().contains("unclassified-state.bin"),
+        "{error:#}"
+    );
+    assert!(temp.path().join(DB_FILE).is_file());
+    assert!(temp.path().join(MASTER_KEY_FILE).is_file());
+    assert!(unknown.is_file());
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+    assert!(!temp.path().join("state").exists());
+}
+
+#[test]
+fn known_operator_files_do_not_block_fresh_initialization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    for name in [
+        "config.toml",
+        "providers.json",
+        "webui-token",
+        ".onboard-completed.json",
+    ] {
+        fs::write(temp.path().join(name), b"operator content").expect("known operator file");
+    }
+
+    admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect("known operator files remain compatible");
+
+    assert!(temp.path().join(LAYOUT_MANIFEST_FILE).is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_known_operator_file_fails_before_initialization() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let outside = tempfile::NamedTempFile::new().expect("outside file");
+    symlink(outside.path(), temp.path().join("config.toml")).expect("config symlink");
+
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("known operator files must still be ordinary files");
+
+    assert!(error.to_string().contains("config.toml"), "{error:#}");
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
+}
+
+#[test]
 fn concurrent_fresh_initializers_admit_the_identical_manifest() {
     use std::sync::{Arc, Barrier};
 
@@ -204,6 +299,8 @@ fn interrupted_migration_record_without_manifest_requires_backup_restore() {
         phase: MigrationPhase::InProgress,
         source: LegacyStorageSource::LocalDev,
         source_root: legacy.clone(),
+        target_manifest: LayoutManifest::new(requirement)
+            .with_memory_provider_app_id(ironclaw_config::legacy_memory_provider_app_id(&legacy)),
         has_legacy_skills: false,
         ignored: Vec::new(),
     };

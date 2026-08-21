@@ -26,7 +26,7 @@ fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     let source = temp.path().join("source");
     fs::create_dir(&source).expect("source root");
     let mut deepest = source.clone();
-    for level in 0..=MAX_ADOPTION_TREE_DEPTH {
+    for level in 0..=ironclaw_filesystem::MAX_ORDINARY_HOST_TREE_DEPTH {
         deepest = deepest.join(format!("level-{level}"));
         fs::create_dir(&deepest).expect("nested source directory");
     }
@@ -41,16 +41,6 @@ fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
     assert!(format!("{content_error:#}").contains("depth"));
 }
 
-#[test]
-fn adoption_tree_depth_guard_accepts_the_exact_bound() {
-    let boundary = std::path::Path::new("boundary-entry");
-    ensure_adoption_tree_depth(boundary, MAX_ADOPTION_TREE_DEPTH)
-        .expect("the documented maximum depth is inclusive");
-    let error = ensure_adoption_tree_depth(boundary, MAX_ADOPTION_TREE_DEPTH + 1)
-        .expect_err("the first depth beyond the bound fails closed");
-    assert!(format!("{error:#}").contains("exceeds maximum depth"));
-}
-
 #[cfg(unix)]
 #[test]
 fn symlinked_legacy_database_is_rejected_without_source_mutation() {
@@ -60,17 +50,63 @@ fn symlinked_legacy_database_is_rejected_without_source_mutation() {
     let home = reborn_home(temp.path());
     let legacy = temp.path().join("local-dev");
     fs::create_dir_all(&legacy).expect("legacy root");
-    let external = temp.path().join("outside.db");
+    let external_root = tempfile::tempdir().expect("external root");
+    let external = external_root.path().join("outside.db");
     fs::write(&external, b"outside").expect("external database");
     symlink(&external, legacy.join("reborn-local-dev.db")).expect("legacy symlink");
 
     let error = admit_startup_layout(&home, embedded_single_user_requirement())
         .expect_err("symlink must not be followed");
 
-    assert!(error.to_string().contains("non-symlink file"));
+    assert!(error.to_string().contains("symlink"), "{error:#}");
     assert!(legacy.join("reborn-local-dev.db").is_symlink());
     assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
     assert!(!temp.path().join("state").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_master_key_accepts_stricter_owner_only_mode_and_rejects_shared_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+    let key = legacy.join(MASTER_KEY_FILE);
+
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o400)).expect("read-only owner key");
+    assert!(matches!(
+        admit_startup_layout(&home, embedded_single_user_requirement())
+            .expect("stricter owner-only mode remains adoptable"),
+        StartupLayoutAdmission::MigrationRequired(_)
+    ));
+
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).expect("shared key mode");
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("group-readable master key must fail closed");
+    assert!(error.to_string().contains("group or world"), "{error:#}");
+}
+
+// APFS rejects invalid UTF-8 names before the application can inspect them;
+// Linux permits the fixture and therefore exercises the explicit rejection.
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_skill_scope_rejects_non_utf8_directory_names() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let tenants = temp.path().join("local-dev/tenants");
+    fs::create_dir_all(&tenants).expect("tenants root");
+    fs::create_dir(tenants.join(std::ffi::OsString::from_vec(vec![0xff])))
+        .expect("non-UTF-8 tenant");
+
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("lossy scope names must not be admitted");
+
+    assert!(error.to_string().contains("not valid UTF-8"), "{error:#}");
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
 }
 
 #[cfg(unix)]
@@ -87,17 +123,8 @@ fn migration_rejects_a_symlinked_runtime_ancestor_before_any_write() {
     fs::create_dir(&outside).expect("outside runtime");
     symlink(&outside, temp.path().join("runtime")).expect("runtime symlink");
 
-    let candidates = match admit_startup_layout(&home, requirement).expect("classify") {
-        StartupLayoutAdmission::MigrationRequired(candidates) => candidates,
-        StartupLayoutAdmission::Ready(_) => panic!("legacy home cannot be ready"),
-    };
-    let error = migrate_legacy_layout(
-        &home,
-        requirement,
-        StorageMigrationPolicy::Automatic,
-        candidates,
-    )
-    .expect_err("runtime symlink must not be followed");
+    let error = admit_startup_layout(&home, requirement)
+        .expect_err("runtime symlink must fail during pre-migration admission");
 
     assert!(
         format!("{error:#}").contains("ordinary non-symlink directory"),

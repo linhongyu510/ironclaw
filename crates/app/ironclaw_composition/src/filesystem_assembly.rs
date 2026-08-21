@@ -9,7 +9,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::path::{HostPath, VirtualPath};
 
 use crate::RebornBuildError;
-use crate::host_access_assembly::HostHomeRoot;
+use crate::host_access_assembly::{HostDiskMountCapabilities, HostHomeRoot};
 
 /// Compatibility filename for the embedded standalone database.
 ///
@@ -89,12 +89,14 @@ pub(crate) async fn build_filesystem(
     system_root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    admitted_disk_mounts: Option<&HostDiskMountCapabilities>,
     durable_storage: DurableStorageInput,
 ) -> Result<FilesystemAssembly, RebornBuildError> {
     let disk = Arc::new(host_disk_filesystem(
         system_root,
         workspace_root,
         host_home_root,
+        admitted_disk_mounts,
     )?);
     let mut composite = CompositeRootFilesystem::new();
     let durable_backend = match durable_storage {
@@ -149,24 +151,48 @@ fn host_disk_filesystem(
     system_root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    admitted: Option<&HostDiskMountCapabilities>,
 ) -> Result<DiskFilesystem, RebornBuildError> {
     let mut filesystem = DiskFilesystem::new();
-    filesystem.mount_local(
-        VirtualPath::new("/projects/workspace")?,
-        HostPath::from_path_buf(workspace_root.to_path_buf()),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/extensions")?,
-        HostPath::from_path_buf(system_root.join("extensions")),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/prompts")?,
-        HostPath::from_path_buf(system_root.join("prompts")),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/skills")?,
-        HostPath::from_path_buf(system_root.join("skills")),
-    )?;
+    if let Some(admitted) = admitted {
+        filesystem.mount_local_capability(
+            VirtualPath::new("/projects/workspace")?,
+            HostPath::from_path_buf(workspace_root.to_path_buf()),
+            admitted.workspace.clone(),
+        )?;
+        filesystem.mount_local_capability(
+            VirtualPath::new("/system/extensions")?,
+            HostPath::from_path_buf(system_root.join("extensions")),
+            admitted.system_extensions.clone(),
+        )?;
+        filesystem.mount_local_capability(
+            VirtualPath::new("/system/prompts")?,
+            HostPath::from_path_buf(system_root.join("prompts")),
+            admitted.system_prompts.clone(),
+        )?;
+        filesystem.mount_local_capability(
+            VirtualPath::new("/system/skills")?,
+            HostPath::from_path_buf(system_root.join("skills")),
+            admitted.system_skills.clone(),
+        )?;
+    } else {
+        filesystem.mount_local(
+            VirtualPath::new("/projects/workspace")?,
+            HostPath::from_path_buf(workspace_root.to_path_buf()),
+        )?;
+        filesystem.mount_local(
+            VirtualPath::new("/system/extensions")?,
+            HostPath::from_path_buf(system_root.join("extensions")),
+        )?;
+        filesystem.mount_local(
+            VirtualPath::new("/system/prompts")?,
+            HostPath::from_path_buf(system_root.join("prompts")),
+        )?;
+        filesystem.mount_local(
+            VirtualPath::new("/system/skills")?,
+            HostPath::from_path_buf(system_root.join("skills")),
+        )?;
+    }
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
             VirtualPath::new("/projects/host")?,
@@ -435,6 +461,7 @@ mod tests {
             &state,
             &system,
             &workspaces,
+            None,
             None,
             DurableStorageInput::EmbeddedLibsql,
         )

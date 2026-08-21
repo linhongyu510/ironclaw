@@ -303,6 +303,7 @@ async fn build_local_storage_production_shaped(
         system_root,
         workspace_root,
         host_home_root,
+        Some(&host_access.disk_mounts),
         storage_backend_input,
     )
     .await?;

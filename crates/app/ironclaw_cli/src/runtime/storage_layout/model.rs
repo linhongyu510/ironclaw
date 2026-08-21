@@ -5,7 +5,7 @@ pub(super) const MIGRATION_RECORD_FILE: &str = "layout-migration.toml";
 pub(super) const MIGRATION_LOCK_FILE: &str = ".reborn-storage-migration.lock";
 pub(super) const MIGRATION_RECORD_SCHEMA_VERSION: u32 = 1;
 pub(super) const DB_FILE: &str = "reborn-local-dev.db";
-pub(super) const MASTER_KEY_FILE: &str = ".reborn-local-dev-secrets-master-key";
+pub(super) const MASTER_KEY_FILE: &str = ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH;
 pub(super) const LIBSQL_DB_UNIT: &[&str] = &[
     DB_FILE,
     "reborn-local-dev.db-wal",
@@ -87,6 +87,11 @@ pub(super) struct MigrationRecord {
     pub(super) phase: MigrationPhase,
     pub(super) source: LegacyStorageSource,
     pub(super) source_root: PathBuf,
+    /// Exact manifest selected and admitted before the first source rename.
+    /// A completed migration can publish only this value after a crash in the
+    /// final record-to-manifest window; it is never reconstructed from a later
+    /// startup request.
+    pub(super) target_manifest: LayoutManifest,
     pub(super) has_legacy_skills: bool,
     #[serde(default)]
     pub(super) ignored: Vec<IgnoredCandidate>,

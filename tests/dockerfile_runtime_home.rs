@@ -181,7 +181,12 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_runtime_aware_host_default()
         "the image must not bake a host override; the entrypoint selects loopback locally and wildcard binding only for Railway"
     );
     assert!(
-        dockerfile.contains("-e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0"),
+        dockerfile.contains(concat!(
+            "# Run locally:\n",
+            "#   docker run --rm --env-file .env.reborn \\\n",
+            "#     -e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 \\\n",
+            "#     -p 127.0.0.1:3000:3000 ironclaw-reborn:latest",
+        )),
         "local Docker instructions must make wildcard binding an explicit operator choice"
     );
     assert!(

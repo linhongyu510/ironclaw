@@ -596,9 +596,9 @@ impl ToolsProfile {
     pub(crate) fn with_post_construct_asset_copy(
         mut self,
         source_dir: PathBuf,
-        relative_dest_under_harness_root: PathBuf,
+        relative_dest_under_installation_root: PathBuf,
     ) -> Self {
-        self.post_construct_asset_copy = Some((source_dir, relative_dest_under_harness_root));
+        self.post_construct_asset_copy = Some((source_dir, relative_dest_under_installation_root));
         self
     }
 

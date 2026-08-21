@@ -3,15 +3,7 @@ use super::*;
 pub(in super::super) fn canonical_layout_is_empty(
     paths: &RebornStoragePaths,
 ) -> anyhow::Result<bool> {
-    for path in [
-        paths.state_root(),
-        paths.system_root(),
-        paths.workspace_root(),
-        paths.runtime_root(),
-        paths.logs_root(),
-        paths.cache_root(),
-        paths.temp_root(),
-    ] {
+    for path in paths.canonical_namespace_roots() {
         if path.exists() && !directory_is_empty(path)? {
             return Ok(false);
         }

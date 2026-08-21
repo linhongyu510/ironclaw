@@ -21,6 +21,22 @@ pub enum RebornCompositionProfile {
 }
 
 impl RebornCompositionProfile {
+    const ALL: [Self; 9] = [
+        Self::Disabled,
+        Self::Standalone,
+        Self::StandaloneUnrestricted,
+        Self::HostedSingleTenant,
+        Self::HostedSingleTenantVolume,
+        Self::HostedSingleTenantVolumeSandboxed,
+        Self::HostedSingleTenantVolumeSandboxedRailway,
+        Self::Production,
+        Self::MigrationDryRun,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",

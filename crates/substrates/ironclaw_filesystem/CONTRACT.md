@@ -35,6 +35,11 @@ boundary. The current rule is codified in
   `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`. All implement
   `RootFilesystem` (re-derive with
   `rg -n "impl RootFilesystem for" src/`).
+- `DiskDirectoryCapability` — trusted-setup admission for a host directory.
+  It creates descendants descriptor-relatively, binds mount metadata to the
+  same directory identity, and keeps reads, writes, listing, metadata, and
+  deletion rooted in that retained authority instead of re-opening a raceable
+  ambient pathname.
 - `PostgresConnectionPool` (`src/postgres.rs`) — the workspace's own carrier for
   an opened `deadpool_postgres::Pool`. This crate is the Postgres substrate, so
   the driver is a chartered dependency *here*; crates above that only pass a
@@ -63,6 +68,15 @@ boundary. The current rule is codified in
   read-only directory handle can reject `FlushFileBuffers` after publication.
   `FilesystemError::LocalCapability` keeps the underlying I/O source for trusted
   diagnostics while its Display contract exposes only the virtual path.
+- Bounded ordinary host-tree inspection (`inspect_ordinary_host_tree`). This
+  host-only migration primitive accepts a non-serializable `HostPath`, rejects
+  root or nested symlinks and special entries, traverses relative to retained
+  directory handles, verifies directory identity after traversal, and reports
+  whether any regular file exists. Its fixed depth bound is shared by callers;
+  migration-specific directory grammar remains in the app/domain that owns it.
+  `read_ordinary_host_file` performs the paired descriptor-relative no-follow
+  open, verifies regular-file metadata from the opened handle, and reads only
+  through that handle so later path replacement cannot redirect the bytes.
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
   wrap the real backend in it (`SecretStore::ephemeral_over`,

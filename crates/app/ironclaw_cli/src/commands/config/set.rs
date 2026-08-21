@@ -420,7 +420,17 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
 /// store opens files beneath it. Secrets and their database must not retain
 /// group or world access inherited from the process umask.
 fn prepare_standalone_secret_store_root(state_root: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(state_root).map_err(|error| {
+    #[cfg(unix)]
+    let create_result = {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(state_root)
+    };
+    #[cfg(not(unix))]
+    let create_result = std::fs::create_dir_all(state_root);
+
+    create_result.map_err(|error| {
         anyhow::anyhow!(
             "create canonical state root {}: {error}",
             state_root.display()

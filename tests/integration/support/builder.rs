@@ -893,6 +893,17 @@ pub struct RebornIntegrationHarness {
 }
 
 impl RebornIntegrationHarness {
+    pub(crate) fn installation_home(&self) -> PathBuf {
+        match &self._shared.capability {
+            GroupCapability::HostRuntime(capability) => capability.storage_root_for_test(),
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
+                panic!("sandbox profile must use the production host-runtime capability path")
+            }
+        }
+    }
+
     /// Default harness: InMemory storage, hermetic env, real decorator chain.
     pub fn test_default() -> RebornIntegrationHarnessBuilder {
         Self::builder("conv-itest")

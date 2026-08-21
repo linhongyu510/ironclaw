@@ -418,6 +418,12 @@ pub(crate) enum RuntimeInputCaller {
     Serve,
 }
 
+impl RuntimeInputCaller {
+    fn requires_per_caller_workspace(self) -> bool {
+        self == Self::Serve
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn build_runtime_input(
     config: &RebornBootConfig,
@@ -516,11 +522,11 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     };
     let provider_id = provider.clone();
     let state_root = local_state_root(config);
-    // The canonical state root is only created lazily (onboarding writing a
-    // key, or a prior `serve` boot). If it was never created there is
-    // definitely no stored key — fail through to the original error instead
-    // of letting the secret-store opener fail on a missing directory.
-    if !state_root.exists() {
+    // Layout admission creates the state directory even when no standalone
+    // store exists. Check the owning database path so a read-only fallback
+    // cannot create a database or master-key cache merely by probing an empty
+    // canonical namespace.
+    if !ironclaw_composition::standalone_db_path(&state_root).exists() {
         return Err(error.into());
     }
     let has_stored_key = block_on_cli(async move {
@@ -732,7 +738,8 @@ pub(crate) fn build_services_input_with_options(
 
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
-    let storage_paths = ensure_startup_layout(config, profile)?;
+    let require_per_caller_workspace = caller.requires_per_caller_workspace();
+    let storage_paths = ensure_startup_layout(config, profile, require_per_caller_workspace)?;
     let legacy_skill_snapshot_source =
         storage_layout::ready_legacy_skill_snapshot_source(config.home())?;
     let mut services_input = match profile {
@@ -782,6 +789,7 @@ pub(crate) fn build_services_input_with_options(
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
     services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
+    services_input = services_input.with_workspace_scoped_per_caller(require_per_caller_workspace);
 
     // Resolve the memory profile binding from the `[memory]` config section +
     // deployment profile and attach it (issue #3537). Fail-closed: a production
@@ -2128,6 +2136,46 @@ mod tests {
     }
 
     #[test]
+    fn serve_admits_the_effective_per_caller_workspace_floor_before_building_services() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        assert!(
+            runtime_input
+                .config()
+                .expect("runtime input carries deployment config")
+                .workspace_scoped_per_caller(),
+            "serve services must use the same per-caller scope admitted on disk"
+        );
+
+        let weaker = storage_boot::storage_layout_requirement_for_profile(
+            ironclaw_config::RebornProfile::Standalone,
+        )
+        .expect("standalone layout requirement");
+        let error = storage_layout::ensure_ready_layout(config.home(), weaker)
+            .expect_err("the persisted serve floor must reject a weaker later caller");
+        assert!(
+            error
+                .to_string()
+                .contains("workspace access floor cannot weaken"),
+            "unexpected admission error: {error:#}"
+        );
+    }
+
+    #[test]
     fn ironhub_register_gateway_is_disabled_without_an_explicit_shared_key() {
         let _lock = lock_runtime_env();
         let _shared_key = EnvGuard::clear("IRONHUB_AGENT_SHARED_KEY");
@@ -3460,6 +3508,43 @@ api_key_env = "OPENAI_API_KEY"
         assert_eq!(
             after, before,
             "migration dry-run must leave every layout file's bytes and metadata unchanged"
+        );
+    }
+
+    #[test]
+    fn stored_llm_fallback_does_not_create_a_store_in_an_empty_state_namespace() {
+        let _lock = lock_runtime_env();
+        let _credential_env = EnvGuard::clear("OPENAI_API_KEY");
+        let (_temp, config) = boot_config_with_config_toml(
+            "local-dev",
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        );
+        let requirement =
+            super::storage_boot::storage_layout_requirement_for_profile(RebornProfile::Standalone)
+                .expect("standalone requirement");
+        let paths = super::storage_layout::ensure_ready_layout(config.home(), requirement)
+            .expect("initialize empty canonical layout");
+        let config_file = super::read_config_file(&config).expect("config file");
+
+        let error = super::resolve_reborn_runtime_llm_with_stored_key_fallback(
+            &config,
+            config_file.as_ref(),
+            RuntimeInputCaller::Serve,
+        )
+        .expect_err("missing environment key remains visible when no store exists");
+
+        assert!(error.to_string().contains("OPENAI_API_KEY"), "{error:#}");
+        assert!(!ironclaw_composition::standalone_db_path(paths.state_root()).exists());
+        assert!(
+            !paths
+                .state_root()
+                .join(ironclaw_composition::STANDALONE_SECRETS_MASTER_KEY_PATH)
+                .exists()
         );
     }
 

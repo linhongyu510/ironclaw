@@ -904,6 +904,7 @@ async fn standalone_default_product_auth_preserves_manual_token_across_rebuilds(
         paths.system_root(),
         paths.workspace_root(),
         None,
+        None,
         DurableStorageInput::EmbeddedLibsql,
     )
     .await

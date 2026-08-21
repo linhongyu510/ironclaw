@@ -427,9 +427,6 @@ PR_STATIC_CONTROL_PATHS = {
     # shell-linted, but no Reborn Rust test lane invokes it.
     "scripts/reset-extension-state.sh",
     "scripts/test-reset-extension-state.sh",
-    # Release-smoke Python contract is selected and run by Code Style's
-    # dedicated release-smoke classifier, not a Reborn Rust test lane.
-    "tests/test_smoke_release_binary.py",
     # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
     # off exactly this pair and owns the image build; Code Style additionally
     # proves every `include_str!` target is inside each build context

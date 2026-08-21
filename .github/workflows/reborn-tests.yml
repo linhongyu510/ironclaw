@@ -196,6 +196,42 @@ jobs:
               --selection-only
           fi
 
+  filesystem-postgres-structural-kind:
+    name: Filesystem Postgres structural-kind contract
+    needs: changes
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+      contains(needs.changes.outputs.crate_buckets, 'ironclaw_filesystem')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Local runs may still opt out explicitly with IRONCLAW_SKIP_POSTGRES_TESTS.
+      # This provisioned lane treats setup and migration failures as failures,
+      # never successful early returns.
+      IRONCLAW_REQUIRE_POSTGRES_TESTS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+      - name: Pre-pull Postgres test image
+        run: docker pull postgres:16-alpine
+      - name: Run required Postgres structural-kind contracts
+        run: |
+          cargo test -p ironclaw_filesystem --test db_root_filesystem_contract \
+            postgres_tests::postgres_query_filters_on_structural_record_kind \
+            -- --exact --nocapture
+          cargo test -p ironclaw_filesystem --test db_root_filesystem_contract \
+            postgres_tests::postgres_query_or_filters_on_structural_record_kind \
+            -- --exact --nocapture
+
   crate-tests:
     name: Test Reborn crate bucket (${{ matrix.bucket.name }})
     needs: changes
@@ -1152,6 +1188,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - filesystem-postgres-structural-kind
       - crate-tests
       - root-reborn-parity-tests
       - reborn-group-tests
@@ -1263,6 +1300,11 @@ jobs:
           check_planned_job "sandbox-docker-tests" \
             "${{ needs.sandbox-docker-tests.result }}" \
             "${{ needs.changes.outputs.run_sandbox_docker }}"
+
+          postgres_structural_kind_expected=${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && contains(needs.changes.outputs.crate_buckets, 'ironclaw_filesystem') }}
+          check_planned_job "filesystem-postgres-structural-kind" \
+            "${{ needs.filesystem-postgres-structural-kind.result }}" \
+            "${postgres_structural_kind_expected}"
 
           mutation_expected=${{ github.event_name == 'merge_group' }}
           check_planned_job "critical-mutation" \

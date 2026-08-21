@@ -15,7 +15,6 @@ mod user_sandbox_live;
 
 use ironclaw_host_api::ids::{InvocationId, TenantId, TenantUserWorkspaceKey, UserId};
 use reborn_support::builder::RebornIntegrationHarness;
-use reborn_support::group::GroupCapability;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 use user_sandbox_live::{
@@ -101,14 +100,7 @@ PY"#
         };
         cleanup.track_identity(identity.clone());
 
-        let installation_home = match &harness._shared.capability {
-            GroupCapability::HostRuntime(capability) => capability.storage_root_for_test(),
-            GroupCapability::Recording
-            | GroupCapability::RecordingNoProgress
-            | GroupCapability::RecordingRecoverablePortError => {
-                panic!("sandbox profile must use the production host-runtime capability path")
-            }
-        };
+        let installation_home = harness.installation_home();
         let caller_key =
             TenantUserWorkspaceKey::from_scope(&harness.turn_scope.to_resource_scope());
         let sibling_key = TenantUserWorkspaceKey::from_tenant_user(
@@ -126,6 +118,16 @@ PY"#
             .join(sibling_key.digest_segment());
         std::fs::create_dir_all(&selected_leaf).expect("selected workspace leaf");
         std::fs::create_dir_all(&sibling_leaf).expect("sibling workspace leaf");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let workspace_root = installation_home.join("workspaces");
+            for private_namespace in [&workspace_root, &workspace_root.join("users")] {
+                std::fs::set_permissions(private_namespace, std::fs::Permissions::from_mode(0o700))
+                    .expect("private workspace namespace");
+            }
+        }
         std::fs::create_dir_all(installation_home.join("state")).expect("canonical state root");
         std::fs::create_dir_all(installation_home.join("system")).expect("canonical system root");
         for (path, value) in [

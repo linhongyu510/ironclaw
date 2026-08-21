@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ironclaw_config::RebornStoragePaths;
-use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, DiskDirectoryCapability, ScopedFilesystem};
 use ironclaw_host_api::mount::MountPermissions;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
@@ -48,6 +48,14 @@ pub(crate) struct HostAccessAssembly {
     pub(crate) workspace_root: PathBuf,
     pub(crate) host_home_root: Option<HostHomeRoot>,
     pub(crate) process_port: Option<HostProcessPort>,
+    pub(crate) disk_mounts: HostDiskMountCapabilities,
+}
+
+pub(crate) struct HostDiskMountCapabilities {
+    pub(crate) workspace: DiskDirectoryCapability,
+    pub(crate) system_extensions: DiskDirectoryCapability,
+    pub(crate) system_prompts: DiskDirectoryCapability,
+    pub(crate) system_skills: DiskDirectoryCapability,
 }
 
 impl HostAccessAssembly {
@@ -111,14 +119,35 @@ pub(crate) fn build_host_access(
         .unwrap_or_else(|| paths.workspace_root());
     preflight_storage_namespace_paths(&paths, configured_workspace_root)?;
 
-    initialize_directory(paths.state_root(), "state root")?;
-    initialize_directory(
-        &paths.system_root().join("extensions"),
-        "system extensions root",
+    let installation =
+        initialize_directory_capability(paths.installation_root(), "installation root")?;
+    let _state = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        paths.state_root(),
+        "state root",
     )?;
-    initialize_directory(&paths.system_root().join("prompts"), "system prompts root")?;
-    initialize_directory(&paths.system_root().join("skills"), "system skills root")?;
-    initialize_directory(configured_workspace_root, "workspace root")?;
+    let system = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        paths.system_root(),
+        "system root",
+    )?;
+    let system_extensions = system
+        .create_dir_capability(Path::new("extensions"))
+        .map_err(|error| directory_initialization_error("system extensions root", error))?;
+    let system_prompts = system
+        .create_dir_capability(Path::new("prompts"))
+        .map_err(|error| directory_initialization_error("system prompts root", error))?;
+    let system_skills = system
+        .create_dir_capability(Path::new("skills"))
+        .map_err(|error| directory_initialization_error("system skills root", error))?;
+    let workspace = initialize_descendant_capability(
+        &installation,
+        paths.installation_root(),
+        configured_workspace_root,
+        "workspace root",
+    )?;
 
     let installation_root = canonicalize_path(paths.installation_root(), "installation root")?;
     let state_root = canonicalize_path(paths.state_root(), "state root")?;
@@ -164,21 +193,57 @@ pub(crate) fn build_host_access(
         workspace_root,
         host_home_root,
         process_port,
+        disk_mounts: HostDiskMountCapabilities {
+            workspace,
+            system_extensions,
+            system_prompts,
+            system_skills,
+        },
     })
 }
 
-fn initialize_directory(path: &Path, label: &str) -> Result<(), RebornBuildError> {
-    std::fs::create_dir_all(path).map_err(|error| RebornBuildError::InvalidConfig {
+fn initialize_directory_capability(
+    path: &Path,
+    label: &str,
+) -> Result<DiskDirectoryCapability, RebornBuildError> {
+    // The installation root itself may be an operator-managed alias (for
+    // example a mounted volume), while all namespaces beneath it must reject
+    // aliases. Resolve that one configured boundary first, then perform the
+    // actual creation/admission against its canonical projected path so the
+    // retained descriptor never depends on reopening the alias.
+    let admitted_path = canonicalize_planned_path(path, label)?;
+    DiskDirectoryCapability::admit_or_create(&admitted_path)
+        .map_err(|error| directory_initialization_error(label, error))
+}
+
+fn initialize_descendant_capability(
+    installation: &DiskDirectoryCapability,
+    configured_installation_root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<DiskDirectoryCapability, RebornBuildError> {
+    let relative = path
+        .strip_prefix(configured_installation_root)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("{label} must be beneath the selected installation root: {error}"),
+        })?;
+    installation
+        .create_dir_capability(relative)
+        .map_err(|error| directory_initialization_error(label, error))
+}
+
+fn directory_initialization_error(label: &str, error: std::io::Error) -> RebornBuildError {
+    RebornBuildError::InvalidConfig {
         reason: format!("{label} could not be initialized: {error}"),
-    })
+    }
 }
 
 /// Checks every resolved namespace before `create_dir_all` can follow a configured alias.
 ///
 /// The roots can be absent on first boot, so this resolves each path through its nearest existing
 /// ancestor and validates the projected canonical result. It then rejects any existing symlink in
-/// the installation or namespace ancestry. A second canonical validation after initialization
-/// below remains the race-resistant final check for the roots handed to host access.
+/// the installation or namespace ancestry. Initialization then creates descendants relative to
+/// retained directory capabilities and hands those same capabilities to the disk mount owner.
 fn preflight_storage_namespace_paths(
     paths: &RebornStoragePaths,
     workspace_root: &Path,

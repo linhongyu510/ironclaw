@@ -565,7 +565,9 @@ impl RebornHostBindings {
                 legacy_skill_snapshot_source,
                 ..
             } => *legacy_skill_snapshot_source = Some(source),
-            _ => {}
+            _ => panic!(
+                "with_legacy_skill_snapshot_source supports only local filesystem and hosted single-tenant PostgreSQL storage"
+            ),
         }
         self
     }
@@ -763,8 +765,7 @@ impl RebornHostBindings {
     /// a per-user subtree the agent never writes to. Raise-only: passing
     /// `false` leaves a scoped profile scoped.
     pub fn with_workspace_scoped_per_caller(mut self, required: bool) -> Self {
-        self.deployment.workspace_scoped_per_caller =
-            self.deployment.workspace_scoped_per_caller || required;
+        self.deployment = self.deployment.with_workspace_scoped_per_caller(required);
         self
     }
 
@@ -1324,5 +1325,14 @@ mod tests {
             .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "with_legacy_skill_snapshot_source supports only local filesystem and hosted single-tenant PostgreSQL storage"
+    )]
+    fn legacy_skill_snapshot_source_rejects_unsupported_storage() {
+        let _ = RebornHostBindings::disabled("test-owner")
+            .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev);
     }
 }
