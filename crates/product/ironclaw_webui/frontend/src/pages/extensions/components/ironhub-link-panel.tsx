@@ -72,6 +72,9 @@ export function IronhubLinkPanel() {
   const pendingRestart = status.key_stored && !status.key_active && !status.env_override;
   const trimmedKey = key.trim();
   const tooShort = trimmedKey.length > 0 && trimmedKey.length < MIN_SHARED_KEY_LENGTH;
+  // Save and clear mutate the same durable key, so a pending write in either
+  // direction must keep the operator from launching a competing one.
+  const mutationPending = save.isPending || clear.isPending;
 
   return (
     <Card padding="md">
@@ -125,7 +128,7 @@ export function IronhubLinkPanel() {
           <div className="flex items-center gap-3">
             <Button
               onClick={() => save.mutate()}
-              disabled={save.isPending || trimmedKey.length === 0 || tooShort}
+              disabled={mutationPending || trimmedKey.length === 0 || tooShort}
             >
               {save.isPending ? t("common.saving") : t("ironhub.link.saveKey")}
             </Button>
@@ -133,7 +136,7 @@ export function IronhubLinkPanel() {
               ? (<Button
                   variant="ghost"
                   onClick={() => clear.mutate()}
-                  disabled={clear.isPending}
+                  disabled={mutationPending}
                 >
                   {t("ironhub.link.clearKey")}
                 </Button>)

@@ -9749,6 +9749,7 @@ async fn ironhub_link_routes_are_stripped_alongside_operator_routes() {
         .expect("oneshot");
 
     let write_response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -9763,6 +9764,19 @@ async fn ironhub_link_routes_are_stripped_alongside_operator_routes() {
         .await
         .expect("oneshot");
 
+    let clear_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
     assert_eq!(read_response.status(), StatusCode::NOT_FOUND);
     assert_eq!(write_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(clear_response.status(), StatusCode::NOT_FOUND);
 }

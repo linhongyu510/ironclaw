@@ -26,9 +26,13 @@ function renderPanel(query, options = {}) {
   const captured = options.captured ?? {};
   captured.mutations = [];
   captured.sentKeys = [];
+  captured.buttons = [];
   const context = {
-    Card() {},
-    Button() {},
+    Card() { return null; },
+    Button(props) {
+      captured.buttons.push(props);
+      return null;
+    },
     Icon() {},
     React: { useState: () => [options.key ?? "", () => {}] },
     useQuery: (queryOptions) => {
@@ -37,9 +41,19 @@ function renderPanel(query, options = {}) {
     },
     useMutation: (mutationOptions) => {
       captured.mutations.push(mutationOptions);
-      return { mutate: () => {}, isPending: false, error: null };
+      return {
+        mutate: () => {
+          captured.mutated = mutationOptions;
+        },
+        isPending:
+          typeof options.pending === "function"
+            ? options.pending(captured.mutations.length)
+            : (options.pending ?? false),
+        error: null,
+      };
     },
     useQueryClient: () => ({ setQueryData: () => {} }),
+    console: { log: () => {} },
     getIronhubLink: () => {},
     setIronhubSharedKey: (value) => {
       captured.sentKeys.push(value);
@@ -239,3 +253,97 @@ test("the link query retries once and never retries a 403", () => {
   assert.equal(retry(1, { status: 500 }), false, "a second failure gives up");
   assert.equal(retry(0, { status: 403 }), false, "a non-operator is never retried");
 });
+
+test("a save in flight disables the clear control too", () => {
+  const captured = {};
+  const panel = renderPanel(
+    {
+      isPending: false,
+      error: null,
+      data: {
+        register_url: "https://agent.example.com/api/ironhub/register",
+        key_stored: true,
+        key_active: false,
+      },
+    },
+    // The save mutation is registered first, so fn(1) = true marks it pending
+    // while the clear mutation (fn(2)) stays idle.
+    { captured, key: "k".repeat(40), pending: (index) => index === 1 },
+  );
+
+  const buttons = [];
+  walkTree(panel, (node) => {
+    if (node && node.type && node.props) buttons.push(node);
+  });
+  const isButton = (node) =>
+    typeof node.type === "function" && node.type.name === "Button";
+  const saveBtn = buttons.find(
+    (node) => isButton(node) && node.props.disabled !== undefined,
+  );
+  const clearBtn = buttons.find(
+    (node) => isButton(node) && node.props.variant === "ghost",
+  );
+
+  assert.ok(saveBtn && clearBtn, "both controls are rendered for a stored key");
+  assert.equal(
+    clearBtn.props.disabled,
+    true,
+    "a pending save must disable the clear button",
+  );
+});
+
+test("a clear in flight disables the save control too", () => {
+  const captured = {};
+  const panel = renderPanel(
+    {
+      isPending: false,
+      error: null,
+      data: {
+        register_url: "https://agent.example.com/api/ironhub/register",
+        key_stored: true,
+        key_active: false,
+      },
+    },
+    // Clear is the second mutation registered; mark it pending only.
+    { captured, key: "k".repeat(40), pending: (index) => index === 2 },
+  );
+
+  const buttons = [];
+  walkTree(panel, (node) => {
+    if (node && node.type && node.props) buttons.push(node);
+  });
+  const isButton = (node) =>
+    typeof node.type === "function" && node.type.name === "Button";
+  const saveBtn = buttons.find(
+    (node) => isButton(node) && node.props.disabled !== undefined,
+  );
+  const clearBtn = buttons.find(
+    (node) => isButton(node) && node.props.variant === "ghost",
+  );
+
+  assert.ok(saveBtn && clearBtn, "both controls are rendered for a stored key");
+  assert.equal(
+    saveBtn.props.disabled,
+    true,
+    "a pending clear must disable the save button",
+  );
+  assert.equal(
+    clearBtn.props.disabled,
+    true,
+    "a pending save must disable the clear button",
+  );
+});
+
+
+function walkTree(node, visit) {
+  if (!node || typeof node !== "object") return;
+  visit(node);
+  if (Array.isArray(node)) {
+    for (const child of node) walkTree(child, visit);
+    return;
+  }
+  const children =
+    node.children ??
+    (Array.isArray(node.values) ? node.values : null);
+  if (children) walkTree(children, visit);
+}

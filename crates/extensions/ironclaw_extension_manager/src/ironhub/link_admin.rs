@@ -330,3 +330,86 @@ mod tests {
         assert!(!format!("{status:?}").contains(KEY));
     }
 }
+
+#[cfg(test)]
+mod concurrent_tests {
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_secrets::SecretStore;
+
+    use super::*;
+
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller {
+            tenant_id: TenantId::new("tenant").expect("tenant"),
+            user_id: UserId::new("user").expect("user"),
+            agent_id: None,
+            project_id: None,
+            operator_config: false,
+        }
+    }
+
+    /// A set racing a clear must leave the reported status consistent with
+    /// the final durable store state: never "stored but not active" while the
+    /// store holds the stored key, nor "active" while the store holds a
+    /// replacement, after both writes have settled in either order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_set_and_clear_report_the_final_durable_state() {
+        let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let service = Arc::new(RebornIronhubLinkAdminService::new(
+            Some("https://agent.example.com/api/ironhub/register".to_string()),
+            /* booted_with_key */ true,
+            false,
+            Arc::clone(&store),
+        ));
+        let key_store = IronhubSharedKeyStore::new(Arc::clone(&store));
+
+        let setter = {
+            let service = Arc::clone(&service);
+            let caller = caller();
+            async move {
+                service
+                    .set_shared_key(
+                        caller,
+                        SecretString::from("ihub_sk_TestSharedKey00000000000000000000000"),
+                    )
+                    .await
+                    .expect("set accepted");
+            }
+        };
+        let clearer = {
+            let service = Arc::clone(&service);
+            let caller = caller();
+            async move {
+                service
+                    .clear_shared_key(caller)
+                    .await
+                    .expect("clear accepted");
+            }
+        };
+
+        // Race both mutations, then take a fresh snapshot from durable state.
+        let set_handle = tokio::spawn(setter);
+        let clear_handle = tokio::spawn(clearer);
+        set_handle.await.expect("set task panicked");
+        clear_handle.await.expect("clear task panicked");
+
+        let durable_exists = key_store.exists().await.expect("exists");
+        let status = service.status().await.expect("status");
+
+        assert_eq!(
+            status.key_stored, durable_exists,
+            "the reported stored flag must match the final durable store state"
+        );
+        if durable_exists {
+            assert!(
+                !status.key_active,
+                "a stored key written after boot can only be promoted by a restart"
+            );
+        } else {
+            assert!(
+                status.key_active,
+                "with nothing stored, the gateway's boot key is the only key in play"
+            );
+        }
+    }
+}

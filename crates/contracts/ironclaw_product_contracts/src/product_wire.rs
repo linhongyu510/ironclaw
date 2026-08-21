@@ -1045,19 +1045,14 @@ pub struct RebornNotificationSetupStatusResponse {
     pub detail: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Body for `ironhub.link.set_key`. Deserialize-only: the shared key must not
+/// be serializable back out of a request DTO (see the crate manifest rule on
+/// secret-bearing wire fields), so the WebUI set-key handler dispatches the
+/// raw JSON body instead of re-encoding this strongly typed request.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RebornIronhubLinkSetKeyRequest {
-    pub shared_key: String,
-}
-
-impl std::fmt::Debug for RebornIronhubLinkSetKeyRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RebornIronhubLinkSetKeyRequest")
-            .field("shared_key", &"<redacted>")
-            .finish()
-    }
+    pub shared_key: SecretString,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -48,6 +48,14 @@ function renderHarness({ text, resetMs, writeText }) {
         container.querySelector("button").click();
       });
     },
+    cleanup: () => {
+      act(() => {
+        root.unmount();
+      });
+      container.remove();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    },
   };
 }
 
@@ -65,6 +73,7 @@ test("a successful copy writes the text and reports success", async () => {
   assert.deepEqual(written, ["https://agent.example.com/api/ironhub/register"]);
   assert.deepEqual(harness.results, [true]);
   assert.equal(harness.state(), "copied");
+  harness.cleanup();
 });
 
 test("a rejected clipboard write reports failure and never shows a copied state", async () => {
@@ -83,6 +92,7 @@ test("a rejected clipboard write reports failure and never shows a copied state"
     "idle",
     "a blocked clipboard must not claim the value was copied",
   );
+  harness.cleanup();
 });
 
 test("empty text is a no-op rather than a copy of nothing", async () => {
@@ -99,6 +109,7 @@ test("empty text is a no-op rather than a copy of nothing", async () => {
   assert.deepEqual(written, []);
   assert.deepEqual(harness.results, [false]);
   assert.equal(harness.state(), "idle");
+  harness.cleanup();
 });
 
 test("the copied state resets once the reset window elapses", async () => {

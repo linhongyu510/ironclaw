@@ -2627,7 +2627,7 @@ where
             return Err(operator_config_capability_forbidden());
         }
         self.ironhub_link_admin
-            .set_shared_key(caller, SecretString::from(request.shared_key))
+            .set_shared_key(caller, request.shared_key)
             .await
             .map_err(ironhub_link::map_ironhub_link_error)
     }

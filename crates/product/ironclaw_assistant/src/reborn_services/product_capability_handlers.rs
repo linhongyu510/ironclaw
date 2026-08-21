@@ -837,6 +837,14 @@ mod tests {
                 SUGGESTION_DISMISS_COMMAND_ID,
                 ProductCommandHandler::SuggestionDismiss,
             ),
+            (
+                IRONHUB_LINK_SET_KEY_COMMAND_ID,
+                ProductCommandHandler::IronhubLinkSetKey,
+            ),
+            (
+                IRONHUB_LINK_CLEAR_KEY_COMMAND_ID,
+                ProductCommandHandler::IronhubLinkClearKey,
+            ),
         ] {
             let capability = CapabilityId::new(id).expect("valid capability id");
             assert_eq!(
