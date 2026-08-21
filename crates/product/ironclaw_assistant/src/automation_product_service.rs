@@ -11,7 +11,8 @@ use crate::{
     TriggerRunThreadScope,
 };
 use ironclaw_event_projections::{
-    CapabilityActivityStatus, EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionScope,
+    CapabilityActivityStatus, EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionError,
+    ProjectionScope,
 };
 use ironclaw_host_api::{
     Timestamp,
@@ -788,10 +789,15 @@ impl TriggerRunEvidenceSource for ProjectedTriggerRunEvidenceSource {
             )
             .await
             .map_err(|error| {
-                tracing::warn!(
-                    error = %error,
-                    "capability activity projection read failed"
-                );
+                let error_kind = match error {
+                    ProjectionError::InvalidRequest { .. } => "invalid_request",
+                    ProjectionError::MissingProjectionMetadata { .. } => {
+                        "missing_projection_metadata"
+                    }
+                    ProjectionError::RebaseRequired { .. } => "rebase_required",
+                    ProjectionError::Source { .. } => "source_failure",
+                };
+                tracing::warn!(error_kind, "capability activity projection read failed");
                 TriggerRunEvidenceError::Unavailable
             })?;
         if window.truncated {
