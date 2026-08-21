@@ -79,9 +79,13 @@ PRs do not compile an unchanged workspace solely for linting. Root
 `Cargo.toml` and `Cargo.lock` changes lint every workspace package because
 their dependency and feature impact is workspace-wide. Merge queue and main
 lint the full workspace, add test and example targets, and run the
-default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
-four Rust groups run on merge queue and main, where they validate the
-exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
+default-feature matrix. Code Style's CLI Rust smoke runs on pull requests
+too, scoped by `has_reborn_cli`, and unconditionally on merge queue and main,
+where it validates the exhaustive merged state. Reborn E2E's four Rust
+groups still run only on merge queue and main, validating the exhaustive
+merged state without repeating that contract on PR runners — see "Known
+accepted gaps" for the re-sampling plan that gates scoping them to PRs too.
+The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every
 code PR. Reborn E2E continues to build the real product binary and run all
 browser/provider lanes on pull requests.
@@ -363,5 +367,15 @@ points, including their existing optional DIND dispatch. The manual
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
   `reborn-e2e.yml`'s `changes` regex in sync with its `paths:` filters.
+- **Reborn E2E's four `rust-reborn` groups are not scoped to a PR's diff**,
+  on either pull_request or merge_group — they run exhaustively on merge
+  queue and main only. Deriving a group→package mapping from
+  `scripts/reborn-e2e-rust.sh` to scope either side was investigated and
+  deferred rather than built as a second, fragile bash-parsing fork: land
+  the planner drift-guard fixes first, re-sample merge_group `rust-reborn`
+  failures over ~2 weeks, and if a residual under-selection class remains,
+  design the derivation once (a `LIST_ONLY=1` script mode, a shared TOML
+  manifest, or a static hand-maintained regex mirroring `has_reborn_cli`) —
+  never twice, one for PR scope and one for merge_group scope.
 - **Code Coverage**, **IronClaw Stress**, live canaries, Docker/release
   pipelines are informational or post-merge; they are not merge-gating.

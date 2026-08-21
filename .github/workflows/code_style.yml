@@ -502,7 +502,10 @@ jobs:
   reborn-cli-smoke:
     name: Reborn CLI smoke tests
     needs: changes
-    if: needs.changes.outputs.has_reborn_cli == 'true' && github.event_name != 'pull_request'
+    # Runs on pull_request too (gated by the same has_reborn_cli scope
+    # filter that already governs it everywhere else): run 32310981177's
+    # queue-only red (PR #7756) would have been caught here at PR time.
+    if: needs.changes.outputs.has_reborn_cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
