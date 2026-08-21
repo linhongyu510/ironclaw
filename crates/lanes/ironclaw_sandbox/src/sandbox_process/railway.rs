@@ -82,6 +82,7 @@ chmod 700 "$material/audit"
 audit_log="$material/audit/proxy.log"
 audit_capture="$material/audit/.capture"
 audit_cursor="$material/audit/.cursor"
+audit_append="$material/audit/.append"
 
 # Appends only records strictly newer than the cursor. The cursor is the
 # last drained record's own RFC3339Nano timestamp (Docker emits fixed-width
@@ -89,7 +90,11 @@ audit_cursor="$material/audit/.cursor"
 # filter makes the boundary exclusive, so back-to-back drains
 # (post-command and next-invocation) never duplicate audit entries.
 drain_proxy_audit() {
-  docker inspect "$proxy" >/dev/null 2>&1 || return 0
+  if ! docker inspect "$proxy" >/dev/null 2>&1; then
+    proxy_matches=$(docker ps --all --filter "name=^/${proxy}$" --format '{{.Names}}') || return 1
+    [ -z "$proxy_matches" ] || return 1
+    return 0
+  fi
   if [ -f "$audit_log" ] && [ "$(wc -c < "$audit_log")" -gt 8388608 ]; then
     mv "$audit_log" "$audit_log.$(date +%s).$$"
   fi
@@ -102,9 +107,19 @@ drain_proxy_audit() {
     docker logs --timestamps "$proxy" >"$audit_capture" 2>&1 || return 1
   fi
   last_record=$(tail -n 1 "$audit_capture" | cut -d' ' -f1)
-  tail -c 4194304 "$audit_capture" >> "$audit_log"
+  tail -c 4194304 "$audit_capture" > "$audit_append" || return 1
+  audit_total=$(wc -c < "$audit_append")
+  for audit_file in "$material"/audit/proxy.log*; do
+    [ -f "$audit_file" ] || continue
+    audit_total=$((audit_total + $(wc -c < "$audit_file")))
+  done
+  if [ "$audit_total" -gt 268435456 ]; then
+    rm -f "$audit_append" "$audit_capture"
+    return 1
+  fi
+  cat "$audit_append" >> "$audit_log"
   chmod 600 "$audit_log"
-  rm -f "$audit_capture"
+  rm -f "$audit_append" "$audit_capture"
   if [ -n "$last_record" ]; then
     printf %s "$last_record" > "$audit_cursor"
   fi

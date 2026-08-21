@@ -683,8 +683,19 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
         "repeated drains must use an exclusive record-timestamp cursor so audit entries are not duplicated"
     );
     assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "proxy_matches=$(docker ps --all --filter \"name=^/${proxy}$\" --format '{{.Names}}') || return 1"
+        ) && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("[ -z \"$proxy_matches\" ] || return 1"),
+        "inspect failures must be treated as absence only after a successful exact-name listing"
+    );
+    assert!(
         RAILWAY_MANAGED_EGRESS_WRAPPER
-            .contains("tail -c 4194304 \"$audit_capture\" >> \"$audit_log\"")
+            .contains("tail -c 4194304 \"$audit_capture\" > \"$audit_append\"")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("for audit_file in \"$material\"/audit/proxy.log*; do")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("if [ \"$audit_total\" -gt 268435456 ]; then"),
+        "Railway audit append must fail closed before aggregate retained evidence exceeds 256 MiB"
     );
     assert!(
         RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
