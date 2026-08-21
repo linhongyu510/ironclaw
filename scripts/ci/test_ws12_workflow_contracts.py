@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -327,6 +329,26 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             ' >> "$GITHUB_OUTPUT"\n'
         )
         self.assertEqual(validate_production_lint_targets(unrelated), [])
+
+    def test_pull_request_clippy_matrix_includes_the_default_features_flavor(self) -> None:
+        """#7119's queue-only default-features shape must also run scoped on PRs.
+
+        Pinned as structured JSON, not a substring, because the PR and non-PR
+        branches share nearly the same literal — a substring match could pass
+        by matching the WRONG branch.
+        """
+        workflow = self.workflows[CODE_STYLE_WORKFLOW]
+        branches = re.findall(
+            r"if \[ \"\$\{\{ github\.event_name \}\}\" = \"pull_request\" \]; then\n"
+            r'\s*echo \'clippy_matrix=(.+?)\' >> "\$GITHUB_OUTPUT"\n'
+            r"\s*else\n"
+            r'\s*echo \'clippy_matrix=(.+?)\' >> "\$GITHUB_OUTPUT"',
+            workflow,
+        )
+        self.assertEqual(len(branches), 1, "expected exactly one pull_request/else clippy_matrix pair")
+        pr_matrix = json.loads(branches[0][0])
+        self.assertIn({"name": "default", "flags": ""}, pr_matrix)
+        self.assertIn({"name": "all-features", "flags": "--all-features"}, pr_matrix)
 
     def test_losing_the_step_or_its_command_fails_loudly(self) -> None:
         """A contract that cannot see the command must say so, not pass."""

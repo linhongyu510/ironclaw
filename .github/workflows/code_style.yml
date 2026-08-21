@@ -141,7 +141,7 @@ jobs:
           fi
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"}]' >> "$GITHUB_OUTPUT"
+            echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
           else
             echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
           fi
@@ -402,6 +402,14 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
+          # The `default` flavor never installs Node/pnpm (its steps above
+          # are gated on `--all-features`), so if a PR's clippy_packages
+          # includes ironclaw_webui, an unguarded build.rs would fall back
+          # to an unbounded `npm exec` network fetch here (the #7756
+          # class). SKIP_FRONTEND_BUILD makes the crate compile with zero
+          # embedded assets instead — safe for a lint-only invocation,
+          # which never executes the compiled test/asset code.
+          SKIP_FRONTEND_BUILD: ${{ matrix.name == 'default' && '1' || '' }}
         run: |
           package_args=()
           while IFS= read -r package; do
