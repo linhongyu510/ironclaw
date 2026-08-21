@@ -1,6 +1,6 @@
 //! Generic product command adapter into the canonical host-runtime pipeline.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_assistant::{
@@ -47,9 +47,9 @@ use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceEr
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as AsyncMutex;
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PRODUCT_RESULT_METADATA_MAX_BYTES: usize = 4 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 
@@ -66,7 +66,11 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     // deployment-shape distinction the invoker still needs.
     skill_mount_resolver: Arc<ScopedSkillManagementMountResolver>,
     system_extensions_lifecycle_mounts: MountView,
-    activity_locks: Arc<AsyncMutex<HashMap<ActivityId, Arc<AsyncMutex<()>>>>>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ProductResultMetadata {
+    summary: String,
 }
 
 #[derive(Clone)]
@@ -91,27 +95,6 @@ impl RuntimeProductCapabilityInvoker {
             ))),
             skill_mount_resolver: runtime.skill_management.mount_resolver(),
             system_extensions_lifecycle_mounts: runtime.system_extensions_lifecycle_mounts.clone(),
-            activity_locks: Arc::new(AsyncMutex::new(HashMap::new())),
-        }
-    }
-
-    async fn lock_for_activity(&self, activity_id: ActivityId) -> Arc<AsyncMutex<()>> {
-        let mut locks = self.activity_locks.lock().await;
-        Arc::clone(
-            locks
-                .entry(activity_id)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        )
-    }
-
-    async fn release_activity_lock(&self, activity_id: ActivityId, lock: &Arc<AsyncMutex<()>>) {
-        let mut locks = self.activity_locks.lock().await;
-        if locks
-            .get(&activity_id)
-            .is_some_and(|current| Arc::ptr_eq(current, lock))
-            && Arc::strong_count(lock) <= 2
-        {
-            locks.remove(&activity_id);
         }
     }
 }
@@ -131,7 +114,6 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             results,
             skill_mount_resolver,
             system_extensions_lifecycle_mounts,
-            activity_locks: _,
         } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
@@ -151,28 +133,28 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         if let Some(replayed) = results.replay(&scope, invocation_id).await? {
             return Ok(replayed);
         }
-        let activity_lock = self.lock_for_activity(activity_id).await;
-        let _activity_guard = activity_lock.lock().await;
-        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
-            drop(_activity_guard);
-            self.release_activity_lock(activity_id, &activity_lock)
-                .await;
+        let requested_capability = capability.clone();
+        let outcome = host_runtime
+            .invoke_capability((context, capability, ResourceEstimate::default(), input))
+            .await
+            .map_err(ProductSurfaceError::internal_from)?;
+        ensure_matching_capability(&requested_capability, &outcome)?;
+        product_resolution(results, &scope, invocation_id, outcome).await
+    }
+
+    async fn complete_product_result(
+        &self,
+        caller: ProductSurfaceCaller,
+        output: serde_json::Value,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+        let scope = product_resource_scope(&caller, invocation_id);
+        if let Some(replayed) = self.results.replay(&scope, invocation_id).await? {
             return Ok(replayed);
         }
-        let requested_capability = capability.clone();
-        let result = async {
-            let outcome = host_runtime
-                .invoke_capability((context, capability, ResourceEstimate::default(), input))
-                .await
-                .map_err(ProductSurfaceError::internal_from)?;
-            ensure_matching_capability(&requested_capability, &outcome)?;
-            product_resolution(results, &scope, invocation_id, outcome).await
-        }
-        .await;
-        drop(_activity_guard);
-        self.release_activity_lock(activity_id, &activity_lock)
-            .await;
-        result
+        persist_product_output(&self.results, &scope, invocation_id, output, summary, None).await
     }
 }
 
@@ -345,36 +327,16 @@ async fn product_resolution(
 ) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let body = serde_json::to_vec(&completed.output)
-                .map_err(ProductSurfaceError::internal_from)?;
-            if body.len() > PRODUCT_RESULT_MAX_BYTES {
-                return Err(ProductSurfaceError::internal_from(
-                    "product capability result exceeded the durable output bound",
-                ));
-            }
-            let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-            results
-                .persist(
-                    scope,
-                    result_ref,
-                    body.clone(),
-                    completed.completed_artifact.as_ref().map(|artifact| {
-                        ProductResultArtifactMetadata {
-                            artifact_ref: artifact.artifact_ref,
-                            byte_len: artifact.byte_len,
-                            output_digest: completed.canonical_output_digest,
-                        }
-                    }),
-                )
-                .await?;
-            let refs = completed_product_outcome_refs(result_ref, body.len(), &completed);
-            Ok(Resolution::Done(Outcome {
-                refs,
-                verdict: ToolVerdict::Success,
-                summary: fixed_summary("capability completed"),
-                progress: ResultProgress::MadeProgress,
-                terminate_hint: TerminateHint::Continue,
-            }))
+            let artifact = completed_artifact_metadata(&completed);
+            persist_product_output(
+                results,
+                scope,
+                invocation_id,
+                completed.output,
+                "capability completed",
+                artifact,
+            )
+            .await
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
@@ -436,16 +398,62 @@ async fn product_resolution(
     }
 }
 
-fn completed_product_outcome_refs(
-    result_ref: ResultRef,
-    preview_bytes: usize,
+async fn persist_product_output(
+    results: &ProductResultFilesystem,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    output: serde_json::Value,
+    summary: &'static str,
+    artifact: Option<ProductResultArtifactMetadata>,
+) -> Result<Resolution, ProductSurfaceError> {
+    let body = serde_json::to_vec(&output).map_err(ProductSurfaceError::internal_from)?;
+    if body.len() > PRODUCT_RESULT_MAX_BYTES {
+        return Err(ProductSurfaceError::internal_from(
+            "product capability result exceeded the durable output bound",
+        ));
+    }
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    results
+        .persist(scope, result_ref, body.clone(), summary, artifact.clone())
+        .await?;
+    Ok(Resolution::Done(Outcome {
+        refs: product_outcome_refs(result_ref, body.len(), artifact),
+        verdict: ToolVerdict::Success,
+        summary: fixed_summary(summary),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    }))
+}
+
+fn completed_artifact_metadata(
     completed: &ironclaw_host_runtime::RuntimeCapabilityCompleted,
-) -> OutcomeRefs {
-    let (byte_len, artifact_ref) = completed
+) -> Option<ProductResultArtifactMetadata> {
+    completed
         .completed_artifact
         .as_ref()
-        .map_or((preview_bytes as u64, None), |artifact| {
-            (artifact.byte_len, Some(artifact.artifact_ref))
+        .map(|artifact| ProductResultArtifactMetadata {
+            artifact_ref: artifact.artifact_ref,
+            byte_len: artifact.byte_len,
+            output_digest: completed.canonical_output_digest,
+        })
+}
+
+/// The one place artifact metadata becomes outcome refs. A spilled result's
+/// durable body is only a bounded preview, so the sidecar owns the real byte
+/// length and canonical digest; a fresh completion and its later replay must
+/// not disagree about them.
+fn product_outcome_refs(
+    result_ref: ResultRef,
+    preview_bytes: usize,
+    artifact: Option<ProductResultArtifactMetadata>,
+) -> OutcomeRefs {
+    let (byte_len, artifact_ref, output_digest) =
+        artifact.map_or((preview_bytes as u64, None, None), |metadata| {
+            (
+                metadata.byte_len,
+                Some(metadata.artifact_ref),
+                metadata.output_digest,
+            )
         });
     OutcomeRefs {
         result: result_ref,
@@ -456,7 +464,7 @@ fn completed_product_outcome_refs(
             ..ResultPreviewMeta::default()
         },
         origin: None,
-        output_digest: completed.canonical_output_digest,
+        output_digest,
     }
 }
 
@@ -549,12 +557,15 @@ impl ProductResultFilesystem {
         scope: &ResourceScope,
         result_ref: ResultRef,
         body: Vec<u8>,
+        summary: &'static str,
         artifact: Option<ProductResultArtifactMetadata>,
     ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
-                persist_product_result_with_metadata(filesystem, scope, result_ref, body, artifact)
-                    .await
+                persist_product_result_with_metadata(
+                    filesystem, scope, result_ref, body, summary, artifact,
+                )
+                .await
             }
         }
     }
@@ -565,10 +576,12 @@ async fn persist_product_result<F>(
     scope: &ResourceScope,
     result_ref: ResultRef,
     body: Vec<u8>,
+    summary: &'static str,
 ) -> Result<(), ProductSurfaceError>
 where
     F: RootFilesystem + ?Sized,
 {
+    persist_product_result_metadata(filesystem, scope, result_ref, summary).await?;
     let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
         .map_err(ProductSurfaceError::internal_from)?;
     let write_body = body.clone();
@@ -603,12 +616,13 @@ async fn persist_product_result_with_metadata<F>(
     scope: &ResourceScope,
     result_ref: ResultRef,
     body: Vec<u8>,
+    summary: &'static str,
     artifact: Option<ProductResultArtifactMetadata>,
 ) -> Result<(), ProductSurfaceError>
 where
     F: RootFilesystem + ?Sized,
 {
-    persist_product_result(filesystem, scope, result_ref, body).await?;
+    persist_product_result(filesystem, scope, result_ref, body, summary).await?;
     let Some(artifact) = artifact else {
         return Ok(());
     };
@@ -616,6 +630,24 @@ where
         .map_err(ProductSurfaceError::internal_from)?;
     let encoded = serde_json::to_vec(&artifact).map_err(ProductSurfaceError::internal_from)?;
     persist_product_result_entry(filesystem, scope, path, encoded).await
+}
+
+async fn persist_product_result_metadata<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+    summary: &'static str,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.meta.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let metadata = serde_json::to_vec(&ProductResultMetadata {
+        summary: summary.to_string(),
+    })
+    .map_err(ProductSurfaceError::internal_from)?;
+    persist_product_result_entry(filesystem, scope, path, metadata).await
 }
 
 async fn persist_product_result_entry<F>(
@@ -673,11 +705,11 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
-    let metadata_path =
+    let artifact_path =
         ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.artifact.json"))
             .map_err(ProductSurfaceError::internal_from)?;
     let artifact = match filesystem
-        .read_bytes_bounded(scope, &metadata_path, 4 * 1024)
+        .read_bytes_bounded(scope, &artifact_path, PRODUCT_RESULT_METADATA_MAX_BYTES)
         .await
     {
         Ok(Some(encoded)) => {
@@ -693,28 +725,24 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => None,
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
-    let (byte_len, artifact_ref, output_digest) =
-        artifact.map_or((body.len() as u64, None, None), |metadata| {
-            (
-                metadata.byte_len,
-                Some(metadata.artifact_ref),
-                metadata.output_digest,
-            )
-        });
+    let metadata_path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.meta.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let summary = match filesystem
+        .read_bytes_bounded(scope, &metadata_path, PRODUCT_RESULT_METADATA_MAX_BYTES)
+        .await
+    {
+        Ok(Some(metadata)) => {
+            serde_json::from_slice::<ProductResultMetadata>(&metadata)
+                .map_err(ProductSurfaceError::internal_from)?
+                .summary
+        }
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => "capability completed".to_string(),
+        Err(error) => return Err(ProductSurfaceError::internal_from(error)),
+    };
     Ok(Some(Resolution::Done(Outcome {
-        refs: OutcomeRefs {
-            result: result_ref,
-            byte_len,
-            preview: None,
-            preview_meta: ResultPreviewMeta {
-                artifact_ref,
-                ..ResultPreviewMeta::default()
-            },
-            origin: None,
-            output_digest,
-        },
+        refs: product_outcome_refs(result_ref, body.len(), artifact),
         verdict: ToolVerdict::Success,
-        summary: fixed_summary("capability completed"),
+        summary: SafeSummary::new(summary).unwrap_or_else(|_| SafeSummary::placeholder()),
         progress: ResultProgress::MadeProgress,
         terminate_hint: TerminateHint::Continue,
     })))

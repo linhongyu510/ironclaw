@@ -12,6 +12,7 @@ use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     artifact::{ArtifactDigest, ArtifactWriteError},
     capability::CapabilityDescriptor,
+    dispatch::DispatchAuthRequirement,
     ids::UserId,
     invocation::InvocationOrigin,
     mount::MountView,
@@ -24,7 +25,7 @@ use serde_json::Value;
 use super::wasm_blocking::run_wasm_prepare_blocking;
 use super::wasm_execution::{ReservationGuard, execute_prepared_wasm};
 use super::{
-    CapabilityId, DenyWasmHostHttp, DispatchError, DispatchErrorLane, ExtensionRuntime,
+    CapabilityId, DenyWasmHostHttp, DispatchError, DispatchFailureKind, ExtensionRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, InvocationServicesResolutionRequest,
     InvocationServicesResolver, McpError, McpExecutionRequest, McpExecutor, McpInvocation,
     NetworkObligationPolicyStore, PlannerError, PreparedWitTool, ResourceGovernor,
@@ -43,6 +44,49 @@ use crate::{
     },
     services::wasm_secrets::StagedWasmHostSecrets,
 };
+
+/// Builds a provider-rejection `DispatchError` for the first-party lane.
+/// `safe_summary` rides the typed diagnostic channel like other lanes'
+/// causes; `detail`, when the caller already has a structured
+/// [`ironclaw_host_api::dispatch::DispatchFailureDetail`], is carried
+/// through verbatim.
+fn first_party_dispatch_error(
+    kind: RuntimeDispatchErrorKind,
+    safe_summary: Option<String>,
+    detail: Option<ironclaw_host_api::dispatch::DispatchFailureDetail>,
+) -> DispatchError {
+    let (detail, cause) = match safe_summary {
+        Some(summary) => {
+            let (safe_summary, cause) =
+                match ironclaw_host_api::safe_summary::SafeSummary::new(summary.as_str()) {
+                    Ok(safe_summary) => (safe_summary, None),
+                    Err(_) => {
+                        tracing::warn!("first-party capability supplied an invalid safe summary");
+                        (
+                            ironclaw_host_api::safe_summary::SafeSummary::placeholder(),
+                            Some(summary),
+                        )
+                    }
+                };
+            (
+                Some(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::HostSummary {
+                        summary: safe_summary,
+                        detail: detail.map(Box::new),
+                    },
+                ),
+                cause,
+            )
+        }
+        None => (detail, None),
+    };
+    DispatchError::provider_rejected(
+        Some(RuntimeKind::FirstParty),
+        DispatchFailureKind::Runtime(kind),
+        cause,
+        detail,
+    )
+}
 
 /// Per-invocation execution request handed to a runtime lane.
 ///
@@ -404,9 +448,12 @@ where
                     },
                 },
             )
-            .map_err(|error| DispatchError::Script {
-                kind: script_error_kind(&error),
-                model_visible_cause: Some(error.to_string()),
+            .map_err(|error| {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Script,
+                    script_error_kind(&error),
+                    Some(error.to_string()),
+                )
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -469,22 +516,25 @@ where
                     credential_requirements,
                 } => DispatchError::AuthRequired {
                     capability: request.capability_id.clone(),
-                    required_secrets,
-                    credential_requirements,
-                    model_visible_cause: None,
+                    requirement: Box::new(DispatchAuthRequirement {
+                        required_secrets,
+                        credential_requirements,
+                        model_visible_cause: None,
+                    }),
                 },
                 McpError::ProviderRejected(rejection) => DispatchError::Rejected {
                     runtime: Some(RuntimeKind::Mcp),
                     kind: ironclaw_host_api::dispatch::DispatchFailureKind::Runtime(
                         RuntimeDispatchErrorKind::Client,
                     ),
-                    diagnostic: Some(rejection.diagnostic),
+                    diagnostic: Some(Box::new(rejection.diagnostic)),
                     detail: None,
                 },
-                error => DispatchError::Mcp {
-                    kind: mcp_error_kind(&error),
-                    model_visible_cause: Some(error.to_string()),
-                },
+                error => dispatch_error_for_runtime(
+                    RuntimeKind::Mcp,
+                    mcp_error_kind(&error),
+                    Some(sanitize_mcp_client_error(&error)),
+                ),
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -645,11 +695,11 @@ where
                 RuntimeDispatchErrorKind::UndeclaredCapability.as_str(),
                 used_prepared_reservation,
             );
-            return Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                detail: None,
-            });
+            return Err(first_party_dispatch_error(
+                RuntimeDispatchErrorKind::UndeclaredCapability,
+                None,
+                None,
+            ));
         };
         trace_first_party_latency_ok(
             "lookup_handler",
@@ -678,11 +728,7 @@ where
                     kind.as_str(),
                     used_prepared_reservation,
                 );
-                DispatchError::FirstParty {
-                    kind,
-                    safe_summary: Some(error.to_string()),
-                    detail: None,
-                }
+                first_party_dispatch_error(kind, Some(error.to_string()), None)
             })?;
         trace_first_party_latency_ok(
             "plan_capability",
@@ -723,11 +769,7 @@ where
                     error.kind().as_str(),
                     used_prepared_reservation,
                 );
-                DispatchError::FirstParty {
-                    kind: error.kind(),
-                    safe_summary: Some(error.to_string()),
-                    detail: None,
-                }
+                first_party_dispatch_error(error.kind(), Some(error.to_string()), None)
             })?;
         trace_first_party_latency_ok(
             "resolve_services",
@@ -773,11 +815,7 @@ where
                         RuntimeDispatchErrorKind::Resource.as_str(),
                         used_prepared_reservation,
                     );
-                    DispatchError::FirstParty {
-                        kind: RuntimeDispatchErrorKind::Resource,
-                        safe_summary: None,
-                        detail: None,
-                    }
+                    first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None)
                 })?,
         };
         tracing::debug!(
@@ -793,11 +831,8 @@ where
         let reservation_id = reservation.id;
         let mut reserved_output_bytes = reservation.estimate.output_bytes.unwrap_or(0);
         let guard = ReservationGuard::new(request.governor, reservation_id);
-        let first_party_resource_error = || DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::Resource,
-            safe_summary: None,
-            detail: None,
-        };
+        let first_party_resource_error =
+            || first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None);
 
         tracing::debug!(
             reservation_id = %reservation_id,
@@ -866,20 +901,22 @@ where
                         ..
                     } => Err(DispatchError::AuthRequired {
                         capability: request.capability_id.clone(),
-                        required_secrets,
-                        credential_requirements,
-                        model_visible_cause: None,
+                        requirement: Box::new(DispatchAuthRequirement {
+                            required_secrets,
+                            credential_requirements,
+                            model_visible_cause: None,
+                        }),
                     }),
                     FirstPartyCapabilityError::Dispatch {
                         kind,
                         safe_summary,
                         detail,
                         ..
-                    } => Err(DispatchError::FirstParty {
+                    } => Err(first_party_dispatch_error(
                         kind,
                         safe_summary,
-                        detail: detail.map(|detail| *detail),
-                    }),
+                        detail.map(|detail| *detail),
+                    )),
                 };
             }
             Err(_) => {
@@ -896,20 +933,18 @@ where
                     used_prepared_reservation,
                 );
                 // Dropping `guard` releases the reservation.
-                return Err(DispatchError::FirstParty {
-                    kind: RuntimeDispatchErrorKind::Backend,
-                    safe_summary: None,
-                    detail: None,
-                });
+                return Err(first_party_dispatch_error(
+                    RuntimeDispatchErrorKind::Backend,
+                    None,
+                    None,
+                ));
             }
         };
 
         let mut result = result;
         let completed_artifact = if let Some(pending) = result.pending_artifact.take() {
-            let persistence = artifact_persistence.ok_or(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::OperationFailed,
-                safe_summary: None,
-                detail: None,
+            let persistence = artifact_persistence.ok_or_else(|| {
+                first_party_dispatch_error(RuntimeDispatchErrorKind::OperationFailed, None, None)
             })?;
             let write_state = persistence
                 .state(&pending.handle)
@@ -992,18 +1027,11 @@ where
                 used_prepared_reservation,
             );
             // Dropping `guard` releases the reservation.
-            DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
-                safe_summary: None,
-                detail: None,
-            }
+            first_party_dispatch_error(RuntimeDispatchErrorKind::OutputDecode, None, None)
         })?;
-        let canonical_output_bytes =
-            u64::try_from(serialized_output.len()).map_err(|_| DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
-                detail: None,
-            })?;
+        let canonical_output_bytes = u64::try_from(serialized_output.len()).map_err(|_| {
+            first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None)
+        })?;
         let output_bytes = completed_artifact
             .as_ref()
             .map_or(canonical_output_bytes, |artifact| artifact.byte_len);
@@ -1054,11 +1082,11 @@ where
                     RuntimeDispatchErrorKind::Resource.as_str(),
                     used_prepared_reservation,
                 );
-                return Err(DispatchError::FirstParty {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
-                    detail: None,
-                });
+                return Err(first_party_dispatch_error(
+                    RuntimeDispatchErrorKind::Resource,
+                    None,
+                    None,
+                ));
             }
         };
         tracing::debug!(
@@ -1137,9 +1165,12 @@ impl WasmRuntimeAdapter {
     fn prepared_guard(
         &self,
     ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
-        self.prepared.lock().map_err(|error| DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Executor,
-            model_visible_cause: Some(error.to_string()),
+        self.prepared.lock().map_err(|error| {
+            dispatch_error_for_runtime(
+                RuntimeKind::Wasm,
+                RuntimeDispatchErrorKind::Executor,
+                Some(error.to_string()),
+            )
         })
     }
 
@@ -1199,27 +1230,31 @@ where
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => ironclaw_extension_registry::resolve_asset_under(
                 module,
-                request
-                    .package
-                    .materialized_root()
-                    .map_err(|error| DispatchError::Wasm {
-                        kind: RuntimeDispatchErrorKind::Manifest,
-                        model_visible_cause: Some(error.to_string()),
-                    })?,
+                request.package.materialized_root().map_err(|error| {
+                    dispatch_error_for_runtime(
+                        RuntimeKind::Wasm,
+                        RuntimeDispatchErrorKind::Manifest,
+                        Some(error.to_string()),
+                    )
+                })?,
             )
-            .map_err(|error| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Manifest,
-                model_visible_cause: Some(error.to_string()),
+            .map_err(|error| {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::Manifest,
+                    Some(error.to_string()),
+                )
             })?,
             other => {
-                return Err(DispatchError::Wasm {
-                    kind: if other.kind() == RuntimeKind::Wasm {
+                return Err(dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    if other.kind() == RuntimeKind::Wasm {
                         RuntimeDispatchErrorKind::Manifest
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    model_visible_cause: None,
-                });
+                    None,
+                ));
             }
         };
         let cache_key = module_path.as_str().to_string();
@@ -1233,9 +1268,12 @@ where
             .filesystem
             .read_file(&module_path)
             .await
-            .map_err(|error| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                model_visible_cause: Some(error.to_string()),
+            .map_err(|error| {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    RuntimeDispatchErrorKind::FilesystemDenied,
+                    Some(error.to_string()),
+                )
             })?;
         let prepared = Arc::new(
             run_wasm_prepare_blocking(
@@ -1244,9 +1282,12 @@ where
                 wasm_bytes,
             )
             .await
-            .map_err(|error| DispatchError::Wasm {
-                kind: error.kind(),
-                model_visible_cause: Some(error.source().to_string()),
+            .map_err(|error| {
+                dispatch_error_for_runtime(
+                    RuntimeKind::Wasm,
+                    error.kind(),
+                    Some(error.source().to_string()),
+                )
             })?,
         );
         let prepared = {
@@ -1290,30 +1331,20 @@ where
     }
 }
 
-fn dispatch_error_for_runtime(
+/// Builds a provider-rejection `DispatchError` for a given runtime lane.
+/// `cause` rides the typed diagnostic channel (#5965): raw-or-better cause
+/// text, scrubbed downstream at the model-visible Diagnostic seam.
+pub(super) fn dispatch_error_for_runtime(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
     cause: Option<String>,
 ) -> DispatchError {
-    match runtime.dispatch_error_lane() {
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind,
-            model_visible_cause: cause,
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind,
-            model_visible_cause: cause,
-        },
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind,
-            model_visible_cause: cause,
-        },
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind,
-            safe_summary: cause,
-            detail: None,
-        },
-    }
+    DispatchError::provider_rejected(
+        Some(runtime),
+        DispatchFailureKind::Runtime(kind),
+        cause,
+        None,
+    )
 }
 
 fn planner_error_kind(error: &PlannerError) -> RuntimeDispatchErrorKind {
@@ -1380,6 +1411,7 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::StoreConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         WasmError::LinkerConfiguration(_) => RuntimeDispatchErrorKind::Executor,
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
+        WasmError::UnsupportedContract(_) => RuntimeDispatchErrorKind::Manifest,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
     }
@@ -1392,9 +1424,12 @@ fn first_party_artifact_error(error: ArtifactWriteError) -> DispatchError {
         | ArtifactWriteError::DigestMismatch
         | ArtifactWriteError::Storage => RuntimeDispatchErrorKind::OperationFailed,
     };
-    DispatchError::FirstParty {
-        kind,
-        safe_summary: None,
-        detail: None,
-    }
+    first_party_dispatch_error(kind, None, None)
+}
+
+fn sanitize_mcp_client_error(error: &McpError) -> String {
+    let raw = error.to_string();
+    let sanitized = ironclaw_safety::sanitize_display_text(&raw);
+    tracing::debug!(reason = %sanitized, "MCP client failure sanitized for provider diagnostic");
+    sanitized
 }

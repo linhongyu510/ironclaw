@@ -1008,7 +1008,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // lines + #7509's prompt-hardening growth): both branches' vocabulary
         // lands in the same tree; pin re-captured at the merged measured count.
         // Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_560),
+        // 13_560 -> 13_758 (2026-08-21, merge of main into #7491): both sides
+        // grew the crate independently -- main's subagent background-delivery
+        // and typed-dispatch vocabulary plus this branch's durable
+        // tool-artifact refs -- so the merged tree lands both deltas at once.
+        // Pure vocabulary on both sides; delivery, dispatch, and artifact
+        // behavior stay in their owning loop, kernel, and threads crates.
+        // Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_758),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

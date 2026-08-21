@@ -35,7 +35,7 @@ use crate::journal::{
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest, StopProcessRequest,
     SubmitProcessAtEdgeRequest, SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
-    SuspendProcessRequest,
+    SuspendProcessRequest, TransitionProcessDependencyRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -1147,6 +1147,19 @@ where
         }
     }
 
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error> {
+        match self
+            .execute(StoredProcessCommand::TransitionDependency(request))
+            .await?
+        {
+            StoredCommandOutcome::Dependency(record) => Ok(record),
+            outcome => Err(unexpected_outcome("transition_dependency", outcome)),
+        }
+    }
+
     async fn consume_process_dependency(
         &self,
         request: CloseProcessDependencyRequest,
@@ -1191,14 +1204,7 @@ where
                 .as_ref()
                 .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
         })
-        .filter(|record| {
-            request.include_closed
-                || !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-        })
+        .filter(|record| request.include_closed || !record.state.is_closed())
         .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (
@@ -1216,13 +1222,7 @@ where
         let mut records = rows::unresolved_dependencies(self.filesystem.as_ref())
             .await?
             .into_iter()
-            .filter(|record| {
-                !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-            })
+            .filter(|record| !record.state.is_closed())
             .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (

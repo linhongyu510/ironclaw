@@ -207,9 +207,15 @@ async fn product_result_replay_returns_persisted_resolution() {
     let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
     let body = br#"{"status":"installed"}"#.to_vec();
 
-    persist_product_result(&filesystem, &scope, result_ref, body.clone())
-        .await
-        .expect("product result persists");
+    persist_product_result(
+        &filesystem,
+        &scope,
+        result_ref,
+        body.clone(),
+        "capability completed",
+    )
+    .await
+    .expect("product result persists");
     let replayed = replay_product_result(&filesystem, &scope, invocation_id)
         .await
         .expect("product result replays")
@@ -239,6 +245,7 @@ async fn product_result_replay_retains_artifact_metadata() {
         &scope,
         result_ref,
         body,
+        "capability completed",
         Some(ProductResultArtifactMetadata {
             artifact_ref,
             byte_len: 100_000,
@@ -259,6 +266,29 @@ async fn product_result_replay_retains_artifact_metadata() {
     assert_eq!(outcome.refs.preview_meta.artifact_ref, Some(artifact_ref));
     assert_eq!(outcome.refs.output_digest, Some(output_digest));
 }
+
+#[tokio::test]
+async fn product_result_replay_preserves_completion_summary() {
+    let filesystem = scoped_product_results_filesystem();
+    let scope = resource_scope();
+    let invocation_id = InvocationId::new();
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    let body = br#"{"status":"submitted"}"#.to_vec();
+
+    persist_product_result(&filesystem, &scope, result_ref, body, "automation started")
+        .await
+        .expect("product result persists");
+    let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+        .await
+        .expect("product result replays")
+        .expect("persisted result should replay");
+
+    let Resolution::Done(replayed) = replayed else {
+        panic!("replayed product result should be completed");
+    };
+    assert_eq!(replayed.summary.as_str(), "automation started");
+}
+
 #[test]
 fn completed_product_result_retains_artifact_evidence() {
     let artifact_ref = ironclaw_host_api::artifact::ArtifactRef::new(
@@ -282,10 +312,10 @@ fn completed_product_result_retains_artifact_evidence() {
         canonical_item_count: None,
     };
 
-    let refs = completed_product_outcome_refs(
+    let refs = product_outcome_refs(
         ResultRef::from_uuid(InvocationId::new().as_uuid()),
         "bounded preview".len(),
-        &completed,
+        completed_artifact_metadata(&completed),
     );
     assert_eq!(refs.byte_len, 100_000);
     assert_eq!(refs.preview_meta.artifact_ref, Some(artifact_ref));

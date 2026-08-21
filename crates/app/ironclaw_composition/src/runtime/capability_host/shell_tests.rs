@@ -122,6 +122,7 @@ async fn standalone_yolo_bash_translates_workspace_workdir_without_scoped_mounts
         external_tool_catalog: std::sync::Arc::new(
             ironclaw_turns::InMemoryExternalToolCatalog::new(),
         ),
+        unavailable_capability_ids: std::collections::HashSet::new(),
     };
     let run_context = run_context("bash-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the

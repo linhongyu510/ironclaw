@@ -43,6 +43,8 @@ pub(crate) enum BuiltinCapabilityPolicyError {
     EmptyProviderManifestPath,
     #[error("standalone capability policy provider manifest path must be absolute")]
     NonAbsoluteProviderManifestPath,
+    #[error("sandbox managed-egress policy is invalid: {reason}")]
+    InvalidSandboxNetworkPolicy { reason: String },
     #[error("standalone capability policy is invalid: {reason}")]
     CachedInvalid { reason: String },
 }
@@ -64,6 +66,11 @@ impl BuiltinCapabilityPolicy {
         if process_backend != ProcessBackendKind::UserSandbox {
             return Ok(self);
         }
+        let network_override = ironclaw_sandbox::sandbox_network_policy().map_err(|error| {
+            BuiltinCapabilityPolicyError::InvalidSandboxNetworkPolicy {
+                reason: error.to_string(),
+            }
+        })?;
 
         for (capability_id, missing_error) in [
             (
@@ -90,7 +97,8 @@ impl BuiltinCapabilityPolicy {
             // Passing the host runtime's tenant-workspace grant would either expose
             // the wrong storage boundary or fail its trusted-mount resolution.
             grant.mounts = CapabilityMountProfile::Ambient;
-            grant.network = CapabilityNetworkProfile::SandboxDirectPreview;
+            grant.network = CapabilityNetworkProfile::SandboxManagedEgress;
+            grant.network_override = Some(network_override.clone());
         }
         Ok(self)
     }
@@ -289,6 +297,8 @@ pub(crate) struct BuiltinCapabilityGrantPolicy {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) mounts: CapabilityMountProfile,
     pub(crate) network: CapabilityNetworkProfile,
+    #[serde(skip)]
+    network_override: Option<NetworkPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,7 +324,7 @@ pub(crate) enum CapabilityMountProfile {
 pub(crate) enum CapabilityNetworkProfile {
     Default,
     DevWildcard,
-    SandboxDirectPreview,
+    SandboxManagedEgress,
     IronhubArtifacts,
 }
 
@@ -354,6 +364,7 @@ trait BuiltinConstraintSource {
     fn effects(&self) -> &[EffectKind];
     fn mounts(&self) -> CapabilityMountProfile;
     fn network(&self) -> CapabilityNetworkProfile;
+    fn network_override(&self) -> Option<&NetworkPolicy>;
 }
 
 impl BuiltinConstraintSource for BuiltinCapabilityGrantPolicy {
@@ -368,6 +379,10 @@ impl BuiltinConstraintSource for BuiltinCapabilityGrantPolicy {
     fn network(&self) -> CapabilityNetworkProfile {
         self.network
     }
+
+    fn network_override(&self) -> Option<&NetworkPolicy> {
+        self.network_override.as_ref()
+    }
 }
 
 impl BuiltinConstraintSource for BuiltinConstraintPolicy {
@@ -381,6 +396,10 @@ impl BuiltinConstraintSource for BuiltinConstraintPolicy {
 
     fn network(&self) -> CapabilityNetworkProfile {
         self.network
+    }
+
+    fn network_override(&self) -> Option<&NetworkPolicy> {
+        None
     }
 }
 
@@ -483,12 +502,16 @@ fn constraint_terms(
         CapabilityMountProfile::Memory => memory_mounts.clone(),
         CapabilityMountProfile::SystemExtensionsLifecycle => system_extensions_mounts.clone(),
     };
-    let network = match source.network() {
-        CapabilityNetworkProfile::Default => NetworkPolicy::default(),
-        CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
-        CapabilityNetworkProfile::SandboxDirectPreview => sandbox_direct_network_policy(),
-        CapabilityNetworkProfile::IronhubArtifacts => {
-            ironclaw_extension_manager::ironhub::artifact_network_policy()
+    let network = if let Some(network) = source.network_override() {
+        network.clone()
+    } else {
+        match source.network() {
+            CapabilityNetworkProfile::Default => NetworkPolicy::default(),
+            CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
+            CapabilityNetworkProfile::SandboxManagedEgress => NetworkPolicy::default(),
+            CapabilityNetworkProfile::IronhubArtifacts => {
+                ironclaw_extension_manager::ironhub::artifact_network_policy()
+            }
         }
     };
     let mut allowed_effects = source.effects().to_vec();
@@ -520,22 +543,6 @@ pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
         // link-local, multicast, loopback, and private IP targets remain
         // blocked by the shared network policy enforcer.
         deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    }
-}
-
-fn sandbox_direct_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: None,
-            host_pattern: "*".to_string(),
-            port: None,
-        }],
-        // PR1 intentionally gives sandbox-profile shell workers unrestricted
-        // provider-NAT egress. This policy records that authority honestly;
-        // it does not claim the private-address protection enforced by
-        // host-mediated HTTP clients or the follow-up sandbox egress relay.
-        deny_private_ip_ranges: false,
         max_egress_bytes: None,
     }
 }
@@ -813,11 +820,12 @@ mod tests {
     }
 
     #[test]
-    fn user_sandbox_process_grants_use_transport_workspace_and_direct_preview_network() {
+    fn user_sandbox_process_grants_use_transport_workspace_and_managed_egress() {
         let policy = builtin_capability_policy()
             .expect("policy parses")
             .for_process_backend(ProcessBackendKind::UserSandbox)
             .expect("user-sandbox policy projects");
+        let shell_id = CapabilityId::new("builtin.shell").expect("capability id");
 
         for capability in ["builtin.shell", "builtin.bash"] {
             let grant = policy
@@ -833,15 +841,23 @@ mod tests {
             assert!(grant.effects.contains(&EffectKind::Network));
             assert_eq!(
                 grant.network,
-                CapabilityNetworkProfile::SandboxDirectPreview
+                CapabilityNetworkProfile::SandboxManagedEgress
             );
             assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
         }
 
-        let network = sandbox_direct_network_policy();
-        assert_eq!(network.allowed_targets.len(), 1);
-        assert_eq!(network.allowed_targets[0].host_pattern, "*");
-        assert!(!network.deny_private_ip_ranges);
+        let network = policy
+            .grant_constraints_for(
+                &shell_id,
+                &MountView::default(),
+                &MountView::default(),
+                &MountView::default(),
+                &MountView::default(),
+            )
+            .expect("sandbox shell constraints project")
+            .network;
+        assert!(network.allowed_targets.len() > 1);
+        assert!(network.deny_private_ip_ranges);
 
         let local_policy = builtin_capability_policy()
             .expect("policy parses")
