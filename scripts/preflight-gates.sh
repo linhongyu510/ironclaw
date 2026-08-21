@@ -36,15 +36,42 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || {
 }
 cd "${REPO_ROOT}" || exit 2
 
+ci_mode=0
+queue_shape=0
+for arg in "$@"; do
+    case "${arg}" in
+        --ci) ci_mode=1 ;;
+        --queue-shape) queue_shape=1 ;;
+        *)
+            echo "preflight-gates: unknown option: ${arg}" >&2
+            echo "usage: preflight-gates.sh [--ci] [--queue-shape]" >&2
+            exit 2
+            ;;
+    esac
+done
+
 failures=()
 
 run_gate() {
     local label="$1"
     shift
-    echo "==> ${label}"
+    if [ "${ci_mode}" -eq 1 ]; then
+        echo "::group::${label}"
+    else
+        echo "==> ${label}"
+    fi
     if ! "$@"; then
         failures+=("${label}")
         echo "    FAILED: ${label}"
+        # REPRO invariant (Global Constraints): this is literally "$@", the
+        # array run_gate was handed — it cannot drift from what actually ran.
+        echo "    REPRO: $(printf '%q ' "$@")"
+        if [ "${ci_mode}" -eq 1 ]; then
+            echo "::error title=preflight gate failed::${label}"
+        fi
+    fi
+    if [ "${ci_mode}" -eq 1 ]; then
+        echo "::endgroup::"
     fi
 }
 
@@ -60,7 +87,17 @@ run_gate "hermetic env mutation (delta)" bash scripts/ci/check-hermetic-env.sh
 run_gate "docs publication boundary" python3 scripts/ci/docs_publication_boundary.py
 
 # --- Layer 2: the architecture gate suite ----------------------------------
-if command -v cargo-nextest >/dev/null 2>&1; then
+if [ "${ci_mode}" -eq 1 ]; then
+    echo "==> architecture suite: skipped under --ci — the crate-bucket lane" \
+         "(reborn-tests.yml, 'Test Reborn crate bucket') already runs" \
+         "ironclaw_architecture_tests with --all-targets whenever it is in the" \
+         "affected closure; compiling it again here would be a second cold" \
+         "build of the same ~40 binaries in fast-checks' one cache-less lane" \
+         "on every PR, including guidance-only PRs that touch no crate at all." \
+         "Known residual gap (accepted; see the PR body): a guidance-only PR" \
+         "never runs this suite anywhere even though it pins guidance files —" \
+         "routed to T3's planner track as a follow-up, not fixed here."
+elif command -v cargo-nextest >/dev/null 2>&1; then
     run_gate "architecture suite (nextest)" \
         cargo nextest run -p ironclaw_architecture_tests --no-fail-fast
 else
@@ -69,44 +106,50 @@ else
 fi
 
 # --- Layer 3: module-charter tests for crates the diff touches -------------
-# Charter maps live inside their crates, so only changed crates pay the
-# compile. Diff base mirrors the pre-push hook's default (origin/main).
-# Discovery fails CLOSED: when the base is missing or the diff plumbing
-# errors, the fallback widens to all five charters — a broken setup may cost
-# compile time, never a silent skip.
-all_charter_crates="crates/product/ironclaw_webui crates/product/ironclaw_assistant \
-         crates/domains/ironclaw_llm crates/domains/ironclaw_auth \
-         crates/lanes/ironclaw_mcp"
-base_ref="${IRONCLAW_PREFLIGHT_BASE:-origin/main}"
-if git rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null; then
-    if merge_base="$(git merge-base HEAD "${base_ref}")" \
-        && changed="$(git diff --name-only "${merge_base}...HEAD")"; then
-        :
+if [ "${ci_mode}" -eq 1 ]; then
+    echo "==> charter tests: skipped under --ci — they are --test targets of their" \
+         "crates and the crate-bucket lane runs them with --all-targets when the" \
+         "crate is in the affected closure (reborn-tests.yml, 'Run crate tests')"
+else
+    # Charter maps live inside their crates, so only changed crates pay the
+    # compile. Diff base mirrors the pre-push hook's default (origin/main).
+    # Discovery fails CLOSED: when the base is missing or the diff plumbing
+    # errors, the fallback widens to all five charters — a broken setup may
+    # cost compile time, never a silent skip.
+    all_charter_crates="crates/product/ironclaw_webui crates/product/ironclaw_assistant \
+             crates/domains/ironclaw_llm crates/domains/ironclaw_auth \
+             crates/lanes/ironclaw_mcp"
+    base_ref="${IRONCLAW_PREFLIGHT_BASE:-origin/main}"
+    if git rev-parse --verify --quiet "${base_ref}^{commit}" >/dev/null; then
+        if merge_base="$(git merge-base HEAD "${base_ref}")" \
+            && changed="$(git diff --name-only "${merge_base}...HEAD")"; then
+            :
+        else
+            echo "==> charter tests: cannot diff against ${base_ref}; running all five"
+            changed="${all_charter_crates}"
+        fi
     else
-        echo "==> charter tests: cannot diff against ${base_ref}; running all five"
+        echo "==> charter tests: base ${base_ref} not found; running all five"
         changed="${all_charter_crates}"
     fi
-else
-    echo "==> charter tests: base ${base_ref} not found; running all five"
-    changed="${all_charter_crates}"
+
+    charter() {
+        local crate_dir="$1" package="$2" test_name="$3"
+        shift 3
+        if grep -q "${crate_dir}" <<<"${changed}"; then
+            run_gate "charter: ${package}" \
+                env "$@" cargo test -p "${package}" --test "${test_name}"
+        fi
+    }
+
+    charter "crates/product/ironclaw_webui" ironclaw_webui handlers_module_charter \
+        SKIP_FRONTEND_BUILD=1
+    charter "crates/product/ironclaw_assistant" ironclaw_assistant \
+        reborn_services_module_charter
+    charter "crates/domains/ironclaw_llm" ironclaw_llm module_charter
+    charter "crates/domains/ironclaw_auth" ironclaw_auth module_charter
+    charter "crates/lanes/ironclaw_mcp" ironclaw_mcp module_charter
 fi
-
-charter() {
-    local crate_dir="$1" package="$2" test_name="$3"
-    shift 3
-    if grep -q "${crate_dir}" <<<"${changed}"; then
-        run_gate "charter: ${package}" \
-            env "$@" cargo test -p "${package}" --test "${test_name}"
-    fi
-}
-
-charter "crates/product/ironclaw_webui" ironclaw_webui handlers_module_charter \
-    SKIP_FRONTEND_BUILD=1
-charter "crates/product/ironclaw_assistant" ironclaw_assistant \
-    reborn_services_module_charter
-charter "crates/domains/ironclaw_llm" ironclaw_llm module_charter
-charter "crates/domains/ironclaw_auth" ironclaw_auth module_charter
-charter "crates/lanes/ironclaw_mcp" ironclaw_mcp module_charter
 
 # --- Verdict ----------------------------------------------------------------
 echo
