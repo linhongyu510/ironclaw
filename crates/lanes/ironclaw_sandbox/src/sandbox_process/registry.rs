@@ -166,6 +166,7 @@ struct ActivityEntry {
     expected_labels: Option<HashMap<String, String>>,
     recycle_required: bool,
     stopped_at: Option<DateTime<Utc>>,
+    egress_suspended: bool,
 }
 
 const MAX_TRACKED_USERS: usize = 4096;
@@ -212,10 +213,12 @@ impl SandboxActivityRegistry {
             expected_labels: None,
             recycle_required: false,
             stopped_at: None,
+            egress_suspended: false,
         });
         entry.active_execs = entry.active_execs.saturating_add(1);
         entry.last_activity = Instant::now();
         entry.stopped_at = None;
+        entry.egress_suspended = false;
         Ok(SandboxActivityGuard {
             registry: Arc::clone(self),
             key: key.clone(),
@@ -264,6 +267,7 @@ impl SandboxActivityRegistry {
         if let Some(entry) = state.get_mut(&key) {
             entry.expected_labels = Some(labels);
             entry.stopped_at = stopped_at;
+            entry.egress_suspended = false;
             return Ok(());
         }
         if state.len() >= MAX_TRACKED_USERS {
@@ -280,6 +284,7 @@ impl SandboxActivityRegistry {
                 expected_labels: Some(labels),
                 recycle_required: false,
                 stopped_at,
+                egress_suspended: false,
             },
         );
         Ok(())
@@ -289,14 +294,15 @@ impl SandboxActivityRegistry {
         &self,
         now: Instant,
         idle_timeout: Duration,
+        wall_now: DateTime<Utc>,
+        retention_timeout: Duration,
     ) -> Vec<(RebornSandboxUserKey, HashMap<String, String>)> {
         self.lock()
             .iter()
             .filter(|(_, entry)| {
                 entry.active_execs == 0
                     && !entry.recycle_required
-                    && (entry.stopped_at.is_some()
-                        || now.saturating_duration_since(entry.last_activity) >= idle_timeout)
+                    && sweep_due(entry, now, idle_timeout, wall_now, retention_timeout)
             })
             .filter_map(|(key, entry)| {
                 entry
@@ -312,18 +318,25 @@ impl SandboxActivityRegistry {
         key: &RebornSandboxUserKey,
         now: Instant,
         idle_timeout: Duration,
+        wall_now: DateTime<Utc>,
+        retention_timeout: Duration,
     ) -> bool {
         self.lock().get(key).is_some_and(|entry| {
             entry.active_execs == 0
                 && !entry.recycle_required
-                && (entry.stopped_at.is_some()
-                    || now.saturating_duration_since(entry.last_activity) >= idle_timeout)
+                && sweep_due(entry, now, idle_timeout, wall_now, retention_timeout)
         })
     }
 
     pub(crate) fn mark_stopped(&self, key: &RebornSandboxUserKey, now: DateTime<Utc>) {
         if let Some(entry) = self.lock().get_mut(key) {
             entry.stopped_at.get_or_insert(now);
+        }
+    }
+
+    pub(crate) fn mark_egress_suspended(&self, key: &RebornSandboxUserKey) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.egress_suspended = true;
         }
     }
 
@@ -352,6 +365,24 @@ impl SandboxActivityRegistry {
         {
             state.remove(key);
         }
+    }
+}
+fn sweep_due(
+    entry: &ActivityEntry,
+    now: Instant,
+    idle_timeout: Duration,
+    wall_now: DateTime<Utc>,
+    retention_timeout: Duration,
+) -> bool {
+    match entry.stopped_at {
+        Some(stopped_at) => {
+            !entry.egress_suspended
+                || wall_now
+                    .signed_duration_since(stopped_at)
+                    .to_std()
+                    .is_ok_and(|elapsed| elapsed >= retention_timeout)
+        }
+        None => now.saturating_duration_since(entry.last_activity) >= idle_timeout,
     }
 }
 
@@ -748,13 +779,14 @@ mod tests {
         assert_eq!(active_execs(&registry, &key), 1);
         assert!(
             registry
-                .sweep_candidates(Instant::now(), Duration::ZERO)
+                .sweep_candidates(Instant::now(), Duration::ZERO, Utc::now(), Duration::MAX,)
                 .is_empty()
         );
 
         drop(guard);
         assert_eq!(active_execs(&registry, &key), 0);
-        let candidates = registry.sweep_candidates(Instant::now(), Duration::ZERO);
+        let candidates =
+            registry.sweep_candidates(Instant::now(), Duration::ZERO, Utc::now(), Duration::MAX);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, key);
     }
@@ -766,12 +798,30 @@ mod tests {
         let guard = registry.begin(&key).unwrap();
         set_last_activity(&registry, &key, Instant::now() - Duration::from_secs(60));
 
-        assert!(!registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+        assert!(!registry.sweep_eligible(
+            &key,
+            Instant::now(),
+            Duration::from_secs(30),
+            Utc::now(),
+            Duration::MAX,
+        ));
         drop(guard);
-        assert!(!registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+        assert!(!registry.sweep_eligible(
+            &key,
+            Instant::now(),
+            Duration::from_secs(30),
+            Utc::now(),
+            Duration::MAX,
+        ));
 
         set_last_activity(&registry, &key, Instant::now() - Duration::from_secs(60));
-        assert!(registry.sweep_eligible(&key, Instant::now(), Duration::from_secs(30)));
+        assert!(registry.sweep_eligible(
+            &key,
+            Instant::now(),
+            Duration::from_secs(30),
+            Utc::now(),
+            Duration::MAX,
+        ));
     }
 
     #[test]
@@ -801,11 +851,53 @@ mod tests {
 
         assert_eq!(
             registry
-                .sweep_candidates(Instant::now(), Duration::from_secs(60))
+                .sweep_candidates(
+                    Instant::now(),
+                    Duration::from_secs(60),
+                    Utc::now(),
+                    Duration::from_secs(24 * 60 * 60),
+                )
                 .len(),
             1
         );
         assert!(registry.retention_eligible(&key, Utc::now(), Duration::from_secs(24 * 60 * 60)));
+    }
+
+    #[test]
+    fn suspended_container_is_not_reselected_before_retention_expires() {
+        let registry = SandboxActivityRegistry::new();
+        let key = test_key("t", "suspended");
+        registry
+            .register_discovered_container(
+                key.clone(),
+                HashMap::from([("identity".to_string(), "v".to_string())]),
+                Some(Utc::now()),
+            )
+            .unwrap();
+        registry.mark_egress_suspended(&key);
+
+        assert!(
+            registry
+                .sweep_candidates(
+                    Instant::now(),
+                    Duration::ZERO,
+                    Utc::now(),
+                    Duration::from_secs(60),
+                )
+                .is_empty()
+        );
+
+        assert_eq!(
+            registry
+                .sweep_candidates(
+                    Instant::now(),
+                    Duration::ZERO,
+                    Utc::now() + chrono::Duration::seconds(61),
+                    Duration::from_secs(60),
+                )
+                .len(),
+            1
+        );
     }
 
     #[test]

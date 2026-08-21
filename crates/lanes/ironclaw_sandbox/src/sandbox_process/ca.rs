@@ -1,15 +1,13 @@
 //! Internal per-tenant CA for the sandbox egress proxy (W5 — design doc
 //! `docs/internal/plans/2026-07-26-sandbox-credential-firewall-design.md` §4).
 //!
-//! Generates a root key/cert pair in memory at construction. The public root
-//! certificate is installed in the untrusted user container. The private key
-//! is serialized only into an in-memory Docker archive and uploaded directly
-//! to that user's trusted iron-proxy sidecar; it never enters the user
-//! container, host filesystem, logs, or durable state.
+//! Generates a root key/cert pair in memory at construction and signs
+//! short-lived leaf certificates for the older host-mediated credential
+//! firewall path. The public root certificate can be installed in an
+//! untrusted user container. This module never serializes or exports the root
+//! private key.
 //!
-//! The host-side leaf cache remains available for the older host-mediated
-//! credential-firewall path. Managed egress uses the upstream proxy's leaf
-//! issuance instead.
+//! Managed egress uses the upstream proxy's own leaf issuance instead.
 
 use std::{
     collections::HashMap,
@@ -106,10 +104,9 @@ struct CachedLeaf {
 }
 
 /// In-memory root CA plus a bounded, TTL-scoped cache of per-host leaf
-/// certificates. The root signing key stays private to this module. Its only
-/// export is [`Self::proxy_material`], used to upload it directly into the
-/// trusted proxy sidecar without host-filesystem persistence.
-#[allow(dead_code)] // consumed by W6; not wired yet
+/// certificates. The root signing key stays private to this module; callers
+/// can export only the public root certificate.
+#[allow(dead_code)] // consumed by the older host-mediated credential-firewall path
 pub(crate) struct SandboxCertificateAuthority {
     root_cert_pem: String,
     issuer: Issuer<'static, KeyPair>,

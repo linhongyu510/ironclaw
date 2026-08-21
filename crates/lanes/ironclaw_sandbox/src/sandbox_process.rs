@@ -181,12 +181,16 @@ impl RebornSandboxConfig {
     }
 
     pub fn with_managed_egress_proxy(mut self) -> Result<Self, RuntimeProcessError> {
+        if self.network_broker.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
         let policy = sandbox_network_policy().map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox managed egress policy is invalid: {error}"
             ))
         })?;
-        self.network_broker = None;
         self.managed_egress = Some(ManagedEgressConfig::from_policy(
             policy,
             self.workspace_root.join(".managed-egress"),
@@ -198,6 +202,11 @@ impl RebornSandboxConfig {
         mut self,
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
+        if self.managed_egress.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
         self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
         Ok(self)
     }
@@ -280,12 +289,25 @@ impl RebornSandboxConfig {
         };
         let mut env = validate_env(&extra_env)?;
         broker::push_broker_env(None, self.secret_broker.as_ref(), &mut env)?;
-        env.retain(|entry| !entry.starts_with("IRONCLAW_REBORN_NETWORK_MODE="));
+        let mode_prefix = format!("{}=", broker::REBORN_NETWORK_MODE_ENV);
+        env.retain(|entry| !entry.starts_with(&mode_prefix));
         env.extend(managed.user_environment(bundle)?);
+        let brokered_mode = format!("{}=brokered", broker::REBORN_NETWORK_MODE_ENV);
+        if env.iter().filter(|entry| *entry == &brokered_mode).count() != 1 {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress did not establish exactly one brokered network mode"
+                    .to_string(),
+            ));
+        }
         Ok(env)
     }
 
     fn append_broker_binds(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
+        if self.managed_egress.is_some() && self.network_broker.is_some() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox managed egress and network broker are mutually exclusive".to_string(),
+            ));
+        }
         broker::append_broker_binds(
             self.network_broker.as_ref(),
             self.secret_broker.as_ref(),
@@ -967,6 +989,31 @@ mod tests {
         assert_eq!(config.container_network_mode().as_deref(), Some("none"));
         assert!(config.network_broker.is_none());
         assert!(config.managed_egress.is_some());
+    }
+
+    #[test]
+    fn managed_egress_and_network_broker_are_mutually_exclusive_in_both_orders() {
+        let broker_then_managed = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+            .unwrap()
+            .with_managed_egress_proxy()
+            .unwrap_err();
+        assert!(
+            broker_then_managed
+                .to_string()
+                .contains("mutually exclusive")
+        );
+
+        let managed_then_broker = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_managed_egress_proxy()
+            .unwrap()
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+            .unwrap_err();
+        assert!(
+            managed_then_broker
+                .to_string()
+                .contains("mutually exclusive")
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ use bollard::{
     },
 };
 use futures_util::StreamExt;
+use ironclaw_common::env_helpers::env_or_override;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     ids::{InvocationId, TenantId, UserId},
@@ -105,7 +106,7 @@ impl ManagedEgressConfig {
 }
 
 pub(super) fn configured_proxy_image() -> Result<String, RuntimeProcessError> {
-    let image = std::env::var(PROXY_IMAGE_ENV).unwrap_or_else(|_| DEFAULT_PROXY_IMAGE.to_string());
+    let image = env_or_override(PROXY_IMAGE_ENV).unwrap_or_else(|| DEFAULT_PROXY_IMAGE.to_string());
     let Some((_, digest)) = image.rsplit_once("@sha256:") else {
         return Err(RuntimeProcessError::ExecutionFailed(
             "sandbox proxy image must be pinned by sha256 digest".to_string(),
@@ -206,7 +207,7 @@ impl ManagedEgressRuntime {
     ) -> Result<Arc<Self>, RuntimeProcessError> {
         let proxy_image = resolve_proxy_image(docker, &config.proxy_image).await?;
         let material_root = config.material_root;
-        create_material_directory(&material_root).await?;
+        create_material_directory(&material_root, 0o711).await?;
         let posture = proxy_posture(&proxy_image, &config.policy, &material_root)?;
         Ok(Arc::new(Self {
             proxy_image,
@@ -254,7 +255,7 @@ impl ManagedEgressRuntime {
         let proxy_name = key.proxy_name();
         let upstream_network_name = SHARED_UPSTREAM_NETWORK_NAME;
         let proxy_material_root = self.material_root.join(&proxy_name);
-        create_material_directory(&proxy_material_root).await?;
+        create_material_directory(&proxy_material_root, 0o711).await?;
         let invocation_id_path = proxy_material_root.join("invocation-id");
         if !tokio::fs::try_exists(&invocation_id_path)
             .await
@@ -658,11 +659,11 @@ impl ManagedEgressRuntime {
     }
 
     /// Drains the proxy container's structured audit log into a durable
-    /// per-proxy file under `<material_root>/audit/` before the container
+    /// per-user directory under `<material_root>/audit/` before the container
     /// (and with it Docker's `json-file` log) is deleted. Capture keeps the
     /// most recent [`PROXY_AUDIT_CAPTURE_BYTES`]; the destination rotates
-    /// once past [`PROXY_AUDIT_ROTATE_BYTES`], bounding disk usage while
-    /// preserving recent egress evidence across suspension and retention.
+    /// once past [`PROXY_AUDIT_ROTATE_BYTES`], bounding each user's disk usage
+    /// while preserving recent egress evidence across suspension and retention.
     async fn preserve_proxy_audit(
         &self,
         docker: &Docker,
@@ -700,31 +701,36 @@ impl ManagedEgressRuntime {
         if captured.is_empty() {
             return Ok(());
         }
-        let audit_dir = self.material_root.join("audit");
-        create_material_directory(&audit_dir).await?;
-        #[cfg(unix)]
-        tokio::fs::set_permissions(&audit_dir, {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::Permissions::from_mode(0o700)
-        })
-        .await
-        .map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox proxy audit directory permissions failed: {error}"
-            ))
-        })?;
-        let audit_path = audit_dir.join(format!("{audit_name}.log"));
-        if let Ok(metadata) = tokio::fs::metadata(&audit_path).await
-            && metadata.len() > PROXY_AUDIT_ROTATE_BYTES
-        {
-            let rotated = audit_dir.join(format!("{audit_name}.log.1"));
-            tokio::fs::rename(&audit_path, &rotated)
-                .await
-                .map_err(|error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox proxy audit log rotation failed: {error}"
-                    ))
-                })?;
+        let audit_dir = self.material_root.join("audit").join(audit_name);
+        create_material_directory(&audit_dir, 0o700).await?;
+        let audit_path = audit_dir.join("proxy.log");
+        match tokio::fs::metadata(&audit_path).await {
+            Ok(metadata) if metadata.len() > PROXY_AUDIT_ROTATE_BYTES => {
+                let rotated = audit_dir.join("proxy.log.1");
+                match tokio::fs::remove_file(&rotated).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(RuntimeProcessError::ExecutionFailed(format!(
+                            "sandbox proxy rotated audit log cleanup failed: {error}"
+                        )));
+                    }
+                }
+                tokio::fs::rename(&audit_path, &rotated)
+                    .await
+                    .map_err(|error| {
+                        RuntimeProcessError::ExecutionFailed(format!(
+                            "sandbox proxy audit log rotation failed: {error}"
+                        ))
+                    })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox proxy audit log metadata failed: {error}"
+                )));
+            }
         }
         let mut options = tokio::fs::OpenOptions::new();
         options.create(true).append(true);
@@ -742,6 +748,18 @@ impl ManagedEgressRuntime {
                     "sandbox proxy audit log write failed: {error}"
                 ))
             })?;
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox proxy audit log flush failed: {error}"
+                ))
+            })?;
+        file.sync_data().await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit log sync failed: {error}"
+            ))
+        })?;
         enforce_audit_budget(&audit_dir, PROXY_AUDIT_DIR_BUDGET_BYTES).await?;
         Ok(())
     }
@@ -994,40 +1012,19 @@ async fn start_proxy_container(docker: &Docker, name: &str) -> Result<(), Runtim
         })
 }
 
-/// Bounded startup diagnostics for a proxy that never became healthy: the
-/// container is about to be removed, so its exit status and last output are
-/// the only evidence an operator would otherwise lose.
+/// Bounded startup diagnostics for a proxy that never became healthy. Raw
+/// proxy output can contain request data, so model-visible errors expose only
+/// Docker's container state and exit code.
 async fn proxy_failure_detail(docker: &Docker, name: &str) -> String {
-    let mut detail = String::new();
     if let Ok(Some(inspected)) = inspect_proxy(docker, name).await
         && let Some(state) = inspected.state
     {
-        detail.push_str(&format!(
+        return format!(
             " (status {:?}, exit code {:?})",
             state.status, state.exit_code
-        ));
+        );
     }
-    let mut logs = docker.logs(
-        name,
-        Some(LogsOptions::<String> {
-            stdout: true,
-            stderr: true,
-            tail: "20".to_string(),
-            ..Default::default()
-        }),
-    );
-    let mut captured = String::new();
-    while let Some(Ok(chunk)) = logs.next().await {
-        captured.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
-        if captured.len() >= 2048 {
-            break;
-        }
-    }
-    let captured = captured.trim();
-    if !captured.is_empty() {
-        detail.push_str(&format!("; proxy output: {captured}"));
-    }
-    detail
+    " (container diagnostics unavailable)".to_string()
 }
 
 async fn wait_proxy_ready(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
@@ -1233,7 +1230,7 @@ pub(super) fn render_proxy_config(
     }
     config.push_str("tls:\n  mode: \"sni-only\"\ntransforms:\n  - name: secrets\n    config:\n      secrets:\n        - source:\n            type: file\n            path: \"");
     config.push_str(PROXY_INVOCATION_ID_PATH);
-    config.push_str("\"\n            ttl: \"1ms\"\n            failure_ttl: \"1ms\"\n          rules:\n            - host: \"*\"\n          inject:\n            header: \"X-Ironclaw-Invocation-Id\"\n            require: true\n  - name: annotate\n    config:\n      annotations:\n        - rules:\n            - host: \"*\"\n          headers: [\"X-Ironclaw-Invocation-Id\"]\n  - name: header_allowlist\n    config:\n      headers: [\"Authorization\", \"Content-Type\", \"Accept\", \"User-Agent\", \"Range\", \"If-None-Match\", \"If-Modified-Since\"]\n  - name: allowlist\n    config:\n      domains:\n");
+    config.push_str("\"\n            ttl: \"-1ns\"\n            failure_ttl: \"1ms\"\n          rules:\n            - host: \"*\"\n          inject:\n            header: \"X-Ironclaw-Invocation-Id\"\n            require: true\n  - name: annotate\n    config:\n      annotations:\n        - rules:\n            - host: \"*\"\n          headers: [\"X-Ironclaw-Invocation-Id\"]\n  - name: header_allowlist\n    config:\n      headers: [\"Authorization\", \"Content-Type\", \"Accept\", \"User-Agent\", \"Range\", \"If-None-Match\", \"If-Modified-Since\"]\n  - name: allowlist\n    config:\n      domains:\n");
     for target in &policy.allowed_targets {
         let quoted = serde_json::to_string(&target.host_pattern).map_err(proxy_config_error)?;
         config.push_str("        - ");
@@ -1319,6 +1316,14 @@ async fn write_atomic_material_file(
                 error.error
             ))
         })?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox managed-egress material directory sync failed: {error}"
+                ))
+            })?;
         Ok(())
     })
     .await
@@ -1329,19 +1334,30 @@ async fn write_atomic_material_file(
     })?
 }
 
-async fn create_material_directory(path: &std::path::Path) -> Result<(), RuntimeProcessError> {
+async fn create_material_directory(
+    path: &std::path::Path,
+    unix_mode: u32,
+) -> Result<(), RuntimeProcessError> {
     tokio::fs::create_dir_all(path).await.map_err(|error| {
         RuntimeProcessError::ExecutionFailed(format!(
             "sandbox managed-egress material directory create failed: {error}"
         ))
+    })?;
+    #[cfg(unix)]
+    tokio::fs::set_permissions(path, {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(unix_mode)
     })
+    .await
+    .map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox managed-egress material directory permissions failed: {error}"
+        ))
+    })?;
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+    Ok(())
 }
-
-/// Caps aggregate audit storage: when the directory exceeds `budget_bytes`,
-/// whole files are removed oldest-first (by modification time) until the
-/// total fits. Per-user audit files are already individually bounded by
-/// rotation; this bounds cardinality across `(tenant, user)` churn so audit
-/// retention cannot exhaust host disk.
 async fn enforce_audit_budget(
     audit_dir: &std::path::Path,
     budget_bytes: u64,
@@ -1357,15 +1373,19 @@ async fn enforce_audit_budget(
             "sandbox proxy audit directory scan failed: {error}"
         ))
     })? {
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
-        };
+        let metadata = entry.metadata().await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit entry metadata failed: {error}"
+            ))
+        })?;
         if !metadata.is_file() {
             continue;
         }
-        let modified = metadata
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let modified = metadata.modified().map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy audit entry modification time failed: {error}"
+            ))
+        })?;
         entries.push((modified, metadata.len(), entry.path()));
     }
     let mut total: u64 = entries.iter().map(|(_, len, _)| len).sum();
@@ -1407,6 +1427,7 @@ async fn remove_material_directory(path: &std::path::Path) -> Result<(), Runtime
 }
 #[cfg(test)]
 mod tests {
+    use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::action::{NetworkScheme, NetworkTargetPattern};
 
     use super::*;
@@ -1457,7 +1478,36 @@ mod tests {
         assert!(!rendered.contains("management:"));
         assert!(rendered.contains(PROXY_INVOCATION_ID_PATH));
         assert!(rendered.contains("X-Ironclaw-Invocation-Id"));
+        assert!(
+            rendered.contains("ttl: \"-1ns\""),
+            "attribution source must bypass the proxy cache on every request"
+        );
         assert!(rendered.contains("name: header_allowlist"));
+    }
+
+    #[test]
+    fn proxy_image_override_requires_a_full_sha256_digest() {
+        let _guard = lock_env();
+        remove_runtime_env(PROXY_IMAGE_ENV);
+        assert_eq!(configured_proxy_image().unwrap(), DEFAULT_PROXY_IMAGE);
+
+        for rejected in [
+            "ironsh/iron-proxy:latest",
+            "ironsh/iron-proxy@sha256:deadbeef",
+            "ironsh/iron-proxy@sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+            "ironsh/iron-proxy@sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            set_runtime_env(PROXY_IMAGE_ENV, rejected);
+            assert!(
+                configured_proxy_image().is_err(),
+                "proxy image override must reject {rejected}"
+            );
+        }
+
+        let accepted = "ironsh/iron-proxy@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        set_runtime_env(PROXY_IMAGE_ENV, accepted);
+        assert_eq!(configured_proxy_image().unwrap(), accepted);
+        remove_runtime_env(PROXY_IMAGE_ENV);
     }
 
     #[test]
@@ -1529,6 +1579,27 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o644);
+        }
+    }
+
+    #[tokio::test]
+    async fn material_directories_apply_the_requested_proxy_boundary_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let proxy_material = directory.path().join("proxy");
+        create_material_directory(&proxy_material, 0o711)
+            .await
+            .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = tokio::fs::metadata(proxy_material)
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o711);
         }
     }
 

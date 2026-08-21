@@ -699,6 +699,12 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
             && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("exit \"$worker_status\""),
         "the wrapper must regain control after the worker to drain the current invocation's audit"
     );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "proxy audit capture failed after command exit\" >&2\n  exit 1\nfi\nexit \"$worker_status\""
+        ),
+        "a final audit capture failure must override a successful worker status"
+    );
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("network connect bridge"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("ca_path"));
     assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("SSL_CERT_FILE"));
@@ -734,7 +740,20 @@ async fn managed_proxy_has_no_direct_network_escape_hatch() {
     let argv = &model_container_runs(&invocations)[0].args;
 
     assert!(argv.iter().any(|arg| arg == RAILWAY_MANAGED_EGRESS_WRAPPER));
-    assert!(!argv.iter().any(|argument| argument == "direct"));
+    assert!(RAILWAY_MANAGED_EGRESS_WRAPPER.contains("docker run \\\n  --network \"$network\""));
+    for forbidden in [
+        "--network host",
+        "--network bridge",
+        "--net host",
+        "--net bridge",
+        "--add-host",
+        "network connect bridge",
+    ] {
+        assert!(
+            !RAILWAY_MANAGED_EGRESS_WRAPPER.contains(forbidden),
+            "managed proxy wrapper exposes forbidden network argument {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -566,12 +566,17 @@ async fn idle_stop_suspends_egress_and_preserves_the_private_network() {
         .join(".managed-egress")
         .join("audit");
     let preserved_audit = std::fs::read_dir(&audit_dir)
-        .expect("suspension preserves a proxy audit directory")
+        .expect("suspension preserves a proxy audit root")
         .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .metadata()
-                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.is_dir()))
+        .any(|user_audit| {
+            std::fs::read_dir(user_audit.path()).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry
+                        .metadata()
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+                })
+            })
         });
     assert!(
         preserved_audit,
@@ -807,7 +812,7 @@ async fn sandbox_profile_allows_allowlisted_https_through_proxy() {
     .await
     .expect("Docker transport connects");
 
-    let request = request(
+    let first_request = request(
         egress_scope.resource_scope(),
         "set -eu; \
          test \"$IRONCLAW_REBORN_NETWORK_MODE\" = brokered; \
@@ -819,11 +824,20 @@ async fn sandbox_profile_allows_allowlisted_https_through_proxy() {
          python -c \"import urllib.request; response = urllib.request.urlopen('https://pypi.org', timeout=15); assert response.status == 200; response.close()\"; \
          echo SANDBOX_PROXY_TLS_MATRIX_OK",
     );
-    let invocation_id = request.scope.invocation_id.to_string();
+    let invocation_id = first_request.scope.invocation_id.to_string();
     let result = transport
-        .run_command(request)
+        .run_command(first_request)
         .await
         .expect("public HTTPS request runs");
+    let second_request = request(
+        egress_scope.resource_scope(),
+        "curl --fail --silent --show-error https://pypi.org >/dev/null",
+    );
+    let second_invocation_id = second_request.scope.invocation_id.to_string();
+    let second_result = transport
+        .run_command(second_request)
+        .await
+        .expect("second public HTTPS request runs");
     let container = cleanup.capture(&egress_scope);
     assert_stable_identity(&container, &egress_scope);
     let proxy = managed_proxy_id(&egress_scope);
@@ -837,9 +851,18 @@ async fn sandbox_profile_allows_allowlisted_https_through_proxy() {
     );
     assert!(result.output.contains("SANDBOX_PROXY_TLS_MATRIX_OK"));
     assert!(result.sandboxed);
+    assert_eq!(
+        second_result.exit_code, 0,
+        "second egress canary failed: {}\nproxy logs:\n{}",
+        second_result.output, proxy_logs,
+    );
     assert!(
         proxy_logs.contains(&invocation_id),
-        "proxy audit did not retain invocation correlation"
+        "proxy audit did not retain first invocation correlation"
+    );
+    assert!(
+        proxy_logs.contains(&second_invocation_id),
+        "proxy attribution cache reused the prior invocation correlation"
     );
 }
 

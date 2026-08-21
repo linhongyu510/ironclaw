@@ -573,14 +573,22 @@ async fn sweep_idle_user_containers(
     idle_timeout: Duration,
     retention_timeout: Duration,
 ) {
-    for (key, expected_labels) in registry.sweep_candidates(Instant::now(), idle_timeout) {
+    for (key, expected_labels) in
+        registry.sweep_candidates(Instant::now(), idle_timeout, Utc::now(), retention_timeout)
+    {
         let Some(gate) = registry.gate(&key) else {
             continue;
         };
         let Ok(_gate) = gate.try_lock() else {
             continue;
         };
-        if !registry.sweep_eligible(&key, Instant::now(), idle_timeout) {
+        if !registry.sweep_eligible(
+            &key,
+            Instant::now(),
+            idle_timeout,
+            Utc::now(),
+            retention_timeout,
+        ) {
             continue;
         }
         let name = key.container_name();
@@ -646,6 +654,7 @@ async fn sweep_idle_user_containers(
                     );
                     continue;
                 }
+                registry.mark_egress_suspended(&key);
                 true
             }
             ExistingContainerDecision::Recreate => {
@@ -670,6 +679,7 @@ async fn sweep_idle_user_containers(
         if stopped {
             let now = Utc::now();
             registry.mark_stopped(&key, now);
+            registry.mark_egress_suspended(&key);
             if registry.retention_eligible(&key, now, retention_timeout) {
                 if let Some(managed) = managed_egress
                     && let Err(error) = managed.remove_bundle(docker, &key, &name).await

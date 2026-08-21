@@ -215,6 +215,7 @@ if ! drain_proxy_audit; then
   # The proxy and its Docker log survive; the next invocation's
   # fail-closed drain retries before any removal can destroy evidence.
   printf '%s\n' "Railway sandbox proxy audit capture failed after command exit" >&2
+  exit 1
 fi
 exit "$worker_status"
 "#;
