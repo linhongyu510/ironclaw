@@ -24,7 +24,18 @@ use super::{
 /// Bounded retries for a transcript-migration page that lost a CAS or
 /// writer-contention race against live turn writes.
 const TRANSCRIPT_PAGE_CONFLICT_RETRIES: u32 = 5;
-const TRANSCRIPT_MIGRATION_MARKER_BODY: &[u8] = b"transcript-index-v2";
+// v2 -> v3: a box that already ran the pre-append-migration build's
+// transcript-index-only pass durably holds a `transcript-index-v2.complete`
+// marker, written before this crate materialized rc1's per-thread
+// `message_appends` log into per-message rows. Reusing the v2 marker here
+// would make `migrate_transcript_for_scope` treat that legacy marker as
+// proof append materialization already ran and skip it forever, silently
+// dropping rc1 append-only assistant messages from every timeline after
+// upgrade (PR #7790 codex review comment 3827449526). Bumping to v3 makes
+// every scope re-run once; `migrate_legacy_append_logs_for_scope` and
+// `migrate_transcript_indexes_for_scope` are both idempotent, so the re-run
+// is safe and cheap even for scopes with nothing left to materialize.
+const TRANSCRIPT_MIGRATION_MARKER_BODY: &[u8] = b"transcript-index-v3";
 
 /// Bounded read size for the append log written by `1.0.0-rc.1`.
 const LEGACY_APPEND_PAGE_LIMIT: usize = 256;
@@ -415,7 +426,7 @@ fn transcript_index_migration_marker_path(
     scope: &ThreadScope,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/index-migrations/transcript-index-v2.complete",
+        "{}/index-migrations/transcript-index-v3.complete",
         scope_axes_string(scope)
     ))
 }
