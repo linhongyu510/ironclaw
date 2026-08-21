@@ -18,9 +18,10 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
-    action::NetworkPolicy,
+    action::{NetworkPolicy, NetworkTargetPattern},
     capability::RuntimeCredentialAccountSetup,
     dispatch::CredentialStageError,
+    http::RuntimeCredentialTarget,
     ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     resource::ResourceScope,
 };
@@ -79,9 +80,15 @@ struct RuntimeSecretInjectionState {
     secrets: Mutex<HashMap<RuntimeSecretInjectionKey, RuntimeSecretInjectionEntry>>,
     ttl: Duration,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeCredentialBindingPolicy {
+    pub audience: NetworkTargetPattern,
+    pub target: RuntimeCredentialTarget,
+}
 
 struct RuntimeSecretInjectionEntry {
     material: SecretMaterial,
+    binding: Option<RuntimeCredentialBindingPolicy>,
     expires_at: Instant,
 }
 
@@ -106,6 +113,28 @@ impl RuntimeSecretInjectionStore {
         handle: &SecretHandle,
         material: SecretMaterial,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
+        self.insert_inner(scope, capability_id, handle, material, None)
+    }
+
+    pub(crate) fn insert_bound(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+        material: SecretMaterial,
+        binding: RuntimeCredentialBindingPolicy,
+    ) -> Result<(), RuntimeSecretInjectionStoreError> {
+        self.insert_inner(scope, capability_id, handle, material, Some(binding))
+    }
+
+    fn insert_inner(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+        material: SecretMaterial,
+        binding: Option<RuntimeCredentialBindingPolicy>,
+    ) -> Result<(), RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
         let expires_at = now.checked_add(self.state.ttl).unwrap_or(now);
         let mut secrets = self.lock()?;
@@ -114,6 +143,7 @@ impl RuntimeSecretInjectionStore {
             RuntimeSecretInjectionKey::new(scope, capability_id, handle),
             RuntimeSecretInjectionEntry {
                 material,
+                binding,
                 expires_at,
             },
         );
@@ -136,6 +166,26 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+    pub(crate) fn take_bound(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<
+        Option<(SecretMaterial, Option<RuntimeCredentialBindingPolicy>)>,
+        RuntimeSecretInjectionStoreError,
+    > {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .remove(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| (entry.material, entry.binding)))
     }
 
     pub(crate) fn clone_material(

@@ -7,6 +7,7 @@
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 mod process_executor;
+pub use process_executor::SandboxTransportProcessExecutor;
 
 use std::sync::{Arc, Mutex};
 
@@ -717,13 +718,16 @@ where
         }
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
         let process_runtime = self.process_services.process_runtime();
-        let process_executor = Arc::new(HostProcessExecutor::new(
-            Arc::new(RuntimeDispatchProcessExecutor::new(
-                Arc::clone(&dispatcher),
-                ironclaw_capabilities::process_authorization_remint_port(process_runtime),
-            )),
-            self.process_sandbox_executor.clone(),
-        ));
+        let process_executor = Arc::new(
+            HostProcessExecutor::new(
+                Arc::new(RuntimeDispatchProcessExecutor::new(
+                    Arc::clone(&dispatcher),
+                    ironclaw_capabilities::process_authorization_remint_port(process_runtime),
+                )),
+                self.process_sandbox_executor.clone(),
+            )
+            .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
+        );
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
         let submission_lifecycle: Arc<dyn ironclaw_processes::ProcessSubmissionLifecycle> =
             lifecycle_process_store.clone();

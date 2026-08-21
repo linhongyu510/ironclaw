@@ -94,6 +94,9 @@ impl UserSandboxProcessPort {
     pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
         Self { transport }
     }
+    pub(crate) fn transport(&self) -> std::sync::Arc<dyn SandboxCommandTransport> {
+        self.transport.clone()
+    }
 
     pub async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
         self.transport.shutdown().await

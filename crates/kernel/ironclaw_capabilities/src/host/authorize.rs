@@ -67,6 +67,27 @@ where
             )),
         }
     }
+    pub(super) async fn enrich_invocation_descriptor(
+        &self,
+        descriptor: &CapabilityDescriptor,
+        capability_id: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<CapabilityDescriptor, CapabilityInvocationError> {
+        let mut descriptor = descriptor.clone();
+        let invocation_credentials = self
+            .policy_facts
+            .invocation_runtime_credentials(capability_id, input)
+            .await
+            .map_err(|detail| CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id.clone(),
+                reason: DenyReason::PolicyDenied,
+                detail: Some(detail),
+            })?;
+        descriptor
+            .runtime_credentials
+            .extend(invocation_credentials);
+        Ok(descriptor)
+    }
 
     /// Persistent-approval fold (§5.2.7/§5.3.2): a prior scoped approval may
     /// already authorize this invocation. Relocated from host_runtime's former
@@ -194,12 +215,15 @@ where
         // fingerprint above nor `invocation_state.start` below needs the descriptor, so
         // hoisting this lookup is safe; everything from `start` onward keeps its
         // original order (the credential pre-flight still runs after `start`).
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             debug!("capability invocation failed before authorization: unknown capability");
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id.clone(),
             });
         };
+        let descriptor = self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await?;
 
         if let Some(invocation_state) = self.invocation_state {
             invocation_state
@@ -233,7 +257,7 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
             apply_invocation_state_transition_if_configured(
                 self.invocation_state,
                 &scope,
@@ -287,7 +311,7 @@ where
         let frozen_deadline = self
             .apply_persistent_approval(
                 &mut authorize_context,
-                descriptor,
+                &descriptor,
                 &request.capability_id,
                 &request.estimate,
                 &trust_decision,
@@ -299,7 +323,7 @@ where
             .authorizer
             .authorize_dispatch_with_trust(
                 &authorize_context,
-                descriptor,
+                &descriptor,
                 &request.estimate,
                 &trust_decision,
             )
@@ -347,7 +371,7 @@ where
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
-                    descriptor,
+                    &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
                 );

@@ -161,7 +161,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_services_for_process_backend,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend, user_sandbox_process_package,
 };
 use ironclaw_identity::projects::ProjectRepository;
 use ironclaw_identity::projects::RebornProjectService;
@@ -1212,6 +1212,17 @@ fn production_builtin_extension_registry(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
+    if process_backend == ProcessBackendKind::UserSandbox {
+        registry
+            .insert(user_sandbox_process_package().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("user sandbox process package is invalid: {error}"),
+                }
+            })?)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("user sandbox process registry is invalid: {error}"),
+            })?;
+    }
     insert_bound_memory_package(&mut registry, memory_package)?;
     Ok(registry)
 }

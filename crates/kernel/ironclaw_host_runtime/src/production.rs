@@ -29,9 +29,12 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
+    capability::{
+        PROCESS_SANDBOX_CAPABILITY_ID, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
     dispatch::{CapabilityDispatcher, provider_diagnostic_model_cause},
     ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
@@ -1037,6 +1040,68 @@ impl DefaultHostRuntime {
     }
 }
 
+fn resolve_invocation_runtime_credentials(
+    registry: &ExtensionRegistry,
+    capability_id: &CapabilityId,
+    input: &serde_json::Value,
+) -> Result<Vec<RuntimeCredentialRequirement>, String> {
+    if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
+        return Ok(Vec::new());
+    }
+
+    let plan = serde_json::from_value::<SandboxProcessPlan>(input.clone())
+        .map_err(|error| format!("sandbox credential request is invalid: {error}"))?;
+    let plan = ValidatedSandboxProcessPlan::new(plan)
+        .map_err(|error| format!("sandbox credential request is invalid: {error}"))?;
+    let mut resolved = Vec::with_capacity(plan.credentials.len());
+
+    for binding in &plan.credentials {
+        let mut matched: Option<RuntimeCredentialRequirement> = None;
+        for declared in registry
+            .capabilities()
+            .flat_map(|descriptor| descriptor.runtime_credentials.iter())
+        {
+            if declared.handle != binding.handle
+                || !matches!(
+                    declared.source,
+                    RuntimeCredentialRequirementSource::ProductAuthAccount { .. }
+                )
+                || !declared
+                    .audience
+                    .host_pattern
+                    .eq_ignore_ascii_case(&binding.approved_host)
+                || declared.target != binding.target
+                || declared.required != binding.required
+            {
+                continue;
+            }
+
+            if let Some(existing) = &matched
+                && (existing.source != declared.source
+                    || existing.provider_scopes != declared.provider_scopes
+                    || existing.audience != declared.audience)
+            {
+                return Err(format!(
+                    "sandbox credential handle '{}' has conflicting host declarations",
+                    binding.handle
+                ));
+            }
+
+            matched = Some(declared.clone());
+        }
+
+        let Some(requirement) = matched else {
+            return Err(format!(
+                "sandbox credential handle '{}' is not declared for host '{}'",
+                binding.handle, binding.approved_host
+            ));
+        };
+        resolved.push(requirement);
+    }
+
+    Ok(resolved)
+}
+
 /// `DefaultHostRuntime` is the sole production implementor of the kernel's
 /// [`ironclaw_capabilities::HostPolicyFacts`] port (§5.3.2/§9). It surfaces
 /// host-mediated policy *facts* — never a verdict — that the capability kernel's
@@ -1047,10 +1112,18 @@ impl DefaultHostRuntime {
 /// - [`persistent_grants`](DefaultHostRuntime::persistent_grants) surfaces the
 ///   active persistent-approval grants (via the same scope × grantee fan-out the
 ///   former `apply_persistent_approval_policy` used). The kernel's `authorize()`
-///   fold owns the re-authorize loop that reads it and adopts the first grant
-///   that flips the decision to `Allow`.
+///   fold owns the re-authorize loop that reads it, adopts the first grant that
+///   flips the decision to `Allow`.
 #[async_trait]
 impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
+    async fn invocation_runtime_credentials(
+        &self,
+        capability_id: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<Vec<RuntimeCredentialRequirement>, String> {
+        let registry = self.registry.snapshot();
+        resolve_invocation_runtime_credentials(&registry, capability_id, input)
+    }
     async fn credential_presence(
         &self,
         capability_id: &CapabilityId,
@@ -1405,7 +1478,7 @@ fn stable_auth_gate_id(
             // `GateRecordAlreadyExists` and silently keeps the stale record, so
             // the runner reloads and renders the wrong authentication flow.
             format!(
-                "credential={}:{}:setup={}:{}",
+                "credential={}:extension:{}:setup={}:{}",
                 requirement.provider.as_str(),
                 requirement.requester_extension.as_str(),
                 stable_setup_token(&requirement.setup),
@@ -2648,16 +2721,8 @@ mod tests {
             "NetworkDenied must not be in the quiet-retry set"
         );
     }
-    // ─── capability_credential_requirements unit tests ──────────────────────────
-    //
-    // These were previously integration tests in host_runtime_services_contract.rs
-    // that called the function via `ironclaw_host_runtime::capability_credential_requirements`.
-    // They are kept here as unit tests because the function is now `pub(crate)`,
-    // making it invisible to external test binaries. Coverage is equivalent.
 
-    fn build_descriptor_for_manifest(
-        manifest_toml: &str,
-    ) -> ironclaw_host_api::capability::CapabilityDescriptor {
+    fn build_registry_for_manifest(manifest_toml: &str) -> ExtensionRegistry {
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::InstalledLocal,
@@ -2665,13 +2730,22 @@ mod tests {
             &capability_provider_contracts(),
         )
         .expect("manifest must parse");
-        let cap_id = manifest.capabilities[0].id.clone();
         let root =
             VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
         let package = ExtensionPackage::from_manifest(manifest, root).expect("package must build");
         let mut registry = ExtensionRegistry::new();
         registry.insert(package).unwrap();
-        registry.get_capability(&cap_id).unwrap().clone()
+        registry
+    }
+
+    fn build_descriptor_for_manifest(
+        manifest_toml: &str,
+    ) -> ironclaw_host_api::capability::CapabilityDescriptor {
+        build_registry_for_manifest(manifest_toml)
+            .capabilities()
+            .next()
+            .expect("fixture package must declare a capability")
+            .clone()
     }
 
     /// `capability_credential_requirements` must return exactly the required
@@ -2870,6 +2944,125 @@ required = true
             !credential_requirements.is_empty(),
             "a required product_auth_account credential must still surface in credential_requirements"
         );
+    }
+    fn sandbox_credential_registry() -> ExtensionRegistry {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "credential-fixture"
+name = "Credential Fixture"
+version = "0.1.0"
+description = "Fixture with a product-auth runtime credential"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "credential-fixture.call"
+description = "Call the fixture provider"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test/input.v1.json"
+output_schema_ref = "schemas/test/output.v1.json"
+prompt_doc_ref = "prompts/test.md"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "fixture_runtime_token"
+source = { type = "product_auth_account", provider = "fixture-vendor" }
+audience = { scheme = "https", host_pattern = "api.example.com" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+        build_registry_for_manifest(MANIFEST)
+    }
+
+    fn sandbox_credential_input(host: &str) -> serde_json::Value {
+        serde_json::json!({
+            "run": {
+                "command": "provider-cli",
+                "args": [],
+                "env": {
+                    "PROVIDER_TOKEN": "icsbx_test_placeholder"
+                }
+            },
+            "network": {
+                "runtime_hosts": [host],
+                "direct_egress_lockdown": true
+            },
+            "credentials": [{
+                "handle": "fixture_runtime_token",
+                "approved_host": host,
+                "target": {
+                    "type": "header",
+                    "name": "authorization",
+                    "prefix": "Bearer "
+                },
+                "placeholder_env": "PROVIDER_TOKEN",
+                "placeholder_value": "icsbx_test_placeholder",
+                "required": true
+            }]
+        })
+    }
+
+    #[test]
+    fn sandbox_invocation_credentials_resolve_from_extension_authority() {
+        let requirements = resolve_invocation_runtime_credentials(
+            &sandbox_credential_registry(),
+            &CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).unwrap(),
+            &sandbox_credential_input("api.example.com"),
+        )
+        .expect("declared sandbox credential resolves");
+
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].handle.as_str(), "fixture_runtime_token");
+        assert!(requirements[0].required);
+        assert!(matches!(
+            &requirements[0].source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. }
+                if provider.as_str() == "fixture-vendor"
+        ));
+        assert!(matches!(
+            &requirements[0].target,
+            ironclaw_host_api::http::RuntimeCredentialTarget::Header { name, prefix }
+                if name == "authorization" && prefix.as_deref() == Some("Bearer ")
+        ));
+    }
+
+    #[test]
+    fn sandbox_invocation_credentials_reject_undeclared_host() {
+        let error = resolve_invocation_runtime_credentials(
+            &sandbox_credential_registry(),
+            &CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).unwrap(),
+            &sandbox_credential_input("other.example.com"),
+        )
+        .expect_err("an undeclared credential audience must fail closed");
+
+        assert!(error.contains("is not declared for host"));
+    }
+
+    #[test]
+    fn sandbox_invocation_credentials_reject_undeclared_header_binding() {
+        let mut input = sandbox_credential_input("api.example.com");
+        input["credentials"][0]["target"]["name"] = serde_json::json!("X-GitHub-Token");
+
+        let error = resolve_invocation_runtime_credentials(
+            &sandbox_credential_registry(),
+            &CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).unwrap(),
+            &input,
+        )
+        .expect_err("a model-selected credential header must fail closed");
+
+        assert!(error.contains("is not declared for host"));
     }
 
     #[test]

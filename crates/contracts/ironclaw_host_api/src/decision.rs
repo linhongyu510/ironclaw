@@ -68,6 +68,19 @@ pub enum Obligation {
         provider_scopes: Vec<String>,
         requester_extension: ExtensionId,
     },
+    InjectSandboxCredentialAccountOnce {
+        handle: SecretHandle,
+        provider: VendorId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_scopes: Vec<String>,
+        requester_extension: ExtensionId,
+        #[serde(default)]
+        required: bool,
+        audience: crate::action::NetworkTargetPattern,
+        target: crate::http::RuntimeCredentialTarget,
+    },
     FirstPartyCredentialStagedViaHostPort {
         capability_id: CapabilityId,
     },
@@ -93,6 +106,19 @@ impl Obligation {
                 setup,
                 provider_scopes,
                 requester_extension,
+                ..
+            } => Some(RuntimeCredentialAuthRequirement {
+                provider: provider.clone(),
+                setup: setup.clone(),
+                requester_extension: requester_extension.clone(),
+                provider_scopes: provider_scopes.clone(),
+            }),
+            Obligation::InjectSandboxCredentialAccountOnce {
+                provider,
+                setup,
+                provider_scopes,
+                requester_extension,
+                required: true,
                 ..
             } => Some(RuntimeCredentialAuthRequirement {
                 provider: provider.clone(),
@@ -240,8 +266,9 @@ fn normalize_multi_inject<'a>(
 
 fn extract_inject_handle(obligation: &Obligation, kind: &ObligationKind) -> SecretHandle {
     match obligation {
-        Obligation::InjectSecretOnce { handle } => handle.clone(),
-        Obligation::InjectCredentialAccountOnce { handle, .. } => handle.clone(),
+        Obligation::InjectSecretOnce { handle }
+        | Obligation::InjectCredentialAccountOnce { handle, .. }
+        | Obligation::InjectSandboxCredentialAccountOnce { handle, .. } => handle.clone(),
         _ => unreachable!("extract_inject_handle called for {kind:?}"),
     }
 }
@@ -265,7 +292,10 @@ impl Obligation {
             Self::ReserveResources { .. } => ObligationKind::ReserveResources,
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
-            Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
+            Self::InjectCredentialAccountOnce { .. }
+            | Self::InjectSandboxCredentialAccountOnce { .. } => {
+                ObligationKind::InjectCredentialAccountOnce
+            }
             Self::FirstPartyCredentialStagedViaHostPort { .. } => {
                 ObligationKind::FirstPartyCredentialStagedViaHostPort
             }

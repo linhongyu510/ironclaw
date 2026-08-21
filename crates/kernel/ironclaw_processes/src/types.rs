@@ -16,6 +16,7 @@ use ironclaw_host_api::{
     },
     mount::MountView,
     path::VirtualPath,
+    process::SandboxCommandCredential,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
     runtime::RuntimeKind,
 };
@@ -247,6 +248,22 @@ pub trait ProcessExecutor: Send + Sync {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError>;
+
+    /// Runs a process with one-shot host-staged sandbox credentials.
+    ///
+    /// Executors that do not implement the credential boundary fail closed.
+    async fn execute_with_credentials(
+        &self,
+        request: ProcessExecutionRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        if !credentials.is_empty() {
+            return Err(ProcessExecutionError::new(
+                "sandbox_credentials_not_supported",
+            ));
+        }
+        self.execute(request).await
+    }
 }
 
 #[async_trait]

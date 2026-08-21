@@ -1,12 +1,25 @@
 use std::{sync::Arc, time::Instant};
 
+use crate::obligations::RuntimeSecretInjectionStore;
 use async_trait::async_trait;
 use ironclaw_capabilities::ProcessAuthorizationRemintPort;
-use ironclaw_host_api::{dispatch::CapabilityDispatcher, runtime::RuntimeKind};
+use ironclaw_host_api::{
+    action::NetworkScheme,
+    dispatch::CapabilityDispatcher,
+    http::RuntimeCredentialTarget,
+    process::{
+        CommandExecutionOutput, DirectSandboxCommandRequest, RuntimeProcessError,
+        SandboxCommandCredential, SandboxCommandTransport,
+    },
+    runtime::RuntimeKind,
+};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
+use ironclaw_sandbox::{SandboxCommandPlan, SandboxProcessPlan, ValidatedSandboxProcessPlan};
+use secrecy::ExposeSecret;
+use serde_json::json;
 
 struct ProcessLatencyFields {
     capability_id: String,
@@ -118,6 +131,7 @@ fn trace_process_latency_error<E: ?Sized>(
 pub(super) struct HostProcessExecutor {
     dispatch_executor: Arc<dyn ProcessExecutor>,
     process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
+    secret_injection_store: Arc<RuntimeSecretInjectionStore>,
 }
 
 impl HostProcessExecutor {
@@ -128,7 +142,78 @@ impl HostProcessExecutor {
         Self {
             dispatch_executor,
             process_sandbox_executor,
+            secret_injection_store: Arc::new(RuntimeSecretInjectionStore::new()),
         }
+    }
+
+    pub(super) fn with_secret_injection_store(
+        mut self,
+        secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
+        self.secret_injection_store = secret_injection_store;
+        self
+    }
+
+    fn resolve_sandbox_credentials(
+        &self,
+        request: &ProcessExecutionRequest,
+    ) -> Result<Vec<SandboxCommandCredential>, ProcessExecutionError> {
+        if request
+            .input
+            .get("credentials")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            return Ok(Vec::new());
+        }
+        let plan = serde_json::from_value::<SandboxProcessPlan>(request.input.clone())
+            .map_err(|_| ProcessExecutionError::new("invalid_sandbox_process_plan"))?;
+        let plan = ValidatedSandboxProcessPlan::new(plan)
+            .map_err(|_| ProcessExecutionError::new("invalid_sandbox_process_plan"))?;
+        let mut credentials = Vec::with_capacity(plan.credentials.len());
+        for binding in &plan.credentials {
+            let placeholder_env = binding.placeholder_env.clone().ok_or_else(|| {
+                ProcessExecutionError::new("sandbox_credential_placeholder_env_required")
+            })?;
+            let RuntimeCredentialTarget::Header { name, prefix } = &binding.target else {
+                return Err(ProcessExecutionError::new(
+                    "sandbox_credential_target_unsupported",
+                ));
+            };
+            let (material, authorized_binding) = self
+                .secret_injection_store
+                .take_bound(&request.scope, &request.capability_id, &binding.handle)
+                .map_err(|_| ProcessExecutionError::new("sandbox_credential_handoff_failed"))?
+                .ok_or_else(|| ProcessExecutionError::new("sandbox_credential_unavailable"))?;
+            let authorized_binding = authorized_binding.ok_or_else(|| {
+                ProcessExecutionError::new("sandbox_credential_binding_unavailable")
+            })?;
+            let audience = &authorized_binding.audience;
+            if audience.scheme != Some(NetworkScheme::Https)
+                || audience.port.is_some_and(|port| port != 443)
+                || !audience
+                    .host_pattern
+                    .eq_ignore_ascii_case(&binding.approved_host)
+                || authorized_binding.target != binding.target
+            {
+                return Err(ProcessExecutionError::new(
+                    "sandbox_credential_binding_mismatch",
+                ));
+            }
+            credentials.push(SandboxCommandCredential::new(
+                placeholder_env,
+                format!(
+                    "{}{}",
+                    ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+                    uuid::Uuid::new_v4().simple()
+                ),
+                binding.approved_host.clone(),
+                name.clone(),
+                prefix.clone(),
+                material.expose_secret().to_string(),
+            ));
+        }
+        Ok(credentials)
     }
 }
 
@@ -151,7 +236,10 @@ impl ProcessExecutor for HostProcessExecutor {
                 );
                 return Err(error);
             };
-            let result = executor.execute(request).await;
+            let credentials = self.resolve_sandbox_credentials(&request)?;
+            let result = executor
+                .execute_with_credentials(request, credentials)
+                .await;
             match &result {
                 Ok(_) => {
                     trace_process_latency_ok("host_process_execute", fields.as_ref(), started_at)
@@ -177,6 +265,155 @@ impl ProcessExecutor for HostProcessExecutor {
         }
         result
     }
+}
+
+/// Executes the typed `system.process_sandbox.run` plan through the configured
+/// sandbox transport without reparsing a shell command line.
+#[derive(Clone)]
+pub struct SandboxTransportProcessExecutor {
+    transport: Arc<dyn SandboxCommandTransport>,
+}
+
+impl SandboxTransportProcessExecutor {
+    pub fn new(transport: Arc<dyn SandboxCommandTransport>) -> Self {
+        Self { transport }
+    }
+
+    async fn execute_command(
+        &self,
+        request: &ProcessExecutionRequest,
+        command: &SandboxCommandPlan,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, ProcessExecutionError> {
+        if request.cancellation.is_cancelled() {
+            return Err(ProcessExecutionError::new("sandbox_process_cancelled"));
+        }
+        let timeout_secs = command
+            .timeout_ms
+            .map(|timeout_ms| timeout_ms.div_ceil(1_000));
+        let mut extra_env = command.env.clone();
+        for credential in &credentials {
+            extra_env.insert(
+                credential.placeholder_env.clone(),
+                credential.placeholder.clone(),
+            );
+        }
+        let command_request = DirectSandboxCommandRequest {
+            scope: request.scope.clone(),
+            mounts: Some(request.mounts.clone()),
+            executable: command.command.clone(),
+            args: command.args.clone(),
+            workdir: command.working_dir.clone(),
+            timeout_secs,
+            extra_env,
+        };
+        self.transport
+            .run_credentialed_direct_command(command_request, credentials)
+            .await
+            .map_err(map_sandbox_process_error)
+    }
+}
+#[async_trait]
+impl ProcessExecutor for crate::UserSandboxProcessPort {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        SandboxTransportProcessExecutor::new(self.transport())
+            .execute(request)
+            .await
+    }
+
+    async fn execute_with_credentials(
+        &self,
+        request: ProcessExecutionRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        SandboxTransportProcessExecutor::new(self.transport())
+            .execute_with_credentials(request, credentials)
+            .await
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for SandboxTransportProcessExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        self.execute_with_credentials(request, Vec::new()).await
+    }
+
+    async fn execute_with_credentials(
+        &self,
+        request: ProcessExecutionRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        let plan = serde_json::from_value::<SandboxProcessPlan>(request.input.clone())
+            .map_err(|_| ProcessExecutionError::new("invalid_sandbox_process_plan"))?;
+        let plan = ValidatedSandboxProcessPlan::new(plan)
+            .map_err(|_| ProcessExecutionError::new("invalid_sandbox_process_plan"))?;
+        if plan.credentials.len() != credentials.len() {
+            return Err(ProcessExecutionError::new(
+                "sandbox_credential_handoff_mismatch",
+            ));
+        }
+
+        if let Some(install) = &plan.install {
+            let output = self
+                .execute_command(&request, &install.command, Vec::new())
+                .await?;
+            if output.exit_code != 0 {
+                return Err(ProcessExecutionError::new("sandbox_install_failed"));
+            }
+        }
+        let output = self
+            .execute_command(&request, &plan.run, credentials)
+            .await?;
+        Ok(ProcessExecutionResult {
+            output: json!({
+                "exit_code": output.exit_code,
+                "output": bounded_output(
+                    output.output,
+                    combined_output_limit(
+                        plan.run.max_stdout_bytes,
+                        plan.run.max_stderr_bytes,
+                    ),
+                ),
+                "duration_ms": output.duration.as_millis(),
+            }),
+        })
+    }
+}
+
+fn map_sandbox_process_error(error: RuntimeProcessError) -> ProcessExecutionError {
+    let kind = match error {
+        RuntimeProcessError::Timeout(_) => "sandbox_process_timeout",
+        RuntimeProcessError::ExecutionFailed(_) => "sandbox_process_execution_failed",
+    };
+    ProcessExecutionError::new(kind)
+}
+
+fn combined_output_limit(stdout: Option<u64>, stderr: Option<u64>) -> Option<u64> {
+    match (stdout, stderr) {
+        (Some(stdout), Some(stderr)) => stdout.checked_add(stderr),
+        (Some(limit), None) | (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    }
+}
+
+fn bounded_output(output: String, max_bytes: Option<u64>) -> String {
+    let Some(max_bytes) = max_bytes.and_then(|value| usize::try_from(value).ok()) else {
+        return output;
+    };
+    if output.len() <= max_bytes {
+        return output;
+    }
+    let mut boundary = max_bytes;
+    while !output.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    output[..boundary].to_string()
 }
 
 fn is_process_sandbox_request(request: &ProcessExecutionRequest) -> bool {
@@ -271,7 +508,8 @@ mod tests {
         },
         ids::{
             ActivityId, AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
-            ProductKind, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
+            ProductKind, ProjectId, ResourceReservationId, SecretHandle, TenantId, ThreadId,
+            UserId,
         },
         invocation::{Actor, InvocationOrigin},
         lane::RuntimeLane,
@@ -319,6 +557,266 @@ mod tests {
                 output: json!({ "executor": self.label }),
             })
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingSandboxCommandTransport {
+        direct_requests: Mutex<Vec<(DirectSandboxCommandRequest, Vec<SandboxCommandCredential>)>>,
+    }
+
+    #[async_trait]
+    impl SandboxCommandTransport for RecordingSandboxCommandTransport {
+        async fn run_command(
+            &self,
+            _request: ironclaw_host_api::process::CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::ExecutionFailed(
+                "legacy command execution is not used by the sandbox process executor".to_string(),
+            ))
+        }
+
+        async fn run_credentialed_direct_command(
+            &self,
+            request: DirectSandboxCommandRequest,
+            credentials: Vec<SandboxCommandCredential>,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            let credentialed = !credentials.is_empty();
+            self.direct_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((request, credentials));
+            Ok(CommandExecutionOutput {
+                output: if credentialed {
+                    "credentialed".to_string()
+                } else {
+                    "hello".to_string()
+                },
+                saved_output: None,
+                exit_code: if credentialed { 0 } else { 7 },
+                sandboxed: true,
+                duration: if credentialed {
+                    std::time::Duration::from_millis(5)
+                } else {
+                    std::time::Duration::from_millis(12)
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn user_sandbox_process_executor_runs_validated_plan_with_direct_arguments() {
+        let transport = Arc::new(RecordingSandboxCommandTransport::default());
+        let executor = SandboxTransportProcessExecutor::new(transport.clone());
+        let mut request = sample_process_request(
+            ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID,
+            RuntimeKind::System,
+        );
+        request.input = json!({
+            "run": {
+                "command": "printf",
+                "args": ["%s", "hello"],
+                "max_stdout_bytes": 3,
+                "max_stderr_bytes": 2
+            }
+        });
+
+        let result = executor.execute(request).await.unwrap();
+
+        assert_eq!(
+            result.output,
+            json!({
+                "exit_code": 7,
+                "output": "hello",
+                "duration_ms": 12
+            })
+        );
+        let requests = transport
+            .direct_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0.executable, "printf");
+        assert_eq!(requests[0].0.args, ["%s", "hello"]);
+    }
+
+    #[tokio::test]
+    async fn host_process_executor_consumes_staged_credential_without_exposing_it_to_command_env() {
+        let transport = Arc::new(RecordingSandboxCommandTransport::default());
+        let sandbox = Arc::new(SandboxTransportProcessExecutor::new(transport.clone()));
+        let store = Arc::new(RuntimeSecretInjectionStore::new());
+        let mut request = sample_process_request(
+            ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID,
+            RuntimeKind::System,
+        );
+        request.input = json!({
+            "run": {
+                "command": "gh",
+                "args": ["pr", "list"],
+                "env": {"GH_TOKEN": "model-value-is-not-authority"}
+            },
+            "network": {
+                "runtime_hosts": ["api.github.com"],
+                "direct_egress_lockdown": true
+            },
+            "credentials": [{
+                "handle": "github_runtime_token",
+                "approved_host": "api.github.com",
+                "target": {
+                    "type": "header",
+                    "name": "Authorization",
+                    "prefix": "token "
+                },
+                "placeholder_env": "GH_TOKEN",
+                "placeholder_value": "model-value-is-not-authority",
+                "required": true
+            }]
+        });
+        let handle = SecretHandle::new("github_runtime_token").unwrap();
+        store
+            .insert_bound(
+                &request.scope,
+                &request.capability_id,
+                &handle,
+                ironclaw_secrets::SecretMaterial::from("github-secret"),
+                crate::obligations::RuntimeCredentialBindingPolicy {
+                    audience: ironclaw_host_api::action::NetworkTargetPattern {
+                        scheme: Some(NetworkScheme::Https),
+                        host_pattern: "api.github.com".to_string(),
+                        port: None,
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "Authorization".to_string(),
+                        prefix: Some("token ".to_string()),
+                    },
+                },
+            )
+            .unwrap();
+        let executor = HostProcessExecutor::new(
+            Arc::new(RecordingProcessExecutor::new("dispatch")),
+            Some(sandbox),
+        )
+        .with_secret_injection_store(store.clone());
+
+        executor.execute(request.clone()).await.unwrap();
+
+        let calls = transport
+            .direct_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(calls.len(), 1);
+        let (command, credentials) = &calls[0];
+        assert_eq!(command.executable, "gh");
+        assert_eq!(command.args, ["pr", "list"]);
+        let placeholder = command.extra_env.get("GH_TOKEN").unwrap();
+        assert!(placeholder.starts_with(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX));
+        assert_ne!(placeholder, "model-value-is-not-authority");
+        assert_ne!(placeholder, "github-secret");
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].placeholder, *placeholder);
+        assert_eq!(credentials[0].approved_host, "api.github.com");
+        assert_eq!(credentials[0].header_name, "Authorization");
+        assert_eq!(credentials[0].expose_secret(), "github-secret");
+        drop(calls);
+        assert!(
+            store
+                .take(&request.scope, &request.capability_id, &handle)
+                .unwrap()
+                .is_none(),
+            "the staged credential must be one-shot"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_process_executor_rejects_model_credential_binding_mismatch() {
+        let transport = Arc::new(RecordingSandboxCommandTransport::default());
+        let sandbox = Arc::new(SandboxTransportProcessExecutor::new(transport.clone()));
+        let store = Arc::new(RuntimeSecretInjectionStore::new());
+        let mut request = sample_process_request(
+            ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID,
+            RuntimeKind::System,
+        );
+        request.input = json!({
+            "run": {
+                "command": "gh",
+                "args": ["pr", "list"],
+                "env": {"GH_TOKEN": "model-value-is-not-authority"}
+            },
+            "network": {
+                "runtime_hosts": ["api.github.com"],
+                "direct_egress_lockdown": true
+            },
+            "credentials": [{
+                "handle": "github_runtime_token",
+                "approved_host": "api.github.com",
+                "target": {
+                    "type": "header",
+                    "name": "Authorization",
+                    "prefix": "Bearer "
+                },
+                "placeholder_env": "GH_TOKEN",
+                "placeholder_value": "model-value-is-not-authority",
+                "required": true
+            }]
+        });
+        let handle = SecretHandle::new("github_runtime_token").unwrap();
+        store
+            .insert_bound(
+                &request.scope,
+                &request.capability_id,
+                &handle,
+                ironclaw_secrets::SecretMaterial::from("github-secret"),
+                crate::obligations::RuntimeCredentialBindingPolicy {
+                    audience: ironclaw_host_api::action::NetworkTargetPattern {
+                        scheme: Some(NetworkScheme::Https),
+                        host_pattern: "api.github.com".to_string(),
+                        port: None,
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "X-GitHub-Token".to_string(),
+                        prefix: None,
+                    },
+                },
+            )
+            .unwrap();
+        let executor = HostProcessExecutor::new(
+            Arc::new(RecordingProcessExecutor::new("dispatch")),
+            Some(sandbox),
+        )
+        .with_secret_injection_store(store);
+
+        let error = executor.execute(request).await.unwrap_err();
+
+        assert_eq!(error.kind, "sandbox_credential_binding_mismatch");
+        assert!(
+            transport
+                .direct_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_process_executor_rejects_cancelled_request_before_transport() {
+        let transport = Arc::new(RecordingSandboxCommandTransport::default());
+        let executor = SandboxTransportProcessExecutor::new(transport.clone());
+        let mut request = sample_process_request(
+            ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID,
+            RuntimeKind::System,
+        );
+        request.input = json!({"run": {"command": "true"}});
+        request.cancellation.cancel();
+
+        let error = executor.execute(request).await.unwrap_err();
+
+        assert_eq!(error.kind, "sandbox_process_cancelled");
+        assert!(
+            transport
+                .direct_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 
     fn dispatch_result() -> CapabilityDispatchResult {
