@@ -348,6 +348,17 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.clippy_matrix) }}
+    # cargo clippy is compile-only and never executes tests, so it cannot
+    # observe the difference between a populated and an empty embedded-asset
+    # ASSETS array. SKIP_FRONTEND_BUILD compiles ironclaw_webui with zero
+    # embedded assets instead of running its build.rs npm/pnpm fallback on
+    # every clippy invocation (both matrix flavors, every event) — removing a
+    # real pnpm/vite build and an unbounded npm-exec-fallback download risk
+    # (the #7756 class) from this job. The SPA-embedding path stays exercised
+    # by webui-v2-smoke, the webui lanes, and webui-v2-js-lint's own pnpm
+    # build step (unaffected — that job never touches build.rs).
+    env:
+      SKIP_FRONTEND_BUILD: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -357,30 +368,6 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy
-      - name: Enable pnpm for setup-node cache
-        if: contains(matrix.flags, '--all-features')
-        run: corepack enable pnpm
-      - name: Install Node.js for WebUI bundle builds
-        if: contains(matrix.flags, '--all-features')
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          # See the webui-v2-js-lint job above for why this is a depth-tolerant
-          # glob list rather than a single literal.
-          cache-dependency-path: |
-            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
-      - name: Enable pnpm
-        if: contains(matrix.flags, '--all-features')
-        run: corepack enable pnpm
-      - name: Install WebUI frontend dependencies
-        if: contains(matrix.flags, '--all-features')
-        run: |
-          set -euo pipefail
-          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
-          cd "${webui_dir}/frontend"
-          pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
@@ -402,14 +389,6 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
-          # The `default` flavor never installs Node/pnpm (its steps above
-          # are gated on `--all-features`), so if a PR's clippy_packages
-          # includes ironclaw_webui, an unguarded build.rs would fall back
-          # to an unbounded `npm exec` network fetch here (the #7756
-          # class). SKIP_FRONTEND_BUILD makes the crate compile with zero
-          # embedded assets instead — safe for a lint-only invocation,
-          # which never executes the compiled test/asset code.
-          SKIP_FRONTEND_BUILD: ${{ matrix.name == 'default' && '1' || '' }}
         run: |
           package_args=()
           while IFS= read -r package; do

@@ -836,8 +836,12 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
 
     def test_every_site_was_actually_converted(self) -> None:
         """Sanity floor: the checked-in tree must contain the expected number
-        of sanctioned cache-dependency-path pairings (12) — a pin that passes
-        vacuously because nobody scanned anything is the defect being fixed."""
+        of sanctioned cache-dependency-path pairings (11, down from 12 —
+        T3 Task 5 removed code_style.yml's `clippy` job's "Install Node.js
+        for WebUI bundle builds" step, whose only purpose was priming the
+        pnpm cache for a frontend build SKIP_FRONTEND_BUILD now skips
+        entirely) — a pin that passes vacuously because nobody scanned
+        anything is the defect being fixed."""
         flat_lockfile = f"{self.webui_dir}/frontend/pnpm-lock.yaml"
         pairs = 0
         for text in self.workflows.values():
@@ -850,7 +854,7 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
                 )
                 if following == WEBUI_NESTED_LOCKFILE_PATTERN:
                     pairs += 1
-        self.assertEqual(pairs, 12, "expected exactly 12 cache-dependency-path sites")
+        self.assertEqual(pairs, 11, "expected exactly 11 cache-dependency-path sites")
 
     def test_reintroducing_a_bare_cd_site_fails_loudly(self) -> None:
         """The exact pre-#7155 regression: a `cd` back to the flat literal."""
