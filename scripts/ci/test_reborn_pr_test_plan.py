@@ -2298,9 +2298,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / ".github/workflows/regression-test-check.yml"
         ).read_text(encoding="utf-8")
 
+        # T3 Task 4: the CLI smoke job now runs on pull_request too, scoped
+        # by the same has_reborn_cli filter — it is no longer queue-only, so
+        # this pins the new unconditional-on-event form instead of the old
+        # `&& github.event_name != 'pull_request'` exclusion.
         self.assertIn(
-            "needs.changes.outputs.has_reborn_cli == 'true' && "
-            "github.event_name != 'pull_request'",
+            "if: needs.changes.outputs.has_reborn_cli == 'true'",
             code_style,
         )
         self.assertIn(
