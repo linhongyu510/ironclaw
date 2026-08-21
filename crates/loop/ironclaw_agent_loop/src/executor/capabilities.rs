@@ -2250,7 +2250,17 @@ pub(super) fn model_observation_from_outcome(
         });
     }
     // Historical observations can reference another result; otherwise use the
-    // outcome's own preserved origin. New results return through artifact refs above.
+    // outcome's own preserved origin.
+    //
+    // A fresh result normally leaves through the artifact or inline branch
+    // above. It can still land HERE when its preview was dropped during the
+    // `Outcome` collapse — `ModelResultPreview::redacted` refuses NUL/control
+    // characters and unmaskable credential text — leaving a summary caption
+    // with no content. The retired shape is the honest remainder in that case:
+    // the model at least keeps a ref it can `result_read`. It must NOT become
+    // the routine outcome for large results; `MODEL_RESULT_PREVIEW_MAX_BYTES`
+    // is pinned to the inline-observation cap so a size mismatch cannot send
+    // ordinary results down this path.
     let result_ref = meta
         .referenced_result_ref
         .as_ref()
