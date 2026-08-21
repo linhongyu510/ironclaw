@@ -106,19 +106,23 @@ async fn migrate_core_rc1_to_1_1<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let oauth = ironclaw_auth::migrate_legacy_oauth_provider_alias(
+    // Each nested migration is independently boxed: without it, the async
+    // transform inlines every awaited domain migration's state into this
+    // function's own generated state machine, and that combined frame
+    // overflows the default 2MB test/tokio-worker stack in debug builds
+    // well before any real recursion would.
+    let oauth = Box::pin(ironclaw_auth::migrate_legacy_oauth_provider_alias(
         Arc::clone(&filesystem),
         Arc::clone(&scoped_filesystem),
         Utc::now(),
-    )
+    ))
     .await
     .map_err(|error| ReleasePairMigrationError::Domain {
         domain: "OAuth provider-alias",
         reason: error.to_string(),
     })?;
-    let channels = migrate_channel_roots(filesystem.as_ref()).await?;
-    let process = process_journal_store
-        .migrate_legacy_journal_with_report()
+    let channels = Box::pin(migrate_channel_roots(filesystem.as_ref())).await?;
+    let process = Box::pin(process_journal_store.migrate_legacy_journal_with_report())
         .await
         .map_err(|error| ReleasePairMigrationError::Domain {
             domain: "process journal",
@@ -133,10 +137,10 @@ where
         admission_reservations_expired = process.disposition.admission_reservations_expired,
         "process journal startup migration completed"
     );
-    let threads = ironclaw_threads::migrate_all_thread_scopes(
+    let threads = Box::pin(ironclaw_threads::migrate_all_thread_scopes(
         Arc::clone(&filesystem),
         Arc::clone(&scoped_filesystem),
-    )
+    ))
     .await
     .map_err(|error| ReleasePairMigrationError::Domain {
         domain: "thread",
@@ -153,7 +157,11 @@ where
         transcript_rows_projected = threads.transcript_rows_projected,
         "thread startup migration completed"
     );
-    validate_channel_thread_references(filesystem.as_ref(), &channels).await?;
+    Box::pin(validate_channel_thread_references(
+        filesystem.as_ref(),
+        &channels,
+    ))
+    .await?;
 
     Ok(Rc1To11CoreMigration {
         oauth,

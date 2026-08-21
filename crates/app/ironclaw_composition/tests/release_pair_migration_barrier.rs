@@ -15,8 +15,13 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
     let policy_skip = flattened
         .find("Rc1To11ChannelStateMigrationOutcome::SkippedByReleasePolicy")
         .expect("the release-policy skip remains typed and visible");
+    // The completion call is boxed at the call site (`Box::pin(release_migration
+    // .complete(...))`) to keep this composition-heavy function's own stack
+    // frame under the deep-migration-futures headroom, so its exact line
+    // break is left to rustfmt rather than pinned here — `.complete(` is
+    // otherwise unique within the sliced production builder.
     let completion = flattened
-        .find("release_migration .complete(")
+        .find(".complete(")
         .expect("release-pair completion barrier remains in production startup");
     let first_worker = flattened
         .find("let credential_refresh_worker")

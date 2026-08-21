@@ -85,6 +85,8 @@ fn slack_admin_descriptor() -> ExtensionAdminConfigurationDescriptor {
         label: handle.to_string(),
         secret,
         required,
+        description: String::new(),
+        host_managed: false,
     })
     .collect();
     ExtensionAdminConfigurationDescriptor {
@@ -108,6 +110,8 @@ fn telegram_admin_descriptor() -> ExtensionAdminConfigurationDescriptor {
         label: handle.to_string(),
         secret,
         required,
+        description: String::new(),
+        host_managed: false,
     })
     .collect();
     ExtensionAdminConfigurationDescriptor {

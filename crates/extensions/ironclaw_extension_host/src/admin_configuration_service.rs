@@ -570,7 +570,7 @@ fn validate_submitted(
 ) -> Result<BTreeMap<SecretHandle, SecretMaterial>, AdminConfigurationServiceError> {
     let validated = validate_declared_submitted(descriptor, submitted)?;
     for field in &descriptor.fields {
-        if !field.required {
+        if field.host_managed || !field.required {
             continue;
         }
         let present = match validated.get(&field.handle) {
@@ -617,23 +617,6 @@ fn validate_declared_submitted(
         }
         if validated.insert(value.handle, value.value).is_some() {
             return Err(AdminConfigurationServiceError::DuplicateField);
-        }
-    }
-    for field in &descriptor.fields {
-        if field.host_managed || !field.required {
-            continue;
-        }
-        let present = match validated.get(&field.handle) {
-            Some(value) if field.secret && !value.expose_secret().is_empty() => true,
-            Some(value) if !field.secret && !value.expose_secret().trim().is_empty() => true,
-            _ if field.secret => matches!(
-                previous.and_then(|record| record.values.get(&field.handle)),
-                Some(AdminConfigurationValueRef::Secret(_))
-            ),
-            _ => false,
-        };
-        if !present {
-            return Err(AdminConfigurationServiceError::MissingRequiredField);
         }
     }
     Ok(validated)

@@ -630,6 +630,27 @@ impl ExtensionActivationState {
     fn is_enabled(value: &Self) -> bool {
         *value == Self::Enabled
     }
+
+    /// Canonical wire spelling for the `V2InstallationRecord` compat field.
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+        }
+    }
+
+    /// Parse the `V2InstallationRecord` compat field. Absent or unrecognized
+    /// (a value written by a build with a variant this one doesn't know)
+    /// both fail open to `Enabled` rather than erroring — see the field's
+    /// doc comment on why the string is carried through opaquely.
+    fn from_wire_name(value: Option<&str>) -> Self {
+        match value {
+            Some("installed") => Self::Installed,
+            Some("disabled") => Self::Disabled,
+            _ => Self::Enabled,
+        }
+    }
 }
 
 fn default_enabled_activation_state() -> ExtensionActivationState {
@@ -1451,7 +1472,7 @@ impl ExtensionInstallationStore {
                             installation_id,
                         });
                     }
-                    record.activation_state = state;
+                    record.activation_state = Some(state.wire_name().to_string());
                     record.updated_at = Utc::now();
                     Ok(CasApply::new(record, ()))
                 }
@@ -3074,7 +3095,9 @@ impl ExtensionInstallationStore {
         ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id: core.installation_id.clone(),
             extension_id: core.extension_id.clone(),
-            activation_state: core.activation_state,
+            activation_state: ExtensionActivationState::from_wire_name(
+                core.activation_state.as_deref(),
+            ),
             manifest_ref: core.manifest_ref(),
             incarnation_id: core.incarnation_id.clone(),
             credential_bindings,

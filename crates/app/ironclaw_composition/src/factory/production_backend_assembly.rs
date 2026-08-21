@@ -210,26 +210,32 @@ where
     let process_journal_store = Arc::new(ProcessJournalStore::new(
         crate::wrap_process_journal_scoped(process_journal_filesystem),
     ));
-    let release_migration = crate::release_migration::Rc1To11Migration::begin(
+    // Boxed at the call site: this composition function is already large
+    // enough in an unoptimized build that inlining the migration
+    // subsystem's own state machine here overflows the default test/tokio
+    // worker stack (see the boxing note in `rc1_to_1_1.rs`).
+    let release_migration = Box::pin(crate::release_migration::Rc1To11Migration::begin(
         crate::release_migration::Rc1To11MigrationInput {
             filesystem: Arc::clone(&filesystem),
             scoped_filesystem: Arc::clone(&scoped_filesystem),
             process_journal_store,
             workspace: None,
         },
-    )
+    ))
     .await
     .map_err(|error| crate::RebornCompositionError::InvalidConfig {
         reason: format!("release-pair startup migration failed: {error}"),
     })?;
     let process_journal_store = release_migration.process_journal_store();
-    release_migration
-        .complete(crate::release_migration::Rc1To11ExtensionReports::default())
-        .await
-        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-            reason: format!("release-pair startup migration commit failed: {error}"),
-        })?;
-    let processes = ProcessRuntimeSystem::from_process_journal_store(process_journal_store);
+    Box::pin(
+        release_migration.complete(crate::release_migration::Rc1To11ExtensionReports::default()),
+    )
+    .await
+    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+        reason: format!("release-pair startup migration commit failed: {error}"),
+    })?;
+    let processes =
+        ProcessRuntimeSystem::from_process_journal_store(Arc::clone(&process_journal_store));
     let turn_state = Arc::new(processes.agent_turn_runtime());
     let process_services = ProcessServices::new(
         process_journal_store,
@@ -562,14 +568,16 @@ pub(super) async fn build_backend_production(
             })
         }
     };
-    let release_migration = crate::release_migration::Rc1To11Migration::begin(
+    // Boxed at the call site: see the boxing note on the sibling call in
+    // `build_filesystem_production_host_runtime_services` above.
+    let release_migration = Box::pin(crate::release_migration::Rc1To11Migration::begin(
         crate::release_migration::Rc1To11MigrationInput {
             filesystem: Arc::clone(&stores.filesystem),
             scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
             process_journal_store,
             workspace: workspace_migration,
         },
-    )
+    ))
     .await
     .map_err(|error| crate::RebornCompositionError::InvalidConfig {
         reason: format!("release-pair startup migration failed: {error}"),
@@ -1041,15 +1049,16 @@ pub(super) async fn build_backend_production(
         };
         crate::release_migration::Rc1To11ChannelStateMigrationOutcome::Completed(report)
     };
-    release_migration
-        .complete(crate::release_migration::Rc1To11ExtensionReports {
+    Box::pin(
+        release_migration.complete(crate::release_migration::Rc1To11ExtensionReports {
             installations: Some(extension_installation_migration),
             channel_state: Some(extension_state_migration),
-        })
-        .await
-        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-            reason: format!("release-pair startup migration commit failed: {error}"),
-        })?;
+        }),
+    )
+    .await
+    .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+        reason: format!("release-pair startup migration commit failed: {error}"),
+    })?;
     let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
     ));

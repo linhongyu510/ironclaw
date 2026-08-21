@@ -1724,8 +1724,16 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-// TODO(port): re-measured after resolving this cherry-pick's conflicts, see below.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 112;
+// 117 -> 112, 2026-08-11..2026-08-20 (unrelated upstream shrinkage on
+// release/2026-08-17 while this branch's own baseline sat at 112).
+// 112 -> 120, 2026-08-20 (port of Firat's rc1/1.2 legacy-state and Railway
+// workspace-artifact preservation commits from release/2026-08-11 onto
+// release/2026-08-17): the ported migration code names vendor-specific
+// legacy-state shapes (`legacy_channel_state_migration/{oauth_channel,
+// proof_code_channel}.rs`, the rc1 Slack/Telegram fixtures) that the
+// pre-port scanner had never seen. Measured, not chosen — see
+// `reborn_extension_specificity_allowlist_ratchets_down_only` below.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 120;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
