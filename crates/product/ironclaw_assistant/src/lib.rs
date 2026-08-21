@@ -254,6 +254,9 @@ pub use run_delivery::{
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
 // single product service.
+pub use reborn_services::run_artifact::timings::{
+    RunArtifactIterationTiming, RunArtifactTimingTotals, RunArtifactTimings, RunArtifactToolTiming,
+};
 pub use reborn_services::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
     ADMIN_CONFIGURATION_VIEW, ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW,
@@ -269,10 +272,11 @@ pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY,
     AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_PAUSE_COMMAND, AUTOMATION_RENAME_CAPABILITY,
     AUTOMATION_RENAME_CAPABILITY_ID, AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY,
-    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND,
-    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATIONS_VIEW, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_CAPABILITY,
+    AUTOMATION_RUN_CAPABILITY_ID, AUTOMATION_RUN_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, AutomationListRequest,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
     ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
@@ -331,6 +335,7 @@ pub use reborn_services::{
     RebornAutomationCapabilityEvidenceStatus, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunAssessment,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
@@ -374,7 +379,7 @@ pub use reborn_services::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
     RebornVendorAuthAccounts, RegistrationChannelNotificationSetupService, RunArtifactLogs,
-    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactRunTimings, RunArtifactToolCall,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW,
     SKILL_INSTALL_CAPABILITY, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY,

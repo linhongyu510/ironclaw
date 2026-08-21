@@ -11,6 +11,20 @@ use ironclaw_triggers::{
 
 use super::*;
 
+struct PendingRunEvidenceSource;
+
+#[async_trait]
+impl TriggerRunEvidenceSource for PendingRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        _scope: &TriggerRunEvidenceScope,
+        _run_ids: &[TurnRunId],
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
+    {
+        std::future::pending().await
+    }
+}
+
 #[test]
 fn deterministic_assessment_never_treats_missing_required_action_as_success() {
     let run = make_run_record(TriggerId::new(), TriggerRunHistoryStatus::Ok);
@@ -52,6 +66,51 @@ fn dynamic_run_reports_observed_calls_without_claiming_semantic_success() {
         assessment.capabilities[0].status,
         crate::RebornAutomationCapabilityEvidenceStatus::Succeeded
     );
+}
+
+#[tokio::test]
+async fn stalled_evidence_read_preserves_time_for_active_hold_projection() {
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    let fire_slot = now() - chrono::Duration::minutes(2);
+    let mut record = make_active_fire_record(trigger_id, &c, fire_slot);
+    record.execution_spec = Some(ironclaw_triggers::TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: Vec::new(),
+        policy: TurnExecutionPolicy::default(),
+    });
+    let mut runs = HashMap::new();
+    runs.insert(
+        trigger_id,
+        vec![make_run_record(trigger_id, TriggerRunHistoryStatus::Ok)],
+    );
+    let repository = Arc::new(ScriptedRepository {
+        get: None,
+        scoped: ScriptedOutcome::Records(vec![record]),
+        batch: ScriptedOutcome::Runs(runs),
+        thread_lookup: None,
+        limits: None,
+    });
+    let active_run_lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Nonterminal),
+    });
+    let service =
+        service_with_backend_timeout(repository, active_run_lookup, Duration::from_secs(3))
+            .with_run_evidence(Arc::new(PendingRunEvidenceSource));
+
+    let automations = tokio::time::timeout(
+        Duration::from_millis(2_750),
+        service.list_automations(c, automation_list_request(10, 1)),
+    )
+    .await
+    .expect("advisory evidence must not consume the panel deadline")
+    .expect("list automations despite stalled evidence");
+
+    assert!(automations[0].active_hold.is_some());
 }
 
 #[tokio::test]

@@ -116,14 +116,22 @@ pub fn assess_trigger_run(
     required_capabilities: &[CapabilityId],
     evidence: Option<&[TriggerCapabilityExecutionEvidence]>,
 ) -> TriggerRunAssessment {
+    let capabilities = if required_capabilities.is_empty() {
+        observed_capabilities(run_id, evidence)
+    } else {
+        required_capabilities
+            .iter()
+            .cloned()
+            .map(|capability_id| assess_capability(run_id, capability_id, evidence))
+            .collect::<Vec<_>>()
+    };
     if run_status == TriggerRunHistoryStatus::Error {
         return TriggerRunAssessment {
             status: TriggerRunAssessmentStatus::RunFailed,
-            capabilities: Vec::new(),
+            capabilities,
         };
     }
     if required_capabilities.is_empty() {
-        let capabilities = observed_capabilities(run_id, evidence);
         let status = if capabilities
             .iter()
             .any(|item| item.status == TriggerCapabilityRequirementStatus::Failed)
@@ -138,11 +146,6 @@ pub fn assess_trigger_run(
         };
     }
 
-    let capabilities = required_capabilities
-        .iter()
-        .cloned()
-        .map(|capability_id| assess_capability(run_id, capability_id, evidence))
-        .collect::<Vec<_>>();
     let status = if capabilities
         .iter()
         .any(|item| item.status == TriggerCapabilityRequirementStatus::Failed)
@@ -376,6 +379,35 @@ mod tests {
         assert_eq!(
             assessment.capabilities[0].status,
             TriggerCapabilityRequirementStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn failed_run_keeps_exact_run_capability_evidence() {
+        let run_id = TurnRunId::new();
+        let evidence = [TriggerCapabilityExecutionEvidence {
+            run_id,
+            capability_id: capability(),
+            status: TriggerCapabilityExecutionStatus::Failed,
+            error_kind: Some("provider_rejected".to_owned()),
+        }];
+
+        let assessment = assess_trigger_run(
+            TriggerRunHistoryStatus::Error,
+            Some(run_id),
+            &[capability()],
+            Some(&evidence),
+        );
+
+        assert_eq!(assessment.status, TriggerRunAssessmentStatus::RunFailed);
+        assert_eq!(assessment.capabilities.len(), 1);
+        assert_eq!(
+            assessment.capabilities[0].status,
+            TriggerCapabilityRequirementStatus::Failed
+        );
+        assert_eq!(
+            assessment.capabilities[0].error_kind.as_deref(),
+            Some("provider_rejected")
         );
     }
 

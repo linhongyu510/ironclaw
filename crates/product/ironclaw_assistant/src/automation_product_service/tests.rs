@@ -154,6 +154,7 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         tenant_id,
         trigger_id,
         fire_slot,
+        source: TriggerSourceKind::Schedule,
         run_id: Some(TurnRunId::new()),
         // Use a canonical UUID thread_id to represent a post-acceptance run.
         // Pre-acceptance rows would have thread_id: None.
@@ -287,6 +288,7 @@ enum ScriptedOutcome {
 type RecordedLimits = Arc<Mutex<Vec<(&'static str, usize)>>>;
 
 struct ScriptedRepository {
+    get: Option<(TriggerRecord, Duration)>,
     scoped: ScriptedOutcome,
     batch: ScriptedOutcome,
     /// Scripts `find_trigger_run_by_thread_id`. Defaults to `Ok(None)` when
@@ -314,6 +316,10 @@ impl TriggerRepository for ScriptedRepository {
         _: TenantId,
         _: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        if let Some((record, delay)) = &self.get {
+            tokio::time::sleep(*delay).await;
+            return Ok(Some(record.clone()));
+        }
         Err(Self::backend_error())
     }
 
@@ -827,6 +833,7 @@ async fn automation_service_maps_trigger_run_status_and_last_status() {
 #[tokio::test]
 async fn automation_service_maps_backend_error_to_unavailable() {
     let repo = Arc::new(ScriptedRepository {
+        get: None,
         scoped: ScriptedOutcome::FailBackend,
         batch: ScriptedOutcome::FailBackend,
         thread_lookup: None,
@@ -856,6 +863,7 @@ async fn automation_service_maps_backend_error_to_unavailable() {
 async fn automation_service_times_out_stalled_repository() {
     let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
+            get: None,
             scoped: ScriptedOutcome::Hang,
             batch: ScriptedOutcome::Hang,
             thread_lookup: None,
@@ -890,6 +898,7 @@ async fn automation_service_maps_backend_error_on_run_history_batch_to_unavailab
         "0 9 * * *",
     );
     let service = service_over(Arc::new(ScriptedRepository {
+        get: None,
         scoped: ScriptedOutcome::Records(vec![record]),
         batch: ScriptedOutcome::FailBackend,
         thread_lookup: None,
@@ -925,6 +934,7 @@ async fn automation_service_times_out_stalled_run_history_batch() {
     );
     let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
+            get: None,
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Hang,
             thread_lookup: None,
@@ -951,6 +961,7 @@ async fn automation_service_times_out_stalled_run_history_batch() {
 #[tokio::test]
 async fn automation_service_maps_not_found_trigger_error_to_404() {
     let service = service_over(Arc::new(ScriptedRepository {
+        get: None,
         scoped: ScriptedOutcome::NotFound,
         batch: ScriptedOutcome::NotFound,
         thread_lookup: None,
@@ -1367,6 +1378,7 @@ async fn automation_service_stalled_hold_lookup_does_not_starve_run_history() {
 
     let service = service_with_backend_timeout(
         Arc::new(ScriptedRepository {
+            get: None,
             scoped: ScriptedOutcome::Records(vec![record]),
             batch: ScriptedOutcome::Runs(runs_by_trigger),
             thread_lookup: None,

@@ -88,7 +88,8 @@ pub use trace_commons::{
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
+    TriggerCreateHook,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -480,12 +481,53 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook_and_evidence(
     run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
-    trigger_management::insert_handlers_with_create_hook_and_evidence(
+    trigger_management::insert_handlers_with_services(
         &mut registry,
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
         run_evidence,
+        Arc::new(ironclaw_triggers::MissingTriggerManualFireRunner),
+    )?;
+    Ok(registry)
+}
+
+/// Create handlers with the complete trigger service set, including the
+/// shared worker-backed manual-fire path used by `builtin.trigger_run`.
+pub fn builtin_first_party_handlers_with_trigger_services(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_services(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        Arc::new(ironclaw_triggers::MissingTriggerRunEvidenceSource),
+        manual_fire_runner,
+    )?;
+    Ok(registry)
+}
+
+/// Production trigger handlers with both read evidence and manual-fire services.
+pub fn builtin_first_party_handlers_with_trigger_services_and_evidence(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_services(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        run_evidence,
+        manual_fire_runner,
     )?;
     Ok(registry)
 }
@@ -537,6 +579,46 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook_and_evidence_for_pr
         trigger_create_hook,
         active_run_lookup,
         run_evidence,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_services_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_services(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        manual_fire_runner,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_services_and_evidence_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_services_and_evidence(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        run_evidence,
+        manual_fire_runner,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
