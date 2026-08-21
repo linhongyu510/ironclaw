@@ -2075,7 +2075,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
         self.assertIn(
             "cargo test -p ironclaw_sandbox --test user_sandbox_docker_live "
-            "-- --nocapture --test-threads=1",
+            "--no-fail-fast -- --nocapture --test-threads=1",
             workflow,
         )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
