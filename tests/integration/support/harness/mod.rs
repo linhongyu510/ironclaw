@@ -843,7 +843,7 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_runtime_policy(runtime_policy);
         }
         if let Some(snapshot_source) = legacy_skill_snapshot_source {
-            input = input.with_legacy_skill_snapshot_source(snapshot_source);
+            input = input.with_legacy_skill_snapshot_source(snapshot_source)?;
         }
         input = input.with_bundled_first_party_for_test();
         if !extra_first_party_bundles.is_empty() {

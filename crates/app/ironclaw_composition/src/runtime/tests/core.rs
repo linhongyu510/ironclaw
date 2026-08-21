@@ -5067,6 +5067,7 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
             storage_root.clone(),
         )
         .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev)
+        .expect("local filesystem accepts legacy snapshot source")
         .with_runtime_policy(standalone_runtime_policy()),
     );
     let runtime = build_reborn_runtime(input).await.expect("runtime");

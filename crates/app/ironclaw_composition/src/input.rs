@@ -555,7 +555,7 @@ impl RebornHostBindings {
     pub fn with_legacy_skill_snapshot_source(
         mut self,
         source: ironclaw_config::LegacyStorageSource,
-    ) -> Self {
+    ) -> Result<Self, RebornBuildError> {
         match &mut self.storage {
             RebornStorageInput::LocalFilesystem {
                 legacy_skill_snapshot_source,
@@ -565,11 +565,13 @@ impl RebornHostBindings {
                 legacy_skill_snapshot_source,
                 ..
             } => *legacy_skill_snapshot_source = Some(source),
-            _ => panic!(
-                "with_legacy_skill_snapshot_source supports only local filesystem and hosted single-tenant PostgreSQL storage"
-            ),
+            _ => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: "legacy skill snapshot sources require local filesystem or hosted single-tenant PostgreSQL storage".to_string(),
+                });
+            }
         }
-        self
+        Ok(self)
     }
 
     pub fn with_local_runtime_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
@@ -1328,11 +1330,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "with_legacy_skill_snapshot_source supports only local filesystem and hosted single-tenant PostgreSQL storage"
-    )]
     fn legacy_skill_snapshot_source_rejects_unsupported_storage() {
-        let _ = RebornHostBindings::disabled("test-owner")
+        let result = RebornHostBindings::disabled("test-owner")
             .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev);
+
+        assert!(matches!(
+            result,
+            Err(RebornBuildError::InvalidConfig { .. })
+        ));
     }
 }

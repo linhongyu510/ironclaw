@@ -981,7 +981,7 @@ fn build_standalone_local_runtime_services_input(
     )
     .with_context(|| format!("failed to build local-runtime services for profile={profile}"))?;
     if let Some(source) = legacy_skill_snapshot_source {
-        services_input = services_input.with_legacy_skill_snapshot_source(source);
+        services_input = services_input.with_legacy_skill_snapshot_source(source)?;
     }
     if services_input.requires_local_runtime_confirmed_host_home_root() {
         let host_home_root =
@@ -1015,7 +1015,7 @@ fn build_hosted_single_tenant_services_input(
         nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
     );
     if let Some(source) = legacy_skill_snapshot_source {
-        services_input = services_input.with_legacy_skill_snapshot_source(source);
+        services_input = services_input.with_legacy_skill_snapshot_source(source)?;
     }
     Ok(services_input)
 }
