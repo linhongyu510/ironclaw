@@ -24,6 +24,34 @@ use sha2::{Digest, Sha256};
 const ARTIFACT_ALIAS: &str = "/artifacts";
 pub const TOOL_ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Name the exact leg that failed, then collapse to the wire-compatible
+/// `ArtifactWriteError::Storage`.
+///
+/// `ArtifactWriteError` is a unit-variant contract type shared with the host
+/// API, so a cause cannot ride the error value. Without this the whole
+/// projection reports one indistinguishable "artifact storage failed" and the
+/// operator cannot tell an unbound service from a missing record from a chunk
+/// invariant — exactly the ambiguity that made the incident expensive to
+/// diagnose. The model-visible summary stays generic; the DEBUG log names the leg.
+fn legacy_projection_failure(
+    leg: &'static str,
+    cause: impl std::fmt::Display,
+) -> ArtifactWriteError {
+    tracing::debug!(
+        operation = "project_legacy_result",
+        leg,
+        cause = %cause,
+        "legacy tool result projection failed"
+    );
+    ArtifactWriteError::Storage
+}
+
+/// The same leg naming for a failure with no bound source error — an absent
+/// record, an unbound service, or a violated invariant.
+fn legacy_projection_missing(leg: &'static str) -> ArtifactWriteError {
+    legacy_projection_failure(leg, "absent or invariant violated")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredArtifactChunk {
     index: u64,
@@ -409,11 +437,11 @@ impl DurableToolArtifactStore {
         self.filesystem
             .get(&ResourceScope::system(), &path)
             .await
-            .map_err(|_| ArtifactWriteError::Storage)?
+            .map_err(|error| legacy_projection_failure("legacy_mapping_get", error))?
             .map(|stored| {
                 serde_json::from_slice::<StoredArtifactReceipt>(&stored.entry.body)
                     .map(|binding| binding.artifact_id)
-                    .map_err(|_| ArtifactWriteError::Storage)
+                    .map_err(|error| legacy_projection_failure("legacy_mapping_decode", error))
             })
             .transpose()
     }
@@ -421,14 +449,17 @@ impl DurableToolArtifactStore {
     fn completed_legacy_artifact(
         metadata: StoredArtifactMetadata,
     ) -> Result<CompletedArtifact, ArtifactWriteError> {
-        let digest = metadata.digest.ok_or(ArtifactWriteError::Storage)?;
-        if metadata.finalized_at.is_none()
-            || !matches!(
-                metadata.backing,
-                ToolArtifactBacking::LegacyResultRecord { .. }
-            )
-        {
-            return Err(ArtifactWriteError::Storage);
+        let digest = metadata
+            .digest
+            .ok_or_else(|| legacy_projection_missing("finalized_digest"))?;
+        if metadata.finalized_at.is_none() {
+            return Err(legacy_projection_missing("finalized_at"));
+        }
+        if !matches!(
+            metadata.backing,
+            ToolArtifactBacking::LegacyResultRecord { .. }
+        ) {
+            return Err(legacy_projection_missing("legacy_result_backing"));
         }
         Ok(CompletedArtifact {
             artifact_ref: ArtifactRef::new(metadata.artifact_id),
@@ -447,7 +478,7 @@ impl DurableToolArtifactStore {
             let (metadata, _) = self
                 .metadata(&request.owner_scope, request.namespace, artifact_id)
                 .await?
-                .ok_or(ArtifactWriteError::Storage)?;
+                .ok_or_else(|| legacy_projection_missing("mapped_artifact_metadata"))?;
             if metadata.finalized_at.is_some() {
                 return Self::completed_legacy_artifact(metadata);
             }
@@ -456,7 +487,7 @@ impl DurableToolArtifactStore {
         let service = self
             .legacy_result_service
             .get()
-            .ok_or(ArtifactWriteError::Storage)?;
+            .ok_or_else(|| legacy_projection_missing("legacy_result_service_binding"))?;
         let mut offset = 0_u64;
         let mut total_bytes = None;
         let mut hasher = Sha256::new();
@@ -472,32 +503,36 @@ impl DurableToolArtifactStore {
                     max_bytes: crate::TOOL_RESULT_RECORD_READ_MAX_BYTES,
                 })
                 .await
-                .map_err(|_| ArtifactWriteError::Storage)?
-                .ok_or(ArtifactWriteError::Storage)?;
+                .map_err(|error| legacy_projection_failure("read_tool_result_record", error))?
+                // The most common leg in production: live capability results
+                // persist artifacts, not tool result records, so only a
+                // prepared-context seeded transcript has a record to project.
+                .ok_or_else(|| legacy_projection_missing("tool_result_record"))?;
             if total_bytes
                 .replace(chunk.total_bytes)
                 .is_some_and(|total| total != chunk.total_bytes)
                 || chunk.content.is_empty() && chunk.next_offset.is_some()
             {
-                return Err(ArtifactWriteError::Storage);
+                return Err(legacy_projection_missing("stable_record_chunk_invariant"));
             }
             hasher.update(&chunk.content);
             newline_count = newline_count
                 .checked_add(chunk.content.iter().filter(|byte| **byte == b'\n').count() as u64)
-                .ok_or(ArtifactWriteError::Storage)?;
+                .ok_or_else(|| legacy_projection_missing("newline_count_overflow"))?;
             last_byte = chunk.content.last().copied().or(last_byte);
             offset = offset
                 .checked_add(chunk.content.len() as u64)
-                .ok_or(ArtifactWriteError::Storage)?;
+                .ok_or_else(|| legacy_projection_missing("read_offset_overflow"))?;
             match chunk.next_offset {
                 Some(next) if next == offset => {}
-                Some(_) => return Err(ArtifactWriteError::Storage),
+                Some(_) => return Err(legacy_projection_missing("record_chunk_offset_continuity")),
                 None => break,
             }
         }
-        let total_bytes = total_bytes.ok_or(ArtifactWriteError::Storage)?;
+        let total_bytes =
+            total_bytes.ok_or_else(|| legacy_projection_missing("record_total_bytes"))?;
         if offset != total_bytes {
-            return Err(ArtifactWriteError::Storage);
+            return Err(legacy_projection_missing("record_total_bytes_agreement"));
         }
         let total_lines = if total_bytes == 0 {
             0
@@ -506,7 +541,7 @@ impl DurableToolArtifactStore {
         } else {
             newline_count
                 .checked_add(1)
-                .ok_or(ArtifactWriteError::Storage)?
+                .ok_or_else(|| legacy_projection_missing("line_count_overflow"))?
         };
         let digest = ArtifactDigest::from_sha256_bytes(hasher.finalize().into());
         let handle = self
@@ -539,15 +574,24 @@ impl DurableToolArtifactStore {
             .await
         {
             Ok(_) => handle.artifact_id(),
-            Err(_) => self
-                .legacy_mapping_artifact_id(&request)
-                .await?
-                .ok_or(ArtifactWriteError::Storage)?,
+            // Lost the mapping CAS to a concurrent projection: adopt its
+            // artifact id instead of minting a second one.
+            Err(error) => {
+                tracing::debug!(
+                    operation = "project_legacy_result",
+                    leg = "legacy_mapping_cas_lost",
+                    cause = %error,
+                    "adopting the concurrent projection's artifact id"
+                );
+                self.legacy_mapping_artifact_id(&request)
+                    .await?
+                    .ok_or_else(|| legacy_projection_missing("legacy_mapping_cas_winner"))?
+            }
         };
         let (mut metadata, version) = self
             .metadata(&request.owner_scope, request.namespace, artifact_id)
             .await?
-            .ok_or(ArtifactWriteError::Storage)?;
+            .ok_or_else(|| legacy_projection_missing("allocated_artifact_metadata"))?;
         if metadata.finalized_at.is_some() {
             return Self::completed_legacy_artifact(metadata);
         }
@@ -573,11 +617,19 @@ impl DurableToolArtifactStore {
             .await
         {
             Ok(_) => Self::completed_legacy_artifact(metadata),
-            Err(_) => {
+            // Lost the metadata CAS to a concurrent projection of the same
+            // record: its finalized metadata is equally authoritative.
+            Err(error) => {
+                tracing::debug!(
+                    operation = "project_legacy_result",
+                    leg = "legacy_metadata_cas_lost",
+                    cause = %error,
+                    "replaying the concurrent projection's finalized metadata"
+                );
                 let (winner, _) = self
                     .metadata(&request.owner_scope, request.namespace, artifact_id)
                     .await?
-                    .ok_or(ArtifactWriteError::Storage)?;
+                    .ok_or_else(|| legacy_projection_missing("legacy_metadata_cas_winner"))?;
                 Self::completed_legacy_artifact(winner)
             }
         }
@@ -1733,6 +1785,75 @@ mod tests {
         assert_eq!(selected.content, b"two\n");
         assert_eq!(selected.total_bytes, content.len() as u64);
         assert_eq!(selected.total_lines, Some(3));
+    }
+
+    /// `ArtifactWriteError` is a unit-variant contract type, so a projection
+    /// failure reaches the operator as one indistinguishable "artifact storage
+    /// failed". Two very different legs — an unbound legacy result service and
+    /// a result ref with no durable record behind it — must be told apart in
+    /// the DEBUG log, or diagnosing an incident means reading the source.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn legacy_projection_failure_names_the_failing_leg_in_the_debug_log() {
+        let unbound = DurableToolArtifactStore::new(Arc::new(InMemoryBackend::new()))
+            .expect("store without a legacy result service");
+        let thread_scope = crate::ThreadScope {
+            tenant_id: TenantId::new("leg-tenant").expect("tenant"),
+            agent_id: AgentId::new("leg-agent").expect("agent"),
+            project_id: None,
+            owner_user_id: Some(UserId::new("leg-owner").expect("user")),
+            mission_id: None,
+        };
+        let request = LegacyResultArtifactRequest {
+            owner_scope: ArtifactOwnerScope::from_resource_scope(
+                &ResourceScope::local_default(
+                    UserId::new("leg-owner").expect("user"),
+                    InvocationId::new(),
+                )
+                .expect("scope"),
+            ),
+            namespace: ArtifactNamespaceId::from_root_run(RunId::new()),
+            producer_capability_id: CapabilityId::new("builtin.legacy_result").expect("capability"),
+            thread_scope: thread_scope.clone(),
+            thread_id: ThreadId::new("leg-thread").expect("thread"),
+            result_ref: "result:no-durable-record".to_string(),
+        };
+
+        assert_eq!(
+            unbound.project_legacy_result(request.clone()).await,
+            Err(ArtifactWriteError::Storage)
+        );
+        assert!(logs_contain("leg=\"legacy_result_service_binding\""));
+
+        let bound = DurableToolArtifactStore::new(Arc::new(InMemoryBackend::new()))
+            .expect("store with a legacy result service");
+        let backing = Arc::new(crate::InMemorySessionThreadService::default());
+        // The thread exists and the result ref is well formed — only the
+        // durable tool result record is absent, which is what a LIVE capability
+        // result looks like: it persists an artifact, never a record.
+        backing
+            .ensure_thread(crate::EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(request.thread_id.clone()),
+                created_by_actor_id: "leg-test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("ensure thread");
+        let service: Arc<dyn SessionThreadService> = backing;
+        bound
+            .bind_legacy_result_service(service)
+            .expect("bind legacy result reader");
+
+        assert_eq!(
+            bound.project_legacy_result(request).await,
+            Err(ArtifactWriteError::Storage)
+        );
+        assert!(
+            logs_contain("leg=\"tool_result_record\""),
+            "a live capability result has no durable record to project; the log must say so"
+        );
     }
 }
 
