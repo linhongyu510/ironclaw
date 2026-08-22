@@ -14,15 +14,32 @@ use ironclaw_host_api::process::{
 };
 use ironclaw_sandbox::RebornSandboxScopeKey;
 
-/// Maximum model-facing process output preview before middle truncation.
+/// Default inline capture window for process output, used when the caller does
+/// not set [`CommandExecutionRequest::max_inline_output_bytes`].
 ///
 /// Lowered 64KB -> 16KB: shell/command output is fresh (non-cached) prompt
 /// tokens re-sent on every subsequent turn, so oversized previews dominate cost
-/// on data/log tasks. 16KB keeps enough head+tail context for the model to act
-/// on (full output is still saved and referenceable) while cutting the per-turn
+/// on data/log tasks. 16KB keeps enough recent context for the model to act on
+/// (full output is still saved and referenceable) while cutting the per-turn
 /// cost of large results. Measured no accuracy regression on data tasks.
+///
+/// The pinned `bash` engine opts out of this default: it spills the stream to a
+/// durable artifact and does its own model-facing shaping, so a cut here would
+/// destroy the stream before the artifact could hold it.
 pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 16 * 1024;
-const COMMAND_PREVIEW_HALF_SIZE: usize = COMMAND_MAX_OUTPUT_SIZE / 2;
+
+/// Upper bound the port will honor for a caller-requested inline window. Keeps
+/// a caller from asking the port to hold an unbounded capture in memory; it
+/// matches the first-party capability output ceiling
+/// (`FIRST_PARTY_MAX_OUTPUT_BYTES`), which bounds the same result downstream.
+pub(crate) const COMMAND_MAX_INLINE_OUTPUT_SIZE: usize = 1024 * 1024;
+
+/// Resolve the inline capture window for one command request.
+pub(crate) fn inline_output_budget(requested: Option<usize>) -> usize {
+    requested.map_or(COMMAND_MAX_OUTPUT_SIZE, |bytes| {
+        bytes.clamp(1, COMMAND_MAX_INLINE_OUTPUT_SIZE)
+    })
+}
 const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
 const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const COMMAND_OUTPUT_TEMP_PREFIX: &str = "ironclaw-command-output-";
@@ -110,43 +127,69 @@ impl From<PathBuf> for ScratchOutputPath {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Tail-keeping preview accumulator for captured command output.
+///
+/// Command output puts what the caller needs last: the failing assertion, the
+/// compiler's error summary, the exit notice. The previous head+tail split
+/// spent half the window on a build log's banner and still dropped the middle,
+/// so neither half was a usable span. Keeping the tail alone yields one
+/// contiguous, recent region, and the dropped prefix is reported by exact byte
+/// count so the caller never reads a partial capture as a complete one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PreviewBytes {
     total_len: usize,
-    head: Vec<u8>,
+    budget: usize,
     tail: Vec<u8>,
 }
 
 impl PreviewBytes {
+    fn new(budget: usize) -> Self {
+        Self {
+            total_len: 0,
+            budget,
+            tail: Vec::new(),
+        }
+    }
+
     fn push(&mut self, bytes: &[u8]) {
         self.total_len = self.total_len.saturating_add(bytes.len());
-        if self.head.len() < COMMAND_PREVIEW_HALF_SIZE {
-            let remaining = COMMAND_PREVIEW_HALF_SIZE - self.head.len();
-            self.head
-                .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-        }
         self.tail.extend_from_slice(bytes);
-        if self.tail.len() > COMMAND_PREVIEW_HALF_SIZE {
-            let excess = self.tail.len() - COMMAND_PREVIEW_HALF_SIZE;
+        if self.tail.len() > self.budget {
+            let excess = self.tail.len() - self.budget;
             self.tail.drain(..excess);
         }
     }
 
     fn render(&self) -> String {
-        if self.total_len <= COMMAND_MAX_OUTPUT_SIZE {
-            return String::from_utf8_lossy(&self.head).to_string();
+        if self.total_len <= self.budget {
+            return String::from_utf8_lossy(&self.tail).to_string();
         }
+        let tail = trim_leading_continuation_bytes(&self.tail);
+        let dropped = self.total_len.saturating_sub(tail.len());
         format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            String::from_utf8_lossy(&self.head),
-            self.total_len - COMMAND_MAX_OUTPUT_SIZE,
-            String::from_utf8_lossy(&self.tail)
+            "[{dropped} earlier bytes dropped: the command produced {} bytes, above the \
+             {}-byte capture window. Showing the last {} bytes.]\n{}",
+            self.total_len,
+            self.budget,
+            tail.len(),
+            String::from_utf8_lossy(tail)
         )
     }
 }
 
+/// Drop UTF-8 continuation bytes left at the front by a byte-aligned tail cut,
+/// so a kept tail never opens with a replacement character.
+fn trim_leading_continuation_bytes(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < bytes.len() && (bytes[start] & 0b1100_0000) == 0b1000_0000 {
+        start += 1;
+    }
+    &bytes[start..]
+}
+
 pub(crate) async fn read_stream_capped<R>(
     scope: &ResourceScope,
+    budget: usize,
     mut stream: R,
 ) -> Result<StreamCapture, RuntimeProcessError>
 where
@@ -168,7 +211,7 @@ where
         let chunk = &buf[..read];
 
         if let StreamStorage::Inline(output) = &mut capture.storage
-            && output.len().saturating_add(chunk.len()) <= COMMAND_MAX_OUTPUT_SIZE
+            && output.len().saturating_add(chunk.len()) <= budget
         {
             output.extend_from_slice(chunk);
             continue;
@@ -223,22 +266,24 @@ where
 
 pub(crate) fn capture_command_output(
     scope: &ResourceScope,
+    budget: usize,
     stdout: StreamCapture,
     stderr: StreamCapture,
 ) -> Result<CapturedCommandOutput, RuntimeProcessError> {
-    if !requires_saved_output(&stdout, &stderr) {
-        let preview = sanitize_preview_bytes(&combined_inline_output(&stdout, &stderr));
+    if !requires_saved_output(budget, &stdout, &stderr) {
+        let preview = sanitize_preview_bytes(budget, &combined_inline_output(&stdout, &stderr));
         return Ok(CapturedCommandOutput {
             preview,
             saved_output: None,
         });
     }
 
-    let mut preview = PreviewBytes::default();
+    let mut preview = PreviewBytes::new(budget);
     (|| {
         let raw_output = materialize_combined_output(scope, &stdout, &stderr, &mut preview)?;
         finalize_saved_output(
             scope,
+            budget,
             &raw_output,
             stdout.was_capped || stderr.was_capped,
             preview,
@@ -250,12 +295,12 @@ pub(crate) fn capture_command_output(
     })()
 }
 
-fn requires_saved_output(stdout: &StreamCapture, stderr: &StreamCapture) -> bool {
+fn requires_saved_output(budget: usize, stdout: &StreamCapture, stderr: &StreamCapture) -> bool {
     stdout.saved_path().is_some()
         || stderr.saved_path().is_some()
         || stdout.was_capped
         || stderr.was_capped
-        || combined_inline_output_len(stdout, stderr) > COMMAND_MAX_OUTPUT_SIZE
+        || combined_inline_output_len(stdout, stderr) > budget
 }
 
 fn combined_inline_output(stdout: &StreamCapture, stderr: &StreamCapture) -> Vec<u8> {
@@ -333,6 +378,7 @@ fn append_bytes(
 
 fn finalize_saved_output(
     scope: &ResourceScope,
+    budget: usize,
     raw_path: &ScratchOutputPath,
     stream_was_capped: bool,
     raw_preview: PreviewBytes,
@@ -343,7 +389,7 @@ fn finalize_saved_output(
     // supports streaming or byte-span sanitization.
     let content = fs::read(raw_path.as_path())
         .map_err(file_error("read saved command output for sanitization"))?;
-    let sanitized = sanitize_command_output_bytes(&content, raw_preview.render());
+    let sanitized = sanitize_command_output_bytes(budget, &content, raw_preview.render());
     let final_path = if let Some(saved_replacement) = sanitized.saved_replacement.as_deref() {
         write_final_saved_output(scope, saved_replacement.as_bytes())?
     } else {
@@ -389,11 +435,21 @@ struct SanitizedCommandOutput {
     saved_replacement: Option<String>,
 }
 
-fn sanitize_preview_bytes(bytes: &[u8]) -> String {
-    sanitize_command_output_bytes(bytes, String::from_utf8_lossy(bytes).to_string()).preview
+fn sanitize_preview_bytes(budget: usize, bytes: &[u8]) -> String {
+    sanitize_command_output_bytes(budget, bytes, String::from_utf8_lossy(bytes).to_string()).preview
 }
 
-fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> SanitizedCommandOutput {
+/// Re-shape after redaction under the SAME window the caller asked for.
+///
+/// Redaction rewrites the text, so the pre-redaction preview no longer
+/// describes it; the cleaned bytes go back through the caller's budget rather
+/// than a fixed default, or a caller that raised its window would silently get
+/// a narrow one whenever a secret was found.
+fn sanitize_command_output_bytes(
+    budget: usize,
+    content: &[u8],
+    raw_preview: String,
+) -> SanitizedCommandOutput {
     let content_text = String::from_utf8_lossy(content);
     let detector = ironclaw_safety::LeakDetector::new();
     let (preview, saved_replacement, sanitization) = match detector.scan_and_clean(&content_text) {
@@ -401,7 +457,7 @@ fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> Sanitiz
             if cleaned == content_text {
                 (raw_preview, None, SavedCommandOutputSanitization::Clean)
             } else {
-                let mut preview = PreviewBytes::default();
+                let mut preview = PreviewBytes::new(budget);
                 preview.push(cleaned.as_bytes());
                 (
                     preview.render(),
@@ -550,29 +606,33 @@ fn expires_at_unix_secs() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-pub(crate) fn truncate_output(s: &str) -> String {
-    if s.len() <= COMMAND_MAX_OUTPUT_SIZE {
-        s.to_string()
-    } else {
-        let half = COMMAND_MAX_OUTPUT_SIZE / 2;
-        let head_end = floor_char_boundary(s, half);
-        let tail_start = floor_char_boundary(s, s.len() - half);
-        format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end],
-            s.len() - COMMAND_MAX_OUTPUT_SIZE,
-            &s[tail_start..]
-        )
+/// Tail-keep an already-materialized transport preview to `budget` bytes.
+///
+/// Same shape and reasoning as [`PreviewBytes::render`]: the end of command
+/// output is the part that carries the result, and the dropped prefix is named
+/// by exact byte count.
+pub(crate) fn truncate_output(s: &str, budget: usize) -> String {
+    if s.len() <= budget {
+        return s.to_string();
     }
+    let tail_start = ceil_char_boundary(s, s.len().saturating_sub(budget));
+    let tail = &s[tail_start..];
+    format!(
+        "[{} earlier bytes dropped: the command produced {} bytes, above the \
+         {budget}-byte capture window. Showing the last {} bytes.]\n{tail}",
+        s.len() - tail.len(),
+        s.len(),
+        tail.len(),
+    )
 }
 
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
+fn ceil_char_boundary(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
         return s.len();
     }
     let mut i = pos;
     while !s.is_char_boundary(i) {
-        i -= 1;
+        i += 1;
     }
     i
 }
@@ -607,31 +667,88 @@ mod tests {
     fn truncate_output_preserves_exact_limit() {
         let output = "x".repeat(COMMAND_MAX_OUTPUT_SIZE);
 
-        assert_eq!(truncate_output(&output), output);
+        assert_eq!(
+            truncate_output(&output, COMMAND_MAX_OUTPUT_SIZE),
+            output,
+            "output exactly at the window is complete and must not gain a notice"
+        );
     }
 
+    /// Over the window, the END is kept — a command reports its result last —
+    /// and the dropped prefix is stated by exact byte count.
     #[test]
-    fn truncate_output_respects_utf8_boundaries() {
+    fn truncate_output_keeps_the_tail_and_names_what_it_dropped() {
         let output = format!(
-            "{}{}{}",
-            "a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1),
-            "é",
+            "{}{}",
+            "a".repeat(COMMAND_MAX_OUTPUT_SIZE),
             "b".repeat(COMMAND_MAX_OUTPUT_SIZE)
         );
 
-        let truncated = truncate_output(&output);
+        let truncated = truncate_output(&output, COMMAND_MAX_OUTPUT_SIZE);
 
-        assert!(truncated.is_char_boundary(COMMAND_MAX_OUTPUT_SIZE / 2 - 1));
-        assert!(truncated.contains("... [truncated "));
-        assert!(truncated.starts_with(&"a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1)));
-        assert!(truncated.ends_with(&"b".repeat(COMMAND_MAX_OUTPUT_SIZE / 2)));
+        assert!(truncated.ends_with(&"b".repeat(COMMAND_MAX_OUTPUT_SIZE)));
+        assert!(truncated.starts_with(&format!(
+            "[{COMMAND_MAX_OUTPUT_SIZE} earlier bytes dropped: the command produced {} bytes",
+            output.len()
+        )));
+        assert!(!truncated.contains("aaaa"));
+    }
+
+    /// A tail cut that lands mid-codepoint must move forward to a boundary
+    /// rather than emitting a replacement character.
+    #[test]
+    fn truncate_output_respects_utf8_boundaries() {
+        let budget = COMMAND_MAX_OUTPUT_SIZE;
+        // Place a 2-byte char so the naive tail start splits it.
+        let output = format!("{}{}{}", "a".repeat(16), "é", "b".repeat(budget - 1));
+
+        let truncated = truncate_output(&output, budget);
+
+        assert!(truncated.ends_with(&"b".repeat(budget - 1)));
+        assert!(!truncated.contains('\u{fffd}'));
+    }
+
+    /// The window is a caller-declared budget, clamped so no caller can ask the
+    /// port to hold an unbounded capture in memory.
+    #[test]
+    fn inline_output_budget_defaults_and_clamps() {
+        assert_eq!(inline_output_budget(None), COMMAND_MAX_OUTPUT_SIZE);
+        assert_eq!(inline_output_budget(Some(64 * 1024)), 64 * 1024);
+        assert_eq!(
+            inline_output_budget(Some(usize::MAX)),
+            COMMAND_MAX_INLINE_OUTPUT_SIZE
+        );
+        assert_eq!(inline_output_budget(Some(0)), 1);
+    }
+
+    /// A caller that raises the window gets the whole capture back untouched,
+    /// which is what lets the host spill the real stream to a durable artifact
+    /// instead of spilling an already-truncated one.
+    #[test]
+    fn a_raised_window_returns_the_capture_whole() {
+        let raw = "y".repeat(COMMAND_MAX_OUTPUT_SIZE * 4);
+        let stdout = saved_stream_capture(raw.as_bytes());
+
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_INLINE_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
+        let saved_output = output.saved_output.expect("saved output metadata");
+        #[allow(clippy::let_underscore_must_use)]
+        // best-effort test teardown; cleanup failure is irrelevant
+        let _ = fs::remove_file(&saved_output.path);
+
+        assert_eq!(output.preview, raw);
     }
 
     #[tokio::test]
     async fn read_stream_capped_keeps_large_output_out_of_inline_buffer() {
         let input = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
 
-        let output = read_stream_capped(&test_scope(), input.as_bytes())
+        let output = read_stream_capped(&test_scope(), COMMAND_MAX_OUTPUT_SIZE, input.as_bytes())
             .await
             .expect("stream capture succeeds");
         let saved_path = output
@@ -654,8 +771,13 @@ mod tests {
             storage: StreamStorage::Inline(b"small output".to_vec()),
             ..StreamCapture::default()
         };
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
 
         assert_eq!(output.preview, "small output");
         assert_eq!(output.saved_output, None);
@@ -669,8 +791,13 @@ mod tests {
             ..StreamCapture::default()
         };
 
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
 
         assert_eq!(output.preview, COMMAND_OUTPUT_BLOCKED_MARKER);
         assert_eq!(output.saved_output, None);
@@ -678,7 +805,7 @@ mod tests {
 
     #[test]
     fn capture_command_output_saves_large_output_file() {
-        let middle = "middle content that current preview would omit";
+        let middle = "middle content the tail-keep window omits";
         let raw = format!(
             "{}{middle}{}",
             "a".repeat(COMMAND_MAX_OUTPUT_SIZE),
@@ -686,15 +813,28 @@ mod tests {
         );
         let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
         #[allow(clippy::let_underscore_must_use)]
         // best-effort test teardown; cleanup failure is irrelevant
         let _ = fs::remove_file(&saved_output.path);
 
-        assert!(output.preview.contains("... [truncated "));
+        assert!(
+            output.preview.starts_with("[") && output.preview.contains("earlier bytes dropped"),
+            "an over-window capture must state what it dropped: {}",
+            &output.preview[..output.preview.len().min(160)]
+        );
+        assert!(
+            output.preview.ends_with(&"z".repeat(1024)),
+            "the tail is kept"
+        );
         assert!(!output.preview.contains(middle));
         assert_eq!(
             saved_output.sanitization,
@@ -710,8 +850,13 @@ mod tests {
         let raw = format!("{}{}", "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1), secret);
         let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
         #[allow(clippy::let_underscore_must_use)]
@@ -733,8 +878,13 @@ mod tests {
         raw.extend_from_slice(b" clean tail");
         let stdout = saved_stream_capture(&raw);
 
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read(&saved_output.path).expect("saved output readable");
         #[allow(clippy::let_underscore_must_use)]
@@ -754,8 +904,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let stdout = saved_stream_capture(b"large clean output");
-        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
-            .expect("capture succeeds");
+        let output = capture_command_output(
+            &test_scope(),
+            COMMAND_MAX_OUTPUT_SIZE,
+            stdout,
+            StreamCapture::default(),
+        )
+        .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let mode = fs::metadata(&saved_output.path)
             .expect("metadata")

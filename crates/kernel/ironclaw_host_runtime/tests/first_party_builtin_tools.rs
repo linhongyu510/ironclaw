@@ -4422,7 +4422,14 @@ async fn builtin_shell_truncates_large_output_without_output_overflow() {
     .unwrap();
 
     let output = model_visible_output_text(&output);
-    assert!(output.contains("[truncated"));
+    // The capture window keeps the END of command output and states the dropped
+    // prefix by exact byte count, so a bounded result is never mistaken for a
+    // whole one.
+    assert!(
+        output.contains("earlier bytes dropped"),
+        "a bounded result must say what it dropped: {}",
+        &output[..output.len().min(200)]
+    );
     assert!(output.contains("no `read`-accessible scoped path was available"));
     assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
     assert!(output.len() <= 66_000);

@@ -360,6 +360,7 @@ pub(crate) async fn run_post_edit_check(
             workdir,
             timeout_secs: Some(config.timeout().as_secs()),
             extra_env: HashMap::new(),
+            max_inline_output_bytes: None,
         })
         .await;
     match outcome {

@@ -168,14 +168,50 @@ fn registered_bash_contract_preserves_the_supported_omp_subset() {
     );
 
     let description = pinned_assets::CODING_BASH_DESCRIPTION;
-    assert!(description.contains("Runs commands in a shell."));
-    assert!(description.contains("output is captured, truncated, and linked as `artifact://<id>`"));
+    assert!(description.contains("Execute bash commands"));
+    assert!(description.contains("artifact://<id>"));
     for unsupported in ["persistent shell", "`pty: true`", "`async: true`"] {
         assert!(
             !description.contains(unsupported),
             "registered bash description advertises unsupported behavior {unsupported:?}"
         );
     }
+}
+
+/// The IronClaw bash contract is deliberately permissive (2026-08-21,
+/// benchmark-driven). The prior variant banned shell `grep`/`rg`, `ls`/`find`,
+/// `head`/`tail`, and redirection, and capped the tool at "ONLY one binary or a
+/// short pipeline". On PinchBench the whole score gap and the cost inflation
+/// versus the pre-restriction baseline concentrated in the bash-active tasks:
+/// the model spent hundreds of calls working around the ban instead of running
+/// the obvious command. This test fails if that restriction language returns.
+#[test]
+fn registered_bash_description_stays_permissive() {
+    use ironclaw_extension_support::coding::pinned::pinned_assets;
+
+    let description = pinned_assets::CODING_BASH_DESCRIPTION;
+    for banned in [
+        "NEVER",
+        "ONLY ",
+        "Avoid ",
+        "must not",
+        "Do not use",
+        "not allowed",
+    ] {
+        assert!(
+            !description.contains(banned),
+            "bash description reintroduces restriction language {banned:?}"
+        );
+    }
+    for permitted in ["ls", "grep", "find", "Pipelines", "redirection"] {
+        assert!(
+            description.contains(permitted),
+            "bash description no longer advertises {permitted:?} as available"
+        );
+    }
+    // The one output line the model needs to recover a truncated stream.
+    assert!(description.contains("the last lines are kept"));
+    assert!(description.contains("the exact line range shown"));
 }
 
 impl Fixture {
@@ -2100,4 +2136,63 @@ async fn bash_requires_command() {
         "{}",
         error_message(&error)
     );
+}
+
+/// Recording executor: captures the exact request the bash engine builds.
+struct RecordingExecutor {
+    requests: std::sync::Mutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl ironclaw_host_api::process::CommandExecutor for RecordingExecutor {
+    async fn run_command(
+        &self,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
+    > {
+        self.requests
+            .lock()
+            .expect("recording executor lock")
+            .push(request);
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
+            output: "ok".to_string(),
+            saved_output: None,
+            exit_code: 0,
+            sandboxed: false,
+            duration: std::time::Duration::from_millis(1),
+        })
+    }
+}
+
+/// The bash engine must raise the process port's inline capture window.
+///
+/// The port's default cuts command output to 16 KiB before the host can spill
+/// it to a durable artifact, so a large result would reach the model truncated
+/// with no way to recover the rest. The engine asks for the wider window; the
+/// host does the model-facing shaping one layer up.
+///
+/// Also pins the default deadline: omitting `timeout` must apply the pinned
+/// 300s default, not run unbounded.
+#[tokio::test]
+async fn bash_requests_the_wide_inline_window_and_the_default_deadline() {
+    let executor = Arc::new(RecordingExecutor {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut ctx = Fixture::new().ctx();
+    ctx.process = Some(executor.clone());
+
+    ironclaw_extension_support::coding::pinned::bash(&ctx, json!({ "command": "echo hi" }))
+        .await
+        .expect("bash runs");
+
+    let requests = executor.requests.lock().expect("recording executor lock");
+    let request = requests.first().expect("one recorded request");
+    assert_eq!(
+        request.max_inline_output_bytes,
+        Some(1024 * 1024),
+        "bash must opt out of the port's narrow default capture window"
+    );
+    assert_eq!(request.timeout_secs, Some(300));
 }

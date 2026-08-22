@@ -230,6 +230,95 @@ fn coding_bash_executes_through_the_process_port() {
     });
 }
 
+/// The `bash` contract is permissive: a shell pipeline built from the utilities
+/// the old prompt banned — `grep` piped into `head` — runs to completion through
+/// the real capability path, with no denial and no interception.
+///
+/// This is the behavior the restrictive contract cost. On PinchBench the model
+/// met the ban with hundreds of workaround calls per run instead of the one
+/// obvious command, and the whole score gap concentrated in bash-active tasks.
+#[test]
+fn coding_bash_runs_a_shell_pipeline_without_interception() {
+    run_async_test_with_stack(
+        "coding_bash_runs_a_shell_pipeline_without_interception",
+        || async {
+            let h = RebornIntegrationHarness::test_default()
+                .with_coding_tools()
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "bash",
+                        json!({
+                            "command":
+                                "printf 'alpha\\nbeta\\nalpha-two\\ngamma\\n' \
+                                 | grep alpha | head -n 1"
+                        }),
+                    ),
+                    RebornScriptedReply::text("pipeline complete"),
+                ])
+                .build()
+                .await
+                .expect("harness builds");
+
+            h.submit_turn("filter the lines")
+                .await
+                .expect("turn completes");
+            h.assert_tool_invoked("builtin.bash")
+                .await
+                .expect("bash dispatches through the capability port");
+
+            let output = output_text(
+                &h.tool_result_output("builtin.bash")
+                    .await
+                    .expect("bash result"),
+            );
+            assert!(
+                output.starts_with("alpha\n") && output.contains("Wall time: "),
+                "the pipeline must run and return its own output: {output}"
+            );
+            for filtered in ["beta", "gamma", "alpha-two"] {
+                assert!(
+                    !output.contains(filtered),
+                    "grep|head must have filtered the stream ({filtered} leaked): {output}"
+                );
+            }
+            for denial in ["Blocked by bash pattern", "NEVER", "not permitted"] {
+                assert!(
+                    !output.contains(denial),
+                    "a benign pipeline must not be denied or lectured: {output}"
+                );
+            }
+        },
+    );
+}
+
+/// Destructive commands stay denied regardless of how permissive the prompt is:
+/// the guard runs before execution and does not read the tool description.
+#[test]
+fn coding_bash_still_denies_destructive_commands() {
+    run_async_test_with_stack("coding_bash_still_denies_destructive_commands", || async {
+        let h = RebornIntegrationHarness::test_default()
+            .with_coding_tools()
+            .script([
+                RebornScriptedReply::tool_call("bash", json!({ "command": "rm -rf /" })),
+                RebornScriptedReply::text("denied"),
+            ])
+            .build()
+            .await
+            .expect("harness builds");
+
+        h.submit_turn("clean up").await.expect("turn completes");
+
+        // The deny text is the model-visible contract, but it is free text the
+        // strict `SafeSummary` validator rejects, so it rides the diagnostic
+        // channel (`coding_error` in `first_party_tools/coding.rs`) while the
+        // persisted summary carries only the generic category. Pin the bytes
+        // the model is actually handed on the follow-up request.
+        h.assert_model_request_contains("Blocked by bash pattern")
+            .await
+            .expect("the destructive command must be denied, visibly to the model");
+    });
+}
+
 /// A scripted `read` → `edit` (anchored on the read's hashline tag) → `read`
 /// chain through the real capability path: exact pinned coding output shapes
 /// flow back as tool results and the edit really mutates the workspace file.

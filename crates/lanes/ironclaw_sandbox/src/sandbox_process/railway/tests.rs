@@ -261,6 +261,7 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
         workdir: None,
         timeout_secs: Some(10),
         extra_env: HashMap::new(),
+        max_inline_output_bytes: None,
     }
 }
 

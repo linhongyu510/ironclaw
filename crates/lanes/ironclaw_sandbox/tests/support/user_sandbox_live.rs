@@ -44,6 +44,7 @@ pub(crate) fn request(scope: ResourceScope, command: impl Into<String>) -> Comma
         workdir: Some("/workspace".to_string()),
         timeout_secs: Some(60),
         extra_env: HashMap::new(),
+        max_inline_output_bytes: None,
     }
 }
 

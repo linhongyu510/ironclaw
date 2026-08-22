@@ -589,6 +589,7 @@ async fn real_docker_resolves_a_production_user_container() {
         workdir: Some("/workspace".to_string()),
         timeout_secs: Some(30),
         extra_env: HashMap::new(),
+        max_inline_output_bytes: None,
     };
     let command_output =
         ironclaw_host_api::process::SandboxCommandTransport::run_command(&transport, command)

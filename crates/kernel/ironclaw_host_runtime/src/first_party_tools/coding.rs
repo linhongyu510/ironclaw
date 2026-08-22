@@ -32,7 +32,7 @@ use ironclaw_extension_support::coding::{
 use ironclaw_host_api::{
     artifact::{
         ARTIFACT_INLINE_PREVIEW_MAX_BYTES, ArtifactOwnerScope, ArtifactRef, ArtifactWriteError,
-        ArtifactWriteMetadata,
+        ArtifactWriteHandle, ArtifactWriteMetadata,
     },
     capability::{EffectKind, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
@@ -72,6 +72,15 @@ pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 /// loses both its footer and its shape. The gap absorbs JSON escaping (every
 /// newline doubles) plus the sibling `artifact_ref`/`total_bytes` fields.
 const CODING_ARTIFACT_PREVIEW_MAX_BYTES: usize = 48 * 1024;
+/// Line ceiling on a spilled command-output preview, applied alongside
+/// [`CODING_ARTIFACT_PREVIEW_MAX_BYTES`] — whichever bites first wins. Many
+/// short lines (a test runner's per-case output, a file listing) stay well
+/// under the byte budget and still flood the turn's context.
+const COMMAND_PREVIEW_MAX_LINES: usize = 3_000;
+/// Room held back from the preview budget so the rendered footer cannot push
+/// the result past it once its counts are substituted. Shared by the command
+/// and document window shapes; their footers are the same order of size.
+const PREVIEW_FOOTER_RESERVE_BYTES: usize = 160;
 const MAX_DOCUMENT_EDIT_INPUT_BYTES: usize = 21 * 1024 * 1024;
 /// A 10 MiB source read can grow when rendered with Hashline anchors. Keep
 /// bounded headroom for that representation without allowing a grep over many
@@ -91,8 +100,9 @@ const HTML_TO_PDF_PROVIDER_TOOL_NAME: &str = "builtin__html_to_pdf";
 /// Model-visible descriptions. `read` uses the IronClaw-supported subset of
 /// the upstream prompt; the others use the verbatim pinned prompt files (`write.md`, `hashline.md`,
 /// `glob.md`, `grep.md` — upstream renders `write`/`edit` with an empty
-/// context and the fixture pins the `glob`/`grep` templates raw). `bash`
-/// uses the pinned `bash.md` template rendered with IronClaw's surface flags.
+/// context and the fixture pins the `glob`/`grep` templates raw). `bash` uses
+/// an IronClaw-specific permissive contract (`bash.ironclaw.md`), deliberately
+/// diverging from the restrictive upstream `bash.md` template.
 const CODING_READ_DESCRIPTION: &str =
     ironclaw_extension_support::coding::pinned::pinned_assets::CODING_READ_DESCRIPTION;
 const CODING_WRITE_DESCRIPTION: &str =
@@ -543,26 +553,28 @@ async fn artifact_backed_output(
     }
 
     let raw_len = coding_artifact_len(raw_output.len())?;
-    let namespace = request
-        .services
-        .artifact_namespace
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
-    let persistence = request
-        .services
-        .artifact_persistence
-        .as_ref()
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::MethodMissing))?;
-    let handle = persistence
-        .allocate(ArtifactWriteMetadata {
-            write_key: Some(request.scope.invocation_id),
-            owner_scope: ArtifactOwnerScope::from_resource_scope(&request.scope),
-            namespace,
-            producer_capability_id: request.capability_id.clone(),
-            content_type: "text/plain; charset=utf-8".to_string(),
-            expected_bytes: Some(raw_len),
-        })
-        .await
-        .map_err(artifact_write_error)?;
+    // Storage being unavailable is an infrastructure miss on a forgiving path,
+    // not a reason to fail a command the user already ran. Degrade to the same
+    // bounded window with a footer that says the rest is gone — honest, never
+    // silent, never fatal.
+    let handle = match allocate_output_artifact(request, raw_len).await {
+        Ok(handle) => handle,
+        Err(reason) => {
+            tracing::debug!(
+                capability_id = request.capability_id.as_str(),
+                raw_len,
+                reason,
+                "coding output could not be spilled to an artifact; returning a bounded window"
+            );
+            let preview = unsaved_preview(&raw_output, request.capability_id.as_str());
+            object.insert("output".to_string(), serde_json::Value::String(preview));
+            object.insert("total_bytes".to_string(), serde_json::json!(raw_len));
+            let output = serde_json::Value::Object(object);
+            let output_bytes =
+                super::bounded_output_bytes(&output, super::FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+            return Ok((output, None, output_bytes));
+        }
+    };
     let artifact_ref = ArtifactRef::new(handle.artifact_id());
     let preview = artifact_preview(&raw_output, &artifact_ref, request.capability_id.as_str());
     object.insert("output".to_string(), serde_json::Value::String(preview));
@@ -582,6 +594,42 @@ async fn artifact_backed_output(
     ))
 }
 
+/// Reserve durable storage for a spilled coding result.
+///
+/// The failure side is a short static reason rather than a capability error:
+/// every one of these is an infrastructure miss the caller degrades around, so
+/// the reason is for the debug log, not for the model.
+async fn allocate_output_artifact(
+    request: &FirstPartyCapabilityRequest,
+    raw_len: u64,
+) -> Result<ArtifactWriteHandle, &'static str> {
+    let namespace = request
+        .services
+        .artifact_namespace
+        .ok_or("no artifact namespace on this invocation")?;
+    let persistence = request
+        .services
+        .artifact_persistence
+        .as_ref()
+        .ok_or("no artifact persistence service wired")?;
+    persistence
+        .allocate(ArtifactWriteMetadata {
+            write_key: Some(request.scope.invocation_id),
+            owner_scope: ArtifactOwnerScope::from_resource_scope(&request.scope),
+            namespace,
+            producer_capability_id: request.capability_id.clone(),
+            content_type: "text/plain; charset=utf-8".to_string(),
+            expected_bytes: Some(raw_len),
+        })
+        .await
+        .map_err(|error| match error {
+            ArtifactWriteError::Budget => "artifact budget exhausted",
+            ArtifactWriteError::InvalidHandle => "invalid artifact handle",
+            ArtifactWriteError::DigestMismatch => "artifact digest mismatch",
+            ArtifactWriteError::Storage => "artifact storage failure",
+        })
+}
+
 fn coding_artifact_len(raw_len: usize) -> Result<u64, FirstPartyCapabilityError> {
     let raw_len = u64::try_from(raw_len)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Resource))?;
@@ -591,16 +639,6 @@ fn coding_artifact_len(raw_len: usize) -> Result<u64, FirstPartyCapabilityError>
         ));
     }
     Ok(raw_len)
-}
-
-fn artifact_write_error(error: ArtifactWriteError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        ArtifactWriteError::Budget => RuntimeDispatchErrorKind::Resource,
-        ArtifactWriteError::InvalidHandle
-        | ArtifactWriteError::DigestMismatch
-        | ArtifactWriteError::Storage => RuntimeDispatchErrorKind::OperationFailed,
-    };
-    FirstPartyCapabilityError::new(kind)
 }
 
 /// Bound a spilled coding result for inline transport.
@@ -625,36 +663,87 @@ fn artifact_preview(raw_output: &str, artifact_ref: &ArtifactRef, capability_id:
     document_window_preview(raw_output, artifact_ref)
 }
 
+/// Keep the last window of command output and name the exact range kept.
+///
+/// Two properties the previous head+tail cut did not have:
+///
+/// * **Tail-keep.** A command's result is at the end — the failing assertion,
+///   the summary line, the exit notice. Splitting the window in half spent
+///   most of it on a build banner and still elided the middle, so neither half
+///   was a span the model could reason over.
+/// * **An exact, copyable footer.** `[raw output: artifact://17]` did not say
+///   what was missing, so the model could not tell a complete result from a cut
+///   one, and had no line to resume from. The footer now states the line range
+///   shown, the total, and the artifact holding the whole stream.
 fn command_output_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
-    let footer = format!("\n[raw output: {artifact_ref}]");
-    let marker = "\n\n... [artifact output elided] ...\n\n";
-    let content_budget = CODING_ARTIFACT_PREVIEW_MAX_BYTES
-        .saturating_sub(footer.len())
-        .saturating_sub(marker.len());
-    let head_budget = content_budget / 2;
-    let tail_budget = content_budget.saturating_sub(head_budget);
-    let head_end = floor_char_boundary(raw_output, head_budget);
-    let tail_start = ceil_char_boundary(raw_output, raw_output.len().saturating_sub(tail_budget));
+    let Some((start, line_aligned)) = command_output_window(raw_output) else {
+        // Nothing was cut. A footer here would teach the model to distrust
+        // results that are in fact complete.
+        return raw_output.to_string();
+    };
+    let kept = &raw_output[start..];
+    if !line_aligned {
+        // One line longer than the whole window: there is no line boundary to
+        // report, so report bytes rather than inventing a line range.
+        return format!(
+            "{kept}\n[Showing the last {} bytes of {}. Full output: {artifact_ref}]",
+            kept.len(),
+            raw_output.len()
+        );
+    }
+    let total_lines = raw_output.lines().count();
+    let first_shown = raw_output[..start].lines().count().saturating_add(1);
     format!(
-        "{}{marker}{}{}",
-        &raw_output[..head_end],
-        &raw_output[tail_start..],
-        footer
+        "{kept}\n[Showing lines {first_shown}-{total_lines} of {total_lines}. \
+         Full output: {artifact_ref}]"
     )
+}
+
+/// Where the kept command-output window starts, and whether it begins on a line
+/// boundary. `None` when the whole output fits and nothing is cut.
+///
+/// Two caps apply, whichever bites first: the byte budget, and
+/// [`COMMAND_PREVIEW_MAX_LINES`] — many short lines stay well under the byte
+/// budget and still flood the turn's context.
+fn command_output_window(raw_output: &str) -> Option<(usize, bool)> {
+    let content_budget =
+        CODING_ARTIFACT_PREVIEW_MAX_BYTES.saturating_sub(PREVIEW_FOOTER_RESERVE_BYTES);
+    if raw_output.len() <= content_budget && raw_output.lines().count() <= COMMAND_PREVIEW_MAX_LINES
+    {
+        return None;
+    }
+    let mut start = ceil_char_boundary(raw_output, raw_output.len().saturating_sub(content_budget));
+    // Start the window on a line boundary so the first shown line is whole and
+    // the footer's line arithmetic describes exactly what is on screen.
+    let line_aligned = match raw_output[start..].find('\n') {
+        // A newline that is also the last byte leaves nothing to show, so the
+        // window has no usable line boundary either.
+        Some(offset) if start + offset + 1 < raw_output.len() => {
+            start += offset + 1;
+            true
+        }
+        _ => start == 0,
+    };
+    if line_aligned {
+        let kept = &raw_output[start..];
+        let kept_lines = kept.lines().count();
+        if kept_lines > COMMAND_PREVIEW_MAX_LINES {
+            let mut offset = 0;
+            for _ in 0..(kept_lines - COMMAND_PREVIEW_MAX_LINES) {
+                match kept[offset..].find('\n') {
+                    Some(next) => offset += next + 1,
+                    None => break,
+                }
+            }
+            start += offset;
+        }
+    }
+    (start > 0).then_some((start, line_aligned))
 }
 
 /// Contiguous head plus a resume selector. Never elides the middle.
 fn document_window_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> String {
-    // Reserve enough room that the rendered footer cannot push the preview past
-    // the budget once its counts are substituted.
-    const FOOTER_RESERVE_BYTES: usize = 160;
-    let content_budget = CODING_ARTIFACT_PREVIEW_MAX_BYTES.saturating_sub(FOOTER_RESERVE_BYTES);
-    let mut head_end = floor_char_boundary(raw_output, content_budget);
-    // Cut on a line boundary so the resumed selector starts a whole line and
-    // the visible tail is never a half-rendered Hashline row.
-    if let Some(last_newline) = raw_output[..head_end].rfind('\n') {
-        head_end = last_newline + 1;
-    }
+    let head_end = document_output_window(raw_output);
     let head = &raw_output[..head_end];
     let remaining_bytes = raw_output.len().saturating_sub(head_end);
     if remaining_bytes == 0 {
@@ -666,6 +755,47 @@ fn document_window_preview(raw_output: &str, artifact_ref: &ArtifactRef) -> Stri
     format!(
         "{head}\n[{remaining_bytes} more bytes in artifact. \
          Use {artifact_ref}:{next_line} to continue]"
+    )
+}
+
+/// End of the contiguous head a document window keeps.
+fn document_output_window(raw_output: &str) -> usize {
+    let content_budget =
+        CODING_ARTIFACT_PREVIEW_MAX_BYTES.saturating_sub(PREVIEW_FOOTER_RESERVE_BYTES);
+    let mut head_end = floor_char_boundary(raw_output, content_budget);
+    // Cut on a line boundary so the resumed selector starts a whole line and
+    // the visible tail is never a half-rendered Hashline row.
+    if let Some(last_newline) = raw_output[..head_end].rfind('\n') {
+        head_end = last_newline + 1;
+    }
+    head_end
+}
+
+/// Bound an oversized result whose durable copy could not be written.
+///
+/// Same window as the artifact-backed previews, but the footer says the rest is
+/// gone rather than naming somewhere to fetch it. Storage being unavailable is
+/// an infrastructure miss, not the model's error and not a reason to throw away
+/// a command the user already paid to run — but the model must never read a cut
+/// result as a whole one, so the loss is stated outright.
+fn unsaved_preview(raw_output: &str, capability_id: &str) -> String {
+    if capability_id == CODING_BASH_CAPABILITY_ID {
+        let Some((start, _)) = command_output_window(raw_output) else {
+            return raw_output.to_string();
+        };
+        return format!(
+            "{}\n[{start} earlier bytes dropped; full output could not be saved]",
+            &raw_output[start..]
+        );
+    }
+    let head_end = document_output_window(raw_output);
+    let dropped = raw_output.len().saturating_sub(head_end);
+    if dropped == 0 {
+        return raw_output.to_string();
+    }
+    format!(
+        "{}\n[{dropped} further bytes dropped; full output could not be saved]",
+        &raw_output[..head_end]
     )
 }
 
@@ -744,6 +874,7 @@ fn bounded_diagnostic(message: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::artifact::ArtifactId;
 
     #[test]
     fn coding_artifacts_have_rendering_headroom_above_the_maximum_read_size() {
@@ -781,6 +912,133 @@ mod tests {
         assert!(bounded.is_char_boundary(bounded.len()));
         assert!(bounded.len() <= 31, "{} bytes", bounded.len());
         assert!(bounded.ends_with("[diagnostic truncated]"));
+    }
+
+    /// A spilled command result keeps the END of the output — that is where a
+    /// command reports what happened — and says exactly which lines are on
+    /// screen, so the model can tell a cut result from a complete one and knows
+    /// what to fetch from the artifact.
+    #[test]
+    fn command_output_preview_keeps_the_tail_and_states_the_exact_range() {
+        let artifact = ArtifactRef::new(ArtifactId::new(17));
+        // 40 000 lines of 8 bytes: over the line cap, under the byte cap.
+        let total_lines = 40_000;
+        let raw: String = (0..total_lines)
+            .map(|line| format!("L{line:06}\n"))
+            .collect();
+
+        let preview = command_output_preview(&raw, &artifact);
+
+        assert!(
+            preview.contains(&format!("L{:06}", total_lines - 1)),
+            "the last line of output must survive"
+        );
+        assert!(
+            !preview.contains("L000000\n"),
+            "the head must not be kept when the tail is what matters"
+        );
+        let first_shown = total_lines - COMMAND_PREVIEW_MAX_LINES + 1;
+        assert!(preview.contains(&format!("L{first_shown:06}")));
+        assert!(
+            preview.ends_with(&format!(
+                "\n[Showing lines {first_shown}-{total_lines} of {total_lines}. \
+                 Full output: artifact://17]"
+            )),
+            "footer must be exact and copyable, got: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
+        assert!(preview.len() <= CODING_ARTIFACT_PREVIEW_MAX_BYTES);
+    }
+
+    /// Output that fits the preview budget is returned whole, with no footer:
+    /// a footer on a complete result would teach the model to distrust it.
+    #[test]
+    fn command_output_preview_adds_no_footer_when_nothing_was_cut() {
+        let artifact = ArtifactRef::new(ArtifactId::new(3));
+        let raw = "line\n".repeat(100);
+
+        assert_eq!(command_output_preview(&raw, &artifact), raw);
+    }
+
+    /// One line longer than the whole window has no line boundary to report.
+    /// Reporting bytes is honest; inventing a line range would not be.
+    #[test]
+    fn command_output_preview_reports_bytes_for_a_single_oversized_line() {
+        let artifact = ArtifactRef::new(ArtifactId::new(9));
+        let raw = "x".repeat(CODING_ARTIFACT_PREVIEW_MAX_BYTES * 2);
+
+        let preview = command_output_preview(&raw, &artifact);
+
+        assert!(
+            preview.contains("Showing the last "),
+            "expected a byte-range footer, got: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
+        assert!(preview.ends_with(&format!(
+            "bytes of {}. Full output: artifact://9]",
+            raw.len()
+        )));
+        assert!(preview.len() <= CODING_ARTIFACT_PREVIEW_MAX_BYTES);
+    }
+
+    /// The byte cap bites before the line cap when lines are long.
+    #[test]
+    fn command_output_preview_honors_the_byte_cap_for_long_lines() {
+        let artifact = ArtifactRef::new(ArtifactId::new(4));
+        let raw = format!("{}\n", "y".repeat(4 * 1024)).repeat(40);
+
+        let preview = command_output_preview(&raw, &artifact);
+
+        assert!(preview.len() <= CODING_ARTIFACT_PREVIEW_MAX_BYTES);
+        assert!(
+            preview.ends_with("of 40. Full output: artifact://4]"),
+            "got: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
+    }
+
+    /// When durable storage is unavailable the result still comes back, but it
+    /// never pretends to be whole: the same window ships with a footer stating
+    /// the loss and naming no artifact to fetch.
+    ///
+    /// Failing the call instead would throw away a command the user already
+    /// ran, over an infrastructure miss the model cannot act on.
+    #[test]
+    fn an_unsaved_command_result_states_the_loss_and_names_no_artifact() {
+        let total_lines = 40_000;
+        let raw: String = (0..total_lines)
+            .map(|line| format!("L{line:06}\n"))
+            .collect();
+
+        let preview = unsaved_preview(&raw, CODING_BASH_CAPABILITY_ID);
+
+        assert!(preview.contains(&format!("L{:06}", total_lines - 1)));
+        assert!(
+            !preview.contains("artifact://"),
+            "no artifact exists, so the footer must not offer one: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
+        assert!(
+            preview.ends_with("earlier bytes dropped; full output could not be saved]"),
+            "got: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
+    }
+
+    /// The document family degrades the same way, keeping its contiguous head.
+    #[test]
+    fn an_unsaved_document_result_keeps_its_head_and_states_the_loss() {
+        let raw = format!("{}\n", "d".repeat(4 * 1024)).repeat(40);
+
+        let preview = unsaved_preview(&raw, CODING_READ_CAPABILITY_ID);
+
+        assert!(preview.starts_with(&"d".repeat(4 * 1024)));
+        assert!(!preview.contains("artifact://"));
+        assert!(
+            preview.ends_with("further bytes dropped; full output could not be saved]"),
+            "got: {}",
+            &preview[preview.len().saturating_sub(120)..]
+        );
     }
 
     #[test]

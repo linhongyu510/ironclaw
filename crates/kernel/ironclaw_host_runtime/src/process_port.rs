@@ -24,8 +24,8 @@ use crate::process_aliases::{
     rewrite_local_host_output_aliases,
 };
 use crate::process_output::{
-    CapturedCommandOutput, StreamCapture, capture_command_output, read_stream_capped,
-    truncate_output,
+    CapturedCommandOutput, StreamCapture, capture_command_output, inline_output_budget,
+    read_stream_capped, truncate_output,
 };
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -112,10 +112,11 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        let budget = inline_output_budget(request.max_inline_output_bytes);
         let mut request = request;
         request.timeout_secs = Some(timeout.as_secs());
         let mut output = self.transport.run_command(request).await?;
-        output.output = truncate_output(&output.output);
+        output.output = truncate_output(&output.output, budget);
         output.sandboxed = true;
         Ok(output)
     }
@@ -245,6 +246,7 @@ impl RuntimeProcessPort for HostProcessPort {
             timeout,
             &request.extra_env,
             self.env_mode,
+            inline_output_budget(request.max_inline_output_bytes),
         )
         .await?;
         // The command was rewritten alias->host before execution, so any host
@@ -271,6 +273,7 @@ async fn execute_local_command(
     timeout: Duration,
     extra_env: &HashMap<String, String>,
     env_mode: HostProcessEnvMode,
+    inline_output_bytes: usize,
 ) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -315,7 +318,7 @@ async fn execute_local_command(
     let result = tokio::time::timeout(timeout, async {
         let stdout_fut = async {
             if let Some(out) = stdout_handle {
-                read_stream_capped(scope, out).await
+                read_stream_capped(scope, inline_output_bytes, out).await
             } else {
                 Ok(StreamCapture::default())
             }
@@ -323,7 +326,7 @@ async fn execute_local_command(
 
         let stderr_fut = async {
             if let Some(err) = stderr_handle {
-                read_stream_capped(scope, err).await
+                read_stream_capped(scope, inline_output_bytes, err).await
             } else {
                 Ok(StreamCapture::default())
             }
@@ -338,9 +341,10 @@ async fn execute_local_command(
     .await;
 
     match result {
-        Ok(Ok((stdout, stderr, code))) => {
-            Ok((capture_command_output(scope, stdout, stderr)?, code))
-        }
+        Ok(Ok((stdout, stderr, code))) => Ok((
+            capture_command_output(scope, inline_output_bytes, stdout, stderr)?,
+            code,
+        )),
         Ok(Err(e)) => Err(e),
         Err(_) => {
             terminate_child_tree(&mut child).await;
@@ -467,6 +471,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap();
@@ -487,6 +492,7 @@ mod tests {
             workdir: None,
             timeout_secs: None,
             extra_env: HashMap::new(),
+            max_inline_output_bytes: None,
         })
         .await
         .unwrap();
@@ -510,6 +516,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap_err();
@@ -532,6 +539,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap_err();
@@ -555,11 +563,46 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap();
 
-        assert!(output.output.contains("... [truncated 1 bytes] ..."));
+        assert!(
+            output.output.starts_with(
+                "[1 earlier bytes dropped: the command produced 16385 bytes, above the \
+                 16384-byte capture window. Showing the last 16384 bytes.]\n"
+            ),
+            "the sandbox transport preview must state exactly what it dropped: {}",
+            &output.output[..output.output.len().min(160)]
+        );
+    }
+
+    /// A caller-declared window rides the request through to the transport
+    /// wrapper, so a caller doing its own downstream shaping is not pre-cut.
+    #[tokio::test]
+    async fn user_sandbox_process_port_honors_a_raised_inline_window() {
+        let raw = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
+        let transport = std::sync::Arc::new(RecordingSandboxTransport {
+            requests: Mutex::new(Vec::new()),
+            output: raw.clone(),
+        });
+        let port = UserSandboxProcessPort::new(transport);
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+                max_inline_output_bytes: Some(1024 * 1024),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.output, raw);
     }
 
     #[cfg(unix)]
@@ -575,6 +618,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             HostProcessEnvMode::Scrubbed,
+            COMMAND_MAX_OUTPUT_SIZE,
         )
         .await
         .expect("command succeeds");
@@ -605,6 +649,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             HostProcessEnvMode::Scrubbed,
+            COMMAND_MAX_OUTPUT_SIZE,
         )
         .await
         .expect("command succeeds");
@@ -630,6 +675,7 @@ mod tests {
                 "inherited".to_string(),
             )]),
             HostProcessEnvMode::Inherited,
+            COMMAND_MAX_OUTPUT_SIZE,
         )
         .await
         .expect("command succeeds");
@@ -663,6 +709,7 @@ mod tests {
                 workdir: Some("/workspace/qa-coding-smoke".to_string()),
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .expect("command succeeds");
@@ -693,6 +740,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .expect("command succeeds");
@@ -716,6 +764,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .expect("command succeeds");
@@ -737,6 +786,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             HostProcessEnvMode::Scrubbed,
+            COMMAND_MAX_OUTPUT_SIZE,
         )
         .await
         .expect("command succeeds");

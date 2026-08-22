@@ -46,6 +46,15 @@ pub struct CommandExecutionRequest {
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
     pub extra_env: HashMap<String, String>,
+    /// Caller's inline-output budget, in bytes.
+    ///
+    /// `None` keeps the port's conservative default. A caller that does its own
+    /// model-facing shaping downstream — the pinned `bash` engine spills the
+    /// stream to a durable artifact and previews the tail — raises this so the
+    /// port stops cutting a window the caller is about to re-cut anyway. Ports
+    /// clamp the value to their own capture ceiling; it never widens what the
+    /// port is willing to hold in memory.
+    pub max_inline_output_bytes: Option<usize>,
 }
 
 /// Process-port command result normalized for capability handlers.

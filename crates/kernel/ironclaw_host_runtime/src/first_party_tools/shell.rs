@@ -90,6 +90,7 @@ pub(super) async fn dispatch(
             workdir: parsed.workdir,
             timeout_secs: parsed.timeout_secs,
             extra_env: parsed.extra_env,
+            max_inline_output_bytes: None,
         })
         .await
         .map_err(process_error)?;

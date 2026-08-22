@@ -34,6 +34,18 @@ const BASH_TIMEOUT_DEFAULT_SECS: u64 = 300;
 const BASH_TIMEOUT_MIN_SECS: u64 = 1;
 const BASH_TIMEOUT_MAX_SECS: u64 = 3600;
 
+/// Inline capture window this engine asks the process port for.
+///
+/// The port's own default cuts command output to a small window before the
+/// host can spill it to a durable artifact, which leaves the model with a
+/// truncated stream and no way to reach the rest. `bash` results are shaped for
+/// the model one layer up — the host spills the stream to an artifact and
+/// previews its tail with an exact line range — so the port must hand back what
+/// it captured rather than pre-cutting it. The value matches the first-party
+/// capability output ceiling that bounds the same result downstream; the port
+/// clamps anything larger.
+const BASH_MAX_INLINE_OUTPUT_BYTES: usize = 1024 * 1024;
+
 /// OMP `BASH_ENV_NAME_PATTERN` (bash.ts).
 fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -366,6 +378,7 @@ pub(crate) async fn bash(
             workdir: request.workdir.clone(),
             timeout_secs: request.timeout_secs,
             extra_env: request.extra_env.clone(),
+            max_inline_output_bytes: Some(BASH_MAX_INLINE_OUTPUT_BYTES),
         })
         .await;
     let elapsed = start.elapsed();

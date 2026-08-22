@@ -1,18 +1,11 @@
-Runs commands in a shell.
+Execute bash commands (`ls`, `grep`, `find`, `sed`, `awk`, `git`, build and test runners, …).
 
-Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort | uniq -c`, `diff`).
-Inline scripts, heredocs, `$(…)`, and complex control flow → a purpose-built tool or checked-in script.
+Pipelines, filters, redirection, `head`/`tail`, and multi-step `&&` chains are all first-class.
 
 <instruction>
 - Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to paths.
+- Output is captured. When it exceeds the inline window the last lines are kept, the full stream is at `artifact://<id>`, and the footer states the exact line range shown.
+- Built-in `grep`/`glob`/`read` are also available and never truncate mid-file.
 </instruction>
-
-<critical>
-- NEVER use shell `grep`/`rg`; use built-in `grep`.
-- List directories with `read` and find paths with `glob`; NEVER use `ls`/`find`.
-- Avoid `head`, `tail`, and redirection: output is captured, truncated, and linked as `artifact://<id>`.
-</critical>
-
-No truncation footer means the displayed output is complete.

@@ -1168,6 +1168,7 @@ mod tests {
                     workdir: None,
                     timeout_secs: Some(1),
                     extra_env: HashMap::new(),
+                    max_inline_output_bytes: None,
                 },
                 "sha256:test-worker",
                 None,
@@ -1253,6 +1254,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(86_401),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap_err();
@@ -1283,6 +1285,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
+                max_inline_output_bytes: None,
             })
             .await
             .unwrap_err();
