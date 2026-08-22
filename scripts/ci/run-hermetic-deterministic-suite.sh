@@ -93,13 +93,23 @@ run_crate_tests() {
 }
 
 run_integration_tier() {
-  local test_name
+  local test_name runner
+  local -a test_args=()
   prepare_postgres_test_image
+  source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
+  runner="$(select_test_runner optional)"
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
-    run cargo test -p ironclaw_integration_tests \
-      --test "${test_name}" -- --nocapture
+    test_args+=(--test "${test_name}")
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
+  if [[ "${runner}" == "nextest" ]]; then
+    run cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" --ignore-rust-version
+  else
+    for test_name in "${test_args[@]}"; do
+      [[ "${test_name}" == --test ]] && continue
+      run cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+    done
+  fi
 }
 
 run_python_e2e() {

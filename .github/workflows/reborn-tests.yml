@@ -767,6 +767,11 @@ jobs:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
 
@@ -856,6 +861,14 @@ jobs:
         with:
           name: reborn-integration-cov-part-${{ matrix.lane }}
           path: part-${{ matrix.lane }}.lcov
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-lane-${{ matrix.lane }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
           if-no-files-found: error
 
   coverage-report:

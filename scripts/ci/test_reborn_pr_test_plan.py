@@ -943,8 +943,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
         self.assertIn(
-            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
-            "\\\n      --ignore-rust-version",
+            'cargo nextest run --profile ci -p ironclaw_integration_tests '
+            '"${test_args[@]}" \\\n        --ignore-rust-version',
             lane_runner,
         )
 
@@ -952,9 +952,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         lane_runner = (
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
+        # nextest arm (flat-partition mode, when nextest is selected).
+        self.assertIn(
+            'cargo nextest run --profile ci -p ironclaw_integration_tests '
+            '"${test_args[@]}" \\\n        --ignore-rust-version',
+            lane_runner,
+        )
+        # cargo fallback arm (group mode always forces this; flat-partition
+        # falls back to it when nextest is unavailable) -- byte-identical to
+        # today's shape so this pin still holds regardless of which arm ran.
         self.assertIn(
             'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
-            "\\\n      --ignore-rust-version -- --nocapture",
+            "\\\n        --ignore-rust-version -- --nocapture",
             lane_runner,
         )
 

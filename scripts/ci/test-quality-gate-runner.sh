@@ -203,6 +203,53 @@ expect_failure "require-in-ci, nextest absent, CI=true: hard fails" "$require_ci
 lib_out="$(run_lib with-nextest optional CI=true)"
 expect_contains "optional policy ignores CI=true when nextest is present" "$lib_out" "nextest"
 
+# --- reborn-coverage-lane-run.sh's group-mode carve-out (Task 5, T2 plan) ---
+# Decision 3: `group` mode must force the sequential cargo-test runner
+# regardless of what select_test_runner would otherwise pick, so a
+# nextest install in this job never silently pulls reborn_group_* suites
+# into the parallel pool. Exercised end-to-end (stubbed cargo/nextest,
+# stubbed suite discovery) rather than grepped, since the carve-out is
+# inline control flow, not a separately-sourceable function.
+run_lane_group_carveout() {
+    local sandbox
+    sandbox="$(mktemp -d)"
+    cat >"$sandbox/cargo" <<'STUB'
+#!/usr/bin/env bash
+echo "cargo $*" >>"$GATE_TEST_LOG"
+STUB
+    chmod +x "$sandbox/cargo"
+    cat >"$sandbox/cargo-nextest" <<'STUB'
+#!/usr/bin/env bash
+echo "cargo-nextest $*" >>"$GATE_TEST_LOG"
+STUB
+    chmod +x "$sandbox/cargo-nextest"
+    mkdir -p "$sandbox/scripts/ci/lib"
+    cp "$SCRIPT_DIR/reborn-coverage-lane-run.sh" "$sandbox/scripts/ci/reborn-coverage-lane-run.sh"
+    cp "$SCRIPT_DIR/lib/select-test-runner.sh" "$sandbox/scripts/ci/lib/select-test-runner.sh"
+    cat >"$sandbox/scripts/ci/reborn-coverage-int-tier-tests.sh" <<'STUB'
+#!/usr/bin/env bash
+printf -- '--test\nreborn_group_fixture\n'
+STUB
+    chmod +x "$sandbox/scripts/ci/reborn-coverage-int-tier-tests.sh"
+    local status
+    set +e
+    status="$(
+        env \
+            GATE_TEST_LOG="$sandbox/log" \
+            PATH="$sandbox:/usr/bin:/bin" \
+            REBORN_COV_COLLECT=false \
+            REBORN_COV_LANE_MODE=group \
+            "$sandbox/scripts/ci/reborn-coverage-lane-run.sh" "$sandbox/unused.lcov" 2>&1
+    )"
+    set -e
+    rm -rf "$sandbox"
+    echo "$status"
+}
+
+lane_out="$(run_lane_group_carveout)"
+expect_contains "group mode: forces cargo even with nextest present" "$lane_out" "cargo test -p ironclaw_integration_tests"
+expect_not_contains "group mode: never invokes nextest" "$lane_out" "nextest run"
+
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed"
     exit 1
