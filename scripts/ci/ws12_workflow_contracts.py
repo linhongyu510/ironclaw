@@ -971,6 +971,14 @@ SCCACHE_SETUP_ACTION = ".github/actions/setup-sccache-dist/action.yml"
 SCCACHE_INSTALL_STEP = "Install sccache"
 SCCACHE_CONFIGURE_STEP = "Configure OVH sccache"
 SCCACHE_FALLBACK_STEP = "Fall back to local compilation"
+SETUP_RUST_ACTION = ".github/actions/setup-rust/action.yml"
+RUSTUP_TOOLCHAIN_PIN_STEP = "Pin the resolved toolchain for the rest of this job"
+MOLD_INSTALL_STEP = "Install mold and clang"
+MOLD_EXPORT_STEP = "Export mold RUSTFLAGS"
+# The one canonical mold invocation; a job's own env may append extra flags
+# after it (the nightly lanes add -Zcrate-attr=...), but this prefix is the
+# only place it may be written out — everywhere else must go through here.
+MOLD_RUSTFLAGS = "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
 
 # One `- name:` step heading. The scan is bounded to its own step because the
 # neighbouring `Check all-target lints` legitimately passes `--tests
@@ -1074,6 +1082,48 @@ def validate_sccache_setup_action(text: str) -> list[str]:
             "failed installation is falling back to local compilation"
         )
 
+    return errors
+
+
+def validate_setup_rust_action(text: str | None) -> list[str]:
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold.
+
+    Contract: every job that installs Rust through this composite gets a
+    RUSTUP_TOOLCHAIN export naming exactly the toolchain dtolnay/rust-toolchain
+    just installed (steps.install.outputs.name — not a second, possibly wrong,
+    guess at the resolved version), and mold's install/verify/RUSTFLAGS steps
+    are gated on Linux so `mold: true` is safe to pass on any runner OS.
+    """
+    if text is None:
+        return [f"{SETUP_RUST_ACTION}: could not read the composite action file"]
+    errors: list[str] = []
+    pin_step = step_body(text, RUSTUP_TOOLCHAIN_PIN_STEP)
+    if pin_step is None:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: missing the {RUSTUP_TOOLCHAIN_PIN_STEP!r} step"
+        )
+    elif "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" not in pin_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {RUSTUP_TOOLCHAIN_PIN_STEP!r} must export "
+            "RUSTUP_TOOLCHAIN from steps.install.outputs.name, or a job's "
+            "cargo invocations can drift from what this step actually installed"
+        )
+    for step_name in (MOLD_INSTALL_STEP, MOLD_EXPORT_STEP):
+        body = step_body(text, step_name)
+        if body is None:
+            errors.append(f"{SETUP_RUST_ACTION}: missing the {step_name!r} step")
+            continue
+        if "runner.os == 'Linux'" not in body:
+            errors.append(
+                f"{SETUP_RUST_ACTION}: {step_name!r} must gate on "
+                "runner.os == 'Linux' so mold: true is safe on any runner"
+            )
+    export_step = step_body(text, MOLD_EXPORT_STEP)
+    if export_step is not None and MOLD_RUSTFLAGS not in export_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {MOLD_EXPORT_STEP!r} must export the "
+            f"canonical mold RUSTFLAGS prefix '{MOLD_RUSTFLAGS}'"
+        )
     return errors
 
 
@@ -1791,6 +1841,11 @@ def validate_workflow_texts(
         errors.append(f"{SCCACHE_SETUP_ACTION}: could not read action: {error}")
     else:
         errors.extend(validate_sccache_setup_action(sccache_action))
+    try:
+        setup_rust_action = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        setup_rust_action = None
+    errors.extend(validate_setup_rust_action(setup_rust_action))
     return errors
 
 

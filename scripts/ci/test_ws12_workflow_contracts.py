@@ -20,6 +20,7 @@ from ws12_workflow_contracts import (
     NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
+    SETUP_RUST_ACTION,
     STEP_HEADING,
     STRESS_WORKFLOW,
     WEBUI_FRONTEND_CRATE,
@@ -36,6 +37,7 @@ from ws12_workflow_contracts import (
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
+    validate_setup_rust_action,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -45,6 +47,57 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+class SetupRustActionContractTests(unittest.TestCase):
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold."""
+
+    OK = (
+        "runs:\n"
+        "  using: composite\n"
+        "  steps:\n"
+        "    - name: Install Rust\n"
+        "      id: install\n"
+        "      uses: dtolnay/rust-toolchain@abc123 # stable\n"
+        "      with:\n"
+        "        toolchain: ${{ inputs.toolchain }}\n"
+        "    - name: Pin the resolved toolchain for the rest of this job\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n'
+        "    - name: Install mold and clang\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: scripts/ci/install-ci-apt-packages.sh clang mold\n"
+        "    - name: Export mold RUSTFLAGS\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTFLAGS=-C linker=clang -C link-arg=--ld-path=/usr/bin/mold ${RUSTFLAGS:-}" >> "$GITHUB_ENV"\n'
+    )
+
+    def test_missing_action_file_fails(self):
+        errors = validate_setup_rust_action(None)
+        self.assertTrue(any("could not read" in e for e in errors))
+
+    def test_missing_rustup_toolchain_pin_fails(self):
+        bad = self.OK.replace(
+            'echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n',
+            "",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("RUSTUP_TOOLCHAIN" in e for e in errors))
+
+    def test_missing_mold_linux_guard_fails(self):
+        bad = self.OK.replace(
+            "if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n      shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+            "shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("Linux" in e for e in errors))
+
+    def test_ok_passes(self):
+        self.assertEqual([], validate_setup_rust_action(self.OK))
 
 
 class SccacheSetupActionContractTests(unittest.TestCase):
