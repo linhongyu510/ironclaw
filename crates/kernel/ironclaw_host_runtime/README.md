@@ -42,10 +42,14 @@ that fold across boundaries without adding isolation.
   are reached only through the witness-bound dispatch it drives.
 - Capability surface policy (`src/surface.rs`), hot catalog
   (`src/capability_catalog.rs`), first-party registry + builtin tool host
-  halves (`src/first_party*`), `RuntimeProcessPort`/`HostProcessPort`
-  (`src/process_port.rs`), memory-context builders, extension-contract
-  *discovery* (the `RootFilesystem` binding; the default catalogs live with
-  their vocabulary owners — see `AGENTS.md`).
+  halves (`src/first_party*`), and the process boundary
+  (`src/process_port.rs`). A command adapter maps an already-authorized
+  `RuntimeCredentialRequirement` to a placeholder environment variable;
+  `StagedCredentialProcessPort` consumes that exact one-shot handle and emits
+  provider-neutral sandbox bindings. The sandbox lane owns proxy substitution.
+  Memory-context builders and extension-contract *discovery* also live here
+  (the `RootFilesystem` binding; default catalogs live with their vocabulary
+  owners — see `AGENTS.md`).
 
 ## Depends on / consumed by
 
@@ -90,6 +94,15 @@ that fold across boundaries without adding isolation.
   secrets are one-shot, runtime-supplied manual credentials are rejected, raw
   and percent-decoded URLs are scanned, leased values are redacted from
   runtime-visible errors/responses, sensitive response headers stripped.
+- Credentialed process execution does not search for secrets. Authorization
+  selects and stages each requirement. The command adapter selects which
+  authorized requirement its executable understands and assigns only the
+  placeholder name. `StagedCredentialProcessPort` validates exact HTTPS header
+  targets, atomically consumes all requested handles, and passes raw material
+  only to `SandboxCommandTransport`. The sandbox proxy substitutes it only for
+  the approved destination. The initial GitHub CLI adapter is intentionally
+  specific (`gh` + `GH_TOKEN` + `api.github.com`); the staging and sandbox
+  mechanisms contain no provider branch.
 - No verified tenant sandbox ⇒ the process/shell capability is hidden by the
   visibility filter (`src/surface.rs`) and refused by the planner
   (`ironclaw_runtime_policy`, `ProcessBackendKind::None`) — never silently

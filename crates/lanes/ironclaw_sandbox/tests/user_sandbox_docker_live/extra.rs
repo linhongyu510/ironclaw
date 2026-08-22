@@ -836,6 +836,8 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
         InvocationId::new()
     );
     let command = DirectSandboxCommandRequest {
+        capability_id: ironclaw_host_api::ids::CapabilityId::new("builtin.shell")
+            .expect("valid shell capability id"),
         scope: scope.resource_scope(),
         mounts: None,
         executable: "gh".to_string(),
@@ -852,6 +854,7 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
         workdir: None,
         timeout_secs: Some(60),
         extra_env: HashMap::from([("GH_TOKEN".to_string(), placeholder.clone())]),
+        credential_bindings: Vec::new(),
     };
     let result = transport
         .run_credentialed_direct_command(

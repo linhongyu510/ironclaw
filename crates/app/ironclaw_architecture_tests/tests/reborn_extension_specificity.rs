@@ -1550,10 +1550,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/i18n/zh-CN.ts",
         "telegram",
     ),
-    // Issue #7732 deliberate carve-out: `builtin.shell` recognizes only the
-    // GitHub CLI so credentials stay behind the existing authorization and
-    // one-shot obligation path. Do not generalize this into a CLI credential
-    // framework; delete these entries if the package gains an owned surface.
+    // Issue #7732 deliberate adapter carve-out: `builtin.shell` recognizes the
+    // GitHub CLI, maps its already-authorized requirement to `GH_TOKEN`, and
+    // does not discover credentials. The process port below this adapter is
+    // provider-neutral; delete these entries if the package gains an owned
+    // process surface.
     (
         "crates/kernel/ironclaw_capabilities/src/host/authorize.rs",
         "api.github.com",
@@ -1564,22 +1565,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell.rs",
+        "api.github.com",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell.rs",
         "github",
     ),
     (
         "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell_core.rs",
-        "github",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
-        "api.github.com",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
-        "github",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/services.rs",
         "github",
     ),
 ];
@@ -1727,7 +1720,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // named doc-comment examples on the retired `DispatchError::Wasm` variant;
 // deleting the variant deleted the examples, so the now-stale allowlist
 // entries were deleted too.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
+// 117 -> 115 (generic staged process credentials): provider selection, the
+// `GH_TOKEN` placeholder, and the exact `api.github.com` audience remain in the
+// explicit shell adapter. The staging port and service composition consume
+// authorized binding descriptors without naming GitHub, retiring their three
+// pilot carve-outs while adding the adapter's audience pair.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 115;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

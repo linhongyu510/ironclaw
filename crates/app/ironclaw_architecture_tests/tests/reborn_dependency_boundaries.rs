@@ -894,7 +894,14 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        ("ironclaw_host_api", 20_516),
+        // 20_516 -> 20_535 (generic credentialed process boundary): +19 lines
+        // add the provider-neutral authorized binding DTO and carry the
+        // capability identity plus bindings on direct sandbox requests.
+        // Credential selection, staging, validation, and proxy substitution
+        // remain in host-runtime and sandbox; this crate owns declarations only.
+        // Re-captured at the exact 20_685 measured count minus the standing
+        // 150-line working tolerance.
+        ("ironclaw_host_api", 20_535),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

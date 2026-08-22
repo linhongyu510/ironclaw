@@ -18,7 +18,10 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{mount::MountView, resource::ResourceScope};
+use crate::{
+    capability::RuntimeCredentialRequirement, ids::CapabilityId, mount::MountView,
+    resource::ResourceScope,
+};
 
 /// Metadata for command output persisted behind a saved-output reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +52,24 @@ pub struct CommandExecutionRequest {
     pub extra_env: HashMap<String, String>,
 }
 
+/// An authorized runtime credential mapped to the placeholder environment
+/// variable understood by a direct-exec client.
+///
+/// The requirement is copied from the authorized capability descriptor. The
+/// host process adapter consumes its one-shot staged material; callers cannot
+/// supply raw credential material through this shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxCommandCredentialBinding {
+    pub placeholder_env: String,
+    pub requirement: RuntimeCredentialRequirement,
+}
+
 /// A validated executable plus argument vector. This request is separate from
 /// [`CommandExecutionRequest`] so existing shell transports cannot accidentally
 /// reinterpret a credentialed command as shell syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectSandboxCommandRequest {
+    pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub mounts: Option<MountView>,
     pub executable: String,
@@ -61,6 +77,7 @@ pub struct DirectSandboxCommandRequest {
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
     pub extra_env: HashMap<String, String>,
+    pub credential_bindings: Vec<SandboxCommandCredentialBinding>,
 }
 
 /// Process-port command result normalized for capability handlers.
@@ -175,6 +192,7 @@ mod tests {
     #[test]
     fn direct_request_preserves_argument_boundaries() {
         let request = DirectSandboxCommandRequest {
+            capability_id: CapabilityId::new("builtin.shell").unwrap(),
             scope: ResourceScope::system(),
             mounts: None,
             executable: "printf".to_string(),
@@ -182,6 +200,7 @@ mod tests {
             workdir: None,
             timeout_secs: None,
             extra_env: HashMap::new(),
+            credential_bindings: Vec::new(),
         };
 
         assert_eq!(request.executable, "printf");

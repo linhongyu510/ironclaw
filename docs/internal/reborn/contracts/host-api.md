@@ -622,6 +622,17 @@ specific invocation. Account-backed sources resolve through product auth before
 runtime egress and stage material under the runtime slot handle, so the WASM
 guest never sees account ids or backend secret handles.
 
+For credentialed direct process execution, the authorized descriptor
+requirements are copied into the first-party request without secret material.
+The executable adapter maps only a requirement it understands to a placeholder
+environment name and carries both in `SandboxCommandCredentialBinding`. A
+provider-neutral host process port validates the exact HTTPS header audience,
+atomically consumes the staged handles, and gives the resulting
+`SandboxCommandCredential` values only to the sandbox transport. The sandbox
+proxy replaces placeholders only at their approved hosts. Adapters own
+executable conventions such as GitHub CLI's `GH_TOKEN`; the staging port and
+sandbox transport must not discover credentials or branch on a provider.
+
 The `required` field applies uniformly across sources: when `required = false`,
 the obligation is skipped entirely. For `SecretHandle`, a missing grant secret
 does not block dispatch. For `ProductAuthAccount`, a missing or unconfigured

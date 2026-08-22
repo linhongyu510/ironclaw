@@ -6,14 +6,22 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ids::{CapabilityId, SecretHandle},
+    action::NetworkScheme,
+    http::RuntimeCredentialTarget,
     process::{
         CommandExecutionOutput, CommandExecutionRequest, DirectSandboxCommandRequest,
-        RuntimeProcessError, SandboxCommandCredential, SandboxCommandTransport,
+        RuntimeProcessError, SandboxCommandCredential, SandboxCommandCredentialBinding,
+        SandboxCommandTransport,
     },
     resource::ResourceScope,
 };
@@ -156,15 +164,19 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
     }
 }
 
-/// Consumes the one-shot GitHub credential staged by the normal capability
-/// obligation path and converts it to a sandbox placeholder binding.
+/// Consumes the one-shot credentials staged by the normal capability
+/// obligation path and converts authorized bindings to sandbox placeholders.
+///
+/// Credential selection remains with the capability adapter. This port only
+/// materializes the exact descriptor requirements carried by the authorized
+/// direct-exec request; it never discovers credentials from the secret store.
 #[derive(Clone)]
-pub(crate) struct StagedGithubProcessPort {
+pub(crate) struct StagedCredentialProcessPort {
     inner: Arc<dyn RuntimeProcessPort>,
     secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
 }
 
-impl StagedGithubProcessPort {
+impl StagedCredentialProcessPort {
     pub(crate) fn new(
         inner: Arc<dyn RuntimeProcessPort>,
         secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
@@ -177,7 +189,7 @@ impl StagedGithubProcessPort {
 }
 
 #[async_trait]
-impl RuntimeProcessPort for StagedGithubProcessPort {
+impl RuntimeProcessPort for StagedCredentialProcessPort {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -199,39 +211,110 @@ impl RuntimeProcessPort for StagedGithubProcessPort {
                 "caller-supplied sandbox credentials are forbidden".to_string(),
             ));
         }
-        let capability_id = CapabilityId::new(crate::SHELL_CAPABILITY_ID)
-            .map_err(|error| RuntimeProcessError::ExecutionFailed(error.to_string()))?;
-        let handle = SecretHandle::new("github_runtime_token")
-            .map_err(|error| RuntimeProcessError::ExecutionFailed(error.to_string()))?;
-        let material = self
+        let bindings = std::mem::take(&mut request.credential_bindings);
+        validate_credential_bindings(&request, &bindings)?;
+        let handles = bindings
+            .iter()
+            .map(|binding| binding.requirement.handle.clone())
+            .collect::<Vec<_>>();
+        let materials = self
             .secret_injection_store
-            .take(&request.scope, &capability_id, &handle)
+            .take_many(&request.scope, &request.capability_id, &handles)
             .map_err(|_| {
                 RuntimeProcessError::ExecutionFailed(
-                    "GitHub credential staging is unavailable".to_string(),
+                    "sandbox credential staging is unavailable".to_string(),
                 )
             })?
             .ok_or_else(|| {
                 RuntimeProcessError::ExecutionFailed(
-                    "GitHub credential was not staged for this invocation".to_string(),
+                    "an authorized sandbox credential was not staged for this invocation"
+                        .to_string(),
                 )
             })?;
-        let placeholder = format!("ironclaw-github-{}", uuid::Uuid::new_v4().simple());
-        request
-            .extra_env
-            .insert("GH_TOKEN".to_string(), placeholder.clone());
-        let credential = SandboxCommandCredential::new(
-            "GH_TOKEN".to_string(),
-            placeholder,
-            "api.github.com".to_string(),
-            "authorization".to_string(),
-            Some("Bearer ".to_string()),
-            material.expose_secret().to_string(),
-        );
+        let mut credentials = Vec::with_capacity(bindings.len());
+        for (binding, material) in bindings.into_iter().zip(materials) {
+            let RuntimeCredentialTarget::Header { name, prefix } = binding.requirement.target
+            else {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "sandbox process credentials require a header injection target".to_string(),
+                ));
+            };
+            let placeholder = format!(
+                "{}{}",
+                ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+                uuid::Uuid::new_v4().simple()
+            );
+            request
+                .extra_env
+                .insert(binding.placeholder_env.clone(), placeholder.clone());
+            credentials.push(SandboxCommandCredential::new(
+                binding.placeholder_env,
+                placeholder,
+                binding.requirement.audience.host_pattern,
+                name,
+                prefix,
+                material.expose_secret().to_string(),
+            ));
+        }
         self.inner
-            .run_credentialed_direct_command(request, vec![credential])
+            .run_credentialed_direct_command(request, credentials)
             .await
     }
+}
+
+fn validate_credential_bindings(
+    request: &DirectSandboxCommandRequest,
+    bindings: &[SandboxCommandCredentialBinding],
+) -> Result<(), RuntimeProcessError> {
+    let mut handles = HashSet::with_capacity(bindings.len());
+    let mut env_names = HashSet::with_capacity(bindings.len());
+    for binding in bindings {
+        let requirement = &binding.requirement;
+        let RuntimeCredentialTarget::Header { name, prefix } = &requirement.target else {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credentials require a header injection target".to_string(),
+            ));
+        };
+        if !requirement.required
+            || requirement.audience.scheme != Some(NetworkScheme::Https)
+            || requirement.audience.port.is_some()
+            || requirement.audience.host_pattern.contains('*')
+            || requirement.audience.host_pattern.is_empty()
+            || requirement
+                .audience
+                .host_pattern
+                .chars()
+                .any(char::is_control)
+            || name.is_empty()
+            || name.chars().any(char::is_control)
+            || prefix
+                .as_ref()
+                .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credential binding is not an exact HTTPS header target"
+                    .to_string(),
+            ));
+        }
+        if !valid_env_name(&binding.placeholder_env)
+            || request.extra_env.contains_key(&binding.placeholder_env)
+            || !handles.insert(&requirement.handle)
+            || !env_names.insert(&binding.placeholder_env)
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credential binding is ambiguous".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 /// Host-process command environment handling.
@@ -485,12 +568,27 @@ mod tests {
     use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
     use ironclaw_host_api::process::SavedCommandOutputSanitization;
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+        http::RuntimeCredentialTarget,
+        ids::{CapabilityId, SecretHandle},
+    };
     use std::sync::Mutex;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedCredential {
+        placeholder_env: String,
+        approved_host: String,
+        header_name: String,
+        header_prefix: Option<String>,
+        secret: String,
+    }
 
     #[derive(Debug)]
     struct RecordingSandboxTransport {
         requests: Mutex<Vec<CommandExecutionRequest>>,
-        direct_requests: Mutex<Vec<(DirectSandboxCommandRequest, Vec<String>)>>,
+        direct_requests: Mutex<Vec<(DirectSandboxCommandRequest, Vec<RecordedCredential>)>>,
         output: String,
     }
 
@@ -531,14 +629,20 @@ mod tests {
             request: DirectSandboxCommandRequest,
             credentials: Vec<SandboxCommandCredential>,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-            let secrets = credentials
+            let credentials = credentials
                 .iter()
-                .map(|credential| credential.expose_secret().to_string())
+                .map(|credential| RecordedCredential {
+                    placeholder_env: credential.placeholder_env.clone(),
+                    approved_host: credential.approved_host.clone(),
+                    header_name: credential.header_name.clone(),
+                    header_prefix: credential.header_prefix.clone(),
+                    secret: credential.expose_secret().to_string(),
+                })
                 .collect();
             self.direct_requests
                 .lock()
                 .unwrap()
-                .push((request, secrets));
+                .push((request, credentials));
             Ok(CommandExecutionOutput {
                 output: self.output.clone(),
                 saved_output: None,
@@ -574,7 +678,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_github_process_port_exposes_only_placeholder_to_command() {
+    async fn staged_credential_process_port_materializes_authorized_bindings_without_provider_special_cases()
+     {
         use ironclaw_secrets::SecretMaterial;
 
         let transport = Arc::new(RecordingSandboxTransport::default());
@@ -583,26 +688,43 @@ mod tests {
         let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
         let scope = ResourceScope::system();
         let capability_id = CapabilityId::new(crate::SHELL_CAPABILITY_ID).unwrap();
-        let handle = SecretHandle::new("github_runtime_token").unwrap();
-        store
-            .insert(
-                &scope,
-                &capability_id,
-                &handle,
-                SecretMaterial::from("ghp_real_token"),
-            )
-            .unwrap();
-        let port = StagedGithubProcessPort::new(sandbox_port, store);
+        let atlas = credential_binding(
+            "atlas_runtime_token",
+            "ATLAS_TOKEN",
+            "api.atlas.test",
+            "authorization",
+            Some("Bearer "),
+        );
+        let acme = credential_binding(
+            "acme_runtime_token",
+            "ACME_TOKEN",
+            "api.acme.test",
+            "x-api-key",
+            None,
+        );
+        for (binding, secret) in [(&atlas, "atlas_real_token"), (&acme, "acme_real_token")] {
+            store
+                .insert(
+                    &scope,
+                    &capability_id,
+                    &binding.requirement.handle,
+                    SecretMaterial::from(secret),
+                )
+                .unwrap();
+        }
+        let port = StagedCredentialProcessPort::new(sandbox_port, store);
 
         port.run_credentialed_direct_command(
             DirectSandboxCommandRequest {
+                capability_id: capability_id.clone(),
                 scope,
                 mounts: None,
-                executable: "gh".to_string(),
-                args: vec!["pr".to_string(), "list".to_string()],
+                executable: "api-client".to_string(),
+                args: vec!["resource".to_string(), "list".to_string()],
                 workdir: None,
                 timeout_secs: Some(10),
                 extra_env: HashMap::new(),
+                credential_bindings: vec![atlas, acme],
             },
             Vec::new(),
         )
@@ -610,12 +732,60 @@ mod tests {
         .unwrap();
 
         let requests = transport.direct_requests.lock().unwrap();
-        let (request, secrets) = &requests[0];
-        assert_eq!(request.executable, "gh");
-        assert_eq!(secrets, &["ghp_real_token"]);
-        let placeholder = request.extra_env.get("GH_TOKEN").unwrap();
-        assert_ne!(placeholder, "ghp_real_token");
-        assert!(placeholder.starts_with("ironclaw-github-"));
+        let (request, credentials) = &requests[0];
+        assert_eq!(request.executable, "api-client");
+        assert!(request.credential_bindings.is_empty());
+        assert_eq!(
+            credentials,
+            &[
+                RecordedCredential {
+                    placeholder_env: "ATLAS_TOKEN".to_string(),
+                    approved_host: "api.atlas.test".to_string(),
+                    header_name: "authorization".to_string(),
+                    header_prefix: Some("Bearer ".to_string()),
+                    secret: "atlas_real_token".to_string(),
+                },
+                RecordedCredential {
+                    placeholder_env: "ACME_TOKEN".to_string(),
+                    approved_host: "api.acme.test".to_string(),
+                    header_name: "x-api-key".to_string(),
+                    header_prefix: None,
+                    secret: "acme_real_token".to_string(),
+                },
+            ]
+        );
+        for name in ["ATLAS_TOKEN", "ACME_TOKEN"] {
+            let placeholder = request.extra_env.get(name).unwrap();
+            assert!(placeholder.starts_with(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX));
+            assert!(!placeholder.contains("real_token"));
+        }
+    }
+
+    fn credential_binding(
+        handle: &str,
+        placeholder_env: &str,
+        approved_host: &str,
+        header_name: &str,
+        header_prefix: Option<&str>,
+    ) -> SandboxCommandCredentialBinding {
+        SandboxCommandCredentialBinding {
+            placeholder_env: placeholder_env.to_string(),
+            requirement: RuntimeCredentialRequirement {
+                handle: SecretHandle::new(handle).unwrap(),
+                source: RuntimeCredentialRequirementSource::SecretHandle,
+                provider_scopes: Vec::new(),
+                audience: NetworkTargetPattern {
+                    scheme: Some(NetworkScheme::Https),
+                    host_pattern: approved_host.to_string(),
+                    port: None,
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: header_name.to_string(),
+                    prefix: header_prefix.map(str::to_string),
+                },
+                required: true,
+            },
+        }
     }
 
     #[tokio::test]

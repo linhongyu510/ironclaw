@@ -3,19 +3,24 @@ use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
 use ironclaw_host_api::{
-    capability::{EffectKind, PermissionMode},
+    action::NetworkScheme,
+    capability::{
+        EffectKind, PermissionMode, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
     dispatch::RuntimeDispatchErrorKind,
+    http::RuntimeCredentialTarget,
     path::{ScopedPath, VirtualPath},
+    process::{
+        CommandExecutionRequest, DirectSandboxCommandRequest, RuntimeProcessError,
+        SandboxCommandCredentialBinding, SavedCommandOutput, SavedCommandOutputSanitization,
+    },
     resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
 };
 use serde_json::{Value, json};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityRequest, process_output::saved_output_filename,
-};
-use ironclaw_host_api::process::{
-    CommandExecutionRequest, DirectSandboxCommandRequest, RuntimeProcessError, SavedCommandOutput,
-    SavedCommandOutputSanitization,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -78,19 +83,42 @@ pub(super) async fn dispatch(
         ));
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
-    let direct_argv = request
+    let supports_direct = request
         .services
         .process
-        .supports_credentialed_direct_command()
-        .then(|| shell_core::github_direct_argv(&parsed.command))
-        .flatten();
-    let output = if let Some(mut argv) = direct_argv {
+        .supports_credentialed_direct_command();
+    if !request.runtime_credentials.is_empty() && !supports_direct {
+        return Err(process_error(RuntimeProcessError::ExecutionFailed(
+            "authorized command credentials require the sandbox direct-exec boundary".to_string(),
+        )));
+    }
+    let direct_command = if supports_direct {
+        match (
+            shell_core::github_direct_argv(&parsed.command),
+            request.runtime_credentials.is_empty(),
+        ) {
+            (Some(argv), false) => Some((
+                argv,
+                github_credential_binding(&request.runtime_credentials).map_err(process_error)?,
+            )),
+            (Some(_), true) | (None, true) => None,
+            (None, false) => {
+                return Err(process_error(RuntimeProcessError::ExecutionFailed(
+                    "authorized command credentials do not match this executable".to_string(),
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    let output = if let Some((mut argv, binding)) = direct_command {
         let executable = argv.remove(0);
         request
             .services
             .process
             .run_credentialed_direct_command(
                 DirectSandboxCommandRequest {
+                    capability_id: request.capability_id.clone(),
                     scope: request.scope.clone(),
                     mounts: request.mounts.clone(),
                     executable,
@@ -98,6 +126,7 @@ pub(super) async fn dispatch(
                     workdir: parsed.workdir,
                     timeout_secs: parsed.timeout_secs,
                     extra_env: parsed.extra_env,
+                    credential_bindings: vec![binding],
                 },
                 Vec::new(),
             )
@@ -310,6 +339,41 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
     FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
+fn github_credential_binding(
+    requirements: &[RuntimeCredentialRequirement],
+) -> Result<SandboxCommandCredentialBinding, RuntimeProcessError> {
+    let [requirement] = requirements else {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "GitHub CLI direct execution requires exactly one authorized credential".to_string(),
+        ));
+    };
+    let is_github_account = matches!(
+        &requirement.source,
+        RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. }
+            if provider.as_str() == "github"
+    );
+    let is_authorization_header = matches!(
+        &requirement.target,
+        RuntimeCredentialTarget::Header { name, .. }
+            if name.eq_ignore_ascii_case("authorization")
+    );
+    if !requirement.required
+        || !is_github_account
+        || requirement.audience.scheme != Some(NetworkScheme::Https)
+        || requirement.audience.host_pattern != "api.github.com"
+        || requirement.audience.port.is_some()
+        || !is_authorization_header
+    {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "authorized credential does not match the GitHub CLI adapter".to_string(),
+        ));
+    }
+    Ok(SandboxCommandCredentialBinding {
+        placeholder_env: "GH_TOKEN".to_string(),
+        requirement: requirement.clone(),
+    })
+}
+
 fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
     let (kind, reason) = match error {
         RuntimeProcessError::Timeout(duration) => (
@@ -327,6 +391,55 @@ fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{
+            RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+            RuntimeCredentialRequirementSource,
+        },
+        ids::{CapabilityId, SecretHandle, VendorId},
+        process::{CommandExecutionOutput, SandboxCommandCredential},
+        resource::ResourceScope,
+    };
+
+    #[derive(Debug, Default)]
+    struct RecordingProcessPort {
+        direct_requests: Mutex<Vec<DirectSandboxCommandRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeProcessPort for RecordingProcessPort {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::ExecutionFailed(
+                "unexpected shell fallback".to_string(),
+            ))
+        }
+
+        fn supports_credentialed_direct_command(&self) -> bool {
+            true
+        }
+
+        async fn run_credentialed_direct_command(
+            &self,
+            request: DirectSandboxCommandRequest,
+            credentials: Vec<SandboxCommandCredential>,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            assert!(credentials.is_empty());
+            self.direct_requests.lock().unwrap().push(request);
+            Ok(CommandExecutionOutput {
+                output: "[]".to_string(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: true,
+                duration: Duration::from_millis(1),
+            })
+        }
+    }
 
     fn dispatch_safe_summary(error: &FirstPartyCapabilityError) -> Option<&str> {
         match error {
@@ -480,6 +593,64 @@ mod tests {
         );
 
         assert!(rendered.contains("saved output capped at 123 bytes per stream"));
+    }
+
+    #[test]
+    fn github_adapter_maps_authorized_requirement_to_generic_binding() {
+        let requirement = github_requirement();
+        let binding = github_credential_binding(std::slice::from_ref(&requirement)).unwrap();
+
+        assert_eq!(binding.placeholder_env, "GH_TOKEN");
+        assert_eq!(binding.requirement, requirement);
+    }
+
+    #[tokio::test]
+    async fn dispatch_carries_authorized_github_binding_to_direct_exec() {
+        let process = Arc::new(RecordingProcessPort::default());
+        let mut request = FirstPartyCapabilityRequest::request_for_test(
+            CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            ResourceScope::system(),
+            json!({"command": "gh pr list"}),
+            None,
+        );
+        request.runtime_credentials = vec![github_requirement()];
+        request.services.process = process.clone();
+
+        dispatch(&request).await.unwrap();
+
+        let requests = process.direct_requests.lock().unwrap();
+        let direct = &requests[0];
+        assert_eq!(direct.capability_id, request.capability_id);
+        assert_eq!(direct.executable, "gh");
+        assert_eq!(direct.args, ["pr", "list"]);
+        assert!(direct.extra_env.is_empty());
+        assert_eq!(direct.credential_bindings.len(), 1);
+        assert_eq!(direct.credential_bindings[0].placeholder_env, "GH_TOKEN");
+        assert_eq!(
+            direct.credential_bindings[0].requirement,
+            request.runtime_credentials[0]
+        );
+    }
+
+    fn github_requirement() -> RuntimeCredentialRequirement {
+        RuntimeCredentialRequirement {
+            handle: SecretHandle::new("github_runtime_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: VendorId::new("github").unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+            },
+            provider_scopes: Vec::new(),
+            audience: NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.github.com".to_string(),
+                port: None,
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }
     }
 
     fn saved_output() -> SavedCommandOutput {
