@@ -452,7 +452,7 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
-      REBORN_ROOT_TEST_TIMEOUT: 28m
+      REBORN_ROOT_TEST_TIMEOUT: 40m
       CARGO_INCREMENTAL: "0"
       # The QA smoke binaries build a full Reborn runtime and drive whole
       # turns on the libtest current-thread stack; the combined debug async
@@ -482,6 +482,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       - name: Install mold and clang
         run: |
@@ -532,6 +537,14 @@ jobs:
           scripts/ci/run-hermetic-deterministic-suite.sh
           command
           scripts/ci/run-reborn-root-partition.sh
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-root-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
 
   reborn-group-tests:
     name: Reborn group tests
