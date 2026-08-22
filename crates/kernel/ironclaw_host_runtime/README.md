@@ -43,10 +43,11 @@ that fold across boundaries without adding isolation.
 - Capability surface policy (`src/surface.rs`), hot catalog
   (`src/capability_catalog.rs`), first-party registry + builtin tool host
   halves (`src/first_party*`), and the process boundary
-  (`src/process_port.rs`). A command adapter maps an already-authorized
-  `RuntimeCredentialRequirement` to a placeholder environment variable;
-  `StagedCredentialProcessPort` consumes that exact one-shot handle and emits
-  provider-neutral sandbox bindings. The sandbox lane owns proxy substitution.
+  (`src/process_port.rs`). A manifest maps an already-authorized
+  `RuntimeCredentialRequirement` to a direct executable and placeholder
+  environment variable. `StagedCredentialProcessPort` consumes that exact
+  one-shot handle and emits provider-neutral sandbox bindings. The sandbox lane
+  owns proxy substitution.
   Memory-context builders and extension-contract *discovery* also live here
   (the `RootFilesystem` binding; default catalogs live with their vocabulary
   owners — see `AGENTS.md`).
@@ -94,15 +95,14 @@ that fold across boundaries without adding isolation.
   secrets are one-shot, runtime-supplied manual credentials are rejected, raw
   and percent-decoded URLs are scanned, leased values are redacted from
   runtime-visible errors/responses, sensitive response headers stripped.
-- Credentialed process execution does not search for secrets. Authorization
-  selects and stages each requirement. The command adapter selects which
-  authorized requirement its executable understands and assigns only the
-  placeholder name. `StagedCredentialProcessPort` validates exact HTTPS header
-  targets, atomically consumes all requested handles, and passes raw material
-  only to `SandboxCommandTransport`. The sandbox proxy substitutes it only for
-  the approved destination. The initial GitHub CLI adapter is intentionally
-  specific (`gh` + `GH_TOKEN` + `api.github.com`); the staging and sandbox
-  mechanisms contain no provider branch.
+- Credentialed process execution does not search for secrets. The manifest
+  declares the direct executable and placeholder environment variable on each
+  exact header-target requirement. Authorization selects and stages matching
+  requirements. `StagedCredentialProcessPort` validates the executable,
+  placeholder, and exact HTTPS header targets, atomically consumes all requested
+  handles, and passes raw material only to `SandboxCommandTransport`. The sandbox
+  proxy loads one invocation-scoped credential bundle and substitutes each value
+  only for its approved destination. No host layer branches on a provider.
 - No verified tenant sandbox ⇒ the process/shell capability is hidden by the
   visibility filter (`src/surface.rs`) and refused by the planner
   (`ironclaw_runtime_policy`, `ProcessBackendKind::None`) — never silently

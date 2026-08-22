@@ -860,6 +860,8 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
         .run_credentialed_direct_command(
             command,
             vec![SandboxCommandCredential::new(
+                ironclaw_host_api::ids::SecretHandle::new("github_runtime_token")
+                    .expect("valid credential handle"),
                 "GH_TOKEN".to_string(),
                 placeholder,
                 "api.github.com".to_string(),

@@ -901,7 +901,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // remain in host-runtime and sandbox; this crate owns declarations only.
         // Re-captured at the exact 20_685 measured count minus the standing
         // 150-line working tolerance.
-        ("ironclaw_host_api", 20_535),
+        // 20_685 -> 20_729 (2026-08-23, #7825 stages 1-2): +44 lines add
+        // serde-defaulted manifest direct-process binding fields, the
+        // invocation bundle credential key, and their wire-contract test.
+        // Executable selection, secret staging, and bundle I/O remain in the
+        // kernel and sandbox crates; host_api still owns declarations only.
+        ("ironclaw_host_api", 20_579),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

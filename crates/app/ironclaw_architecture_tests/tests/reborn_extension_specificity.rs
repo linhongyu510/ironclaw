@@ -270,12 +270,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          archive workflows — GitHub as a code host, not the github extension",
     ),
     (
-        "crates/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
-        "api.github.com",
-        "default sandboxed-shell egress allowlist includes GitHub's content API host for \
-         `gh`/archive-download workflows — GitHub as a code host, not the github extension",
-    ),
-    (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",
@@ -1550,31 +1544,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/i18n/zh-CN.ts",
         "telegram",
     ),
-    // Issue #7732 deliberate adapter carve-out: `builtin.shell` recognizes the
-    // GitHub CLI, maps its already-authorized requirement to `GH_TOKEN`, and
-    // does not discover credentials. The process port below this adapter is
-    // provider-neutral; delete these entries if the package gains an owned
-    // process surface.
-    (
-        "crates/kernel/ironclaw_capabilities/src/host/authorize.rs",
-        "api.github.com",
-    ),
-    (
-        "crates/kernel/ironclaw_capabilities/src/host/authorize.rs",
-        "github",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell.rs",
-        "api.github.com",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell.rs",
-        "github",
-    ),
-    (
-        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell_core.rs",
-        "github",
-    ),
 ];
 
 /// WS0 baseline for the extension-specificity allowlist (target-architecture
@@ -1725,7 +1694,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // explicit shell adapter. The staging port and service composition consume
 // authorized binding descriptors without naming GitHub, retiring their three
 // pilot carve-outs while adding the adapter's audience pair.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 115;
+// 115 -> 110 (2026-08-23, #7825 stages 1-2): direct process credential
+// mediation now selects manifest-declared placeholder/executable bindings and
+// exact header targets. The authorization fold, shell adapter, and direct-argv
+// parser no longer name GitHub or its API audience, retiring all five #7732
+// pilot carve-outs.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
@@ -2191,7 +2165,6 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
             "google-calendar",
             "notion",
             "telegram",
-            "api.github.com",
             "private.near.ai",
             "accounts.google.com",
             "oauth2.googleapis.com",

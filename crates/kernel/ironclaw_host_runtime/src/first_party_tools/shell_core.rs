@@ -330,7 +330,7 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
     segments
 }
 
-pub(super) fn github_direct_argv(command: &str) -> Option<Vec<String>> {
+pub(super) fn single_direct_argv(command: &str, expected_executable: &str) -> Option<Vec<String>> {
     let segments = split_shell_segments(command);
     if segments.len() != 1
         || !redirect_targets(command, '<').is_empty()
@@ -338,10 +338,65 @@ pub(super) fn github_direct_argv(command: &str) -> Option<Vec<String>> {
     {
         return None;
     }
-    let argv = shell_words(command);
+    let argv = direct_shell_words(command)?;
     let executable = argv.first()?;
     let executable = executable.rsplit('/').next().unwrap_or(executable);
-    executable.eq_ignore_ascii_case("gh").then_some(argv)
+    executable
+        .eq_ignore_ascii_case(expected_executable)
+        .then_some(argv)
+}
+
+fn direct_shell_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = ShellQuote::None;
+    let mut escaped = false;
+    let mut word_started = false;
+    for ch in command.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            word_started = true;
+            continue;
+        }
+        match (quote, ch) {
+            (_, '\\') => {
+                escaped = true;
+                word_started = true;
+            }
+            (ShellQuote::None, '\'') => {
+                quote = ShellQuote::Single;
+                word_started = true;
+            }
+            (ShellQuote::Single, '\'') => quote = ShellQuote::None,
+            (ShellQuote::None, '"') => {
+                quote = ShellQuote::Double;
+                word_started = true;
+            }
+            (ShellQuote::Double, '"') => quote = ShellQuote::None,
+            (ShellQuote::None | ShellQuote::Double, '$' | '`') => return None,
+            (ShellQuote::None, ';' | '|' | '&' | '<' | '>' | '\n' | '\r') => return None,
+            (ShellQuote::None, '*' | '?' | '[' | ']' | '{' | '}') => return None,
+            (ShellQuote::None, '~') if !word_started => return None,
+            (ShellQuote::None, ch) if ch.is_whitespace() => {
+                if word_started {
+                    words.push(std::mem::take(&mut current));
+                    word_started = false;
+                }
+            }
+            _ => {
+                current.push(ch);
+                word_started = true;
+            }
+        }
+    }
+    if escaped || quote != ShellQuote::None {
+        return None;
+    }
+    if word_started {
+        words.push(current);
+    }
+    Some(words)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,19 +549,24 @@ fn expand_tilde(token: &str) -> PathBuf {
     PathBuf::from(token)
 }
 #[test]
-fn github_direct_argv_preserves_arguments_without_shell_interpretation() {
+fn single_direct_argv_preserves_arguments_without_shell_interpretation() {
     assert_eq!(
-        github_direct_argv("gh api repos/nearai/ironclaw --jq '.name'"),
+        single_direct_argv("atlas api resources --filter '.name'", "atlas"),
         Some(vec![
-            "gh".to_string(),
+            "atlas".to_string(),
             "api".to_string(),
-            "repos/nearai/ironclaw".to_string(),
-            "--jq".to_string(),
+            "resources".to_string(),
+            "--filter".to_string(),
             ".name".to_string(),
         ])
     );
-    assert!(github_direct_argv("gh pr list | cat").is_none());
-    assert!(github_direct_argv("echo gh pr list").is_none());
+    assert!(single_direct_argv("atlas resources | cat", "atlas").is_none());
+    assert!(single_direct_argv("echo atlas resources", "atlas").is_none());
+    assert!(single_direct_argv("atlas \"$RESOURCE\"", "atlas").is_none());
+    assert!(single_direct_argv("atlas $(resource)", "atlas").is_none());
+    assert!(single_direct_argv("atlas resource*", "atlas").is_none());
+    assert!(single_direct_argv("atlas resources &", "atlas").is_none());
+    assert!(single_direct_argv("atlas resources", "other").is_none());
 }
 
 fn truncate_for_error(s: &str) -> String {

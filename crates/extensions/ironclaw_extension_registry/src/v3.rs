@@ -201,6 +201,10 @@ struct RawToolCredentialV3 {
     scopes: Vec<String>,
     audience: RawAudienceV3,
     injection: RuntimeCredentialTarget,
+    #[serde(default)]
+    placeholder_env: Option<String>,
+    #[serde(default)]
+    direct_executable: Option<String>,
     #[serde(default = "default_credential_required")]
     required: bool,
 }
@@ -452,6 +456,8 @@ pub(crate) fn parse_v3(
                         port: None,
                     },
                     credential.injection.clone(),
+                    None,
+                    None,
                     true,
                     &recipes,
                     &mut referenced_vendors,
@@ -647,6 +653,8 @@ pub(crate) fn parse_v3(
                             &credential.scopes,
                             credential.audience,
                             credential.injection,
+                            credential.placeholder_env,
+                            credential.direct_executable,
                             credential.required,
                             &recipes,
                             &mut referenced_vendors,
@@ -910,6 +918,8 @@ fn credential_from_v3(
     scopes: &[String],
     audience: RawAudienceV3,
     injection: RuntimeCredentialTarget,
+    placeholder_env: Option<String>,
+    direct_executable: Option<String>,
     required: bool,
     recipes: &BTreeMap<VendorId, VendorAuthRecipe>,
     referenced_vendors: &mut BTreeMap<VendorId, ()>,
@@ -940,6 +950,8 @@ fn credential_from_v3(
             port: audience.port,
         },
         target: injection,
+        placeholder_env,
+        direct_executable,
         required,
     })
 }

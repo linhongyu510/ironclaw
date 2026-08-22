@@ -334,6 +334,8 @@ fn runtime_credential(
             name: "authorization".to_string(),
             prefix: Some("Bearer ".to_string()),
         },
+        placeholder_env: None,
+        direct_executable: None,
         required,
     }
 }

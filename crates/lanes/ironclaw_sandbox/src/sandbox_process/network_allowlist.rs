@@ -37,7 +37,6 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
     // managed-egress profile construction.
     "github.com",
     "raw.githubusercontent.com",
-    "api.github.com",
     "codeload.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",

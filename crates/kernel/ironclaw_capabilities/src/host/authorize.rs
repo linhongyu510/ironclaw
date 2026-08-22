@@ -8,11 +8,10 @@
 use ironclaw_host_api::{
     Timestamp,
     authorized::{AuthorizeResult, Authorized, CapabilityAuthorizer},
-    capability::{
-        CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirementSource,
-    },
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
     decision::{Decision, DenyReason},
     dispatch::{CapabilityDispatcher, DispatchAuthRequirement},
+    http::RuntimeCredentialTarget,
     ids::{ActivityId, CapabilityId, DenyRef, GateRef},
     invocation::{Actor, Invocation},
     lane::RuntimeLane,
@@ -76,71 +75,62 @@ where
         capability_id: &CapabilityId,
         input: &serde_json::Value,
     ) -> Result<CapabilityDescriptor, CapabilityInvocationError> {
-        let command = input
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let direct_github_command = command
-            .split_whitespace()
-            .next()
-            .is_some_and(|executable| executable.rsplit('/').next() == Some("gh"));
         if self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox
             || capability_id.as_str() != "builtin.shell"
-            || !direct_github_command
         {
             return Ok(descriptor.clone());
         }
+        let Some(executable) = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|command| command.split_whitespace().next())
+            .and_then(|executable| executable.rsplit('/').next())
+        else {
+            return Ok(descriptor.clone());
+        };
 
-        let mut matched = None;
+        let mut matched: Vec<RuntimeCredentialRequirement> = Vec::new();
         for declared in self
             .registry
             .capabilities()
             .flat_map(|candidate| candidate.runtime_credentials.iter())
         {
-            let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
-                &declared.source
-            else {
-                continue;
-            };
-            if declared.handle.as_str() != "github_runtime_token"
-                || provider.as_str() != "github"
+            if declared.placeholder_env.is_none()
+                || !matches!(declared.target, RuntimeCredentialTarget::Header { .. })
                 || !declared
-                    .audience
-                    .host_pattern
-                    .eq_ignore_ascii_case("api.github.com")
-                || !declared.required
+                    .direct_executable
+                    .as_deref()
+                    .is_some_and(|expected| expected.eq_ignore_ascii_case(executable))
             {
                 continue;
             }
-            if matched
-                .as_ref()
-                .is_some_and(|existing| existing != declared)
+            if let Some(existing) = matched
+                .iter()
+                .find(|existing| existing.handle == declared.handle)
             {
-                return Err(CapabilityInvocationError::AuthorizationDenied {
-                    capability: capability_id.clone(),
-                    reason: DenyReason::PolicyDenied,
-                    detail: Some(
-                        "GitHub runtime credential has conflicting api.github.com declarations"
-                            .to_string(),
-                    ),
-                });
+                if existing != declared {
+                    return Err(CapabilityInvocationError::AuthorizationDenied {
+                        capability: capability_id.clone(),
+                        reason: DenyReason::PolicyDenied,
+                        detail: Some(
+                            "direct-exec credential handle has conflicting declarations"
+                                .to_string(),
+                        ),
+                    });
+                }
+                continue;
             }
-            matched = Some(declared.clone());
+            matched.push(declared.clone());
         }
-        let credential = matched.ok_or_else(|| CapabilityInvocationError::AuthorizationDenied {
-            capability: capability_id.clone(),
-            reason: DenyReason::PolicyDenied,
-            detail: Some(
-                "GitHub CLI requires the installed GitHub credential declaration".to_string(),
-            ),
-        })?;
+        if matched.is_empty() {
+            return Ok(descriptor.clone());
+        }
 
         let mut descriptor = descriptor.clone();
         if !descriptor.effects.contains(&EffectKind::UseSecret) {
             descriptor.effects.push(EffectKind::UseSecret);
         }
-        descriptor.runtime_credentials.push(credential);
+        descriptor.runtime_credentials.extend(matched);
         Ok(descriptor)
     }
 

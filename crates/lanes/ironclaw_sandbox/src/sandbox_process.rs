@@ -1092,6 +1092,7 @@ mod tests {
             ("RUST_LOG".to_string(), "debug".to_string()),
         ]);
         let credentials = [SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
             "GH_TOKEN".to_string(),
             placeholder,
             "api.github.com".to_string(),
@@ -1212,6 +1213,7 @@ mod tests {
 
         let placeholder = format!("{}test", ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX);
         let credential = SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
             "GH_TOKEN".to_string(),
             placeholder.clone(),
             "api.github.com".to_string(),

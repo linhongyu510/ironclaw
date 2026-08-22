@@ -1349,6 +1349,28 @@ impl CapabilityDeclV2 {
                         "capability {id} declares invalid runtime credential target: {error}"
                     ),
                 })?;
+            if raw_credential.placeholder_env.is_some()
+                != raw_credential.direct_executable.is_some()
+            {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} direct process credential must declare both \
+                         placeholder_env and direct_executable"
+                    ),
+                });
+            }
+            if raw_credential.placeholder_env.is_some()
+                && !matches!(
+                    raw_credential.target,
+                    RuntimeCredentialTarget::Header { .. }
+                )
+            {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} direct process credential requires a header target"
+                    ),
+                });
+            }
             raw_credential
                 .audience
                 .validate_declaration()
@@ -1369,6 +1391,8 @@ impl CapabilityDeclV2 {
                 provider_scopes,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
+                placeholder_env: raw_credential.placeholder_env,
+                direct_executable: raw_credential.direct_executable,
                 required: raw_credential.required,
             });
         }
@@ -1986,6 +2010,10 @@ pub(crate) struct RawRuntimeCredentialV2 {
     pub(crate) provider_scopes: Vec<String>,
     pub(crate) audience: NetworkTargetPattern,
     pub(crate) target: RuntimeCredentialTarget,
+    #[serde(default)]
+    pub(crate) placeholder_env: Option<String>,
+    #[serde(default)]
+    pub(crate) direct_executable: Option<String>,
     #[serde(default = "default_runtime_credential_required")]
     pub(crate) required: bool,
 }

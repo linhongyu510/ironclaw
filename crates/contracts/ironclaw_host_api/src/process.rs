@@ -19,7 +19,9 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
-    capability::RuntimeCredentialRequirement, ids::CapabilityId, mount::MountView,
+    capability::RuntimeCredentialRequirement,
+    ids::{CapabilityId, SecretHandle},
+    mount::MountView,
     resource::ResourceScope,
 };
 
@@ -51,9 +53,8 @@ pub struct CommandExecutionRequest {
     pub timeout_secs: Option<u64>,
     pub extra_env: HashMap<String, String>,
 }
-
-/// An authorized runtime credential mapped to the placeholder environment
-/// variable understood by a direct-exec client.
+/// An authorized runtime credential mapped from its manifest-declared direct
+/// executable and placeholder environment variable.
 ///
 /// The requirement is copied from the authorized capability descriptor. The
 /// host process adapter consumes its one-shot staged material; callers cannot
@@ -89,12 +90,13 @@ pub struct CommandExecutionOutput {
     pub sandboxed: bool,
     pub duration: Duration,
 }
-
 /// One invocation-scoped credential binding handed only to the sandbox
-/// transport. The command receives `placeholder`; only the proxy-side
-/// transport may expose `secret`.
+/// transport. `credential_key` addresses this value inside the proxy's JSON
+/// bundle. The command receives `placeholder`; only the proxy-side transport
+/// may expose `secret`.
 #[derive(Clone)]
 pub struct SandboxCommandCredential {
+    pub credential_key: SecretHandle,
     pub placeholder_env: String,
     pub placeholder: String,
     pub approved_host: String,
@@ -105,6 +107,7 @@ pub struct SandboxCommandCredential {
 
 impl SandboxCommandCredential {
     pub fn new(
+        credential_key: SecretHandle,
         placeholder_env: String,
         placeholder: String,
         approved_host: String,
@@ -113,6 +116,7 @@ impl SandboxCommandCredential {
         secret: String,
     ) -> Self {
         Self {
+            credential_key,
             placeholder_env,
             placeholder,
             approved_host,
@@ -131,6 +135,7 @@ impl std::fmt::Debug for SandboxCommandCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SandboxCommandCredential")
+            .field("credential_key", &self.credential_key)
             .field("placeholder_env", &self.placeholder_env)
             .field("approved_host", &self.approved_host)
             .field("header_name", &self.header_name)

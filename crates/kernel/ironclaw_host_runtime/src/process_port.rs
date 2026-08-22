@@ -248,6 +248,7 @@ impl RuntimeProcessPort for StagedCredentialProcessPort {
                 .extra_env
                 .insert(binding.placeholder_env.clone(), placeholder.clone());
             credentials.push(SandboxCommandCredential::new(
+                binding.requirement.handle,
                 binding.placeholder_env,
                 placeholder,
                 binding.requirement.audience.host_pattern,
@@ -275,8 +276,7 @@ fn validate_credential_bindings(
                 "sandbox process credentials require a header injection target".to_string(),
             ));
         };
-        if !requirement.required
-            || requirement.audience.scheme != Some(NetworkScheme::Https)
+        if requirement.audience.scheme != Some(NetworkScheme::Https)
             || requirement.audience.port.is_some()
             || requirement.audience.host_pattern.contains('*')
             || requirement.audience.host_pattern.is_empty()
@@ -294,6 +294,21 @@ fn validate_credential_bindings(
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox process credential binding is not an exact HTTPS header target"
                     .to_string(),
+            ));
+        }
+        let executable = request
+            .executable
+            .rsplit('/')
+            .next()
+            .unwrap_or(request.executable.as_str());
+        if requirement.placeholder_env.as_deref() != Some(binding.placeholder_env.as_str())
+            || !requirement
+                .direct_executable
+                .as_deref()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(executable))
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "authorized command credentials do not match this executable".to_string(),
             ));
         }
         if !valid_env_name(&binding.placeholder_env)
@@ -783,6 +798,8 @@ mod tests {
                     name: header_name.to_string(),
                     prefix: header_prefix.map(str::to_string),
                 },
+                placeholder_env: Some(placeholder_env.to_string()),
+                direct_executable: Some("api-client".to_string()),
                 required: true,
             },
         }

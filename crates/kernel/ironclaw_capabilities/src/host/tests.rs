@@ -307,17 +307,17 @@ input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;
 
-const GITHUB_MANIFEST_FIXTURE: &str = r#"
+const ATLAS_MANIFEST_FIXTURE: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
-id = "github"
-name = "GitHub"
+id = "atlas"
+name = "Atlas"
 version = "0.1.0"
-description = "GitHub credential fixture"
+description = "Atlas credential fixture"
 trust = "third_party"
 
 [runtime]
 kind = "wasm"
-module = "github.wasm"
+module = "atlas.wasm"
 
 [[host_api]]
 id = "ironclaw.capability_provider/v1"
@@ -326,19 +326,21 @@ section = "capability_provider.tools"
 [capability_provider.tools]
 
 [[capability_provider.tools.capabilities]]
-id = "github.test"
-description = "GitHub credential fixture"
+id = "atlas.test"
+description = "Atlas credential fixture"
 effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 visibility = "host_internal"
-input_schema_ref = "schemas/github/test.input.v1.json"
-output_schema_ref = "schemas/github/test.output.v1.json"
+input_schema_ref = "schemas/atlas/test.input.v1.json"
+output_schema_ref = "schemas/atlas/test.output.v1.json"
 
 [[capability_provider.tools.capabilities.runtime_credentials]]
-handle = "github_runtime_token"
-source = { type = "product_auth_account", provider = "github" }
-audience = { scheme = "https", host_pattern = "api.github.com" }
+handle = "atlas_runtime_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.atlas.test" }
 target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "ATLAS_TOKEN"
+direct_executable = "atlas"
 required = true
 "#;
 
@@ -447,13 +449,13 @@ fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 #[tokio::test]
-async fn sandbox_github_shell_enrichment_uses_declared_credential_only() {
+async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
     use ironclaw_host_api::{
         capability::EffectKind,
         runtime_policy::{ProcessBackendKind, RuntimeProfile},
     };
 
-    let registry = registry_from_manifest(GITHUB_MANIFEST_FIXTURE, "/system/extensions/github");
+    let registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
     let dispatcher =
         ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
             Err(DispatchError::UnknownCapability {
@@ -477,7 +479,7 @@ async fn sandbox_github_shell_enrichment_uses_declared_credential_only() {
     );
     let shell_id = CapabilityId::new("builtin.shell").unwrap();
     let mut descriptor = registry
-        .get_capability(&CapabilityId::new("github.test").unwrap())
+        .get_capability(&CapabilityId::new("atlas.test").unwrap())
         .unwrap()
         .clone();
     descriptor.runtime_credentials.clear();
@@ -486,7 +488,7 @@ async fn sandbox_github_shell_enrichment_uses_declared_credential_only() {
         .enrich_invocation_descriptor(
             &descriptor,
             &shell_id,
-            &serde_json::json!({ "command": "gh pr list" }),
+            &serde_json::json!({ "command": "atlas resources list" }),
         )
         .await
         .unwrap();
@@ -494,14 +496,18 @@ async fn sandbox_github_shell_enrichment_uses_declared_credential_only() {
     assert_eq!(enriched.runtime_credentials.len(), 1);
     assert_eq!(
         enriched.runtime_credentials[0].handle.as_str(),
-        "github_runtime_token"
+        "atlas_runtime_token"
+    );
+    assert_eq!(
+        enriched.runtime_credentials[0].placeholder_env.as_deref(),
+        Some("ATLAS_TOKEN")
     );
 
     let unchanged = host
         .enrich_invocation_descriptor(
             &descriptor,
             &shell_id,
-            &serde_json::json!({ "command": "git status" }),
+            &serde_json::json!({ "command": "unbound status" }),
         )
         .await
         .unwrap();
