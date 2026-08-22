@@ -34,10 +34,14 @@ pub(super) enum ProductCommandHandler {
     AdminUserCreate,
     AdminUserDeleteSecret,
     AutomationPause,
+    AutomationRun,
     AutomationResume,
     AutomationRename,
     AutomationDelete,
     NotificationChannelsSet,
+    NotificationMarkRead,
+    NotificationMarkAllRead,
+    NotificationArchive,
     NotificationSetupEnable,
     NotificationSetupDisable,
     SuggestionsGenerate,
@@ -79,10 +83,14 @@ impl ProductCommandHandler {
             ADMIN_USER_CREATE_COMMAND_ID => Some(Self::AdminUserCreate),
             ADMIN_USER_DELETE_SECRET_COMMAND_ID => Some(Self::AdminUserDeleteSecret),
             AUTOMATION_PAUSE_COMMAND_ID => Some(Self::AutomationPause),
+            AUTOMATION_RUN_COMMAND_ID => Some(Self::AutomationRun),
             AUTOMATION_RESUME_COMMAND_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_COMMAND_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_COMMAND_ID => Some(Self::AutomationDelete),
             NOTIFICATION_CHANNELS_SET_COMMAND_ID => Some(Self::NotificationChannelsSet),
+            NOTIFICATIONS_MARK_READ_COMMAND_ID => Some(Self::NotificationMarkRead),
+            NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID => Some(Self::NotificationMarkAllRead),
+            NOTIFICATIONS_ARCHIVE_COMMAND_ID => Some(Self::NotificationArchive),
             NOTIFICATION_SETUP_ENABLE_COMMAND_ID => Some(Self::NotificationSetupEnable),
             NOTIFICATION_SETUP_DISABLE_COMMAND_ID => Some(Self::NotificationSetupDisable),
             SUGGESTIONS_GENERATE_COMMAND_ID => Some(Self::SuggestionsGenerate),
@@ -303,6 +311,14 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::AutomationRun => {
+                let request: RebornAutomationRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .run_automation(caller, request.automation_id)
+                        .await?,
+                )
+            }
             Self::AutomationResume => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
                 command_output(
@@ -334,6 +350,18 @@ impl ProductCommandHandler {
             Self::NotificationChannelsSet => {
                 let request: RebornSetNotificationChannelsRequest = product_command_input(input)?;
                 command_output(services.set_notification_channels(caller, request).await?)
+            }
+            Self::NotificationMarkRead => {
+                let request: ProductNotificationMutationRequest = product_command_input(input)?;
+                command_output(services.mark_notification_read(caller, request).await?)
+            }
+            Self::NotificationMarkAllRead => {
+                let _: ProductMarkAllNotificationsReadRequest = product_command_input(input)?;
+                command_output(services.mark_all_notifications_read(caller).await?)
+            }
+            Self::NotificationArchive => {
+                let request: ProductNotificationMutationRequest = product_command_input(input)?;
+                command_output(services.archive_notification(caller, request).await?)
             }
             Self::NotificationSetupEnable => {
                 let request: RebornNotificationSetupMutationRequest = product_command_input(input)?;
@@ -394,6 +422,7 @@ pub(super) enum ProductCapabilityHandler {
     ProjectMemberRemove,
     ThreadDelete,
     AutomationPause,
+    AutomationRun,
     AutomationResume,
     AutomationRename,
     AutomationDelete,
@@ -424,6 +453,7 @@ impl ProductCapabilityHandler {
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID => Some(Self::ProjectMemberRemove),
             THREAD_DELETE_CAPABILITY_ID => Some(Self::ThreadDelete),
             AUTOMATION_PAUSE_CAPABILITY_ID => Some(Self::AutomationPause),
+            AUTOMATION_RUN_CAPABILITY_ID => Some(Self::AutomationRun),
             AUTOMATION_RESUME_CAPABILITY_ID => Some(Self::AutomationResume),
             AUTOMATION_RENAME_CAPABILITY_ID => Some(Self::AutomationRename),
             AUTOMATION_DELETE_CAPABILITY_ID => Some(Self::AutomationDelete),
@@ -455,6 +485,7 @@ impl ProductCapabilityHandler {
             Self::ProjectMemberRemove => "project member removed",
             Self::ThreadDelete => "thread deleted",
             Self::AutomationPause => "automation paused",
+            Self::AutomationRun => "automation started",
             Self::AutomationResume => "automation resumed",
             Self::AutomationRename => "automation renamed",
             Self::AutomationDelete => "automation deleted",
@@ -472,11 +503,12 @@ impl ProductCapabilityHandler {
         services: &RebornServices<I, V>,
         caller: ProductSurfaceCaller,
         input: serde_json::Value,
-    ) -> Result<(), ProductSurfaceError>
+    ) -> Result<Option<RebornAutomationRunMutationResult>, ProductSurfaceError>
     where
         I: ProductCapabilityInvoker + Clone + 'static,
         V: RebornViewProvider + Clone + 'static,
     {
+        let mut automation_run_result = None;
         match self {
             Self::OperatorSetupRun => services.invoke_operator_setup_run(caller, input).await,
             Self::LlmProviderUpsert => {
@@ -577,6 +609,17 @@ impl ProductCapabilityHandler {
                     .await?;
                 Ok(())
             }
+            Self::AutomationRun => {
+                let request: RebornAutomationRequest = product_command_input(input)?;
+                let response = services
+                    .run_automation(caller, request.automation_id)
+                    .await?;
+                if !response.updated {
+                    return Err(ProductSurfaceError::not_found());
+                }
+                automation_run_result = response.run_result;
+                Ok(())
+            }
             Self::AutomationResume => {
                 let request: RebornAutomationRequest = product_command_input(input)?;
                 services
@@ -668,7 +711,8 @@ impl ProductCapabilityHandler {
                     .await?;
                 Ok(())
             }
-        }
+        }?;
+        Ok(automation_run_result)
     }
 }
 
@@ -695,6 +739,7 @@ mod tests {
             PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
             THREAD_DELETE_CAPABILITY_ID,
             AUTOMATION_PAUSE_CAPABILITY_ID,
+            AUTOMATION_RUN_CAPABILITY_ID,
             AUTOMATION_RESUME_CAPABILITY_ID,
             AUTOMATION_RENAME_CAPABILITY_ID,
             AUTOMATION_DELETE_CAPABILITY_ID,
@@ -814,6 +859,10 @@ mod tests {
                 ProductCommandHandler::AutomationPause,
             ),
             (
+                AUTOMATION_RUN_COMMAND_ID,
+                ProductCommandHandler::AutomationRun,
+            ),
+            (
                 AUTOMATION_RESUME_COMMAND_ID,
                 ProductCommandHandler::AutomationResume,
             ),
@@ -836,6 +885,18 @@ mod tests {
             (
                 SUGGESTION_DISMISS_COMMAND_ID,
                 ProductCommandHandler::SuggestionDismiss,
+            ),
+            (
+                NOTIFICATIONS_MARK_READ_COMMAND_ID,
+                ProductCommandHandler::NotificationMarkRead,
+            ),
+            (
+                NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+                ProductCommandHandler::NotificationMarkAllRead,
+            ),
+            (
+                NOTIFICATIONS_ARCHIVE_COMMAND_ID,
+                ProductCommandHandler::NotificationArchive,
             ),
             (
                 IRONHUB_LINK_SET_KEY_COMMAND_ID,
