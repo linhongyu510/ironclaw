@@ -76,12 +76,19 @@ discover_reborn_packages() {
 }
 
 run_crate_tests() {
-  local package feature_flags
+  local package feature_flags runner
   prepare_postgres_test_image
+  source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
+  runner="$(select_test_runner optional)"
   while IFS= read -r package; do
     feature_flags="$("${repo_root}/scripts/ci/package-feature-flags.sh" "${package}")"
-    # shellcheck disable=SC2086 # feature_flags is the checked-in CI argument list.
-    run cargo test -p "${package}" ${feature_flags} --all-targets -- --nocapture
+    if [[ "${runner}" == "nextest" ]]; then
+      # shellcheck disable=SC2086 # feature_flags is the checked-in CI argument list.
+      run cargo nextest run --profile ci -p "${package}" ${feature_flags} --all-targets --ignore-rust-version
+    else
+      # shellcheck disable=SC2086
+      run cargo test -p "${package}" ${feature_flags} --all-targets -- --nocapture
+    fi
   done < <(discover_reborn_packages)
 }
 

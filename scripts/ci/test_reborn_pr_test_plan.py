@@ -2080,7 +2080,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
-            '"${feature_args[@]}" --ignore-rust-version --all-targets',
+            '"${feature_args[@]}" --all-targets --ignore-rust-version',
             workflow,
         )
         self.assertIn(
@@ -2138,7 +2138,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            '"${incremental_env[@]}" cargo test \\\n'
+            '"${incremental_env[@]}" cargo nextest run --profile ci \\\n'
             '                    -p "${package}" "--${kind}" "${name}"',
             workflow,
         )

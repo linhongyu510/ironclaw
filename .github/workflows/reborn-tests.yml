@@ -249,6 +249,11 @@ jobs:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
       - name: Resolve bucket settings
         id: bucket-settings
         env:
@@ -405,6 +410,7 @@ jobs:
             echo "::endgroup::"
           else
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            mkdir -p junit-reports
             if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
               while IFS=$'\t' read -r package kind name; do
                 target_feature_args=()
@@ -414,9 +420,10 @@ jobs:
                 fi
                 scripts/ci/run-hermetic-deterministic-suite.sh command \
                   timeout --signal=INT --kill-after=30s 28m \
-                  "${incremental_env[@]}" cargo test \
+                  "${incremental_env[@]}" cargo nextest run --profile ci \
                     -p "${package}" "--${kind}" "${name}" \
-                    "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
+                    "${target_feature_args[@]}" --all-targets --ignore-rust-version
+                cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
@@ -424,8 +431,9 @@ jobs:
             else
               scripts/ci/run-hermetic-deterministic-suite.sh command \
                 timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+                "${incremental_env[@]}" cargo nextest run --profile ci "${package_args[@]}" \
+                  "${feature_args[@]}" --all-targets --ignore-rust-version
+              cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-bulk.xml" 2>/dev/null || true
             fi
             echo "::endgroup::"
           fi
@@ -437,6 +445,14 @@ jobs:
           name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
           path: bucket-${{ matrix.bucket.name }}.lcov
           if-no-files-found: error
+
+      - name: Upload JUnit reports
+        if: always() && needs.changes.outputs.run_coverage != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-bucket-${{ matrix.bucket.name }}
+          path: junit-reports/
+          if-no-files-found: ignore
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
