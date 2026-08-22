@@ -10014,4 +10014,40 @@ async fn ironhub_link_routes_are_stripped_alongside_operator_routes() {
     assert_eq!(read_response.status(), StatusCode::NOT_FOUND);
     assert_eq!(write_response.status(), StatusCode::NOT_FOUND);
     assert_eq!(clear_response.status(), StatusCode::NOT_FOUND);
+
+    let mounted = webui_v2_router_with_options(
+        WebUiV2State::new(
+            Arc::new(StubServices::default()),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ),
+        WebUiV2RouteOptions::all(),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    for (method, uri) in [
+        (Method::GET, "/api/webchat/v2/ironhub/link"),
+        (Method::POST, "/api/webchat/v2/ironhub/link/key"),
+        (Method::DELETE, "/api/webchat/v2/ironhub/link/key"),
+    ] {
+        let response = mounted
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must name a route that exists when operator routes are mounted, \
+             otherwise the stripped-router assertions above pass vacuously"
+        );
+    }
 }

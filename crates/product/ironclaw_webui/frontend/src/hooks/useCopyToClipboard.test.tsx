@@ -114,13 +114,13 @@ test("empty text is a no-op rather than a copy of nothing", async () => {
 
 test("the copied state resets once the reset window elapses", async () => {
   vi.useFakeTimers();
-  try {
-    const harness = renderHarness({
-      text: "https://agent.example.com/api/ironhub/register",
-      resetMs: 50,
-      writeText: async () => {},
-    });
+  const harness = renderHarness({
+    text: "https://agent.example.com/api/ironhub/register",
+    resetMs: 50,
+    writeText: async () => {},
+  });
 
+  try {
     await harness.click();
     assert.equal(harness.state(), "copied");
 
@@ -130,6 +130,7 @@ test("the copied state resets once the reset window elapses", async () => {
 
     assert.equal(harness.state(), "idle");
   } finally {
+    harness.cleanup();
     vi.useRealTimers();
   }
 });

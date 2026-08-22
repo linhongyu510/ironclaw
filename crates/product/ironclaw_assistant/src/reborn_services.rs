@@ -7791,6 +7791,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ironhub_link_view_requires_operator_config() {
+        assert!(product_view_requires_operator_config(IRONHUB_LINK_VIEW.id));
+        assert!(!product_view_requires_operator_config(THREADS_VIEW.id));
+    }
+
     /// The WebUI settings/tools request enum must use the exact wire strings
     /// the operator-config storage parser accepts and the entry writer emits.
     /// This pins the type link so the request vocabulary cannot drift from
