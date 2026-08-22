@@ -37,6 +37,7 @@ from ws12_workflow_contracts import (
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_no_direct_dtolnay_usage,
+    validate_no_job_env_rustflags_with_setup_rust,
     validate_production_lint_targets,
     validate_setup_rust_action,
     validate_toolchain_pin_sync,
@@ -130,6 +131,65 @@ class DirectDtolnayUsageForbiddenTests(unittest.TestCase):
         }
         errors = validate_no_direct_dtolnay_usage(workflows)
         self.assertTrue(any("mold" in e.lower() for e in errors))
+
+
+class JobEnvRustflagsShadowingTests(unittest.TestCase):
+    """A setup-rust job may not declare its own RUSTFLAGS env key.
+
+    Job env is re-applied to every step on top of $GITHUB_ENV, so such a key
+    silently shadows the composite's mold export — slower builds, never a
+    red check. The flags belong in the composite's extra_rustflags input.
+    """
+
+    SETUP_RUST_JOB = (
+        "  crate-tests:\n"
+        "    env:\n"
+        '      RUSTC_BOOTSTRAP: "1"\n'
+        "    steps:\n"
+        "      - uses: ./.github/actions/setup-rust\n"
+        "        with:\n"
+        "          mold: true\n"
+    )
+
+    def test_job_level_rustflags_alongside_setup_rust_fails(self):
+        shadowing = self.SETUP_RUST_JOB.replace(
+            '      RUSTC_BOOTSTRAP: "1"\n',
+            '      RUSTC_BOOTSTRAP: "1"\n      RUSTFLAGS: "-Zcrate-attr=x"\n',
+        )
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/x.yml": shadowing}
+        )
+        self.assertTrue(any("crate-tests" in e for e in errors), errors)
+
+    def test_extra_rustflags_input_passes(self):
+        passing = self.SETUP_RUST_JOB + '          extra_rustflags: "-Zcrate-attr=x"\n'
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": passing}
+            ),
+        )
+
+    def test_rustflags_in_a_job_that_does_not_use_setup_rust_is_allowed(self):
+        other = (
+            "  docs:\n"
+            "    env:\n"
+            '      RUSTFLAGS: "-Zcrate-attr=x"\n'
+            "    steps:\n"
+            "      - run: echo hi\n"
+        )
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": other}
+            ),
+        )
+
+    def test_live_workflows_are_clean(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual(
+            [], validate_no_job_env_rustflags_with_setup_rust(workflows)
+        )
 
 
 class ToolchainPinSyncTests(unittest.TestCase):

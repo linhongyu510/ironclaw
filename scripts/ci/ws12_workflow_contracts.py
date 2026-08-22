@@ -1156,6 +1156,51 @@ def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
     return errors
 
 
+SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
+JOB_ENV_RUSTFLAGS = re.compile(r"^ {6}RUSTFLAGS:", re.MULTILINE)
+
+
+def validate_no_job_env_rustflags_with_setup_rust(
+    workflows: dict[str, str],
+) -> list[str]:
+    """A job installing Rust via the composite must not set its own RUSTFLAGS.
+
+    GitHub re-applies a job-level `env:` mapping to every step of that job,
+    on top of whatever earlier steps wrote to $GITHUB_ENV. So a job-level
+    `RUSTFLAGS:` shadows the composite's export for the rest of the job and
+    silently drops the mold linker flags — a slower build, never a red
+    check, which is exactly the drift class this action exists to remove.
+    Jobs pass their extra flags through the composite's `extra_rustflags`
+    input instead, so one place composes the final value.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if SETUP_RUST_USES not in text:
+            continue
+        headings = list(JOB_HEADING.finditer(text))
+        for index, heading in enumerate(headings):
+            start = heading.start()
+            end = (
+                headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(text)
+            )
+            block = text[start:end]
+            if SETUP_RUST_USES not in block:
+                continue
+            if JOB_ENV_RUSTFLAGS.search(block):
+                errors.append(
+                    f"{path}: job {heading.group('name')!r} sets a job-level "
+                    "RUSTFLAGS env key while installing Rust through "
+                    ".github/actions/setup-rust — job env shadows the "
+                    "composite's $GITHUB_ENV write and drops the mold linker "
+                    "flags; pass them as the composite's extra_rustflags "
+                    "input instead"
+                )
+    return errors
+
+
 def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
     """rust-toolchain.toml and the composite's default must name one version."""
     try:
@@ -1900,6 +1945,7 @@ def validate_workflow_texts(
         setup_rust_action = None
     errors.extend(validate_setup_rust_action(setup_rust_action))
     errors.extend(validate_no_direct_dtolnay_usage(workflows))
+    errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
     errors.extend(validate_toolchain_pin_sync(root))
     return errors
 

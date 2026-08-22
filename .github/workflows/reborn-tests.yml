@@ -207,7 +207,6 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # The deep composed-runtime futures (turn -> capability -> skills script
       # mount, and the channel admission chain) overflow the 2 MiB default
       # test-thread stack on this lane's Linux codegen — first observed as a
@@ -246,6 +245,11 @@ jobs:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
           mold: true
+          # Nightly crate attributes this lane compiles with. They live here,
+          # not in a job-level `env: RUSTFLAGS:`, because a job env key is
+          # re-applied to every step and would shadow the composite's
+          # $GITHUB_ENV write — silently dropping the mold linker flags.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
 
       - name: Resolve bucket settings
         id: bucket-settings
@@ -651,7 +655,6 @@ jobs:
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # llvm-cov instrumentation inflates stack frames; the deep channel
       # admission futures (webhook -> pairing gate -> workflow) overflow the
       # default 2 MiB test-thread stack under instrumentation only. The
@@ -690,6 +693,11 @@ jobs:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
           mold: true
+          # Nightly crate attributes this lane compiles with. They live here,
+          # not in a job-level `env: RUSTFLAGS:`, because a job env key is
+          # re-applied to every step and would shadow the composite's
+          # $GITHUB_ENV write — silently dropping the mold linker flags.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm

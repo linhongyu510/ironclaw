@@ -54,7 +54,6 @@ jobs:
       # LLVM 21.1.3 predates these now-stable APIs used by current dependencies.
       # Coverage-only compatibility; ordinary CI remains the MSRV authority.
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # `--workspace` below runs BOTH root-package test tiers in one job: the
       # Reborn integration suites (tests/integration/*) and the root QA suites
       # (tests/reborn_qa_*). Both overrun libtest's 2 MiB default test-thread
@@ -114,6 +113,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
+          # Nightly crate attributes for the instrumented build. They belong
+          # here rather than in a job-level `env: RUSTFLAGS:`, which would
+          # split ownership of the variable with the composite.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
           components: llvm-tools-preview
           targets: wasm32-wasip2
 
@@ -204,7 +207,6 @@ jobs:
     env:
       # Keep the shipping binary on the same crash-safe coverage toolchain.
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
     permissions:
       id-token: write
       contents: read
@@ -223,6 +225,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
+          # Nightly crate attributes for the instrumented build. They belong
+          # here rather than in a job-level `env: RUSTFLAGS:`, which would
+          # split ownership of the variable with the composite.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
           components: llvm-tools-preview
           targets: wasm32-wasip2
 
