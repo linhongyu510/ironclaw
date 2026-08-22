@@ -418,25 +418,32 @@ jobs:
                 if [[ -n "${feature_flags}" ]]; then
                   read -ra target_feature_args <<< "${feature_flags}"
                 fi
-                scripts/ci/run-hermetic-deterministic-suite.sh command \
-                  timeout --signal=INT --kill-after=30s 28m \
-                  "${incremental_env[@]}" cargo nextest run --profile ci \
-                    -p "${package}" "--${kind}" "${name}" \
-                    "${target_feature_args[@]}" --all-targets --ignore-rust-version
+                REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci -p ${package} --${kind} ${name} ${target_feature_args[*]} --all-targets --ignore-rust-version"
+                echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+                eval "${REPRO}"
                 cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
               )
             else
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo nextest run --profile ci "${package_args[@]}" \
-                  "${feature_args[@]}" --all-targets --ignore-rust-version
+              REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci ${package_args[*]} ${feature_args[*]} --all-targets --ignore-rust-version"
+              echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+              eval "${REPRO}"
               cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-bulk.xml" 2>/dev/null || true
             fi
             echo "::endgroup::"
           fi
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bucket lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
@@ -549,10 +556,20 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          scripts/ci/run-reborn-root-partition.sh
+        run: |
+          REPRO='REBORN_ROOT_TEST_PARTITIONS=4 REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }} RUST_MIN_STACK=67108864 scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/run-reborn-root-partition.sh'
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+          eval "${REPRO}"
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload JUnit report
         if: always()
@@ -653,7 +670,20 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn group tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh groups
+        run: |
+          REPRO='scripts/ci/run-hermetic-deterministic-suite.sh groups'
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+          eval "${REPRO}"
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   sandbox-docker-tests:
     name: Reborn user-sandbox Docker tests
@@ -850,10 +880,22 @@ jobs:
             # matrix leg. Clear only profiling data, not compiled binaries.
             cargo llvm-cov clean --profraw-only
           fi
+          REPRO="REBORN_COV_COLLECT=false REBORN_COV_LANE_MODE=${REBORN_COV_LANE_MODE} REBORN_COV_LANE_PARTITIONS=4 REBORN_COV_LANE_INDEX=${REBORN_COV_LANE_INDEX} scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/reborn-coverage-lane-run.sh /tmp/repro.lcov"
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
             scripts/ci/run-hermetic-deterministic-suite.sh command \
             scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload lane lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
