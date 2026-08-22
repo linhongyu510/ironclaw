@@ -101,7 +101,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **59** group scenarios · **62** flat integration bins (55 in
-`tests/integration/`, 7 in `tests/integration/auth/`) · **40** top-level Rust bins ·
+`tests/integration/`, 7 in `tests/integration/auth/`) · **30** top-level Rust bins ·
 **102** Python scenario files (**870** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
@@ -341,7 +341,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (40)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (30)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -364,16 +364,13 @@ channel-delivery journeys (two-lane model):
 | The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
 
-**Scope isolation parity** — one bin per boundary; each proves data from one scope is
-unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
-`reborn_project_scope_isolation_parity.rs`,
-`reborn_identity_{tenant,project,prompt}_scope_isolation_parity.rs`,
-`reborn_tenant_binding_scope_isolation_parity.rs`,
-`reborn_thread_binding_isolation_parity.rs`,
-`reborn_direct_chat_user_scope_isolation_parity.rs`,
-`reborn_http_network_scope_isolation_parity.rs`,
-`reborn_adapter_installation_scope_isolation_parity.rs`,
-`reborn_wrong_scope_access_isolation_parity.rs`.
+**Scope isolation parity** — one bin per boundary, each proving data from one
+scope is unreachable from another. Consolidated into a single binary,
+`reborn_scope_isolation_suite.rs`, which mounts the 11 members from
+`tests/reborn_scope_isolation_suite/` via `#[path]` (agent, project,
+identity {tenant,project,prompt}, tenant-binding, thread-binding,
+direct-chat-user, http-network, adapter-installation, wrong-scope-access).
+Test bodies are unchanged; the merge exists to cut per-binary link cost.
 
 **Trace parity** — recorded-trace equivalence for tool families and error paths:
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
