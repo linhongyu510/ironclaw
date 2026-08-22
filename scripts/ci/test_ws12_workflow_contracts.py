@@ -36,8 +36,10 @@ from ws12_workflow_contracts import (
     validate_e2e_scope_filters,
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
+    validate_no_direct_dtolnay_usage,
     validate_production_lint_targets,
     validate_setup_rust_action,
+    validate_toolchain_pin_sync,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -98,6 +100,70 @@ class SetupRustActionContractTests(unittest.TestCase):
 
     def test_ok_passes(self):
         self.assertEqual([], validate_setup_rust_action(self.OK))
+
+
+class DirectDtolnayUsageForbiddenTests(unittest.TestCase):
+    """Every workflow must install Rust through the setup-rust composite."""
+
+    def test_direct_dtolnay_call_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: dtolnay/rust-toolchain@abc123 # stable\n"
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("x.yml" in e for e in errors))
+
+    def test_composite_call_passes(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: ./.github/actions/setup-rust\n"
+            )
+        }
+        self.assertEqual([], validate_no_direct_dtolnay_usage(workflows))
+
+    def test_bare_mold_rustflags_string_outside_composite_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                'RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"\n'
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("mold" in e.lower() for e in errors))
+
+
+class ToolchainPinSyncTests(unittest.TestCase):
+    """rust-toolchain.toml and the composite's default must name one version."""
+
+    def _root(self, toolchain_text: str | None, action_text: str | None) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        if toolchain_text is not None:
+            (tmp / "rust-toolchain.toml").write_text(toolchain_text)
+        action_dir = tmp / ".github" / "actions" / "setup-rust"
+        action_dir.mkdir(parents=True)
+        if action_text is not None:
+            (action_dir / "action.yml").write_text(action_text)
+        return tmp
+
+    ACTION_OK = (
+        "inputs:\n"
+        "  toolchain:\n"
+        "    default: \"1.98.0\"\n"
+    )
+    FILE_OK = '[toolchain]\nchannel = "1.98.0"\ncomponents = ["clippy", "rustfmt"]\n'
+
+    def test_missing_file_fails(self):
+        errors = validate_toolchain_pin_sync(self._root(None, self.ACTION_OK))
+        self.assertTrue(any("rust-toolchain.toml" in e for e in errors))
+
+    def test_mismatched_default_fails(self):
+        action = self.ACTION_OK.replace("1.98.0", "1.97.0")
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, action))
+        self.assertTrue(any("1.97.0" in e for e in errors))
+
+    def test_matching_default_passes(self):
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, self.ACTION_OK))
+        self.assertEqual([], errors)
 
 
 class SccacheSetupActionContractTests(unittest.TestCase):

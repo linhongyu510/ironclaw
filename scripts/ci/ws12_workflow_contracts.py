@@ -1127,6 +1127,59 @@ def validate_setup_rust_action(text: str | None) -> list[str]:
     return errors
 
 
+DTOLNAY_ACTION = "dtolnay/rust-toolchain@"
+
+
+def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
+    """Every workflow must install Rust through .github/actions/setup-rust.
+
+    A negative substring check, not a per-site window scan: this is what
+    T1's earlier per-input-drift design collapsed to once every job routes
+    through one composite. Also forbids re-writing out the canonical mold
+    RUSTFLAGS prefix by hand anywhere a workflow's own env block might set
+    it — the composite is the only place that string may appear.
+    """
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if DTOLNAY_ACTION in text:
+            errors.append(
+                f"{path}: calls {DTOLNAY_ACTION!r} directly — install Rust "
+                "through .github/actions/setup-rust instead"
+            )
+        if MOLD_RUSTFLAGS in text:
+            errors.append(
+                f"{path}: writes out the canonical mold RUSTFLAGS prefix "
+                f"'{MOLD_RUSTFLAGS}' directly — pass mold: true to "
+                ".github/actions/setup-rust instead, which prepends it onto "
+                "this job's existing RUSTFLAGS"
+            )
+    return errors
+
+
+def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
+    """rust-toolchain.toml and the composite's default must name one version."""
+    try:
+        file_text = (root / "rust-toolchain.toml").read_text(encoding="utf-8")
+    except OSError:
+        return ["rust-toolchain.toml: missing (single source of truth for the CI toolchain)"]
+    channel_match = re.search(r'^channel = "(\d+\.\d+\.\d+)"$', file_text, re.MULTILINE)
+    if channel_match is None:
+        return ['rust-toolchain.toml: channel must be an exact stable version ("X.Y.Z")']
+    channel = channel_match.group(1)
+    try:
+        action_text = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        return [f"{SETUP_RUST_ACTION}: missing"]
+    default_match = re.search(r'default:\s*"([^"]+)"', action_text)
+    if default_match is None or default_match.group(1) != channel:
+        found = default_match.group(1) if default_match else "<none>"
+        return [
+            f"{SETUP_RUST_ACTION}: toolchain input default {found!r} != "
+            f"rust-toolchain.toml channel {channel!r}"
+        ]
+    return []
+
+
 def job_body(text: str, job_name: str) -> str | None:
     """Return one workflow job's body, bounded by the next job heading."""
     for heading in JOB_HEADING.finditer(text):
@@ -1846,6 +1899,8 @@ def validate_workflow_texts(
     except OSError:
         setup_rust_action = None
     errors.extend(validate_setup_rust_action(setup_rust_action))
+    errors.extend(validate_no_direct_dtolnay_usage(workflows))
+    errors.extend(validate_toolchain_pin_sync(root))
     return errors
 
 
