@@ -37,6 +37,39 @@ Don't restate prop values here; they drift.
 | `primitives.tsx` | `Panel`, `StatCard`, `FlowList`, `EmptyPanel`, `SectionHeader`, `SubLabel`, `cx` | Higher-level composites built on `Card`/`Badge` (+ back-compat re-exports `StatusPill`, `Panel`). |
 | `theme.ts` | `useInterfaceTheme`, `InterfaceTheme` | Light/dark theme hook (drives `data-theme` on `<html>`). |
 
+## Design tokens
+
+Every visual decision comes from a token in [`../styles/app.css`](../styles/app.css).
+The file covers seven axes; `Tokens/*` in Storybook is the live sheet for each.
+
+| Axis | Prefix | Storybook | Utility |
+|------|--------|-----------|---------|
+| Colour | `--v2-<role>` | `Tokens/Colors` | `text-iron-*`, `bg-signal`, … (theme-swapped) |
+| Radius | `--v2-radius-*` | `Tokens/Shape & Space` | `rounded-chip`, `rounded-control`, … |
+| Spacing | `--v2-space-*` | `Tokens/Shape & Space` | `p-inset`, `gap-stack`, … |
+| Elevation | `--v2-elevation-*` | `Tokens/Shape & Space` | `shadow-e1`…`shadow-e3` (theme-swapped) |
+| Stacking | `--v2-z-*` | `Tokens/Shape & Space` | `var()` — no Tailwind namespace |
+| Type | `--text-ui-*`, `--text-title-*` | `Tokens/Typography` | `text-ui`, `text-title`, … |
+| Motion | `--v2-duration-*`, `--v2-ease-*` | `Tokens/Motion` | `ease-standard`; durations via `var()` |
+
+Three rules govern them:
+
+- **Tokens are named for their role, never their size.** `--v2-radius-control`
+  means "this is a button", so the reskin can change what a button looks like by
+  editing one line. `--radius-md` would only relocate the hardcoding — the call
+  site would still be asserting a size.
+- **Reach for a token before an arbitrary value.** A `rounded-[14px]` or
+  `shadow-[0_10px_30px_…]` in a component is a value the reskin cannot move. If
+  no token fits, add one to `app.css` rather than inlining a literal.
+- **Take durations from `--v2-duration-*`.** They collapse to `0ms` under
+  `prefers-reduced-motion` at the token layer, so a component that uses one is
+  reduced-motion-correct by construction. A hardcoded `duration-150` is not.
+
+The static-motion policy in `app.css` still suppresses animation globally; the
+motion tokens are the vocabulary Phase 4 (#7782 WS4) opts components back into,
+not a licence to animate today. Token *values* are Phase 3a's to change
+(#7781 WS3) — this table is the contract, not the palette.
+
 ## Conventions
 
 - **One primitive per file.** Kebab-case filename, PascalCase export
