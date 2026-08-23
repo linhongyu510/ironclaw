@@ -11,6 +11,7 @@ from pathlib import Path
 
 import ws12_workflow_contracts
 from ws12_workflow_contracts import (
+    validate_no_eval_in_workflow_run_blocks,
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
     CRATE_SCOPE_FILTERS,
@@ -2123,6 +2124,55 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         )
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("fixed sequential loop" in error for error in errors), errors)
+
+
+
+class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):
+    """Workflows build argv arrays; they never re-parse a command string.
+
+    The crate-bucket lane interpolates planner-derived target names, and
+    those come from changed FILENAMES -- `tests/$(cmd).rs` under `eval`
+    executes on a runner holding sccache credentials.
+    """
+
+    def test_eval_in_a_run_block_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "        run: |\n"
+                '          REPRO="cargo test ${name}"\n'
+                '          eval "${REPRO}"\n'
+            )
+        }
+        errors = validate_no_eval_in_workflow_run_blocks(workflows)
+        self.assertTrue(any("x.yml:3" in e for e in errors), errors)
+
+    def test_argv_array_invocation_passes(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "        run: |\n"
+                '          cmd=(cargo test -p "${package}")\n'
+                "          printf -v REPRO '%q ' \"${cmd[@]}\"\n"
+                '          "${cmd[@]}"\n'
+            )
+        }
+        self.assertEqual(
+            [], validate_no_eval_in_workflow_run_blocks(workflows)
+        )
+
+    def test_the_word_eval_inside_a_longer_token_is_not_flagged(self):
+        workflows = {
+            ".github/workflows/x.yml": "          evaluate_results.sh\n"
+        }
+        self.assertEqual(
+            [], validate_no_eval_in_workflow_run_blocks(workflows)
+        )
+
+    def test_live_workflows_contain_no_eval(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual(
+            [], validate_no_eval_in_workflow_run_blocks(workflows)
+        )
+
 
 
 if __name__ == "__main__":

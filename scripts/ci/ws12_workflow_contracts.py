@@ -1750,6 +1750,37 @@ def validate_crate_name_residue(
     return errors
 
 
+WORKFLOW_EVAL = re.compile(r"^[ \t]*eval[ \t]", re.MULTILINE)
+
+
+def validate_no_eval_in_workflow_run_blocks(
+    workflows: dict[str, str],
+) -> list[str]:
+    """No workflow may `eval` a command it just built as a string.
+
+    Commands are assembled as argv arrays and run directly; the REPRO hint
+    is derived FROM the argv with printf '%q '. `eval` re-parses whatever
+    was interpolated, and the crate-bucket lane interpolates
+    planner-derived target names that come from changed FILENAMES -- so a
+    contributor adding `tests/$(cmd).rs` would execute `cmd` on a runner
+    that holds sccache credentials. A newline in the same value can also
+    forge extra $GITHUB_ENV entries. Both become unrepresentable once the
+    argv is never re-parsed, so this stays a hard contract rather than a
+    review habit.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        for match in WORKFLOW_EVAL.finditer(text):
+            line = text[: match.start()].count("\n") + 1
+            errors.append(
+                f"{path}:{line}: workflow run block uses `eval`. Build the "
+                "command as an array and run it directly; derive any REPRO "
+                "hint from the argv with printf '%q '."
+            )
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -1780,6 +1811,7 @@ def validate_workflow_texts(
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))
+    errors.extend(validate_no_eval_in_workflow_run_blocks(workflows))
     try:
         sccache_action = (root / SCCACHE_SETUP_ACTION).read_text(encoding="utf-8")
     except OSError as error:

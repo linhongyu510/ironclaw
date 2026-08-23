@@ -418,18 +418,34 @@ jobs:
                 if [[ -n "${feature_flags}" ]]; then
                   read -ra target_feature_args <<< "${feature_flags}"
                 fi
-                REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci -p ${package} --${kind} ${name} ${target_feature_args[*]} --all-targets --ignore-rust-version"
+                # Run the argv directly; never eval. `name` is a changed
+                # file's stem, so a path like `tests/$(cmd).rs` would be
+                # re-parsed as shell here. Deriving the REPRO line FROM the
+                # argv with %q makes the hint both injection-proof and
+                # genuinely paste-able, and keeps it single-line so it
+                # cannot forge extra $GITHUB_ENV entries.
+                cmd=(scripts/ci/run-hermetic-deterministic-suite.sh command
+                  timeout --signal=INT --kill-after=30s 28m
+                  "${incremental_env[@]}" cargo nextest run --profile ci
+                  -p "${package}" "--${kind}" "${name}"
+                  "${target_feature_args[@]}" --all-targets --ignore-rust-version)
+                printf -v REPRO '%q ' "${cmd[@]}"
                 echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-                eval "${REPRO}"
+                "${cmd[@]}"
                 cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
               )
             else
-              REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci ${package_args[*]} ${feature_args[*]} --all-targets --ignore-rust-version"
+              cmd=(scripts/ci/run-hermetic-deterministic-suite.sh command
+                timeout --signal=INT --kill-after=30s 28m
+                "${incremental_env[@]}" cargo nextest run --profile ci
+                "${package_args[@]}" "${feature_args[@]}"
+                --all-targets --ignore-rust-version)
+              printf -v REPRO '%q ' "${cmd[@]}"
               echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-              eval "${REPRO}"
+              "${cmd[@]}"
               cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-bulk.xml" 2>/dev/null || true
             fi
             echo "::endgroup::"
@@ -567,9 +583,14 @@ jobs:
 
       - name: Run Reborn root tests
         run: |
-          REPRO='REBORN_ROOT_TEST_PARTITIONS=4 REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }} RUST_MIN_STACK=67108864 scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/run-reborn-root-partition.sh'
+          cmd=(env REBORN_ROOT_TEST_PARTITIONS=4
+            "REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }}"
+            RUST_MIN_STACK=67108864
+            scripts/ci/run-hermetic-deterministic-suite.sh command
+            scripts/ci/run-reborn-root-partition.sh)
+          printf -v REPRO '%q ' "${cmd[@]}"
           echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-          eval "${REPRO}"
+          "${cmd[@]}"
 
       - name: Local repro for this job
         if: failure()
@@ -681,9 +702,10 @@ jobs:
 
       - name: Run Reborn group tests
         run: |
-          REPRO='scripts/ci/run-hermetic-deterministic-suite.sh groups'
+          cmd=(scripts/ci/run-hermetic-deterministic-suite.sh groups)
+          printf -v REPRO '%q ' "${cmd[@]}"
           echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-          eval "${REPRO}"
+          "${cmd[@]}"
 
       - name: Local repro for this job
         if: failure()
