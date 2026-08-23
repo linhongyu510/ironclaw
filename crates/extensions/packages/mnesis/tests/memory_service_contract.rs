@@ -173,11 +173,11 @@ impl MnesisTransport for SharedFake {
         );
         let arguments = &request.body["params"]["arguments"];
         let body = match request.operation {
-            "record_interaction" => {
+            "memory_record_interaction" => {
                 self.0.store(owner_key, arguments);
                 json!({ "recorded": true })
             }
-            "memory_search" | "knowledge_search" => self.0.search(&owner_key, arguments),
+            "memory_search" | "search_knowledge" => self.0.search(&owner_key, arguments),
             other => panic!("fake Mnesis server: unexpected operation {other}"),
         };
         Ok(MnesisResponse {

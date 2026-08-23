@@ -110,7 +110,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
         self.search_lane(
             MnesisLane::Knowledge,
-            "knowledge_search",
+            "search_knowledge",
             invocation,
             request,
         )
@@ -186,6 +186,9 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         if !response.is_success() {
             return Err(lane_failure(&response));
         }
+        if tool_call_failed(&response.body) {
+            return Err(MemoryServiceError::operation());
+        }
 
         Ok(decode_results(&response.body, limit))
     }
@@ -200,8 +203,8 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .transport
             .execute(MnesisRequest {
                 lane: MnesisLane::Memory,
-                operation: "record_interaction",
-                body: tool_call("record_interaction", body),
+                operation: "memory_record_interaction",
+                body: tool_call("memory_record_interaction", body),
                 idempotent: true,
                 attribution,
                 session_key,
@@ -209,7 +212,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
 
-        if response.is_success() {
+        if response.is_success() && !tool_call_failed(&response.body) {
             return Ok(());
         }
         Err(lane_failure(&response))
@@ -222,6 +225,14 @@ fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
     } else {
         MemoryServiceError::operation()
     }
+}
+
+/// A refused tool call is an HTTP 200 carrying `isError`, so status alone
+/// reports success for an unknown tool or a denied argument.
+fn tool_call_failed(body: &Value) -> bool {
+    body.pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn interaction_body(

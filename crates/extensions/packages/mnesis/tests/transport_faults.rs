@@ -162,6 +162,21 @@ async fn a_lane_denial_and_a_lane_outage_map_to_different_host_error_kinds() {
 }
 
 #[tokio::test]
+async fn a_refused_tool_call_is_an_error_even_though_the_lane_answered_200() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
+        "result": {
+            "content": [{"type": "text", "text": "MCP error -32602: Tool nope not found"}],
+            "isError": true
+        }
+    })));
+    let error = service
+        .read_long_term(invocation(), request("anything", 4))
+        .await
+        .expect_err("a refused tool call must not read as an empty lane");
+    assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+}
+
+#[tokio::test]
 async fn an_undecodable_body_yields_no_snippets_rather_than_garbage() {
     let service =
         MnesisMemoryService::new(MockMnesisTransport::always_ok(json!("not an envelope")));
@@ -478,7 +493,7 @@ async fn live_canary_reaches_both_published_lanes() {
 
     let (attribution, session_key) = canary_identity();
     for (lane, operation) in [
-        (MnesisLane::Knowledge, "knowledge_search"),
+        (MnesisLane::Knowledge, "search_knowledge"),
         (MnesisLane::Memory, "memory_search"),
     ] {
         let response = transport
@@ -506,6 +521,23 @@ async fn live_canary_reaches_both_published_lanes() {
             "{operation} did not complete: status {}",
             response.status
         );
+        assert!(
+            response.body.pointer("/result/structuredContent").is_some(),
+            "{operation} answered without the nested envelope the decoder reads"
+        );
+        if lane == MnesisLane::Knowledge {
+            let hits = response
+                .body
+                .pointer("/result/structuredContent/results")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or_default();
+            assert!(
+                hits > 0,
+                "the corpus lane returned no rows, so a 200 here would not \
+                 distinguish a working read from an empty one"
+            );
+        }
     }
 }
 

@@ -62,7 +62,7 @@ async fn an_exchange_is_recorded_on_the_memory_lane_only() {
     let recorded = service.transport().recorded();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].lane, MnesisLane::Memory);
-    assert_eq!(recorded[0].operation, "record_interaction");
+    assert_eq!(recorded[0].operation, "memory_record_interaction");
 }
 
 #[tokio::test]
