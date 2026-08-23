@@ -1333,14 +1333,16 @@ def build_plan(
     affected = (
         _affected_packages(production_packages, reverse) | direct_test_packages
     ) & canonical_set
-    if production_packages:
+    if production_packages or direct_test_packages or root_partitions:
         scanning_packages = set(WORKSPACE_SCANNING_TEST_PACKAGES) & canonical_set
         if scanning_packages - affected:
             affected |= scanning_packages
             reasons.append(
                 "workspace scan: ironclaw_architecture_tests reads every "
-                "crate's sources from disk and has no dependency edge to "
-                "any of them, so it joins any production-package change"
+                "crate's sources from disk (including test targets and root "
+                "`tests/*.rs`) and has no dependency edge to any of them, so "
+                "it joins any production-package, package-owned-test, or "
+                "root-test change"
             )
     if changed_packages and not affected:
         raise ValueError(

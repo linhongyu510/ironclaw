@@ -1247,6 +1247,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 )
 
     def test_workflow_files_read_by_cli_smoke_route_to_the_smoke_test(self) -> None:
+        # These workflow files route to `ironclaw` via REPO_CONFIG_TEST_OWNERS,
+        # which now also joins the workspace-scanning `ironclaw_architecture_
+        # tests` (see test_shipped_container_configs_select_their_parsing_test
+        # for why the fake single-bucket stub needs per-package buckets here).
+        planner._bucket_packages = lambda packages: [
+            {"name": package, "packages": [package]} for package in packages
+        ]
         for workflow in (
             "reborn-release-compile.yml",
             "ironclaw-release.yml",
@@ -1261,7 +1268,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     any(
                         target == {"package": "ironclaw", "kind": "test", "name": "smoke"}
                         for bucket in plan["crate_buckets"]
-                        for target in bucket["exact_targets"]
+                        for target in bucket.get("exact_targets", [])
                     ),
                     plan["crate_buckets"],
                 )
@@ -1304,16 +1311,36 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["reasons"],
         )
 
-        # Negative control: a package-owned test change cannot alter a scanned
-        # production source's contract, so it must not add the workspace-
-        # scanning architecture tests either — mirrors
-        # test_package_owned_test_change_does_not_run_reverse_dependents's
-        # philosophy.
+        # A package-owned *test* change is scanned too:
+        # `repo_config_file_literals_in_test_sources()` walks every
+        # `crates/**/tests/*.rs` file, so a test-only diff can add or remove a
+        # `.github/...` literal without touching that package's `src/`. The
+        # reverse-dependency closure still has no edge into
+        # ironclaw_architecture_tests, so it must join on `direct_test_packages`
+        # the same way it joins on `production_packages` above.
         test_only = self.plan_real_owners(
             ["crates/product/ironclaw_openai_compat/tests/contract.rs"]
         )
-        self.assertNotIn(
-            "ironclaw_architecture_tests", test_only["affected_packages"]
+        self.assertIn("ironclaw_architecture_tests", test_only["affected_packages"])
+        self.assertTrue(
+            any("workspace scan" in reason for reason in test_only["reasons"]),
+            test_only["reasons"],
+        )
+
+    def test_root_test_only_change_schedules_the_workspace_scanning_architecture_tests(
+        self,
+    ) -> None:
+        """The same workspace-scan gate applies when the only changed path is a
+        root-level `tests/*.rs` file: `repo_config_file_literals_in_test_sources()`
+        globs `tests/*.rs` at the workspace root too, and root test files map to
+        no workspace package at all (`root_partitions`, not `production_packages`
+        or `direct_test_packages`), so the gate must also key off `root_partitions`.
+        """
+        plan = self.plan_real_owners(["tests/reborn_qa_doc_grounding.rs"])
+        self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
+        self.assertTrue(
+            any("workspace scan" in reason for reason in plan["reasons"]),
+            plan["reasons"],
         )
 
     def test_workspace_scanning_packages_exist_in_the_real_tree(self) -> None:
@@ -1754,6 +1781,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
             f"{owner} must parse the shipped container configs through "
             "RebornConfigFile::parse_text",
         )
+        # The docker-config owner change also joins the workspace-scanning
+        # `ironclaw_architecture_tests` (it has no exact target of its own, so
+        # it must run its full suite). The real bucketing script isolates it
+        # into its own bucket because it has no dependency edge to `ironclaw`;
+        # mirror that here (as `test_high_fanout_package_keeps_consumers_in_
+        # bounded_jobs` does for its own scenario) instead of this suite's
+        # default single-merged-bucket stub, which would otherwise force
+        # `ironclaw`'s bucket into a full run alongside it and hide the exact
+        # target this test exists to pin.
+        planner._bucket_packages = lambda packages: [
+            {"name": package, "packages": [package]} for package in packages
+        ]
         for path in (
             "docker/reborn/config.toml",
             "docker/reborn/config.production.toml",
@@ -1827,15 +1866,30 @@ class RebornPrTestPlanTests(unittest.TestCase):
         """A published `docs/` page selects the doc-fact sweep instead of
         planning `mode=none` (#7378: docs-only PRs merged green while cargo
         tests read their pages)."""
+        # The doc-fact-owned package also joins the workspace-scanning
+        # `ironclaw_architecture_tests` (see
+        # test_shipped_container_configs_select_their_parsing_test for why
+        # this suite's default single-bucket stub is replaced with a
+        # per-package one here).
+        planner._bucket_packages = lambda packages: [
+            {"name": package, "packages": [package]} for package in packages
+        ]
         plan = self.plan_real_owners(["docs/extensions/building-a-tool.md"])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
-        self.assertEqual(plan["affected_packages"], ["ironclaw_extension_registry"])
+        self.assertEqual(
+            plan["affected_packages"],
+            ["ironclaw_architecture_tests", "ironclaw_extension_registry"],
+        )
         self.assertEqual(
             plan["crate_buckets"],
             [
                 {
-                    "name": "selected",
+                    "name": "ironclaw_architecture_tests",
+                    "packages": ["ironclaw_architecture_tests"],
+                },
+                {
+                    "name": "ironclaw_extension_registry",
                     "packages": ["ironclaw_extension_registry"],
                     "exact_targets": [
                         {
@@ -1844,22 +1898,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
                             "name": "docs_manifest_schema_version",
                         }
                     ],
-                }
+                },
             ],
         )
 
     def test_doc_fact_pinned_pages_add_their_owning_crate(self) -> None:
         """The two pinned pages also select their owning crate's doc-fact
         test, with no reverse-dependency widening."""
+        planner._bucket_packages = lambda packages: [
+            {"name": package, "packages": [package]} for package in packages
+        ]
         cli = self.plan_real_owners(["docs/using/cli.mdx"])
         self.assertEqual(
             cli["changed_packages"], ["ironclaw", "ironclaw_extension_registry"]
         )
         self.assertEqual(
-            cli["affected_packages"], ["ironclaw", "ironclaw_extension_registry"]
+            cli["affected_packages"],
+            ["ironclaw", "ironclaw_architecture_tests", "ironclaw_extension_registry"],
         )
+        cli_exact_targets = [
+            target
+            for bucket in cli["crate_buckets"]
+            for target in bucket.get("exact_targets", [])
+        ]
         self.assertEqual(
-            cli["crate_buckets"][0]["exact_targets"],
+            cli_exact_targets,
             [
                 {"package": "ironclaw", "kind": "test", "name": "docs_cli_reference"},
                 {
@@ -1875,7 +1938,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ["ironclaw_extension_registry", "ironclaw_openai_compat"],
         )
         self.assertEqual(
-            responses["crate_buckets"][0]["exact_targets"],
+            responses["affected_packages"],
+            [
+                "ironclaw_architecture_tests",
+                "ironclaw_extension_registry",
+                "ironclaw_openai_compat",
+            ],
+        )
+        responses_exact_targets = [
+            target
+            for bucket in responses["crate_buckets"]
+            for target in bucket.get("exact_targets", [])
+        ]
+        self.assertEqual(
+            responses_exact_targets,
             [
                 {
                     "package": "ironclaw_extension_registry",
@@ -1892,11 +1968,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
     def test_mintignore_edit_runs_the_published_sweep(self) -> None:
         """A fence edit changes the sweep's scope, so it must run the sweep."""
+        planner._bucket_packages = lambda packages: [
+            {"name": package, "packages": [package]} for package in packages
+        ]
         plan = self.plan_real_owners(["docs/.mintignore"])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["changed_packages"], ["ironclaw_extension_registry"])
+        exact_targets = [
+            target
+            for bucket in plan["crate_buckets"]
+            for target in bucket.get("exact_targets", [])
+        ]
         self.assertEqual(
-            plan["crate_buckets"][0]["exact_targets"],
+            exact_targets,
             [
                 {
                     "package": "ironclaw_extension_registry",
