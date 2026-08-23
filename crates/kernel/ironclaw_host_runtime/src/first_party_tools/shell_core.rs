@@ -331,72 +331,7 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
 }
 
 pub(super) fn single_direct_argv(command: &str, expected_executable: &str) -> Option<Vec<String>> {
-    let segments = split_shell_segments(command);
-    if segments.len() != 1
-        || !redirect_targets(command, '<').is_empty()
-        || !redirect_targets(command, '>').is_empty()
-    {
-        return None;
-    }
-    let argv = direct_shell_words(command)?;
-    let executable = argv.first()?;
-    let executable = executable.rsplit('/').next().unwrap_or(executable);
-    executable
-        .eq_ignore_ascii_case(expected_executable)
-        .then_some(argv)
-}
-
-fn direct_shell_words(command: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote = ShellQuote::None;
-    let mut escaped = false;
-    let mut word_started = false;
-    for ch in command.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            word_started = true;
-            continue;
-        }
-        match (quote, ch) {
-            (_, '\\') => {
-                escaped = true;
-                word_started = true;
-            }
-            (ShellQuote::None, '\'') => {
-                quote = ShellQuote::Single;
-                word_started = true;
-            }
-            (ShellQuote::Single, '\'') => quote = ShellQuote::None,
-            (ShellQuote::None, '"') => {
-                quote = ShellQuote::Double;
-                word_started = true;
-            }
-            (ShellQuote::Double, '"') => quote = ShellQuote::None,
-            (ShellQuote::None | ShellQuote::Double, '$' | '`') => return None,
-            (ShellQuote::None, ';' | '|' | '&' | '<' | '>' | '\n' | '\r') => return None,
-            (ShellQuote::None, '*' | '?' | '[' | ']' | '{' | '}') => return None,
-            (ShellQuote::None, '~') if !word_started => return None,
-            (ShellQuote::None, ch) if ch.is_whitespace() => {
-                if word_started {
-                    words.push(std::mem::take(&mut current));
-                    word_started = false;
-                }
-            }
-            _ => {
-                current.push(ch);
-                word_started = true;
-            }
-        }
-    }
-    if escaped || quote != ShellQuote::None {
-        return None;
-    }
-    if word_started {
-        words.push(current);
-    }
-    Some(words)
+    ironclaw_host_api::process::single_direct_argv(command, expected_executable)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,26 +483,6 @@ fn expand_tilde(token: &str) -> PathBuf {
     }
     PathBuf::from(token)
 }
-#[test]
-fn single_direct_argv_preserves_arguments_without_shell_interpretation() {
-    assert_eq!(
-        single_direct_argv("atlas api resources --filter '.name'", "atlas"),
-        Some(vec![
-            "atlas".to_string(),
-            "api".to_string(),
-            "resources".to_string(),
-            "--filter".to_string(),
-            ".name".to_string(),
-        ])
-    );
-    assert!(single_direct_argv("atlas resources | cat", "atlas").is_none());
-    assert!(single_direct_argv("echo atlas resources", "atlas").is_none());
-    assert!(single_direct_argv("atlas \"$RESOURCE\"", "atlas").is_none());
-    assert!(single_direct_argv("atlas $(resource)", "atlas").is_none());
-    assert!(single_direct_argv("atlas resource*", "atlas").is_none());
-    assert!(single_direct_argv("atlas resources &", "atlas").is_none());
-    assert!(single_direct_argv("atlas resources", "other").is_none());
-}
 
 fn truncate_for_error(s: &str) -> String {
     if s.chars().count() <= 100 {
@@ -581,6 +496,58 @@ fn truncate_for_error(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn single_direct_argv_preserves_arguments_and_rejects_shell_interpretation() {
+        assert_eq!(
+            single_direct_argv(
+                r#"atlas api resources --filter '.name' --field 'a\b' --raw "x\\y\"z\$""#,
+                "atlas"
+            ),
+            Some(vec![
+                "atlas".to_string(),
+                "api".to_string(),
+                "resources".to_string(),
+                "--filter".to_string(),
+                ".name".to_string(),
+                "--field".to_string(),
+                r"a\b".to_string(),
+                "--raw".to_string(),
+                "x\\y\"z$".to_string(),
+            ])
+        );
+        // A quoted head is a valid spelling of the same bare basename;
+        // authorization enrichment and dispatch both accept it (PR #7810
+        // review: the two predicates must agree on this form).
+        assert_eq!(
+            single_direct_argv(r#""atlas" resources"#, "atlas"),
+            Some(vec!["atlas".to_string(), "resources".to_string()])
+        );
+        for command in [
+            "atlas resources | cat",
+            "echo atlas resources",
+            "atlas \"$RESOURCE\"",
+            "atlas $(resource)",
+            "atlas resource*",
+            "atlas resources &",
+            "atlas resources",
+            "ATLAS resources",
+            "atlas api x > out",
+            "/tmp/atlas resources",
+            "./atlas resources",
+            r#"atlas api "a\q""#,
+        ] {
+            let expected = if command == "atlas resources" {
+                "other"
+            } else {
+                "atlas"
+            };
+            assert!(
+                single_direct_argv(command, expected).is_none(),
+                "expected direct command rejection: {command}"
+            );
+        }
+    }
 
     #[test]
     fn split_shell_segments_ignores_operators_inside_quotes() {

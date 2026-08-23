@@ -342,9 +342,93 @@ target = { type = "header", name = "authorization", prefix = "Bearer " }
 placeholder_env = "ATLAS_TOKEN"
 direct_executable = "atlas"
 required = true
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_admin_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "admin.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "ATLAS_ADMIN_TOKEN"
+direct_executable = "atlas-admin"
+required = true
 "#;
 
-fn registry_from_manifest(manifest_toml: &str, root: &str) -> ExtensionRegistry {
+const UNRELATED_AUTH_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "unrelated"
+name = "Unrelated"
+version = "0.1.0"
+description = "Unrelated product auth fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "unrelated.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "unrelated.test"
+description = "Unrelated product auth fixture"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/unrelated/test.input.v1.json"
+output_schema_ref = "schemas/unrelated/test.output.v1.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_runtime_token"
+source = { type = "product_auth_account", provider = "atlas" }
+audience = { scheme = "https", host_pattern = "api.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+
+const COLLIDING_EXECUTABLE_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "counterfeit"
+name = "Counterfeit"
+version = "0.1.0"
+description = "Colliding direct executable fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "counterfeit.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "counterfeit.test"
+description = "Colliding direct executable fixture"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/counterfeit/test.input.v1.json"
+output_schema_ref = "schemas/counterfeit/test.output.v1.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "counterfeit_runtime_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.counterfeit.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "COUNTERFEIT_TOKEN"
+direct_executable = "atlas"
+required = true
+"#;
+
+fn package_from_manifest(
+    manifest_toml: &str,
+    root: &str,
+) -> ironclaw_extension_registry::ExtensionPackage {
     use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
@@ -363,10 +447,14 @@ fn registry_from_manifest(manifest_toml: &str, root: &str) -> ExtensionRegistry 
         &contracts,
     )
     .unwrap();
-    let package =
-        ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
+    ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap()
+}
+
+fn registry_from_manifest(manifest_toml: &str, root: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
-    registry.insert(package).unwrap();
+    registry
+        .insert(package_from_manifest(manifest_toml, root))
+        .unwrap();
     registry
 }
 
@@ -451,11 +539,17 @@ fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
 #[tokio::test]
 async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
     use ironclaw_host_api::{
-        capability::EffectKind,
+        capability::{EffectKind, RuntimeCredentialRequirementSource},
         runtime_policy::{ProcessBackendKind, RuntimeProfile},
     };
 
-    let registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
+    let mut registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
+    registry
+        .insert(package_from_manifest(
+            UNRELATED_AUTH_MANIFEST_FIXTURE,
+            "/system/extensions/unrelated",
+        ))
+        .unwrap();
     let dispatcher =
         ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
             Err(DispatchError::UnknownCapability {
@@ -502,6 +596,24 @@ async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
         enriched.runtime_credentials[0].placeholder_env.as_deref(),
         Some("ATLAS_TOKEN")
     );
+    assert_eq!(
+        enriched.runtime_credentials[0].source,
+        RuntimeCredentialRequirementSource::SecretHandle,
+        "an unrelated product-auth declaration with the same handle and audience is not authority"
+    );
+
+    let quoted = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({ "command": "\"atlas\" resources list" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        quoted, enriched,
+        "authorization and direct dispatch must treat a quoted executable identically"
+    );
 
     let unchanged = host
         .enrich_invocation_descriptor(
@@ -512,6 +624,71 @@ async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
         .await
         .unwrap();
     assert_eq!(unchanged, descriptor);
+}
+
+#[tokio::test]
+async fn sandbox_shell_enrichment_rejects_active_extension_executable_collision() {
+    use ironclaw_host_api::runtime_policy::{ProcessBackendKind, RuntimeProfile};
+
+    let mut registry = registry_from_manifest(
+        COLLIDING_EXECUTABLE_MANIFEST_FIXTURE,
+        "/system/extensions/counterfeit",
+    );
+    registry
+        .insert(package_from_manifest(
+            ATLAS_MANIFEST_FIXTURE,
+            "/system/extensions/atlas",
+        ))
+        .unwrap();
+    let dispatcher =
+        ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
+            Err(DispatchError::UnknownCapability {
+                capability: request.invocation.capability.clone(),
+            })
+        });
+    let authorizer = AllowAuthorizer;
+    let trust_policy = StaticTrustPolicy;
+    let mut runtime_policy = permissive_runtime_policy();
+    runtime_policy.requested_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.resolved_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+    let policy_facts = SatisfiedPolicyFacts;
+    let host = CapabilityHost::new(
+        &registry,
+        &dispatcher,
+        &authorizer,
+        &trust_policy,
+        &runtime_policy,
+        &policy_facts,
+    );
+    let shell_id = CapabilityId::new("builtin.shell").unwrap();
+    let mut descriptor = registry
+        .get_capability(&CapabilityId::new("atlas.test").unwrap())
+        .unwrap()
+        .clone();
+    descriptor.runtime_credentials.clear();
+
+    let error = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({ "command": "atlas resources list" }),
+        )
+        .await
+        .unwrap_err();
+    let CapabilityInvocationError::AuthorizationDenied {
+        reason: DenyReason::PolicyDenied,
+        detail: Some(detail),
+        ..
+    } = error
+    else {
+        panic!("an executable collision must fail closed as a policy denial");
+    };
+    assert_eq!(
+        detail,
+        "direct-exec credential executable `atlas` is declared by multiple active extensions: \
+         atlas, counterfeit"
+    );
 }
 
 // The Allow decision seals an `Authorized` whose lane is resolved from the

@@ -31,6 +31,7 @@ use ironclaw_host_api::{
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 pub(super) const PROXY_LABEL_PREFIX: &str = "ironclaw.proxy";
 pub(super) const NETWORK_LABEL_PREFIX: &str = "ironclaw.network";
 pub(super) const DEFAULT_PROXY_IMAGE: &str =
@@ -206,11 +207,42 @@ pub(super) struct ManagedEgressBundle {
     invocation_id_path: PathBuf,
 }
 
+#[cfg(test)]
+impl ManagedEgressBundle {
+    pub(super) fn test_bundle(material_root: &std::path::Path) -> Self {
+        Self {
+            network_name: "test-network".to_string(),
+            proxy_ip: "172.28.10.2".to_string(),
+            proxy_host: "test-proxy".to_string(),
+            posture: "test-posture".to_string(),
+            ca_cert_path: material_root.join("ca.crt"),
+            invocation_id_path: material_root.join("invocation-id"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedNetworkStatus {
     Missing,
     Compatible,
     Incompatible,
+}
+
+#[cfg(test)]
+impl ManagedEgressRuntime {
+    pub(super) fn test_runtime(
+        policy: NetworkPolicy,
+        material_root: PathBuf,
+    ) -> Result<Arc<Self>, RuntimeProcessError> {
+        Ok(Arc::new(Self {
+            proxy_image: "sha256:test-proxy".to_string(),
+            policy,
+            posture: "test-posture".to_string(),
+            ca: Arc::new(SandboxCertificateAuthority::generate()?),
+            material_root,
+            upstream_gate: tokio::sync::Mutex::new(()),
+        }))
+    }
 }
 
 impl ManagedEgressRuntime {
@@ -447,6 +479,22 @@ impl ManagedEgressRuntime {
         bundle: &ManagedEgressBundle,
         credentials: &[SandboxCommandCredential],
     ) -> Result<(), RuntimeProcessError> {
+        self.configure_credentials_with_restart(bundle, credentials, || {
+            restart_proxy_container(docker, &bundle.proxy_host)
+        })
+        .await
+    }
+
+    async fn configure_credentials_with_restart<F, Fut>(
+        &self,
+        bundle: &ManagedEgressBundle,
+        credentials: &[SandboxCommandCredential],
+        restart: F,
+    ) -> Result<(), RuntimeProcessError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), RuntimeProcessError>>,
+    {
         let material_root = bundle.ca_cert_path.parent().ok_or_else(|| {
             RuntimeProcessError::ExecutionFailed(
                 "sandbox proxy credential material path has no parent".to_string(),
@@ -467,9 +515,20 @@ impl ManagedEgressRuntime {
                             .to_string(),
                     ));
                 }
-                let bundle_key = credential.credential_key.as_str().to_string();
                 let header_prefix = credential.header_prefix.as_deref().unwrap_or_default();
-                let authorized_value = format!("{header_prefix}{}", credential.expose_secret());
+                let placeholder_value = format!("{header_prefix}{}", credential.placeholder);
+                if credential.placeholder.trim().is_empty()
+                    || credential.header_name.trim().is_empty()
+                    || placeholder_value.trim().is_empty()
+                    || credential.placeholder == credential.expose_secret()
+                {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential replacement rule is invalid".to_string(),
+                    ));
+                }
+                let bundle_key = credential.credential_key.as_str().to_string();
+                let authorized_value =
+                    Zeroizing::new(format!("{header_prefix}{}", credential.expose_secret()));
                 if credential_bundle
                     .insert(bundle_key.clone(), authorized_value)
                     .is_some()
@@ -482,18 +541,19 @@ impl ManagedEgressRuntime {
                     bundle_key,
                     approved_host: credential.approved_host.clone(),
                     target_header: credential.header_name.clone(),
-                    placeholder_value: format!("{header_prefix}{}", credential.placeholder),
+                    placeholder_value,
                 });
             }
             let config =
                 render_proxy_config_inner(&self.policy, &bundle.proxy_ip, true, &rendered)?;
-            let bundle_json = serde_json::to_vec(&credential_bundle).map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox proxy credential bundle rendering failed: {error}"
-                ))
-            })?;
+            let bundle_json =
+                Zeroizing::new(serde_json::to_vec(&credential_bundle).map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox proxy credential bundle rendering failed: {error}"
+                    ))
+                })?);
             write_proxy_credential_material(material_root, &bundle_json, config.as_bytes()).await?;
-            restart_proxy_container(docker, &bundle.proxy_host).await
+            restart().await
         }
         .await;
         if let Err(configure_error) = configured {
@@ -517,6 +577,11 @@ impl ManagedEgressRuntime {
                 "sandbox proxy credential material path has no parent".to_string(),
             )
         })?;
+        // Delete the bundle before asking Docker to reload. A failed or hung
+        // restart must not extend the lifetime of credential material on disk.
+        // If deletion itself fails, still reload the uncredentialed config so
+        // the proxy stops referencing the stranded file.
+        let cleanup_result = remove_credential_material(material_root).await;
         let clear_result = async {
             let config = render_proxy_config_with_ca(&self.policy, &bundle.proxy_ip)?;
             write_atomic_material_file(&material_root.join("proxy.yaml"), config.as_bytes())
@@ -524,7 +589,6 @@ impl ManagedEgressRuntime {
             restart_proxy_container(docker, &bundle.proxy_host).await
         }
         .await;
-        let cleanup_result = remove_credential_material(material_root).await;
         match (clear_result, cleanup_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(clear_error), Ok(())) => Err(clear_error),
@@ -1682,14 +1746,19 @@ async fn write_atomic_material_file(
     path: &std::path::Path,
     contents: &[u8],
 ) -> Result<(), RuntimeProcessError> {
-    write_atomic_material_file_with_mode(path, contents, 0o644).await
+    write_atomic_material_file_with_mode(path.to_path_buf(), contents.to_vec(), 0o644).await
 }
 
 async fn write_atomic_private_material_file(
     path: &std::path::Path,
     contents: &[u8],
 ) -> Result<(), RuntimeProcessError> {
-    write_atomic_material_file_with_mode(path, contents, 0o600).await
+    write_atomic_material_file_with_mode(
+        path.to_path_buf(),
+        Zeroizing::new(contents.to_vec()),
+        0o600,
+    )
+    .await
 }
 
 async fn write_proxy_credential_material(
@@ -1714,13 +1783,14 @@ async fn write_proxy_credential_material(
     Ok(())
 }
 
-async fn write_atomic_material_file_with_mode(
-    path: &std::path::Path,
-    contents: &[u8],
+async fn write_atomic_material_file_with_mode<C>(
+    path: PathBuf,
+    contents: C,
     mode: u32,
-) -> Result<(), RuntimeProcessError> {
-    let path = path.to_path_buf();
-    let contents = contents.to_vec();
+) -> Result<(), RuntimeProcessError>
+where
+    C: AsRef<[u8]> + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         use std::io::Write as _;
 
@@ -1746,7 +1816,7 @@ async fn write_atomic_material_file_with_mode(
                     ))
                 })?;
         }
-        temporary.write_all(&contents).map_err(|error| {
+        temporary.write_all(contents.as_ref()).map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox managed-egress material file write failed: {error}"
             ))
@@ -1897,6 +1967,44 @@ mod tests {
         }
     }
 
+    fn test_runtime(material_root: PathBuf) -> ManagedEgressRuntime {
+        ManagedEgressRuntime {
+            proxy_image: "sha256:test-proxy".to_string(),
+            policy: policy(),
+            posture: "test-posture".to_string(),
+            ca: Arc::new(SandboxCertificateAuthority::generate().unwrap()),
+            material_root,
+            upstream_gate: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn test_bundle(material_root: &std::path::Path) -> ManagedEgressBundle {
+        ManagedEgressBundle {
+            network_name: "test-network".to_string(),
+            proxy_ip: "172.28.10.2".to_string(),
+            proxy_host: "test-proxy".to_string(),
+            posture: "test-posture".to_string(),
+            ca_cert_path: material_root.join("ca.crt"),
+            invocation_id_path: material_root.join("invocation-id"),
+        }
+    }
+
+    fn test_credential(
+        placeholder: &str,
+        header_name: &str,
+        secret: &str,
+    ) -> SandboxCommandCredential {
+        SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("atlas_runtime_token").unwrap(),
+            "ATLAS_TOKEN".to_string(),
+            placeholder.to_string(),
+            "github.com".to_string(),
+            header_name.to_string(),
+            Some("Bearer ".to_string()),
+            secret.to_string(),
+        )
+    }
+
     #[test]
     fn renders_parseable_default_deny_allowlist_without_management_api() {
         let rendered = render_proxy_config(&policy(), "172.28.10.2").unwrap();
@@ -1994,7 +2102,6 @@ mod tests {
         assert_eq!(secrets[1]["rules"][0]["host"].as_str(), Some("github.com"));
         assert_eq!(parsed["tls"]["ca_cert"].as_str(), Some(PROXY_CA_CERT_PATH));
         assert_eq!(parsed["tls"]["ca_key"].as_str(), Some(PROXY_CA_KEY_PATH));
-        assert!(!rendered.contains("RAW_SECRET_SENTINEL"));
     }
 
     #[test]
@@ -2160,7 +2267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_credential_configuration_removes_bundle() {
+    async fn failed_credential_write_removes_bundle() {
         let directory = tempfile::tempdir().unwrap();
         tokio::fs::create_dir(directory.path().join("proxy.yaml"))
             .await
@@ -2175,6 +2282,92 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!directory.path().join("credentials.json").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_proxy_restart_removes_configured_credential_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credential = test_credential("icsbx_test_placeholder", "Authorization", "secret");
+
+        let result = runtime
+            .configure_credentials_with_restart(&bundle, &[credential], || async {
+                Err(RuntimeProcessError::ExecutionFailed(
+                    "test proxy restart failure".to_string(),
+                ))
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(!directory.path().join("credentials.json").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_credential_replacement_rules_fail_before_material_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let invalid = [
+            test_credential("", "Authorization", "secret"),
+            test_credential("   ", "Authorization", "secret"),
+            test_credential("same-value", "Authorization", "same-value"),
+            test_credential("icsbx_test_placeholder", "", "secret"),
+        ];
+
+        for credential in invalid {
+            let result = runtime
+                .configure_credentials_with_restart(&bundle, &[credential], || async { Ok(()) })
+                .await;
+            assert!(result.is_err());
+            assert!(!directory.path().join("credentials.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_secret_exists_only_in_the_private_bundle() {
+        const RAW_SECRET_SENTINEL: &str = "raw-secret-sentinel-for-test";
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credential = test_credential(
+            "icsbx_test_placeholder",
+            "Authorization",
+            RAW_SECRET_SENTINEL,
+        );
+
+        runtime
+            .configure_credentials_with_restart(
+                &bundle,
+                std::slice::from_ref(&credential),
+                || async { Ok(()) },
+            )
+            .await
+            .unwrap();
+
+        let proxy_config = tokio::fs::read_to_string(directory.path().join("proxy.yaml"))
+            .await
+            .unwrap();
+        let credential_bundle =
+            tokio::fs::read_to_string(directory.path().join("credentials.json"))
+                .await
+                .unwrap();
+        assert!(!proxy_config.contains(RAW_SECRET_SENTINEL));
+        assert!(!format!("{runtime:?}").contains(RAW_SECRET_SENTINEL));
+        assert!(!format!("{credential:?}").contains(RAW_SECRET_SENTINEL));
+        assert!(credential_bundle.contains(RAW_SECRET_SENTINEL));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = tokio::fs::metadata(directory.path().join("credentials.json"))
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[tokio::test]

@@ -866,16 +866,23 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
                 placeholder,
                 "api.github.com".to_string(),
                 "Authorization".to_string(),
-                Some("Bearer ".to_string()),
+                Some("token ".to_string()),
                 token.clone(),
             )],
         )
         .await
         .expect("credentialed gh command reaches GitHub through the proxy");
 
-    assert_eq!(result.exit_code, 0, "gh command failed: {}", result.output);
+    assert!(
+        !result.output.contains(&token),
+        "gh command output exposed the real token"
+    );
+    let redacted_output = result.output.replace(&token, "[REDACTED]");
+    assert_eq!(result.exit_code, 0, "gh command failed: {redacted_output}");
     assert!(serde_json::from_str::<serde_json::Value>(&result.output).is_ok());
-    assert!(!result.output.contains(&token));
+    // This call also regresses the proxy's private-material boundary: the
+    // cap-dropped proxy retains only DAC_READ_SEARCH so it can read host-owned
+    // 0600 credentials through its per-user read-only bind mount.
     let container = cleanup.capture(&scope);
     let inspect = docker_command(&[
         "container",

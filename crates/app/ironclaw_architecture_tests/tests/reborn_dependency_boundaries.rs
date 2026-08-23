@@ -906,7 +906,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // invocation bundle credential key, and their wire-contract test.
         // Executable selection, secret staging, and bundle I/O remain in the
         // kernel and sandbox crates; host_api still owns declarations only.
-        ("ironclaw_host_api", 20_579),
+        // 20_729 -> 20_728 (2026-08-24, #7810 review fixes): +149 lines move
+        // the quote-aware `single_direct_argv` predicate into `process.rs` so
+        // kernel authorization enrichment and host-runtime shell dispatch
+        // share ONE command predicate (review: the two tokenizers disagreed
+        // on quoted executables), plus case-normalized credential comparison
+        // fields and their tests. Pure declaration-adjacent parsing with zero
+        // dependencies; execution, staging, and proxy substitution stay in
+        // the kernel and sandbox crates. Re-captured at the exact 20_878
+        // measured count minus the standing 150-line working tolerance.
+        ("ironclaw_host_api", 20_728),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

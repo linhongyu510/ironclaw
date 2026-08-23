@@ -345,7 +345,7 @@ fn direct_credential_bindings(
         .filter_map(|requirement| {
             let placeholder_env = requirement.placeholder_env.as_ref()?;
             let direct_executable = requirement.direct_executable.as_deref()?;
-            if !direct_executable.eq_ignore_ascii_case(executable)
+            if direct_executable != executable
                 || !matches!(requirement.target, RuntimeCredentialTarget::Header { .. })
             {
                 return None;
@@ -427,6 +427,24 @@ mod tests {
                 sandboxed: true,
                 duration: Duration::from_millis(1),
             })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct OrdinaryOnlyProcessPort {
+        requests: Mutex<Vec<CommandExecutionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeProcessPort for OrdinaryOnlyProcessPort {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            self.requests.lock().push(request);
+            Err(RuntimeProcessError::ExecutionFailed(
+                "ordinary process path reached".to_string(),
+            ))
         }
     }
 
@@ -624,12 +642,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_rejects_executable_without_its_declared_binding() {
-        let process = Arc::new(RecordingProcessPort::default());
+    async fn dispatch_rejects_commands_without_an_exact_declared_executable() {
+        for command in [
+            "unbound resources list",
+            "/tmp/atlas resources list",
+            "./atlas resources list",
+        ] {
+            let process = Arc::new(RecordingProcessPort::default());
+            let mut request = FirstPartyCapabilityRequest::request_for_test(
+                CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+                ResourceScope::system(),
+                json!({"command": command}),
+                None,
+            );
+            request.runtime_credentials = vec![atlas_requirement()];
+            request.services.process = process.clone();
+
+            let error = dispatch(&request).await.unwrap_err();
+
+            assert!(dispatch_safe_summary(&error).is_some_and(|summary| {
+                summary.contains("authorized command credentials do not match this executable")
+            }));
+            assert!(
+                process.direct_requests.lock().is_empty(),
+                "rejected executable must not reach the credentialed process path: {command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_fails_at_direct_exec_boundary_when_transport_lacks_support() {
+        let process = Arc::new(OrdinaryOnlyProcessPort::default());
         let mut request = FirstPartyCapabilityRequest::request_for_test(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceScope::system(),
-            json!({"command": "unbound resources list"}),
+            json!({"command": "atlas resources list"}),
             None,
         );
         request.runtime_credentials = vec![atlas_requirement()];
@@ -638,9 +685,11 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert!(dispatch_safe_summary(&error).is_some_and(|summary| {
-            summary.contains("authorized command credentials do not match this executable")
+            summary
+                .contains("authorized command credentials require the sandbox direct-exec boundary")
+                && !summary.contains("not staged")
         }));
-        assert!(process.direct_requests.lock().is_empty());
+        assert!(process.requests.lock().is_empty());
     }
 
     fn atlas_requirement() -> RuntimeCredentialRequirement {

@@ -394,6 +394,87 @@ struct SandboxExecutionRequest {
     extra_env: HashMap<String, String>,
 }
 
+struct CredentialCleanupGuard {
+    managed: Option<Arc<ManagedEgressRuntime>>,
+    docker: Docker,
+    bundle: Option<ManagedEgressBundle>,
+    lifecycle: Option<tokio::sync::OwnedMutexGuard<()>>,
+    armed: bool,
+}
+
+impl CredentialCleanupGuard {
+    fn new(docker: Docker, lifecycle: tokio::sync::OwnedMutexGuard<()>) -> Self {
+        Self {
+            managed: None,
+            docker,
+            bundle: None,
+            lifecycle: Some(lifecycle),
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self, managed: Arc<ManagedEgressRuntime>, bundle: ManagedEgressBundle) {
+        self.managed = Some(managed);
+        self.bundle = Some(bundle);
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    async fn cleanup(&mut self) -> Result<(), RuntimeProcessError> {
+        if !self.armed {
+            return Ok(());
+        }
+        let managed = self.managed.as_ref().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox credential cleanup guard is incomplete".to_string(),
+            )
+        })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox credential cleanup guard is incomplete".to_string(),
+            )
+        })?;
+        let result = managed.clear_credentials(&self.docker, bundle).await;
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for CredentialCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (Some(managed), Some(bundle), Some(lifecycle)) = (
+            self.managed.take(),
+            self.bundle.take(),
+            self.lifecycle.take(),
+        ) else {
+            tracing::error!("sandbox credential cleanup guard dropped without cleanup state");
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!("sandbox credential cleanup could not start after runtime shutdown");
+            return;
+        };
+        let docker = self.docker.clone();
+        // Tokio cancellation and Rust panic unwinding both run this Drop path.
+        // The owned lifecycle gate moves into the detached task, so another
+        // invocation cannot race credential replacement with cleanup. Process
+        // aborts do not run destructors and therefore remain outside this
+        // in-process guarantee.
+        runtime.spawn(async move {
+            let _lifecycle = lifecycle;
+            if let Err(error) = managed.clear_credentials(&docker, &bundle).await {
+                tracing::error!(?error, "sandbox detached credential cleanup failed");
+            }
+        });
+    }
+}
+
 impl From<CommandExecutionRequest> for SandboxExecutionRequest {
     fn from(request: CommandExecutionRequest) -> Self {
         Self {
@@ -690,8 +771,10 @@ impl RebornScopedSandboxCommandTransport {
             )
         })?;
         let resolved_image = self.resolve_worker_image().await?;
-        let _user_lifecycle =
-            acquire_user_lifecycle_gate(&gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let user_lifecycle =
+            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let mut credential_cleanup =
+            CredentialCleanupGuard::new(self.docker.clone(), user_lifecycle);
         let bundle = match self.managed_egress.as_ref() {
             Some(managed) => Some(
                 managed
@@ -705,6 +788,11 @@ impl RebornScopedSandboxCommandTransport {
             ),
             None => None,
         };
+        if !credentials.is_empty()
+            && let (Some(managed), Some(bundle)) = (self.managed_egress.as_ref(), bundle.as_ref())
+        {
+            credential_cleanup.arm(Arc::clone(managed), bundle.clone());
+        }
         let setup = async {
             if let (Some(managed), Some(bundle)) = (self.managed_egress.as_ref(), bundle.as_ref()) {
                 managed
@@ -737,18 +825,22 @@ impl RebornScopedSandboxCommandTransport {
         let (container_name, exec_env) = match setup {
             Ok(setup) => setup,
             Err(setup_error) => {
-                if let Some(managed) = self.managed_egress.as_ref()
-                    && let Err(cleanup_error) = managed
+                if let Some(managed) = self.managed_egress.as_ref() {
+                    match managed
                         .rollback_provisioned_bundle(
                             &self.docker,
                             &user_key,
                             &user_key.container_name(),
                         )
                         .await
-                {
-                    return Err(RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox user container setup failed: {setup_error}; managed-egress rollback failed: {cleanup_error}"
-                    )));
+                    {
+                        Ok(()) => credential_cleanup.disarm(),
+                        Err(cleanup_error) => {
+                            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                                "sandbox user container setup failed: {setup_error}; managed-egress rollback failed: {cleanup_error}"
+                            )));
+                        }
+                    }
                 }
                 return Err(setup_error);
             }
@@ -766,12 +858,7 @@ impl RebornScopedSandboxCommandTransport {
             },
         )
         .await;
-        let cleanup = match (self.managed_egress.as_ref(), bundle.as_ref()) {
-            (Some(managed), Some(bundle)) if !credentials.is_empty() => {
-                managed.clear_credentials(&self.docker, bundle).await
-            }
-            _ => Ok(()),
-        };
+        let cleanup = credential_cleanup.cleanup().await;
         drop(activity);
         match (result, cleanup) {
             (Ok(output), Ok(())) => Ok(output),
@@ -785,10 +872,10 @@ impl RebornScopedSandboxCommandTransport {
 }
 
 async fn acquire_user_lifecycle_gate(
-    gate: &tokio::sync::Mutex<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
     timeout: Duration,
-) -> Result<tokio::sync::MutexGuard<'_, ()>, RuntimeProcessError> {
-    tokio::time::timeout(timeout, gate.lock())
+) -> Result<tokio::sync::OwnedMutexGuard<()>, RuntimeProcessError> {
+    tokio::time::timeout(timeout, gate.lock_owned())
         .await
         .map_err(|error| {
             tracing::debug!(?error, "sandbox user lifecycle gate acquisition timed out");
@@ -834,6 +921,10 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
                 "sandbox credentialed command execution task failed: {error}"
             ))
         })?
+    }
+
+    fn supports_credentialed_direct_command(&self) -> bool {
+        self.managed_egress.is_some()
     }
 
     async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
@@ -1030,6 +1121,7 @@ mod tests {
     use super::*;
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
+        action::{NetworkPolicy, NetworkTargetPattern},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
@@ -1106,10 +1198,10 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_gate_wait_is_bounded() {
-        let gate = tokio::sync::Mutex::new(());
-        let _held = gate.lock().await;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let _held = gate.clone().lock_owned().await;
 
-        let error = acquire_user_lifecycle_gate(&gate, Duration::from_millis(1))
+        let error = acquire_user_lifecycle_gate(gate, Duration::from_millis(1))
             .await
             .expect_err("contended lifecycle gate must time out");
 
@@ -1119,6 +1211,49 @@ mod tests {
                 "sandbox is busy: timed out waiting for another command for this user".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_credential_task_detaches_cleanup_while_holding_lifecycle_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let credential_bundle = directory.path().join("credentials.json");
+        tokio::fs::write(&credential_bundle, br#"{"atlas":"secret"}"#)
+            .await
+            .unwrap();
+        let managed = ManagedEgressRuntime::test_runtime(
+            NetworkPolicy {
+                allowed_targets: vec![NetworkTargetPattern {
+                    scheme: None,
+                    host_pattern: "github.com".to_string(),
+                    port: None,
+                }],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: None,
+            },
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        let bundle = ManagedEgressBundle::test_bundle(directory.path());
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let task_gate = Arc::clone(&gate);
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let execution = tokio::spawn(async move {
+            let lifecycle = task_gate.lock_owned().await;
+            let mut cleanup = CredentialCleanupGuard::new(inert_docker_client(), lifecycle);
+            cleanup.arm(managed, bundle);
+            armed_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        armed_rx.await.unwrap();
+
+        execution.abort();
+        assert!(execution.await.unwrap_err().is_cancelled());
+        let lifecycle = tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("detached credential cleanup must release the lifecycle gate");
+        drop(lifecycle);
+
+        assert!(!credential_bundle.exists());
     }
 
     #[test]

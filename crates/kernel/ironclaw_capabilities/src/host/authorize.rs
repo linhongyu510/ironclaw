@@ -69,6 +69,12 @@ where
             )),
         }
     }
+    /// Add the one direct-process credential declared for a sandboxed shell command.
+    ///
+    /// `self.registry` is the installed-and-active publication snapshot. Disabled
+    /// or uninstalled packages are absent. Matching by package preserves the
+    /// declaration owner, and duplicate owners for one executable fail closed
+    /// instead of depending on registry insertion order.
     pub(super) async fn enrich_invocation_descriptor(
         &self,
         descriptor: &CapabilityDescriptor,
@@ -80,57 +86,84 @@ where
         {
             return Ok(descriptor.clone());
         }
-        let Some(executable) = input
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|command| command.split_whitespace().next())
-            .and_then(|executable| executable.rsplit('/').next())
-        else {
+        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
             return Ok(descriptor.clone());
         };
 
-        let mut matched: Vec<RuntimeCredentialRequirement> = Vec::new();
-        for declared in self
-            .registry
-            .capabilities()
-            .flat_map(|candidate| candidate.runtime_credentials.iter())
-        {
-            if declared.placeholder_env.is_none()
-                || !matches!(declared.target, RuntimeCredentialTarget::Header { .. })
-                || !declared
-                    .direct_executable
-                    .as_deref()
-                    .is_some_and(|expected| expected.eq_ignore_ascii_case(executable))
-            {
-                continue;
-            }
-            if let Some(existing) = matched
+        let mut matched = Vec::new();
+        for package in self.registry.extensions() {
+            let mut owner_match: Option<(String, RuntimeCredentialRequirement)> = None;
+            for declared in package
+                .capabilities
                 .iter()
-                .find(|existing| existing.handle == declared.handle)
+                .flat_map(|candidate| candidate.runtime_credentials.iter())
             {
-                if existing != declared {
-                    return Err(CapabilityInvocationError::AuthorizationDenied {
-                        capability: capability_id.clone(),
-                        reason: DenyReason::PolicyDenied,
-                        detail: Some(
-                            "direct-exec credential handle has conflicting declarations"
-                                .to_string(),
-                        ),
-                    });
+                let Some(executable) = declared.direct_executable.as_deref() else {
+                    continue;
+                };
+                if declared.placeholder_env.is_none()
+                    || !matches!(declared.target, RuntimeCredentialTarget::Header { .. })
+                {
+                    continue;
                 }
-                continue;
+                if owner_match
+                    .as_ref()
+                    .is_some_and(|(_, existing)| existing == declared)
+                {
+                    continue;
+                }
+                if ironclaw_host_api::process::single_direct_argv(command, executable).is_none() {
+                    continue;
+                }
+
+                if let Some((_, existing)) = &owner_match {
+                    if existing != declared {
+                        return Err(CapabilityInvocationError::AuthorizationDenied {
+                            capability: capability_id.clone(),
+                            reason: DenyReason::PolicyDenied,
+                            detail: Some(format!(
+                                "active extension {} has conflicting direct-exec credential \
+                                 declarations for executable `{}`",
+                                package.id,
+                                executable.to_ascii_lowercase()
+                            )),
+                        });
+                    }
+                } else {
+                    owner_match = Some((executable.to_ascii_lowercase(), declared.clone()));
+                }
             }
-            matched.push(declared.clone());
+            if let Some((executable, requirement)) = owner_match {
+                matched.push((package.id.clone(), executable, requirement));
+            }
         }
-        if matched.is_empty() {
+
+        matched.sort_by(|(left, _, _), (right, _, _)| left.as_str().cmp(right.as_str()));
+        if matched.len() > 1 {
+            let executable = &matched[0].1;
+            let owners = matched
+                .iter()
+                .map(|(owner, _, _)| owner.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id.clone(),
+                reason: DenyReason::PolicyDenied,
+                detail: Some(format!(
+                    "direct-exec credential executable `{executable}` is declared by multiple \
+                     active extensions: {owners}"
+                )),
+            });
+        }
+        let Some((_, _, requirement)) = matched.pop() else {
             return Ok(descriptor.clone());
-        }
+        };
 
         let mut descriptor = descriptor.clone();
         if !descriptor.effects.contains(&EffectKind::UseSecret) {
             descriptor.effects.push(EffectKind::UseSecret);
         }
-        descriptor.runtime_credentials.extend(matched);
+        descriptor.runtime_credentials.push(requirement);
         Ok(descriptor)
     }
 
