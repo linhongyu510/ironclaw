@@ -117,6 +117,9 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 const MAX_TRACKED_SESSIONS: usize = 64;
 
+type SessionCell = std::sync::Arc<tokio::sync::OnceCell<reqwest::header::HeaderValue>>;
+type SessionCache = std::sync::Mutex<std::collections::HashMap<(MnesisLane, String), SessionCell>>;
+
 pub struct MnesisHttpTransport {
     client: reqwest::Client,
     knowledge_endpoint: String,
@@ -124,9 +127,7 @@ pub struct MnesisHttpTransport {
     knowledge_authorization: reqwest::header::HeaderValue,
     memory_authorization: reqwest::header::HeaderValue,
     limits: MnesisLimits,
-    sessions: std::sync::Mutex<
-        std::collections::HashMap<(MnesisLane, String), reqwest::header::HeaderValue>,
-    >,
+    sessions: SessionCache,
 }
 
 impl std::fmt::Debug for MnesisHttpTransport {
@@ -188,22 +189,20 @@ impl MnesisHttpTransport {
         })
     }
 
-    fn cached_session(&self, lane: MnesisLane, key: &str) -> Option<reqwest::header::HeaderValue> {
-        match self.sessions.lock() {
-            Ok(sessions) => sessions.get(&(lane, key.to_string())).cloned(),
-            Err(_) => None,
-        }
-    }
-
-    fn remember_session(&self, lane: MnesisLane, key: &str, session: reqwest::header::HeaderValue) {
+    fn session_cell(&self, lane: MnesisLane, key: &str) -> Option<SessionCell> {
         let Ok(mut sessions) = self.sessions.lock() else {
-            return;
+            return None;
         };
         let entry = (lane, key.to_string());
-        if sessions.len() >= MAX_TRACKED_SESSIONS && !sessions.contains_key(&entry) {
+        if let Some(cell) = sessions.get(&entry) {
+            return Some(std::sync::Arc::clone(cell));
+        }
+        if sessions.len() >= MAX_TRACKED_SESSIONS {
             sessions.clear();
         }
-        sessions.insert(entry, session);
+        let cell = std::sync::Arc::new(tokio::sync::OnceCell::new());
+        sessions.insert(entry, std::sync::Arc::clone(&cell));
+        Some(cell)
     }
 
     fn forget_session(&self, lane: MnesisLane, key: &str) {
@@ -274,12 +273,12 @@ impl MnesisHttpTransport {
         key: &str,
         attribution: Option<&str>,
     ) -> Result<reqwest::header::HeaderValue, MnesisTransportError> {
-        if let Some(session) = self.cached_session(lane, key) {
-            return Ok(session);
-        }
-        let session = self.open_session(lane, attribution).await?;
-        self.remember_session(lane, key, session.clone());
-        Ok(session)
+        let Some(cell) = self.session_cell(lane, key) else {
+            return self.open_session(lane, attribution).await;
+        };
+        cell.get_or_try_init(|| self.open_session(lane, attribution))
+            .await
+            .cloned()
     }
 
     fn endpoint(&self, lane: MnesisLane) -> &str {

@@ -424,6 +424,121 @@ fn http_sse(payload: &str) -> String {
     )
 }
 
+/// Concurrent first calls on one owner scope may race to open a session, but
+/// they must converge on one and none may fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_calls_on_one_scope_share_a_session_and_none_fail() {
+    let (port, seen) = counting_session_origin();
+    let config = config_for(
+        &format!("http://127.0.0.1:{port}"),
+        EndpointProfile::LoopbackDevelopment,
+    );
+    let transport =
+        std::sync::Arc::new(build(&config, "lab-token").expect("the loopback endpoint builds"));
+
+    let mut handles = Vec::new();
+    for index in 0..16 {
+        let transport = std::sync::Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .execute(MnesisRequest {
+                    lane: MnesisLane::Memory,
+                    operation: "memory_search",
+                    body: json!({"query": format!("q{index}"), "limit": 1}),
+                    idempotent: true,
+                    attribution: Some("mpa1.shared".to_string()),
+                    session_key: Some("mos1.shared".to_string()),
+                })
+                .await
+        }));
+    }
+
+    let mut ok = 0;
+    for handle in handles {
+        let response = handle
+            .await
+            .expect("no task panics")
+            .expect("no concurrent call fails");
+        assert!(response.is_success(), "status {}", response.status);
+        ok += 1;
+    }
+    assert_eq!(ok, 16);
+
+    let handshakes = seen.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        handshakes, 1,
+        "16 concurrent calls on one scope opened {handshakes} sessions; each caller \
+         is handshaking instead of sharing"
+    );
+}
+
+/// Distinct owner scopes must never share a session, or one caller's session
+/// could carry another caller's scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn distinct_scopes_never_share_a_session() {
+    let (port, _seen) = counting_session_origin();
+    let config = config_for(
+        &format!("http://127.0.0.1:{port}"),
+        EndpointProfile::LoopbackDevelopment,
+    );
+    let transport =
+        std::sync::Arc::new(build(&config, "lab-token").expect("the loopback endpoint builds"));
+
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let transport = std::sync::Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .execute(MnesisRequest {
+                    lane: MnesisLane::Memory,
+                    operation: "memory_search",
+                    body: json!({"query": "q", "limit": 1}),
+                    idempotent: true,
+                    attribution: Some(format!("mpa1.scope{index}")),
+                    session_key: Some(format!("mos1.scope{index}")),
+                })
+                .await
+        }));
+    }
+    for handle in handles {
+        let response = handle
+            .await
+            .expect("no task panics")
+            .expect("no scoped call fails");
+        assert!(response.is_success());
+    }
+}
+
+fn counting_session_origin() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the counting origin binds");
+    let port = listener
+        .local_addr()
+        .expect("the counting origin reports its address")
+        .port();
+    let handshakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&handshakes);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let counter = std::sync::Arc::clone(&counter);
+            std::thread::spawn(move || {
+                let request = read_bounded(&mut stream);
+                let response = if request.contains("\"initialize\"") {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    http_json(200, "{}", Some("session-shared"))
+                } else if request.to_ascii_lowercase().contains("mcp-session-id:") {
+                    http_sse(TOOL_CALL_RESULT)
+                } else {
+                    http_json(400, SERVER_NOT_INITIALIZED, None)
+                };
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+    (port, handshakes)
+}
+
 fn redirect_target() -> (u16, std::sync::mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("the redirect target binds");
     let port = listener
@@ -506,7 +621,11 @@ async fn live_canary_reaches_both_published_lanes() {
                     "method": "tools/call",
                     "params": {
                         "name": operation,
-                        "arguments": {"query": "mnesis integration canary", "limit": 1}
+                        "arguments": {
+                            "query": std::env::var("MNESIS_CANARY_QUERY")
+                                .unwrap_or_else(|_| "mnesis integration canary".to_string()),
+                            "limit": 5
+                        }
                     }
                 }),
                 idempotent: true,
@@ -515,7 +634,13 @@ async fn live_canary_reaches_both_published_lanes() {
             })
             .await
             .unwrap_or_else(|error| panic!("{operation} transport failed: {error}"));
-        println!("  {operation}: status {}", response.status);
+        let rows = response
+            .body
+            .pointer("/result/structuredContent/results")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default();
+        println!("  {operation}: status {} rows {rows}", response.status);
         assert!(
             response.is_success(),
             "{operation} did not complete: status {}",
@@ -552,7 +677,11 @@ fn canary_identity() -> (String, String) {
         std::env::var("MNESIS_CANARY_TENANT").unwrap_or_else(|_| "ironclaw-lab".to_string()),
         std::env::var("MNESIS_CANARY_PRINCIPAL")
             .unwrap_or_else(|_| "ironclaw-integration-reader".to_string()),
-        OwnerAxes::default(),
+        OwnerAxes {
+            agent_id: std::env::var("MNESIS_CANARY_AGENT").ok(),
+            project_id: std::env::var("MNESIS_CANARY_PROJECT").ok(),
+            thread_id: None,
+        },
     );
     let session_key = owner_scope.key().expect("the canary owner scope keys");
     let attribution = ProviderAttribution {
