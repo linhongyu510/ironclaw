@@ -31,12 +31,18 @@ regression-check exemption rather than silently omitting coverage.
 - **Feature matrix, not just `--all-features`:** `--all-features` cannot catch
   feature-gated dead code — a `#[cfg(feature = "x")]`-only caller makes its
   helper *live* under `--all-features` and *dead* (a `-D warnings` error)
-  everywhere the feature is off. **PR CI runs only the slim `all-features` lane;
-  the broader `default` lane runs post-merge**, so this class can break `main`
-  after a green PR. If you add or move a `#[cfg(feature = ...)]` gate, or touch
-  a helper only reachable through one, run the relevant feature lanes locally
-  before merging (see "Required checks"). When you gate the only caller(s) of a
-  helper behind a feature, gate the helper's definition with the same `#[cfg]`.
+  everywhere the feature is off. As of `9d074f84a`, **PR CI also lints the
+  changed packages with default features** (`cargo clippy -p <changed> --lib
+  --bins -- -D warnings`, no `--all-features`), so this class surfaces on the
+  PR when the gate lives in a package you touched directly. The
+  **workspace-wide** default sweep (`cargo clippy --all --lib --bins`) — which
+  also catches a crate that only transitively depends on your changed set —
+  still runs post-merge only, so a gate whose fallout lands in an untouched
+  dependency can still break `main` after a green PR. If you add or move a
+  `#[cfg(feature = ...)]` gate, or touch a helper only reachable through one,
+  run the relevant feature lanes locally before merging (see "Required
+  checks"). When you gate the only caller(s) of a helper behind a feature,
+  gate the helper's definition with the same `#[cfg]`.
 - **UTF-8:** never byte-slice user or external strings with `&value[..n]`.
   Use `char_indices()`, `chars()`, or an `is_char_boundary()`-checked boundary.
   Search changed Rust files for suspicious `[..` slicing.
@@ -71,9 +77,11 @@ Workspace-wide zero-warning clippy:
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Feature matrix — reproduces the post-merge `Code Style` gate that PR CI skips
-(it only runs the `all-features` lane). Run both whenever a change adds, moves,
-or relies on a `#[cfg(feature = ...)]` gate:
+Feature matrix — reproduces the post-merge, **workspace-wide** `Code Style`
+default-features gate. PR CI itself now lints your *changed* packages with
+default features too (`9d074f84a`), but only the post-merge sweep also covers
+an untouched package that merely depends on your changed set. Run both
+whenever a change adds, moves, or relies on a `#[cfg(feature = ...)]` gate:
 
 ```bash
 cargo clippy --all --tests --examples -- -D warnings                              # default
