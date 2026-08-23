@@ -110,6 +110,7 @@ fn deps_over_mock(transport: Arc<MockMnesisTransport>) -> MemoryProviderDeps {
         filesystem: None,
         prompt_write_safety_sink: None,
         mem0: Mem0ConnectionConfig::default(),
+        #[cfg(feature = "memory-mem0")]
         mem0_transport_override: None,
         mnesis: MnesisConnectionConfig::default(),
         mnesis_transport_override: Some(transport as Arc<dyn MnesisTransport>),
@@ -152,7 +153,7 @@ async fn config_binding_swaps_the_memory_provider_to_mnesis_through_the_factory(
             .declares(MemoryLifecycleHook::RecordInteraction)
     );
     assert!(
-        !resolved
+        resolved
             .lifecycle
             .declares(MemoryLifecycleHook::ReadShortTerm)
     );
@@ -195,7 +196,7 @@ async fn config_binding_swaps_the_memory_provider_to_mnesis_through_the_factory(
         "the memory tool must reach the Mnesis memory lane"
     );
     assert_eq!(
-        transport.count_operation("knowledge_search"),
+        transport.count_operation("search_knowledge"),
         1,
         "the knowledge tool must reach the Mnesis knowledge lane"
     );

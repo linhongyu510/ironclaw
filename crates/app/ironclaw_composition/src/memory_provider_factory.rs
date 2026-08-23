@@ -841,6 +841,29 @@ mod tests {
         assert!(full.user_profile_source.is_some());
     }
 
+    /// A hook the bundle drops leaves its consumer `None` and the run records
+    /// nothing, silently.
+    #[cfg(feature = "memory-mnesis")]
+    #[test]
+    fn the_mnesis_bundle_surfaces_every_hook_its_manifest_declares() {
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
+        let bundle = memory_extension::mnesis_memory_provider_bundle(
+            ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
+            ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
+        )
+        .expect("the mnesis bundle loads");
+        for hook in [
+            MemoryLifecycleHook::ReadLongTerm,
+            MemoryLifecycleHook::ReadShortTerm,
+            MemoryLifecycleHook::RecordInteraction,
+        ] {
+            assert!(
+                bundle.lifecycle.declares(hook),
+                "the manifest declares {hook:?} but the bundle does not surface it"
+            );
+        }
+    }
+
     /// Binding-shape regression for the resolved provider: `Disabled` and an
     /// unknown third party register NO package and an EMPTY lifecycle (no
     /// tools advertised, no hooks called); native registers its package with
