@@ -2175,6 +2175,53 @@ class NoDuplicateYamlKeysTests(unittest.TestCase):
             )
             self.assertEqual([], validate_no_duplicate_yaml_keys(root))
 
+    def test_anchor_only_list_items_are_not_false_positives(self):
+        """`- &anchor` opens an item without carrying a key on that line.
+
+        The first scanner draft missed that boundary and reported the next
+        item's `name:`/`uses:` as duplicates of the previous item's.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._workflows_dir(root)
+            (directory / "anchors.yml").write_text(
+                "jobs:\n"
+                "  release:\n"
+                "    steps:\n"
+                "      - &checkout\n"
+                "        name: Checkout repository\n"
+                "        uses: actions/checkout@v6\n"
+                "      - &install\n"
+                "        name: Install Rust toolchain\n"
+                "        uses: dtolnay/rust-toolchain@stable\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], validate_no_duplicate_yaml_keys(root))
+
+    def test_block_scalar_text_is_not_parsed_as_yaml(self):
+        """A `run: |` body may contain `key:`-looking lines; they are prose."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._workflows_dir(root)
+            (directory / "scalar.yml").write_text(
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "      - name: Echo\n"
+                "        run: |\n"
+                "          echo 'name: not-a-key'\n"
+                "          echo 'name: still-not-a-key'\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], validate_no_duplicate_yaml_keys(root))
+
+    def test_the_checker_needs_no_third_party_yaml_module(self):
+        """scripts/ci checkers are stdlib-only; PyYAML is absent in fast-checks."""
+        source = (
+            Path(ws12_workflow_contracts.__file__).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("import yaml", source)
+
     def test_live_workflows_have_no_duplicate_keys(self):
         self.assertEqual([], validate_no_duplicate_yaml_keys(ROOT))
 

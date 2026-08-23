@@ -2308,5 +2308,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: true", workflow)
 
 
+    def test_hermetic_guard_probe_is_a_known_root_test(self) -> None:
+        """A new top-level test must be registered or the planner fails closed.
+
+        tests/hermetic_network_guard_probe.rs is not `reborn_`-prefixed, so
+        the inventory glob misses it; before it joined the extras list the
+        fail-closed arm rejected the path with "unmapped test or CI path"
+        and reddened Detect Reborn test scope for the whole PR.
+        """
+        partitions = planner._root_test_partitions()
+        self.assertIn("tests/hermetic_network_guard_probe.rs", partitions)
+
+
+
 if __name__ == "__main__":
     unittest.main()

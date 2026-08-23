@@ -1786,49 +1786,85 @@ def validate_no_eval_in_workflow_run_blocks(
     return errors
 
 
-def validate_no_duplicate_yaml_keys(root: Path = ROOT) -> list[str]:
-    """No workflow may declare the same mapping key twice.
+KEY_LINE = re.compile(
+    r"^(?P<indent>[ ]*)(?P<dash>-[ ]+)?(?P<key>\"[^\"]+\"|'[^']+'|[A-Za-z_][\w.\-]*)[ ]*:"
+    r"(?P<rest>[ ].*|)$"
+)
+BLOCK_SCALAR = re.compile(r"^[|>][+-]?[0-9]*[ ]*(#.*)?$")
 
-    PyYAML's safe_load silently keeps the LAST duplicate, so a local
-    `yaml.safe_load` sanity check passes while the value the author
-    intended is discarded -- and GitHub's own parser is stricter. That is
-    exactly the green-locally/red-in-CI class this repo keeps paying for:
-    a duplicated `if-no-files-found` on a JUnit upload pinned the step to
-    `error`, so coverage lanes (which legitimately produce no junit.xml)
-    would have hard-failed.
+
+def validate_no_duplicate_yaml_keys(root: Path = ROOT) -> list[str]:
+    """No workflow may declare the same mapping key twice in one block.
+
+    Deliberately stdlib-only: every checker in scripts/ci is, and adding
+    PyYAML here would make the gate depend on a package the fast-checks job
+    does not install (learned the hard way -- an earlier PyYAML version of
+    this function errored 70 self-tests in CI while passing locally).
+
+    It is also the wrong tool: PyYAML's safe_load silently keeps the LAST
+    duplicate, so a local `yaml.safe_load` sanity check passes while the
+    value the author wrote is discarded -- which is how a duplicated
+    `if-no-files-found` pinned a JUnit upload to `error` and would have
+    hard-failed every coverage lane.
+
+    The scan tracks one key set per mapping block, keyed by indent. A `- `
+    item opens a fresh block, and block scalars (`|`, `>`) are skipped so
+    their free text is never parsed as YAML.
     """
 
-    import yaml
-
-    class _NoDuplicates(yaml.SafeLoader):
-        pass
-
     errors: list[str] = []
-
-    def _mapping(loader, node, deep=False):
-        seen: dict = {}
-        for key_node, value_node in node.value:
-            key = loader.construct_object(key_node, deep=deep)
-            if key in seen:
-                raise ValueError(
-                    f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
-                )
-            seen[key] = loader.construct_object(value_node, deep=deep)
-        return seen
-
-    _NoDuplicates.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping
-    )
-
     for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
-        try:
-            yaml.load(path.read_text(encoding="utf-8"), _NoDuplicates)
-        except ValueError as error:
-            rel = path.relative_to(root).as_posix()
-            errors.append(f"{rel}: {error}")
-        except yaml.YAMLError as error:
-            rel = path.relative_to(root).as_posix()
-            errors.append(f"{rel}: could not parse: {error}")
+        rel = path.relative_to(root).as_posix()
+        scopes: list[tuple[int, set[str]]] = []
+        skip_until_indent: int | None = None
+        pending_item: int | None = None
+        for number, raw in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if skip_until_indent is not None:
+                if indent > skip_until_indent:
+                    continue
+                skip_until_indent = None
+            # A list element always opens a fresh mapping. The marker may
+            # carry its key inline (`- name: x`) or stand alone with only an
+            # anchor (`- &checkout`), so record the boundary either way.
+            if stripped.startswith("-"):
+                while scopes and scopes[-1][0] > indent:
+                    scopes.pop()
+                pending_item = indent
+            match = KEY_LINE.match(raw)
+            if match is None:
+                continue
+            key = match.group("key").strip("\"'")
+            dash = match.group("dash")
+            effective = indent + (len(dash) if dash else 0)
+            while scopes and scopes[-1][0] > effective:
+                scopes.pop()
+            starts_item = bool(dash) or (
+                pending_item is not None and effective > pending_item
+            )
+            if starts_item:
+                while scopes and scopes[-1][0] >= effective:
+                    scopes.pop()
+                scopes.append((effective, set()))
+                pending_item = None
+            elif not scopes or scopes[-1][0] < effective:
+                scopes.append((effective, set()))
+            seen = scopes[-1][1]
+            if key in seen:
+                errors.append(
+                    f"{rel}:{number}: duplicate key {key!r} in the same mapping. "
+                    "YAML keeps the last one, so the value above it is silently "
+                    "discarded."
+                )
+            else:
+                seen.add(key)
+            if BLOCK_SCALAR.match(match.group("rest").strip()):
+                skip_until_indent = effective
     return errors
 
 

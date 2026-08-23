@@ -751,7 +751,16 @@ def _bound_pr_buckets(
 def _root_test_partitions() -> dict[str, int]:
     extra_tests = [
         name
-        for name in ("dockerfile_runtime_home", "support_unit_tests")
+        for name in (
+            "dockerfile_runtime_home",
+            "support_unit_tests",
+            # Not `reborn_`-prefixed, so the glob above misses it. It is the
+            # fixture the hermetic network-guard control drives, and that
+            # control runs in the root-partition job -- so a change to the
+            # probe must select the lane that exercises it. Without this the
+            # fail-closed arm rejects the path outright.
+            "hermetic_network_guard_probe",
+        )
         if (ROOT / f"tests/{name}.rs").is_file()
     ]
     names = sorted(
