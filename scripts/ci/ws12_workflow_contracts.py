@@ -1202,6 +1202,24 @@ def validate_no_job_env_rustflags_with_setup_rust(
     return errors
 
 
+# One `<name>:` entry under an action's `inputs:` block — the same two-space,
+# name-then-colon-then-nothing-else shape JOB_HEADING matches for workflow
+# jobs, but kept as its own pattern: action.yml has no `jobs:` section, and
+# reusing JOB_HEADING here would conflate the two headings the moment either
+# one's shape changes for its own reason.
+INPUT_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
+
+
+def input_body(text: str, input_name: str) -> str | None:
+    """Return one composite action's `inputs:` entry, bounded by the next one."""
+    for heading in INPUT_HEADING.finditer(text):
+        if heading.group("name") != input_name:
+            continue
+        following = INPUT_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
 def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
     """rust-toolchain.toml and the composite's default must name one version."""
     try:
@@ -1216,7 +1234,15 @@ def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
         action_text = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
     except OSError:
         return [f"{SETUP_RUST_ACTION}: missing"]
-    default_match = re.search(r'default:\s*"([^"]+)"', action_text)
+    # Scoped to the `toolchain:` input's own entry, not the whole file: a
+    # `re.search` over the entire action text would resolve to whichever
+    # `default: "..."` happens to appear first, which is only the toolchain
+    # input's by accident of every other input's default being empty and
+    # sitting after it in the file today.
+    toolchain_input = input_body(action_text, "toolchain")
+    if toolchain_input is None:
+        return [f"{SETUP_RUST_ACTION}: no `toolchain:` input found"]
+    default_match = re.search(r'default:\s*"([^"]+)"', toolchain_input)
     if default_match is None or default_match.group(1) != channel:
         found = default_match.group(1) if default_match else "<none>"
         return [

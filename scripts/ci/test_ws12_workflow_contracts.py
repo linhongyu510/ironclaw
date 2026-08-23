@@ -255,6 +255,27 @@ class ToolchainPinSyncTests(unittest.TestCase):
         errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, self.ACTION_OK))
         self.assertEqual([], errors)
 
+    def test_a_reordered_earlier_input_with_a_non_empty_default_cannot_hide_drift(
+        self,
+    ):
+        """A whole-file `re.search` for the first `default: "..."` resolves
+        to whichever input happens to come first — today that is `toolchain`
+        only because every other input's default is empty and sits after it.
+        Add an earlier input with a non-empty default that happens to equal
+        the pinned channel while `toolchain` itself has drifted: an unscoped
+        search would find the decoy default, see it match, and report no
+        drift at all — exactly the silent-pass this contract exists to rule
+        out."""
+        action = (
+            "inputs:\n"
+            '  components:\n'
+            '    default: "1.98.0"\n'
+            "  toolchain:\n"
+            '    default: "1.97.0"\n'
+        )
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, action))
+        self.assertTrue(any("1.97.0" in e for e in errors), errors)
+
 
 class SccacheSetupActionContractTests(unittest.TestCase):
     """The optional compiler cache must never gate the tests it accelerates."""
