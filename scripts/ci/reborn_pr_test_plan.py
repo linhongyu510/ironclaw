@@ -599,18 +599,39 @@ _GITHUB_DIRECTORY_LITERALS = {".github/workflows", ".github/actions", ".github"}
 _CODEOWNERS_LITERAL = re.compile(r'"(CODEOWNERS|docs/CODEOWNERS|\.gitlab/CODEOWNERS)"')
 
 
+def _test_tree_rust_files() -> list[Path]:
+    """Every `.rs` file inside a `tests/` directory tree — the workspace-root
+    `tests/` tree and every crate's `tests/` tree, at any nesting depth (a
+    top-level `tests/<name>.rs` target commonly `mod`-includes files under
+    `tests/<name>/...`, and a literal can live in either).
+
+    Walked as "find each `tests/` directory, then everything under it" rather
+    than a single `rglob("tests/**/*.rs")` pattern: pathlib only accepts a
+    `**` glob segment in the middle of a pattern starting with Python 3.13,
+    and CI runs 3.12.
+    """
+    test_dirs = [ROOT / "tests"] + sorted(
+        path for path in (ROOT / "crates").rglob("tests") if path.is_dir()
+    )
+    files: list[Path] = []
+    for test_dir in test_dirs:
+        if test_dir.is_dir():
+            files.extend(sorted(test_dir.rglob("*.rs")))
+    return files
+
+
 def repo_config_file_literals_in_test_sources() -> dict[str, list[Path]]:
     """Every `.github/<file>` or CODEOWNERS-location literal any workspace
     test target reads.
 
-    Scans every `tests/*.rs` file (root and per-crate — `crates/**/tests/*.rs`
-    via rglob) rather than a hand-maintained list, so a new test added later
-    that reads a workflow file fails the drift-guard test immediately.
+    Scans every `.rs` file under the workspace-root `tests/` tree and every
+    crate's `tests/` tree, including nested test-module files (see
+    `_test_tree_rust_files`), rather than a hand-maintained list, so a new
+    test added later that reads a workflow file fails the drift-guard test
+    immediately.
     """
     hits: dict[str, list[Path]] = defaultdict(list)
-    candidates = sorted((ROOT / "tests").glob("*.rs")) + sorted(
-        (ROOT / "crates").rglob("tests/*.rs")
-    )
+    candidates = _test_tree_rust_files()
     for rs_file in candidates:
         text = rs_file.read_text(encoding="utf-8")
         for match in _GITHUB_FILE_LITERAL.finditer(text):

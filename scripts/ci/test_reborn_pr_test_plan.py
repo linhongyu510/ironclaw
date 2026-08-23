@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -1229,6 +1230,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "found .github/<file> literals read by a test but not owned in "
             f"REPO_CONFIG_TEST_OWNERS: { {k: sorted(str(p) for p in v) for k, v in hits.items() if k in unmapped} }",
         )
+
+    def test_repo_config_file_literals_scan_reaches_nested_test_modules(self) -> None:
+        """A `.github/<file>` literal written in a *nested* test-module file
+        (`tests/<name>/support/helper.rs`, typically pulled in via `mod` from
+        the crate's top-level `tests/<name>.rs` target) must be found too —
+        the scan reads every file compiled into a test target, not just its
+        top-level entry file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            crate_tests = root / "crates" / "family" / "widget" / "tests"
+            nested = crate_tests / "contract" / "support"
+            nested.mkdir(parents=True)
+            (crate_tests / "contract.rs").write_text("mod support;\n", encoding="utf-8")
+            (nested / "helper.rs").write_text(
+                'const OWNER: &str = ".github/dependabot.yml";\n', encoding="utf-8"
+            )
+            with mock.patch.object(planner, "ROOT", root):
+                hits = planner.repo_config_file_literals_in_test_sources()
+            self.assertIn(".github/dependabot.yml", hits)
 
     def test_repo_config_test_owners_route_to_a_real_package_or_root_partition(self) -> None:
         """Every mapped owner must actually resolve — catches a moved/renamed owner file."""
