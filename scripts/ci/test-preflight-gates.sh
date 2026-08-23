@@ -15,8 +15,9 @@ make_sandbox() {
     (
         cd "$sandbox"
         git init -q -b main .
-        mkdir -p scripts/ci bin
+        mkdir -p scripts/ci scripts/ci/lib bin
         cp "$REPO_ROOT/scripts/preflight-gates.sh" scripts/preflight-gates.sh
+        cp "$REPO_ROOT/scripts/ci/lib/run-cargo-ci-env.sh" scripts/ci/lib/run-cargo-ci-env.sh
         # Stub every script gate preflight names.
         for stub in scripts/ci/check-composition-budget.sh \
                     scripts/ci/check-include-str-paths.sh \

@@ -18,10 +18,13 @@ make_repo() {
     (
         cd "$work"
         git config user.email t@t && git config user.name t
-        mkdir -p .githooks scripts/ci bin
+        mkdir -p .githooks scripts/ci scripts/ci/lib bin
         cp "$REPO_ROOT/.githooks/pre-push" .githooks/pre-push
         cp "$REPO_ROOT/.githooks/pre-commit" .githooks/pre-commit
         chmod +x .githooks/pre-push .githooks/pre-commit
+        # Real content, not a stub: pre-push sources this for its actual
+        # scrub behavior, which test 1 below asserts against directly.
+        cp "$REPO_ROOT/scripts/ci/lib/run-cargo-ci-env.sh" scripts/ci/lib/run-cargo-ci-env.sh
         for stub in scripts/preflight-gates.sh scripts/ci/quality_gate.sh \
                     scripts/ci/check-include-str-paths.sh scripts/ci/check-hermetic-env.sh \
                     scripts/ci/reborn-local-coverage-ratchet.sh scripts/check-version-bumps.sh \
@@ -43,7 +46,12 @@ make_repo() {
         # default-tier assertion fails with "cargo: command not found"
         # (rc=127) rather than testing the hook's own logic. Stubbed the same
         # way scripts/ci/test-preflight-gates.sh already stubs cargo.
-        printf '#!/usr/bin/env bash\necho "ran cargo $*" >>"$HOOK_TEST_LOG"\n' >bin/cargo
+        # Also dumps its own environment (when HOOK_TEST_ENV_LOG is set) so
+        # tests can assert the changed-package clippy step's compile is
+        # scrubbed of NEARAI_*/IRONCLAW_LLM_*/LLM_BACKEND credentials
+        # (finding 1 — build.rs/proc macros run arbitrary code with whatever
+        # env the compile sees).
+        printf '#!/usr/bin/env bash\necho "ran cargo $*" >>"$HOOK_TEST_LOG"\nif [ -n "${HOOK_TEST_ENV_LOG:-}" ]; then env >>"$HOOK_TEST_ENV_LOG"; fi\n' >bin/cargo
         chmod +x bin/cargo
         git add -A && git commit -qm init
         git remote add origin "$origin"
@@ -65,12 +73,16 @@ run_hook() { # repo, hook, env...
 # 1. Default pre-push tier: merge check + preflight + changed-package clippy,
 #    NOT the full gauntlet.
 repo="$(make_repo)"
-run_hook "$repo" pre-push
+run_hook "$repo" pre-push NEARAI_API_KEY=leaked-test-secret HOOK_TEST_ENV_LOG="$repo/envlog"
 [ "$status" -eq 0 ] || fail "default pre-push exited $status: $output"
 grep -q "ran preflight-gates.sh" "$repo/log" || fail "default tier must run preflight-gates.sh"
 grep -q "ran quality_gate.sh" "$repo/log" && fail "default tier must NOT run quality_gate.sh"
 grep -qF "merge check" <<<"$output" || fail "default tier must keep the merge-cleanliness check"
 grep -qF "changed-package clippy" <<<"$output" || fail "default tier must run the changed-package clippy step (fix 7)"
+grep -q "^ran cargo clippy -p a -- -D warnings$" "$repo/log" \
+    || fail "changed-package clippy must invoke cargo with the discovered -p <pkg> args, not just log the phrase (fix 5b)"
+grep -q "^NEARAI_API_KEY=" "$repo/envlog" \
+    && fail "SECURITY: changed-package clippy compile must not see NEARAI_API_KEY (unscrubbed compile, fix 1)"
 
 # 2. IRONCLAW_PREPUSH_FULL=1: full gauntlet runs; Emulate CLI absent is a
 #    WARNING and a skip, not a hard failure.

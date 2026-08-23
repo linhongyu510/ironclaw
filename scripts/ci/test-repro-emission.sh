@@ -18,6 +18,7 @@ make_sandbox() {
     cp "$REPO_ROOT/scripts/ci/run-hermetic-deterministic-suite.sh" \
         "$sandbox/scripts/ci/run-hermetic-deterministic-suite.sh"
     mkdir -p "$sandbox/scripts/ci/lib"
+    cp "$REPO_ROOT/scripts/ci/lib/run-cargo-ci-env.sh" "$sandbox/scripts/ci/lib/run-cargo-ci-env.sh"
     printf '#!/usr/bin/env bash\necho "ran $*" >>"$REPRO_TEST_LOG"\nexit 1\n' \
         >"$sandbox/scripts/ci/run-hermetic-test-process.sh"
     chmod +x "$sandbox/scripts/ci/run-hermetic-test-process.sh"

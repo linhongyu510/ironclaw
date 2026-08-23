@@ -75,25 +75,14 @@ run_gate() {
     fi
 }
 
-# Mirrors scripts/ci/quality_gate.sh:7-22's env scrub exactly (two copies —
-# below the rule-of-three threshold this repo's own discipline uses to decide
-# when duplication earns an extraction; if a third caller appears, factor
-# both into scripts/ci/lib/run-cargo-ci-env.sh).
+source "${REPO_ROOT}/scripts/ci/lib/run-cargo-ci-env.sh"
+
+# Delegates to the canonical scrub in scripts/ci/lib/run-cargo-ci-env.sh — the
+# extraction the old comment here promised once a third caller showed up
+# (.githooks/pre-push's changed-package clippy is that caller). The function
+# NAME is kept so nothing else in this script has to change.
 run_cargo_ci_scrubbed() {
-    env \
-        -u NEARAI_API_KEY \
-        -u NEARAI_BASE_URL \
-        -u NEARAI_SESSION_TOKEN \
-        -u NEARAI_PROVIDER_ID \
-        -u NEARAI_MODEL \
-        -u IRONCLAW_LLM_PROVIDER \
-        -u IRONCLAW_LLM_MODEL \
-        -u LLM_BACKEND \
-        IRONCLAW_DISABLE_OS_KEYCHAIN="${IRONCLAW_DISABLE_OS_KEYCHAIN:-1}" \
-        CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
-        CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
-        RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}" \
-        "$@"
+    run_cargo_ci_env "$@"
 }
 
 queue_plan_listing() {

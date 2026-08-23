@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SCRIPT_DIR="$REPO_ROOT/scripts/ci"
+source "$SCRIPT_DIR/lib/run-cargo-ci-env.sh"
 
 check_merge_to_base_clean() {
     if [ "${IRONCLAW_PREPUSH_MERGE_CHECK:-1}" = "0" ]; then
@@ -38,21 +39,12 @@ EOF
     rm -f "$merge_output"
 }
 
+# Delegates to the canonical scrub in scripts/ci/lib/run-cargo-ci-env.sh (this
+# hook is the third caller that crossed the rule-of-three threshold and
+# triggered the extraction — see that file's header). The function NAME is
+# kept so nothing else in this hook has to change.
 run_ci_env() {
-    env \
-        -u NEARAI_API_KEY \
-        -u NEARAI_BASE_URL \
-        -u NEARAI_SESSION_TOKEN \
-        -u NEARAI_PROVIDER_ID \
-        -u NEARAI_MODEL \
-        -u IRONCLAW_LLM_PROVIDER \
-        -u IRONCLAW_LLM_MODEL \
-        -u LLM_BACKEND \
-        IRONCLAW_DISABLE_OS_KEYCHAIN="${IRONCLAW_DISABLE_OS_KEYCHAIN:-1}" \
-        CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
-        CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
-        RUST_MIN_STACK="${RUST_MIN_STACK:-67108864}" \
-        "$@"
+    run_cargo_ci_env "$@"
 }
 
 check_merge_to_base_clean "${1:-origin}"
@@ -84,7 +76,15 @@ if [ "${IRONCLAW_PREPUSH_FULL:-0}" != "1" ]; then
             for pkg in "${changed_packages[@]}"; do
                 package_args+=(-p "${pkg}")
             done
-            cargo clippy "${package_args[@]}" -- -D warnings
+            # Scrubbed (run_ci_env): this compiles the changed packages via
+            # build.rs/proc macros, so it must not see NEARAI_*/IRONCLAW_LLM_*
+            # credentials any more than the full gauntlet's clippy does.
+            # Deliberately omits --all-features (unlike the full gauntlet and
+            # the --queue-shape gates): this step's job is a ~60s local
+            # approximation of the PR-lane shape, not full CI parity, so
+            # feature-gated lints are not caught here — a cost decision, not
+            # an oversight.
+            run_ci_env cargo clippy "${package_args[@]}" -- -D warnings
         else
             echo "    (no changed workspace packages; nothing to lint)"
         fi
