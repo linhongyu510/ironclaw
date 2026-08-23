@@ -1306,20 +1306,37 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Resolves the Mnesis endpoint profile. Production is the default and the only
+/// value that survives an unrecognised setting: the development profile is the
+/// one that relaxes plaintext to loopback, so a typo must not select it.
+#[cfg(feature = "memory-mnesis")]
+fn mnesis_endpoint_profile() -> ironclaw_composition::MnesisEndpointProfile {
+    match optional_nonempty_env("MEMORY_MNESIS_ENDPOINT_PROFILE")
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("loopback_development") => {
+            ironclaw_composition::MnesisEndpointProfile::LoopbackDevelopment
+        }
+        Some(other) if other != "production" => {
+            tracing::warn!(
+                profile = other,
+                "unrecognised MEMORY_MNESIS_ENDPOINT_PROFILE; using production"
+            );
+            ironclaw_composition::MnesisEndpointProfile::Production
+        }
+        _ => ironclaw_composition::MnesisEndpointProfile::Production,
+    }
+}
+
 /// Mnesis lane endpoints and bearers. Both lanes must be fully supplied or the
 /// factory fails closed; nothing here has a default and no value is logged.
 fn mnesis_connection() -> ironclaw_composition::MnesisConnectionConfig {
     #[cfg(feature = "memory-mnesis")]
     {
-        let handle = |name: &str| {
-            optional_nonempty_env(name)
-                .and_then(|raw| ironclaw_composition::SecretHandle::new(raw).ok())
-        };
         ironclaw_composition::MnesisConnectionConfig {
             knowledge_endpoint: optional_nonempty_env("MEMORY_MNESIS_KNOWLEDGE_ENDPOINT"),
             memory_endpoint: optional_nonempty_env("MEMORY_MNESIS_MEMORY_ENDPOINT"),
-            knowledge_credential: handle("MEMORY_MNESIS_KNOWLEDGE_CREDENTIAL"),
-            memory_credential: handle("MEMORY_MNESIS_MEMORY_CREDENTIAL"),
             knowledge_bearer: optional_nonempty_env("MEMORY_MNESIS_KNOWLEDGE_TOKEN")
                 .map(SecretString::from),
             memory_bearer: optional_nonempty_env("MEMORY_MNESIS_MEMORY_TOKEN")
@@ -1332,7 +1349,7 @@ fn mnesis_connection() -> ironclaw_composition::MnesisConnectionConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            profile: ironclaw_composition::MnesisEndpointProfile::default(),
+            profile: mnesis_endpoint_profile(),
         }
     }
     #[cfg(not(feature = "memory-mnesis"))]

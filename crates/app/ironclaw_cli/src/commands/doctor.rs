@@ -90,17 +90,15 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
 
 const MNESIS_MEMORY_PROVIDER_ID: &str = "mnesis.hosted.memory";
 
-const MNESIS_REQUIRED_ENV: [&str; 6] = [
+const MNESIS_REQUIRED_ENV: [&str; 4] = [
     "MEMORY_MNESIS_KNOWLEDGE_ENDPOINT",
     "MEMORY_MNESIS_MEMORY_ENDPOINT",
     "MEMORY_MNESIS_KNOWLEDGE_TOKEN",
     "MEMORY_MNESIS_MEMORY_TOKEN",
-    "MEMORY_MNESIS_KNOWLEDGE_CREDENTIAL",
-    "MEMORY_MNESIS_MEMORY_CREDENTIAL",
 ];
 
 /// Reports the bound memory provider and, for Mnesis, which required settings
-/// are present. Presence only: no endpoint, token, or handle value is read out.
+/// are present. Presence only: no endpoint or token value is read out.
 fn check_memory_binding(path: &std::path::Path) -> DoctorCheck {
     let provider = RebornConfigFile::load(path)
         .ok()
@@ -335,12 +333,10 @@ mod tests {
                 "MEMORY_MNESIS_MEMORY_ENDPOINT",
                 "MEMORY_MNESIS_KNOWLEDGE_TOKEN",
                 "MEMORY_MNESIS_MEMORY_TOKEN",
-                "MEMORY_MNESIS_KNOWLEDGE_CREDENTIAL",
-                "MEMORY_MNESIS_MEMORY_CREDENTIAL",
             ],
-            "create_mnesis_provider fails closed on any unset endpoint, bearer, or \
-             credential handle, so doctor must report the same six or it passes a \
-             binding the runtime refuses to build"
+            "create_mnesis_provider fails closed on any unset endpoint or bearer, so \
+             doctor must report the same four or it passes a binding the runtime \
+             refuses to build"
         );
     }
 

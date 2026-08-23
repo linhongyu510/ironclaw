@@ -66,8 +66,8 @@ tolerance_bp = 30
 # Informational — the observed share when this file was last updated. Lets a
 # reviewer see the baseline and lets the gate emit a down-ratchet nudge. Not
 # consulted for the pass/fail decision.
-observed_bp = 572
-observed_date = "2026-08-08"
+observed_bp = 543
+observed_date = "2026-08-23"
 
 # --- Absolute mass (production LOC) ---------------------------------------
 # The BINDING mass bound. Same numerator as the share metric — production `.rs`
@@ -238,7 +238,14 @@ observed_date = "2026-08-08"
 # `bash scripts/ci/check-composition-budget.sh --print`, not summed.
 #
 # Re-measured 42198 -> 42386 on 2026-08-19 after rebasing onto main 5380a320d.
-loc_ceiling = 42386
+#
+# Re-measured 42386 -> 42401 on 2026-08-23. The 42386 pin and the mirrored
+# constant had drifted from the tree (a `--print` run reported 42409), and this
+# change then evicted the unread Mnesis credential-handle wiring. Both this
+# figure and `COMPOSITION_ABSOLUTE_SRC_LOC` move together to the one
+# `bash scripts/ci/check-composition-budget.sh --print` measurement, per this
+# file's own re-capture instruction.
+loc_ceiling = 42401
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -249,8 +256,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42386
-loc_observed_date = "2026-08-19"
+loc_observed = 42401
+loc_observed_date = "2026-08-23"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

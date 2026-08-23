@@ -1,6 +1,4 @@
-use ironclaw_memory_mnesis::{
-    EndpointProfile, MnesisConfig, MnesisHttpTransport, MnesisLimits, SecretHandle,
-};
+use ironclaw_memory_mnesis::{EndpointProfile, MnesisConfig, MnesisHttpTransport, MnesisLimits};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -25,8 +23,6 @@ fn accepts(url: &str, profile: EndpointProfile) -> bool {
     let config = MnesisConfig {
         knowledge_endpoint: url.to_string(),
         memory_endpoint: url.to_string(),
-        knowledge_credential: SecretHandle::new("services/rar-clients").unwrap(),
-        memory_credential: SecretHandle::new("services/memory-clients").unwrap(),
         host_allowlist: Vec::new(),
         profile,
         limits: MnesisLimits::default(),

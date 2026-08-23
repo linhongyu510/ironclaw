@@ -21,6 +21,69 @@ impl MnesisLane {
     pub fn is_hybrid(self) -> bool {
         matches!(self, Self::Knowledge)
     }
+
+    /// Per-lane result ceiling from the frozen provider contract. The lanes do
+    /// not share one: a corpus sweep is allowed more evidence than a personal
+    /// memory search returns.
+    pub fn max_results(self) -> usize {
+        match self {
+            Self::Knowledge => MAX_KNOWLEDGE_SEARCH_RESULTS,
+            Self::Memory => MAX_MEMORY_SEARCH_RESULTS,
+        }
+    }
+}
+
+pub const MAX_MEMORY_SEARCH_RESULTS: usize = 20;
+pub const MAX_KNOWLEDGE_SEARCH_RESULTS: usize = 50;
+pub const MAX_CONTEXT_SNIPPETS: usize = 50;
+
+/// The tools Mnesis registers, by the name the MCP `tools/call` envelope must
+/// carry. A wire name reachable only as a literal is a wire name that drifts
+/// without a compiler error; every call site resolves through this enum, and
+/// `tests/mcp_tool_contract.rs` pins each variant against the frozen fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MnesisTool {
+    MemorySearch,
+    KnowledgeSearch,
+    RecordInteraction,
+    ReadShortTerm,
+}
+
+impl MnesisTool {
+    pub const ALL: [Self; 4] = [
+        Self::MemorySearch,
+        Self::KnowledgeSearch,
+        Self::RecordInteraction,
+        Self::ReadShortTerm,
+    ];
+
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::MemorySearch => "memory_search",
+            Self::KnowledgeSearch => "search_knowledge",
+            Self::RecordInteraction => "memory_record_interaction",
+            Self::ReadShortTerm => "read_short_term",
+        }
+    }
+
+    pub fn lane(self) -> MnesisLane {
+        match self {
+            Self::KnowledgeSearch => MnesisLane::Knowledge,
+            Self::MemorySearch | Self::RecordInteraction | Self::ReadShortTerm => {
+                MnesisLane::Memory
+            }
+        }
+    }
+
+    /// The lifecycle hook this tool backs, for the hooks a manifest may declare.
+    pub fn lifecycle_hook(self) -> Option<&'static str> {
+        match self {
+            Self::MemorySearch => Some("read_long_term"),
+            Self::RecordInteraction => Some("record_interaction"),
+            Self::ReadShortTerm => Some("read_short_term"),
+            Self::KnowledgeSearch => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -561,14 +624,11 @@ pub use mock::{MnesisMockHandler, MockMnesisTransport};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SecretHandle;
 
     fn config(profile: EndpointProfile, endpoint: &str) -> MnesisConfig {
         MnesisConfig {
             knowledge_endpoint: format!("{endpoint}/rar/mcp"),
             memory_endpoint: format!("{endpoint}/memory/mcp"),
-            knowledge_credential: SecretHandle::new("services/rar-clients").unwrap(),
-            memory_credential: SecretHandle::new("services/memory-clients").unwrap(),
             host_allowlist: Vec::new(),
             profile,
             limits: MnesisLimits::default(),

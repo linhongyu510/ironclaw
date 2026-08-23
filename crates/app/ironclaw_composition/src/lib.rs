@@ -135,7 +135,7 @@ pub use memory_provider_factory::{
 };
 // consumer: `ironclaw_cli` runtime Mnesis connection · pinned by: `ironclaw_cli` runtime build (`--features memory-mnesis`)
 #[cfg(feature = "memory-mnesis")]
-pub use ironclaw_memory_mnesis::{EndpointProfile as MnesisEndpointProfile, SecretHandle};
+pub use ironclaw_memory_mnesis::EndpointProfile as MnesisEndpointProfile;
 // consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 // consumer: `ironclaw_cli` explicit sandbox-profile boot wiring · pinned by: `ironclaw_cli` runtime build + profile tests

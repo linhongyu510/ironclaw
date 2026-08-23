@@ -43,7 +43,7 @@ use ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID;
 #[cfg(feature = "memory-mnesis")]
 use ironclaw_memory_mnesis::{
     EndpointProfile, MnesisConfig, MnesisHttpTransport, MnesisLimits, MnesisMemoryService,
-    MnesisTransport, SecretHandle,
+    MnesisTransport,
 };
 #[cfg(test)]
 use ironclaw_memory_native::NativeMemoryService;
@@ -124,10 +124,6 @@ pub struct MemoryProviderDeps {
 pub struct MnesisConnectionConfig {
     pub knowledge_endpoint: Option<String>,
     pub memory_endpoint: Option<String>,
-    #[cfg(feature = "memory-mnesis")]
-    pub knowledge_credential: Option<SecretHandle>,
-    #[cfg(feature = "memory-mnesis")]
-    pub memory_credential: Option<SecretHandle>,
     pub knowledge_bearer: Option<SecretString>,
     pub memory_bearer: Option<SecretString>,
     pub host_allowlist: Vec<String>,
@@ -247,22 +243,9 @@ fn create_mnesis_provider(deps: &MemoryProviderDeps) -> Option<Arc<MnesisProvide
         return None;
     };
 
-    let (Some(knowledge_credential), Some(memory_credential)) = (
-        settings.knowledge_credential.clone(),
-        settings.memory_credential.clone(),
-    ) else {
-        tracing::warn!(
-            target: LOG_TARGET,
-            "mnesis memory binding selected but a credential handle is unset; failing closed"
-        );
-        return None;
-    };
-
     let config = MnesisConfig {
         knowledge_endpoint: knowledge_endpoint.to_string(),
         memory_endpoint: memory_endpoint.to_string(),
-        knowledge_credential,
-        memory_credential,
         host_allowlist: settings.host_allowlist.clone(),
         profile: settings.profile,
         limits: MnesisLimits::default(),
@@ -842,24 +825,33 @@ mod tests {
     }
 
     /// A hook the bundle drops leaves its consumer `None` and the run records
-    /// nothing, silently.
+    /// nothing, silently; a hook it invents is called against a tool the server
+    /// may not register.
     #[cfg(feature = "memory-mnesis")]
     #[test]
-    fn the_mnesis_bundle_surfaces_every_hook_its_manifest_declares() {
+    fn the_mnesis_bundle_surfaces_exactly_the_hooks_its_manifest_declares() {
         use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         let bundle = memory_extension::mnesis_memory_provider_bundle(
             ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
             ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
         )
         .expect("the mnesis bundle loads");
-        for hook in [
-            MemoryLifecycleHook::ReadLongTerm,
-            MemoryLifecycleHook::ReadShortTerm,
-            MemoryLifecycleHook::RecordInteraction,
+        match &bundle.package.manifest.runtime {
+            ironclaw_extension_contracts::runtime::ExtensionRuntime::FirstParty { service } => {
+                assert_eq!(service, memory_extension::MNESIS_MEMORY_PROVIDER_SERVICE);
+            }
+            other => panic!("expected a first_party runtime, got {other:?}"),
+        }
+        for (hook, declared) in [
+            (MemoryLifecycleHook::ReadLongTerm, true),
+            (MemoryLifecycleHook::RecordInteraction, true),
+            (MemoryLifecycleHook::ReadShortTerm, false),
+            (MemoryLifecycleHook::ProfileRead, false),
         ] {
-            assert!(
+            assert_eq!(
                 bundle.lifecycle.declares(hook),
-                "the manifest declares {hook:?} but the bundle does not surface it"
+                declared,
+                "{hook:?} declaration drifted from the manifest"
             );
         }
     }

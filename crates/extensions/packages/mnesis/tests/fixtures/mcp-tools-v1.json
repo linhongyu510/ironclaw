@@ -1,0 +1,37 @@
+{
+  "description": "The MCP tool names this provider sends in a tools/call envelope, and whether each is confirmed registered by a live Mnesis lane. This is a different contract from provider-request-v1.json: that file froze the pre-MCP provider envelope, whose `operation` strings are not tool names and no longer describe the wire. Frozen and versioned; a contract change is a -v2 file, never an edit.",
+  "tools": [
+    {
+      "variant": "MemorySearch",
+      "wire_name": "memory_search",
+      "lane": "memory",
+      "lifecycle_hook": "read_long_term",
+      "registration_confirmed": true,
+      "confirmed_by": "credentialed canary, status 200 with rows, 2026-08-23"
+    },
+    {
+      "variant": "KnowledgeSearch",
+      "wire_name": "search_knowledge",
+      "lane": "knowledge",
+      "lifecycle_hook": null,
+      "registration_confirmed": true,
+      "confirmed_by": "credentialed canary, status 200 with rows, 2026-08-23"
+    },
+    {
+      "variant": "RecordInteraction",
+      "wire_name": "memory_record_interaction",
+      "lane": "memory",
+      "lifecycle_hook": "record_interaction",
+      "registration_confirmed": true,
+      "confirmed_by": "live after-turn write observed end to end, 2026-08-23"
+    },
+    {
+      "variant": "ReadShortTerm",
+      "wire_name": "read_short_term",
+      "lane": "memory",
+      "lifecycle_hook": "read_short_term",
+      "registration_confirmed": false,
+      "confirmed_by": null
+    }
+  ]
+}

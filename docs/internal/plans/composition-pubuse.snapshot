@@ -34,7 +34,7 @@ pub use memory_provider_factory::{
     ResolvedMemoryProvider, memory_lifecycle_consumers, resolve_memory_provider,
 };
 #[cfg(feature = "memory-mnesis")]
-pub use ironclaw_memory_mnesis::{EndpointProfile as MnesisEndpointProfile, SecretHandle};
+pub use ironclaw_memory_mnesis::EndpointProfile as MnesisEndpointProfile;
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 pub use deployment::{

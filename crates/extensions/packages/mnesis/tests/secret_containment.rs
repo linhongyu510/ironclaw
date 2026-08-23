@@ -1,5 +1,5 @@
 use ironclaw_memory_mnesis::{
-    EndpointProfile, MnesisConfig, MnesisError, MnesisHttpTransport, MnesisLimits, SecretHandle,
+    EndpointProfile, MnesisConfig, MnesisError, MnesisHttpTransport, MnesisLimits,
 };
 
 const CREDENTIAL: &str = "mnesis-canary-bearer-a1b2c3d4e5f6";
@@ -8,8 +8,6 @@ fn config() -> MnesisConfig {
     MnesisConfig {
         knowledge_endpoint: "https://mnesis.example.com/rar/mcp".to_string(),
         memory_endpoint: "https://mnesis.example.com/memory/mcp".to_string(),
-        knowledge_credential: SecretHandle::new("services/rar-clients").unwrap(),
-        memory_credential: SecretHandle::new("services/memory-clients").unwrap(),
         host_allowlist: Vec::new(),
         profile: EndpointProfile::Production,
         limits: MnesisLimits::default(),
@@ -34,12 +32,12 @@ fn the_alternate_debug_form_is_also_clean() {
 }
 
 #[test]
-fn config_carries_a_handle_and_never_material_in_any_rendering() {
+fn config_never_renders_credential_material_in_any_form() {
     let config = config();
     for rendered in [format!("{config:?}"), format!("{config:#?}")] {
         assert!(!rendered.contains(CREDENTIAL), "{rendered}");
         assert!(!rendered.contains("Bearer"), "{rendered}");
-        assert!(rendered.contains("services/rar-clients"), "{rendered}");
+        assert!(rendered.contains("mnesis.example.com"), "{rendered}");
     }
 }
 
@@ -48,7 +46,7 @@ fn a_serialized_config_snapshot_contains_no_credential_material() {
     let serialized = serde_json::to_string_pretty(&config()).unwrap();
     assert!(!serialized.contains(CREDENTIAL), "{serialized}");
     assert!(!serialized.contains("Bearer"), "{serialized}");
-    assert!(serialized.contains("services/rar-clients"));
+    assert!(serialized.contains("mnesis.example.com"));
 }
 
 #[test]

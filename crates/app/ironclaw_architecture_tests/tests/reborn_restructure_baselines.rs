@@ -185,8 +185,9 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// on the merged tree with `bash scripts/ci/check-composition-budget.sh
 /// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-/// ✎ Re-measured 42_198 -> 42_447 on 2026-08-19 after rebasing onto main b6c33d33d.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_386;
+/// ✎ Re-measured 42_198 -> 42_401 on 2026-08-23; moves with the budget file's
+/// `loc_ceiling`/`loc_observed` to the same `--print` figure.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_401;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

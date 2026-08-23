@@ -1209,11 +1209,15 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
     );
 }
 
-/// Every memory *provider* crate. Both are packages under
+/// Every memory *provider* crate. All three are packages under
 /// `crates/extensions/packages/` since WS2; the contract crate
 /// `ironclaw_memory` is deliberately not here — naming the contract is the
 /// point of having one.
-const MEMORY_PROVIDER_CRATES: &[&str] = &["ironclaw_memory_native", "ironclaw_memory_mem0"];
+const MEMORY_PROVIDER_CRATES: &[&str] = &[
+    "ironclaw_memory_native",
+    "ironclaw_memory_mem0",
+    "ironclaw_memory_mnesis",
+];
 
 /// Crates that still take a normal dependency on a memory provider, with the
 /// row that removes each one. **Shrink-only**: a stale entry fails, so this
@@ -1251,6 +1255,11 @@ const MEMORY_PROVIDER_DEPENDENT_RESIDUE: &[(&str, &str, &str)] = &[
     (
         "ironclaw_composition",
         "ironclaw_memory_mem0",
+        "WS3 — provider construction moves to the binary",
+    ),
+    (
+        "ironclaw_composition",
+        "ironclaw_memory_mnesis",
         "WS3 — provider construction moves to the binary",
     ),
 ];

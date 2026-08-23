@@ -10,9 +10,10 @@ use serde_json::{Value, json};
 
 use crate::attribution::{OwnerAxes, OwnerScope, ProviderAttribution};
 use crate::idempotency::{WriteIdentity, assert_interaction_bounds, operation_id};
-use crate::transport::{MnesisLane, MnesisRequest, MnesisResponse, MnesisTransport};
+use crate::transport::{
+    MAX_CONTEXT_SNIPPETS, MnesisRequest, MnesisResponse, MnesisTool, MnesisTransport,
+};
 
-const MAX_SNIPPETS: usize = 20;
 const MAX_QUERY_BYTES: usize = 4_096;
 const UNNAMED_SOURCE: &str = "mnesis";
 const ATTRIBUTION_DEADLINE_MS: u64 = 30_000;
@@ -22,16 +23,14 @@ pub struct MnesisMemoryService<T: MnesisTransport> {
 }
 
 /// Attribution changes per call; the session key must not.
+///
+/// Constructed only by [`MnesisMemoryService::lane_identity`], which fails
+/// rather than yielding a partial identity: a request that reaches a lane with
+/// no attribution header carries no owner scope, and the lane answers it under
+/// whatever scope it infers instead of the caller's.
 struct LaneIdentity {
     attribution: String,
     session_key: String,
-}
-
-fn split_identity(identity: Option<LaneIdentity>) -> (Option<String>, Option<String>) {
-    match identity {
-        Some(identity) => (Some(identity.attribution), Some(identity.session_key)),
-        None => (None, None),
-    }
 }
 
 impl<T: MnesisTransport> std::fmt::Debug for MnesisMemoryService<T> {
@@ -51,15 +50,18 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         &self.transport
     }
 
-    fn attribution_for(&self, invocation: &MemoryInvocation) -> Option<LaneIdentity> {
-        self.attribution_with_thread(invocation, None)
+    fn attribution_for(
+        &self,
+        invocation: &MemoryInvocation,
+    ) -> Result<LaneIdentity, MemoryServiceError> {
+        self.lane_identity(invocation, None)
     }
 
-    fn attribution_with_thread(
+    fn lane_identity(
         &self,
         invocation: &MemoryInvocation,
         thread_id: Option<String>,
-    ) -> Option<LaneIdentity> {
+    ) -> Result<LaneIdentity, MemoryServiceError> {
         let scope = &invocation.scope;
         let owner_scope = OwnerScope::narrowest(
             scope.tenant_id.as_str(),
@@ -70,10 +72,11 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                 thread_id,
             },
         );
-        let session_key = owner_scope.key().ok()?;
-        let deadline_at_ms = std::time::SystemTime::now()
+        let session_key = owner_scope.key().map_err(|error| refuse_unscoped(&error))?;
+        let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
+            .map_err(|error| refuse_unscoped(&error))?;
+        let deadline_at_ms = elapsed
             .as_millis()
             .saturating_add(u128::from(ATTRIBUTION_DEADLINE_MS));
         let attribution = ProviderAttribution {
@@ -81,11 +84,12 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
             invocation_id: scope.invocation_id.to_string(),
             correlation_id: invocation.correlation_id.to_string(),
-            deadline_at_ms: i64::try_from(deadline_at_ms).ok()?,
+            deadline_at_ms: i64::try_from(deadline_at_ms)
+                .map_err(|error| refuse_unscoped(&error))?,
         }
         .encode()
-        .ok()?;
-        Some(LaneIdentity {
+        .map_err(|error| refuse_unscoped(&error))?;
+        Ok(LaneIdentity {
             attribution,
             session_key,
         })
@@ -97,7 +101,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        self.search_lane(MnesisLane::Memory, "memory_search", invocation, request)
+        self.search_lane(MnesisTool::MemorySearch, invocation, request)
             .await
     }
 
@@ -108,19 +112,13 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        self.search_lane(
-            MnesisLane::Knowledge,
-            "search_knowledge",
-            invocation,
-            request,
-        )
-        .await
+        self.search_lane(MnesisTool::KnowledgeSearch, invocation, request)
+            .await
     }
 
     async fn search_lane(
         &self,
-        lane: MnesisLane,
-        operation: &'static str,
+        tool: MnesisTool,
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
@@ -133,10 +131,10 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         if request.query.len() > MAX_QUERY_BYTES {
             return Err(MemoryServiceError::input());
         }
-        let limit = request.limit.min(MAX_SNIPPETS);
-        let attribution = self.attribution_for(&invocation);
+        let limit = request.limit.min(tool.lane().max_results());
+        let attribution = self.attribution_for(&invocation)?;
         let hits = self
-            .query_lane(lane, operation, &request.query, limit, attribution)
+            .query_lane(tool, &request.query, limit, attribution)
             .await?;
         Ok(MemoryServiceSearchResponse {
             query: request.query,
@@ -146,7 +144,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                     content: hit.text,
                     score: hit.score,
                     path: hit.relative_path,
-                    is_hybrid_match: lane.is_hybrid(),
+                    is_hybrid_match: tool.lane().is_hybrid(),
                 })
                 .collect(),
         })
@@ -154,12 +152,12 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
 
     async fn query_lane(
         &self,
-        lane: MnesisLane,
-        operation: &'static str,
+        tool: MnesisTool,
         query: &str,
         limit: usize,
-        identity: Option<LaneIdentity>,
+        identity: LaneIdentity,
     ) -> Result<Vec<MnesisResult>, MemoryServiceError> {
+        let lane = tool.lane();
         // The memory lane omits the key entirely rather than sending false, so
         // the wire shape stays exactly what the server already accepts.
         let arguments = if lane.is_hybrid() {
@@ -167,9 +165,13 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         } else {
             json!({ "query": query, "limit": limit })
         };
+        let operation = tool.wire_name();
         let body = tool_call(operation, arguments);
 
-        let (attribution, session_key) = split_identity(identity);
+        let LaneIdentity {
+            attribution,
+            session_key,
+        } = identity;
         let response = self
             .transport
             .execute(MnesisRequest {
@@ -177,8 +179,8 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                 operation,
                 body,
                 idempotent: true,
-                attribution,
-                session_key,
+                attribution: Some(attribution),
+                session_key: Some(session_key),
             })
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
@@ -196,18 +198,21 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
     async fn record_lane(
         &self,
         body: Value,
-        identity: Option<LaneIdentity>,
+        identity: LaneIdentity,
     ) -> Result<(), MemoryServiceError> {
-        let (attribution, session_key) = split_identity(identity);
+        let LaneIdentity {
+            attribution,
+            session_key,
+        } = identity;
         let response = self
             .transport
             .execute(MnesisRequest {
-                lane: MnesisLane::Memory,
-                operation: "memory_record_interaction",
-                body: tool_call("memory_record_interaction", body),
+                lane: MnesisTool::RecordInteraction.lane(),
+                operation: MnesisTool::RecordInteraction.wire_name(),
+                body: tool_call(MnesisTool::RecordInteraction.wire_name(), body),
                 idempotent: true,
-                attribution,
-                session_key,
+                attribution: Some(attribution),
+                session_key: Some(session_key),
             })
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
@@ -217,6 +222,16 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         }
         Err(lane_failure(&response))
     }
+}
+
+/// An owner scope that will not encode is a call that cannot be attributed, and
+/// an unattributed call is answered under a scope that is not the caller's.
+fn refuse_unscoped(error: &dyn std::fmt::Display) -> MemoryServiceError {
+    tracing::warn!(
+        target: "ironclaw_memory_mnesis",
+        "refusing an unattributable Mnesis call: {error}"
+    );
+    MemoryServiceError::input()
 }
 
 fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
@@ -286,16 +301,15 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
             return Err(MemoryServiceError::input());
         }
 
-        let budget = request.max_snippets.min(MAX_SNIPPETS);
+        let budget = request.max_snippets.min(MAX_CONTEXT_SNIPPETS);
         if budget == 0 {
             return Ok(Vec::new());
         }
-        let attribution = self.attribution_for(&invocation);
+        let attribution = self.attribution_for(&invocation)?;
 
         let memory = degrade_availability(
             self.query_lane(
-                MnesisLane::Memory,
-                "memory_search",
+                MnesisTool::MemorySearch,
                 &request.query,
                 budget,
                 attribution,
@@ -365,7 +379,7 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
             request.turn_run_id.as_deref(),
             &operation,
         );
-        self.record_lane(body, self.attribution_for(&invocation))
+        self.record_lane(body, self.attribution_for(&invocation)?)
             .await?;
         Ok(MemoryServiceRecordResponse { recorded: true })
     }
@@ -386,17 +400,15 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
         if request.query.len() > MAX_QUERY_BYTES {
             return Err(MemoryServiceError::input());
         }
-        let budget = request.max_snippets.min(MAX_SNIPPETS);
+        let budget = request.max_snippets.min(MAX_CONTEXT_SNIPPETS);
         if budget == 0 {
             return Ok(Vec::new());
         }
 
-        let attribution =
-            self.attribution_with_thread(&invocation, Some(thread_id.as_str().to_string()));
+        let attribution = self.lane_identity(&invocation, Some(thread_id.as_str().to_string()))?;
         let results = degrade_availability(
             self.query_lane(
-                MnesisLane::Memory,
-                "read_short_term",
+                MnesisTool::ReadShortTerm,
                 &request.query,
                 budget,
                 attribution,
@@ -573,6 +585,13 @@ mod tests {
     use super::*;
     use crate::transport::MockMnesisTransport;
 
+    fn identity() -> LaneIdentity {
+        LaneIdentity {
+            attribution: "mpa1.fixture".to_string(),
+            session_key: "mos1.fixture".to_string(),
+        }
+    }
+
     #[test]
     fn decodes_the_contract_envelope_and_a_bare_array() {
         let enveloped = json!({"results": [{"relativePath": "a.md", "content": "alpha"}]});
@@ -668,7 +687,7 @@ mod tests {
             })
         })));
         let error = denied
-            .query_lane(MnesisLane::Knowledge, "knowledge_search", "q", 4, None)
+            .query_lane(MnesisTool::KnowledgeSearch, "q", 4, identity())
             .await
             .unwrap_err();
         assert_eq!(
@@ -683,7 +702,7 @@ mod tests {
             })
         })));
         let error = outage
-            .query_lane(MnesisLane::Memory, "memory_search", "q", 4, None)
+            .query_lane(MnesisTool::MemorySearch, "q", 4, identity())
             .await
             .unwrap_err();
         assert_eq!(
@@ -719,10 +738,13 @@ mod tests {
                     })
                 })));
             let read = service
-                .query_lane(MnesisLane::Memory, "memory_search", "q", 4, None)
+                .query_lane(MnesisTool::MemorySearch, "q", 4, identity())
                 .await
                 .unwrap_err();
-            let write = service.record_lane(json!({}), None).await.unwrap_err();
+            let write = service
+                .record_lane(json!({}), identity())
+                .await
+                .unwrap_err();
             assert_eq!(read.kind(), expected, "read lane, status {status}");
             assert_eq!(write.kind(), expected, "write lane, status {status}");
         }
@@ -734,13 +756,13 @@ mod tests {
             json!({"results": [{"relativePath": "a.md", "content": "alpha"}]}),
         ));
         let results = service
-            .query_lane(MnesisLane::Knowledge, "knowledge_search", "q", 4, None)
+            .query_lane(MnesisTool::KnowledgeSearch, "q", 4, identity())
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
         let recorded = service.transport.recorded();
         assert_eq!(recorded.len(), 1);
         assert!(recorded[0].idempotent);
-        assert_eq!(recorded[0].lane, MnesisLane::Knowledge);
+        assert_eq!(recorded[0].lane, MnesisTool::KnowledgeSearch.lane());
     }
 }

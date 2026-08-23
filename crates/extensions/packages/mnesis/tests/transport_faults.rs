@@ -6,7 +6,7 @@ use ironclaw_memory::{MemoryService, MemoryServiceErrorKind};
 use ironclaw_memory_mnesis::{
     EndpointProfile, MnesisConfig, MnesisError, MnesisHttpTransport, MnesisLane, MnesisLimits,
     MnesisMemoryService, MnesisRequest, MnesisResponse, MnesisTransport, MockMnesisTransport,
-    OwnerAxes, SecretHandle,
+    OwnerAxes,
 };
 use serde_json::{Value, json};
 
@@ -14,8 +14,6 @@ fn config_for(endpoint: &str, profile: EndpointProfile) -> MnesisConfig {
     MnesisConfig {
         knowledge_endpoint: format!("{endpoint}/rar/mcp"),
         memory_endpoint: format!("{endpoint}/memory/mcp"),
-        knowledge_credential: SecretHandle::new("services/rar-clients").unwrap(),
-        memory_credential: SecretHandle::new("services/memory-clients").unwrap(),
         host_allowlist: Vec::new(),
         profile,
         limits: MnesisLimits::default(),

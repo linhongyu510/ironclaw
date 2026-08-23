@@ -1,5 +1,7 @@
 use ironclaw_memory::{MemoryService, MemoryServiceErrorKind};
-use ironclaw_memory_mnesis::{MnesisMemoryService, MnesisResponse, MockMnesisTransport};
+use ironclaw_memory_mnesis::{
+    MAX_CONTEXT_SNIPPETS, MnesisMemoryService, MnesisResponse, MockMnesisTransport,
+};
 use serde_json::{Value, json};
 
 fn scoped(tenant: &str, principal: &str, text: &str) -> Value {
@@ -67,7 +69,10 @@ async fn multi_byte_utf8_never_breaks_the_count_budget() {
             .read_long_term(invocation(), request("anything", budget))
             .await
             .unwrap();
-        assert!(snippets.len() <= budget.min(20), "budget {budget}");
+        assert!(
+            snippets.len() <= budget.min(MAX_CONTEXT_SNIPPETS),
+            "budget {budget}"
+        );
         for snippet in &snippets {
             assert_eq!(snippet.text, multibyte);
         }

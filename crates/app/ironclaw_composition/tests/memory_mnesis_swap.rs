@@ -153,7 +153,7 @@ async fn config_binding_swaps_the_memory_provider_to_mnesis_through_the_factory(
             .declares(MemoryLifecycleHook::RecordInteraction)
     );
     assert!(
-        resolved
+        !resolved
             .lifecycle
             .declares(MemoryLifecycleHook::ReadShortTerm)
     );

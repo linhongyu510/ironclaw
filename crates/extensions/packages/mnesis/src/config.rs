@@ -12,71 +12,6 @@ pub const DEFAULT_MAX_IDLE_CONNECTIONS: usize = 4;
 pub const DEFAULT_MAX_RETRIES: u32 = 2;
 pub const DEFAULT_RETRY_BACKOFF_MS: u64 = 200;
 
-const MAX_HANDLE_LENGTH: usize = 128;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct SecretHandle(String);
-
-#[derive(Debug, thiserror::Error)]
-#[error("secret handle is invalid: {reason}")]
-pub struct SecretHandleError {
-    reason: String,
-}
-
-impl SecretHandle {
-    fn validate(value: &str) -> Result<(), SecretHandleError> {
-        if value.is_empty() || value.len() > MAX_HANDLE_LENGTH {
-            return Err(SecretHandleError {
-                reason: format!("must be 1 to {MAX_HANDLE_LENGTH} characters"),
-            });
-        }
-        if !value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/' | '.')
-        }) {
-            return Err(SecretHandleError {
-                reason: "may contain only ASCII alphanumerics and _-/.".to_string(),
-            });
-        }
-        Ok(())
-    }
-
-    pub fn new(raw: impl Into<String>) -> Result<Self, SecretHandleError> {
-        let value = raw.into();
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl TryFrom<String> for SecretHandle {
-    type Error = SecretHandleError;
-
-    fn try_from(value: String) -> Result<Self, SecretHandleError> {
-        Self::validate(&value)?;
-        Ok(Self(value))
-    }
-}
-
-impl AsRef<str> for SecretHandle {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SecretHandle {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MnesisLimits {
     pub max_response_bytes: usize,
@@ -124,8 +59,6 @@ impl MnesisLimits {
 pub struct MnesisConfig {
     pub knowledge_endpoint: String,
     pub memory_endpoint: String,
-    pub knowledge_credential: SecretHandle,
-    pub memory_credential: SecretHandle,
     #[serde(default)]
     pub host_allowlist: Vec<String>,
     #[serde(default)]
@@ -139,36 +72,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secret_handle_rejects_material_shaped_values() {
-        SecretHandle::new("services/memory-clients").unwrap();
-        SecretHandle::new("mnesis_bearer").unwrap();
-        SecretHandle::new("").unwrap_err();
-        SecretHandle::new("has space").unwrap_err();
-        SecretHandle::new("has\nnewline").unwrap_err();
-        SecretHandle::new("a".repeat(MAX_HANDLE_LENGTH + 1)).unwrap_err();
-    }
-
-    #[test]
-    fn secret_handle_round_trips_through_serde_with_validation() {
-        let handle: SecretHandle = serde_json::from_str("\"services/rar-clients\"").unwrap();
-        assert_eq!(handle.as_str(), "services/rar-clients");
-        serde_json::from_str::<SecretHandle>("\"bad value\"").unwrap_err();
-    }
-
-    #[test]
     fn config_debug_carries_no_secret_material() {
         let config = MnesisConfig {
             knowledge_endpoint: "https://mnesis.example.com/rar/mcp".to_string(),
             memory_endpoint: "https://mnesis.example.com/memory/mcp".to_string(),
-            knowledge_credential: SecretHandle::new("services/rar-clients").unwrap(),
-            memory_credential: SecretHandle::new("services/memory-clients").unwrap(),
             host_allowlist: Vec::new(),
             profile: EndpointProfile::Production,
             limits: MnesisLimits::default(),
         };
         let rendered = format!("{config:?}");
-        assert!(rendered.contains("services/rar-clients"));
-        assert!(rendered.contains("services/memory-clients"));
+        assert!(rendered.contains("mnesis.example.com"));
         assert!(!rendered.contains("Bearer"));
     }
 

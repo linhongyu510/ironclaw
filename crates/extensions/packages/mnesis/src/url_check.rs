@@ -78,7 +78,7 @@ pub(crate) fn check_endpoint(
         }
     }
 
-    if !allowlist.is_empty() && !allowlist_permits(host, allowlist) {
+    if !allowlist.is_empty() && !allowlist_permits(normalized_host, allowlist) {
         return Err(MnesisError::InvalidEndpoint {
             reason: "host is not in the operator endpoint allowlist".to_string(),
         });
@@ -87,11 +87,19 @@ pub(crate) fn check_endpoint(
     Ok(())
 }
 
+/// Compares on the bracket-free host so an operator writes an IPv6 entry the way
+/// they write the address, not the way a URL spells it.
 fn allowlist_permits(host: &str, allowlist: &[String]) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    allowlist
-        .iter()
-        .any(|entry| entry.trim_end_matches('.').to_ascii_lowercase() == host)
+    allowlist.iter().any(|entry| {
+        entry
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            == host
+    })
 }
 
 // Private ranges are deliberately NOT blocked: the endpoint is operator
@@ -180,6 +188,24 @@ mod tests {
         production("file:///etc/passwd").unwrap_err();
         production("ftp://mnesis.example.com").unwrap_err();
         production("https://mnesis.example.com/rar/mcp#frag").unwrap_err();
+    }
+
+    #[test]
+    fn an_ipv6_allowlist_entry_matches_the_bracketed_url_form() {
+        for entry in ["::1", "[::1]"] {
+            check_endpoint(
+                "https://[::1]:3443",
+                EndpointProfile::Production,
+                &[entry.to_string()],
+            )
+            .unwrap_or_else(|error| panic!("entry {entry} must permit the endpoint: {error}"));
+        }
+        check_endpoint(
+            "https://[::2]:3443",
+            EndpointProfile::Production,
+            &["::1".to_string()],
+        )
+        .unwrap_err();
     }
 
     #[test]

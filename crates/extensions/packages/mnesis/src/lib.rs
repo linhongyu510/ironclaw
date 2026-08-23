@@ -18,7 +18,7 @@ pub use attribution::{
 pub use config::{
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_MAX_RETRIES, DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_RETRY_BACKOFF_MS,
-    DEFAULT_TOTAL_DEADLINE_SECS, MnesisConfig, MnesisLimits, SecretHandle, SecretHandleError,
+    DEFAULT_TOTAL_DEADLINE_SECS, MnesisConfig, MnesisLimits,
 };
 pub use error::MnesisError;
 pub use idempotency::{
@@ -27,7 +27,8 @@ pub use idempotency::{
 };
 pub use service::MnesisMemoryService;
 pub use transport::{
-    MnesisHttpTransport, MnesisLane, MnesisRequest, MnesisResponse, MnesisTransport,
+    MAX_CONTEXT_SNIPPETS, MAX_KNOWLEDGE_SEARCH_RESULTS, MAX_MEMORY_SEARCH_RESULTS,
+    MnesisHttpTransport, MnesisLane, MnesisRequest, MnesisResponse, MnesisTool, MnesisTransport,
     MnesisTransportError,
 };
 pub use url_check::EndpointProfile;
