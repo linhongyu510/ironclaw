@@ -2004,7 +2004,7 @@ def validate_workflow_texts(
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    """Every `.github/workflows/*.yml` file, repo-relative path -> text.
+    """Every `.github/workflows/*.{yml,yaml}` file, repo-relative path -> text.
 
     A handful of contracts key off one specific known path (REQUIRED_MARKERS,
     CRATE_SCOPE_FILTERS, CRATE_NAME_RESIDUE); `validate_webui_frontend_sites`
@@ -2012,13 +2012,18 @@ def load_workflows(root: Path) -> dict[str, str]:
     flat WebUI literal reappearing somewhere nobody enumerated. Loading every
     (small) workflow file eagerly costs nothing and keeps one loader for every
     consumer — a superset of the old explicit path list, so every existing
-    `workflows.get(path)` lookup keeps working unchanged.
+    `workflows.get(path)` lookup keeps working unchanged. GitHub Actions
+    accepts both `.yml` and `.yaml` for a workflow file; globbing only the
+    former would let a `.yaml` workflow escape every ws12 contract silently.
     """
 
     workflows_dir = root / ".github" / "workflows"
+    paths = sorted(
+        {*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")}
+    )
     return {
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted(workflows_dir.glob("*.yml"))
+        for path in paths
     }
 
 

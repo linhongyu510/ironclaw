@@ -309,6 +309,27 @@ class ToolchainPinSyncTests(unittest.TestCase):
         self.assertTrue(any("1.97.0" in e for e in errors), errors)
 
 
+class LoadWorkflowsTests(unittest.TestCase):
+    """Every workflow contract runs on load_workflows()'s output — a file it
+    fails to discover is invisible to every one of them, silently, since
+    nothing iterates the directory a second way to notice the gap."""
+
+    def test_discovers_both_yml_and_yaml_extensions(self):
+        tmp = Path(tempfile.mkdtemp())
+        workflows_dir = tmp / ".github" / "workflows"
+        workflows_dir.mkdir(parents=True)
+        (workflows_dir / "a.yml").write_text("name: a\n")
+        (workflows_dir / "b.yaml").write_text("name: b\n")
+        loaded = ws12_workflow_contracts.load_workflows(tmp)
+        self.assertEqual(
+            loaded,
+            {
+                ".github/workflows/a.yml": "name: a\n",
+                ".github/workflows/b.yaml": "name: b\n",
+            },
+        )
+
+
 class SccacheSetupActionContractTests(unittest.TestCase):
     """The optional compiler cache must never gate the tests it accelerates."""
 
