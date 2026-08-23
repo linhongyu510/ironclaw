@@ -655,6 +655,16 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
     def test_checked_in_scope_filters_pass(self) -> None:
         self.assertEqual(validate_crate_scope_filters(self.workflows, ROOT), [])
 
+    def test_has_code_covers_the_toolchain_pin_and_its_own_guard(self) -> None:
+        """validate_toolchain_pin_sync() only runs inside fast-checks, gated
+        on has_code || has_guidance. A PR touching only rust-toolchain.toml or
+        the setup-rust composite — exactly the two files the sync guard
+        exists to police — must still set has_code=true, or the guard never
+        fires for its own governed diff."""
+        has_code = next(f for f in CRATE_SCOPE_FILTERS if f.name == "has_code")
+        self.assertIn("rust-toolchain.toml", has_code.in_scope)
+        self.assertIn(".github/actions/setup-rust/action.yml", has_code.in_scope)
+
     def test_has_docs_trigger_is_pinned(self) -> None:
         """The docs publication gate rides its own trigger: docs-only PRs have
         has_code=false, so nothing else would run the boundary job. An

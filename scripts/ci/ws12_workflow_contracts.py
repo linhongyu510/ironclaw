@@ -1357,6 +1357,12 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # exactly the diff it guards (#7797 review).
             "scripts/test-check-type-duplicates.py",
             "scripts/check-type-duplicates.py",
+            # A PR touching only the toolchain pin or the composite that must
+            # stay in sync with it has to reach fast-checks, or
+            # validate_toolchain_pin_sync's own gate never runs for the two
+            # files it exists to police.
+            "rust-toolchain.toml",
+            ".github/actions/setup-rust/action.yml",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
