@@ -1838,8 +1838,12 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
 
     def test_every_site_was_actually_converted(self) -> None:
         """Sanity floor: the checked-in tree must contain the expected number
-        of sanctioned cache-dependency-path pairings (12) — a pin that passes
-        vacuously because nobody scanned anything is the defect being fixed."""
+        of sanctioned cache-dependency-path pairings (13) — a pin that passes
+        vacuously because nobody scanned anything is the defect being fixed.
+
+        Bumped 12 -> 13 when code_style.yml gained the `webui-v2-chromatic`
+        lane: it installs the frontend to publish the Storybook catalog, so it
+        carries its own twinned lockfile cache line."""
         flat_lockfile = f"{self.webui_dir}/frontend/pnpm-lock.yaml"
         pairs = 0
         for text in self.workflows.values():
@@ -1852,7 +1856,7 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
                 )
                 if following == WEBUI_NESTED_LOCKFILE_PATTERN:
                     pairs += 1
-        self.assertEqual(pairs, 12, "expected exactly 12 cache-dependency-path sites")
+        self.assertEqual(pairs, 13, "expected exactly 13 cache-dependency-path sites")
 
     def test_reintroducing_a_bare_cd_site_fails_loudly(self) -> None:
         """The exact pre-#7155 regression: a `cd` back to the flat literal."""

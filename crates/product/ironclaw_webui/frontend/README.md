@@ -33,6 +33,43 @@ Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary. If
 assets, installs dependencies with Corepack, and runs the Vite production build.
 Use `./build.sh --no-vendor` when you only want to rebuild the SPA.
 
+## Visual regression (Chromatic)
+
+`code_style.yml` carries a `webui-v2-chromatic` lane that publishes the built
+Storybook catalog to Chromatic, so a PR that restyles a primitive shows a
+rendered before/after instead of a diff of Tailwind class strings. This is the
+review surface the Phase 3 reskin (#7781 WS3) is judged on.
+
+The lane is **optional and non-blocking** — it is deliberately absent from the
+`code-style` roll-up's `needs:` list, per the #7782 WS6 decision to promote it
+to a required gate only once the baseline proves stable. It self-skips with a
+CI notice when `CHROMATIC_PROJECT_TOKEN` is unset, which is what happens on
+fork PRs and in any checkout without the secret provisioned.
+
+Two pieces of repository configuration switch it on:
+
+| Setting | Kind | Purpose |
+|---|---|---|
+| `CHROMATIC_PROJECT_TOKEN` | secret | From Chromatic project settings. Absent → the lane skips. |
+| `CHROMATIC_CLI_VERSION` | variable | Exact CLI version, e.g. `13.1.2`. Set alongside the secret. |
+
+The version is pinned through a variable rather than floating on `@latest`
+because a visual-baseline tool that silently changes version changes the
+baseline with it. If the secret is set and the variable is not, the lane fails
+with an explanatory error rather than picking a version for you.
+
+The lane shells out to `pnpm dlx chromatic` instead of using `chromaui/action`.
+GitHub resolves every `uses:` during *Set up job*, before step-level `if:`
+conditions run, so an action would have to be pinned and reachable even on the
+runs where the publish is skipped; a `pnpm dlx` inside a gated `run:` is
+genuinely inert. Adding `chromatic` to `package.json` was the other option and
+would put a service dependency into the `--frozen-lockfile` install every other
+frontend job performs.
+
+`--exit-zero-on-changes` is on: a visual change reports but never fails the
+step, because during a reskin the changes *are* the deliverable. `main` carries
+the accepted baseline via `--auto-accept-changes`.
+
 ## Outputs
 
 | Output | Made by | Commit? |
