@@ -1035,10 +1035,32 @@ class RebornPrTestPlanTests(unittest.TestCase):
         test scope` on the very PR that introduced the composite.
         """
         plan = self.plan("pull_request", [".github/actions/setup-rust/action.yml"])
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
-        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertIn("shared reborn action changed", plan["reasons"][0])
+        # Full field-by-field equality, not a handful of spot checks: an
+        # exhaustive plan has ten fields besides `reasons` that a partial
+        # assertion would leave silently unpinned (e.g. `run_sandbox_docker`
+        # regressing to False on a "full" plan would pass every check this
+        # test used to make).
+        self.assertEqual(
+            plan,
+            {
+                "mode": "full",
+                "reasons": [
+                    "shared reborn action changed; this PR runs the "
+                    "exhaustive plan"
+                ],
+                "changed_packages": [],
+                "affected_packages": ["alpha", "beta", "gamma"],
+                "crate_buckets": [
+                    {"name": "selected", "packages": ["alpha", "beta", "gamma"]}
+                ],
+                "root_partitions": [0, 1, 2, 3],
+                "integration_lanes": [0, 1, 2, 3, "groups"],
+                "run_group_tests": True,
+                "run_qa_replay": True,
+                "run_sandbox_docker": True,
+                "coverage_mode": "full",
+            },
+        )
 
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan(
