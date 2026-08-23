@@ -1158,7 +1158,15 @@ def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
 
 
 SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
+# Job-level `env:` (jobs.<job>.env, two-space job + four-space `env:` + this
+# key at six spaces) and workflow-level top `env:` (two-space key straight
+# under the file's own `env:`) are both re-applied to every step of a job on
+# top of $GITHUB_ENV, so both shadow the composite's mold export the same
+# way. They need separate patterns, not one merged indentation class: the
+# workflow-level form sits in the file's preamble, before any job heading, so
+# it is checked once per file rather than by slicing per-job blocks.
 JOB_ENV_RUSTFLAGS = re.compile(r"^ {6}RUSTFLAGS:", re.MULTILINE)
+WORKFLOW_ENV_RUSTFLAGS = re.compile(r"^ {2}RUSTFLAGS:", re.MULTILINE)
 
 
 def validate_no_job_env_rustflags_with_setup_rust(
@@ -1170,9 +1178,11 @@ def validate_no_job_env_rustflags_with_setup_rust(
     on top of whatever earlier steps wrote to $GITHUB_ENV. So a job-level
     `RUSTFLAGS:` shadows the composite's export for the rest of the job and
     silently drops the mold linker flags — a slower build, never a red
-    check, which is exactly the drift class this action exists to remove.
-    Jobs pass their extra flags through the composite's `extra_rustflags`
-    input instead, so one place composes the final value.
+    check, which is exactly the drift class this action exists to remove. A
+    workflow-level top `env:` key shadows every job in the file identically,
+    so it is checked the same way. Jobs pass their extra flags through the
+    composite's `extra_rustflags` input instead, so one place composes the
+    final value.
     """
 
     errors: list[str] = []
@@ -1180,6 +1190,16 @@ def validate_no_job_env_rustflags_with_setup_rust(
         if SETUP_RUST_USES not in text:
             continue
         headings = list(JOB_HEADING.finditer(text))
+        preamble = text[: headings[0].start()] if headings else text
+        if WORKFLOW_ENV_RUSTFLAGS.search(preamble):
+            errors.append(
+                f"{path}: workflow-level env sets a RUSTFLAGS key while a "
+                "job in this file installs Rust through "
+                ".github/actions/setup-rust — a workflow-level env key "
+                "shadows the composite's $GITHUB_ENV write for every job in "
+                "the file identically to a job-level one; pass extra flags "
+                "as the composite's extra_rustflags input instead"
+            )
         for index, heading in enumerate(headings):
             start = heading.start()
             end = (

@@ -215,6 +215,38 @@ class JobEnvRustflagsShadowingTests(unittest.TestCase):
             ),
         )
 
+    def test_sibling_job_without_setup_rust_is_allowed_in_a_multi_job_file(self):
+        """The FILE-level skip (`SETUP_RUST_USES not in text`) is already
+        covered above by a single-job file. This is the PER-JOB skip branch
+        (`SETUP_RUST_USES not in block`): a sibling job's own RUSTFLAGS must
+        stay allowed even when another job in the SAME file uses the
+        composite."""
+        workflow = (
+            "  docs:\n"
+            "    env:\n"
+            '      RUSTFLAGS: "-Zcrate-attr=docs"\n'
+            "    steps:\n"
+            "      - run: echo hi\n"
+        ) + self.SETUP_RUST_JOB
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": workflow}
+            ),
+        )
+
+    def test_workflow_level_rustflags_alongside_setup_rust_fails(self):
+        """A workflow-level top `env:` block applies to every job in the
+        file identically to a job-level env key, but sits before any job
+        heading at two-space indentation — invisible to a check that only
+        slices text starting at each job heading and only matches six-space
+        indentation."""
+        workflow = 'env:\n  RUSTFLAGS: "-Zcrate-attr=x"\njobs:\n' + self.SETUP_RUST_JOB
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/x.yml": workflow}
+        )
+        self.assertTrue(any("workflow-level" in e for e in errors), errors)
+
     def test_live_workflows_are_clean(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)
         self.assertEqual(
