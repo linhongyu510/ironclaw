@@ -212,6 +212,17 @@ fn registered_bash_description_stays_permissive() {
     // The one output line the model needs to recover a truncated stream.
     assert!(description.contains("the last lines are kept"));
     assert!(description.contains("the exact line range shown"));
+
+    // Pipeline-side filtering is the cost-efficiency half of the permissive
+    // contract: the 60.5% baseline kept median shell output at 639 bytes by
+    // letting the model reduce data in the shell. Benchmark run 410dfedf showed
+    // fresh content per call double once raw reads grew, so the guidance to
+    // return conclusions instead of content is pinned alongside the permissions.
+    assert!(
+        description.contains("Prefer computing the answer in the pipeline"),
+        "bash description no longer steers toward pipeline-side filtering"
+    );
+    assert!(description.contains("return conclusions, not content"));
 }
 
 impl Fixture {
