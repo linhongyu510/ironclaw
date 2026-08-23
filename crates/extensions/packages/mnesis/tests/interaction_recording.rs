@@ -5,6 +5,10 @@ use ironclaw_memory::{
 use ironclaw_memory_mnesis::{MnesisLane, MnesisMemoryService, MockMnesisTransport};
 use serde_json::{Value, json};
 
+fn arguments(request: &ironclaw_memory_mnesis::MnesisRequest) -> &Value {
+    &request.body["params"]["arguments"]
+}
+
 fn invocation() -> MemoryInvocation {
     use ironclaw_host_api::ids::{
         AgentId, CorrelationId, InvocationId, ProjectId, TenantId, UserId,
@@ -91,7 +95,7 @@ async fn every_message_reaches_the_wire_with_its_role_intact() {
         .unwrap();
 
     let recorded = service.transport().recorded();
-    let sent = recorded[0].body["messages"].as_array().unwrap();
+    let sent = arguments(&recorded[0])["messages"].as_array().unwrap();
     assert_eq!(sent.len(), 3);
     assert_eq!(sent[0]["role"], "user");
     assert_eq!(sent[1]["role"], "assistant");
@@ -114,13 +118,13 @@ async fn the_write_carries_a_stable_operation_identity_and_the_turn_run() {
         .unwrap();
 
     let recorded = service.transport().recorded();
-    let first = recorded[0].body["operation_id"].as_str().unwrap();
-    let second = recorded[1].body["operation_id"].as_str().unwrap();
+    let first = arguments(&recorded[0])["operation_id"].as_str().unwrap();
+    let second = arguments(&recorded[1])["operation_id"].as_str().unwrap();
     assert_eq!(
         first, second,
         "one invocation must present one operation identity so a retry is idempotent"
     );
-    assert_eq!(recorded[0].body["turn_run_id"], "run-1");
+    assert_eq!(arguments(&recorded[0])["turn_run_id"], "run-1");
 }
 
 #[tokio::test]
@@ -137,7 +141,8 @@ async fn a_different_invocation_gets_a_different_operation_identity() {
 
     let recorded = service.transport().recorded();
     assert_ne!(
-        recorded[0].body["operation_id"], recorded[1].body["operation_id"],
+        arguments(&recorded[0])["operation_id"],
+        arguments(&recorded[1])["operation_id"],
         "two distinct turns must not collide onto one durable effect"
     );
 }
@@ -185,7 +190,9 @@ async fn scope_is_never_taken_from_the_recorded_payload() {
         .unwrap();
 
     let recorded = service.transport().recorded();
-    let body = recorded[0].body.as_object().unwrap();
+    let sent = arguments(&recorded[0])
+        .as_object()
+        .expect("the wire arguments must be an object");
     for forbidden in [
         "tenant_id",
         "user_id",
@@ -194,9 +201,9 @@ async fn scope_is_never_taken_from_the_recorded_payload() {
         "agent_id",
     ] {
         assert!(
-            !body.contains_key(forbidden),
+            !sent.contains_key(forbidden),
             "identity must ride attribution, never the body: {forbidden}"
         );
     }
-    assert_eq!(body.get("metadata"), None::<&Value>);
+    assert_eq!(sent.get("metadata"), None::<&Value>);
 }

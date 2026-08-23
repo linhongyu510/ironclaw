@@ -21,6 +21,19 @@ pub struct MnesisMemoryService<T: MnesisTransport> {
     transport: T,
 }
 
+/// Attribution changes per call; the session key must not.
+struct LaneIdentity {
+    attribution: String,
+    session_key: String,
+}
+
+fn split_identity(identity: Option<LaneIdentity>) -> (Option<String>, Option<String>) {
+    match identity {
+        Some(identity) => (Some(identity.attribution), Some(identity.session_key)),
+        None => (None, None),
+    }
+}
+
 impl<T: MnesisTransport> std::fmt::Debug for MnesisMemoryService<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -38,7 +51,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         &self.transport
     }
 
-    fn attribution_for(&self, invocation: &MemoryInvocation) -> Option<String> {
+    fn attribution_for(&self, invocation: &MemoryInvocation) -> Option<LaneIdentity> {
         self.attribution_with_thread(invocation, None)
     }
 
@@ -46,7 +59,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         &self,
         invocation: &MemoryInvocation,
         thread_id: Option<String>,
-    ) -> Option<String> {
+    ) -> Option<LaneIdentity> {
         let scope = &invocation.scope;
         let owner_scope = OwnerScope::narrowest(
             scope.tenant_id.as_str(),
@@ -57,12 +70,13 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                 thread_id,
             },
         );
+        let session_key = owner_scope.key().ok()?;
         let deadline_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
             .as_millis()
             .saturating_add(u128::from(ATTRIBUTION_DEADLINE_MS));
-        ProviderAttribution {
+        let attribution = ProviderAttribution {
             owner_scope,
             mission_id: scope.mission_id.as_ref().map(|id| id.as_str().to_string()),
             invocation_id: scope.invocation_id.to_string(),
@@ -70,7 +84,11 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             deadline_at_ms: i64::try_from(deadline_at_ms).ok()?,
         }
         .encode()
-        .ok()
+        .ok()?;
+        Some(LaneIdentity {
+            attribution,
+            session_key,
+        })
     }
 
     /// Backs `ironclaw.memory.search`.
@@ -140,16 +158,18 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
         operation: &'static str,
         query: &str,
         limit: usize,
-        attribution: Option<String>,
+        identity: Option<LaneIdentity>,
     ) -> Result<Vec<MnesisResult>, MemoryServiceError> {
         // The memory lane omits the key entirely rather than sending false, so
         // the wire shape stays exactly what the server already accepts.
-        let body = if lane.is_hybrid() {
+        let arguments = if lane.is_hybrid() {
             json!({ "query": query, "limit": limit, "hybrid": true })
         } else {
             json!({ "query": query, "limit": limit })
         };
+        let body = tool_call(operation, arguments);
 
+        let (attribution, session_key) = split_identity(identity);
         let response = self
             .transport
             .execute(MnesisRequest {
@@ -158,6 +178,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
                 body,
                 idempotent: true,
                 attribution,
+                session_key,
             })
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
@@ -172,16 +193,18 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
     async fn record_lane(
         &self,
         body: Value,
-        attribution: Option<String>,
+        identity: Option<LaneIdentity>,
     ) -> Result<(), MemoryServiceError> {
+        let (attribution, session_key) = split_identity(identity);
         let response = self
             .transport
             .execute(MnesisRequest {
                 lane: MnesisLane::Memory,
                 operation: "record_interaction",
-                body,
+                body: tool_call("record_interaction", body),
                 idempotent: true,
                 attribution,
+                session_key,
             })
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
@@ -465,7 +488,20 @@ fn decode_owner_scope(entry: &serde_json::Map<String, Value>) -> Option<ResultOw
     })
 }
 
+fn tool_call(name: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+}
+
 fn decode_results(body: &Value, limit: usize) -> Vec<MnesisResult> {
+    let body = body
+        .get("result")
+        .and_then(|result| result.get("structuredContent"))
+        .unwrap_or(body);
     let entries = match body {
         Value::Array(entries) => entries.as_slice(),
         Value::Object(map) => match map.get("results") {

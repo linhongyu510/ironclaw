@@ -163,15 +163,27 @@ impl MnesisTransport for SharedFake {
         request: MnesisRequest,
     ) -> Result<MnesisResponse, MnesisTransportError> {
         let owner_key = FakeMnesisServer::owner_key(request.attribution.as_deref());
+        assert_eq!(
+            request.body["method"], "tools/call",
+            "the provider must reach the lane as JSON-RPC, not a bare payload"
+        );
+        assert_eq!(
+            request.body["params"]["name"], request.operation,
+            "the tool named on the wire must be the operation the caller asked for"
+        );
+        let arguments = &request.body["params"]["arguments"];
         let body = match request.operation {
             "record_interaction" => {
-                self.0.store(owner_key, &request.body);
+                self.0.store(owner_key, arguments);
                 json!({ "recorded": true })
             }
-            "memory_search" | "knowledge_search" => self.0.search(&owner_key, &request.body),
+            "memory_search" | "knowledge_search" => self.0.search(&owner_key, arguments),
             other => panic!("fake Mnesis server: unexpected operation {other}"),
         };
-        Ok(MnesisResponse { status: 200, body })
+        Ok(MnesisResponse {
+            status: 200,
+            body: json!({ "result": { "structuredContent": body } }),
+        })
     }
 }
 

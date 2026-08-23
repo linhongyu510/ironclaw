@@ -310,6 +310,7 @@ async fn a_redirect_is_never_followed_and_the_credential_never_reaches_its_targe
             body: json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
             idempotent: false,
             attribution: None,
+            session_key: None,
         })
         .await
         .expect("a redirect is a response, not a transport failure");
@@ -323,6 +324,89 @@ async fn a_redirect_is_never_followed_and_the_credential_never_reaches_its_targe
         "the redirect must surface to the caller rather than being followed"
     );
     assert!(!response.is_success());
+}
+
+#[tokio::test]
+async fn a_read_completes_against_a_lane_that_requires_an_mcp_session() {
+    let port = session_required_origin();
+    let config = config_for(
+        &format!("http://127.0.0.1:{port}"),
+        EndpointProfile::LoopbackDevelopment,
+    );
+    let service = MnesisMemoryService::new(
+        build(&config, "lab-token").expect("the loopback endpoint builds"),
+    );
+
+    let snippets = service
+        .read_long_term(invocation(), request("mnesis", 4))
+        .await
+        .expect("a session-requiring lane must still serve a read");
+
+    assert_eq!(
+        snippets.len(),
+        1,
+        "the lane yielded no snippet, which is exactly how an unestablished MCP session \
+         presents to the caller: the server answers 'Server not initialized' and the \
+         failure degrades to an empty lane"
+    );
+}
+
+const SERVER_NOT_INITIALIZED: &str = r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: Server not initialized"},"id":null}"#;
+
+const JSON_RPC_PARSE_ERROR: &str = r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error: Invalid JSON-RPC message"},"id":null}"#;
+
+const TOOL_CALL_RESULT: &str = r#"{"result":{"content":[{"type":"text","text":"1 memory"}],"structuredContent":{"schemaVersion":1,"engine":"memory","results":[{"text":"a stored lab memory","relativePath":"memory/lab.md","score":1.0,"authorization":{"kind":"owner-scope","ownerScope":{"recordClass":"thread-private","tenantId":"tenant-mnesis","principalId":"user-mnesis"}}}]}},"jsonrpc":"2.0","id":1}"#;
+
+fn session_required_origin() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("the session origin binds");
+    let port = listener
+        .local_addr()
+        .expect("the session origin reports its address")
+        .port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let request = read_bounded(&mut stream);
+            let response = if request.contains("\"initialize\"") {
+                http_json(200, "{}", Some("session-1"))
+            } else if !request.to_ascii_lowercase().contains("mcp-session-id:") {
+                http_json(400, SERVER_NOT_INITIALIZED, None)
+            } else if request.contains("\"tools/call\"") {
+                http_sse(TOOL_CALL_RESULT)
+            } else {
+                http_json(400, JSON_RPC_PARSE_ERROR, None)
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    port
+}
+
+fn http_json(status: u16, body: &str, session: Option<&str>) -> String {
+    let reason = if status == 200 { "OK" } else { "Bad Request" };
+    let session_header = session
+        .map(|id| format!("Mcp-Session-Id: {id}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: application/json\r\n\
+         {session_header}\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn http_sse(payload: &str) -> String {
+    let body = format!("event: message\ndata: {payload}\n\n");
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 fn redirect_target() -> (u16, std::sync::mpsc::Receiver<String>) {
@@ -392,6 +476,7 @@ async fn live_canary_reaches_both_published_lanes() {
     )
     .expect("the canary endpoint must pass validation");
 
+    let (attribution, session_key) = canary_identity();
     for (lane, operation) in [
         (MnesisLane::Knowledge, "knowledge_search"),
         (MnesisLane::Memory, "memory_search"),
@@ -403,47 +488,51 @@ async fn live_canary_reaches_both_published_lanes() {
                 body: json!({
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "method": "initialize",
+                    "method": "tools/call",
                     "params": {
-                        "capabilities": {},
-                        "clientInfo": {"name": "mnesis-live-canary", "version": "1.0.0"},
-                        "protocolVersion": "2025-06-18"
+                        "name": operation,
+                        "arguments": {"query": "mnesis integration canary", "limit": 1}
                     }
                 }),
                 idempotent: true,
-                attribution: Some(canary_attribution()),
+                attribution: Some(attribution.clone()),
+                session_key: Some(session_key.clone()),
             })
             .await
             .unwrap_or_else(|error| panic!("{operation} transport failed: {error}"));
         println!("  {operation}: status {}", response.status);
         assert!(
-            response.status != 401 && response.status != 403,
-            "{operation} was denied: check the bearer credential"
+            response.is_success(),
+            "{operation} did not complete: status {}",
+            response.status
         );
     }
 }
 
-fn canary_attribution() -> String {
+fn canary_identity() -> (String, String) {
     use ironclaw_memory_mnesis::{OwnerScope, ProviderAttribution};
     let deadline_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a clock after the epoch")
         .as_millis() as i64
         + 30_000;
-    ProviderAttribution {
-        owner_scope: OwnerScope::narrowest(
-            std::env::var("MNESIS_CANARY_TENANT").unwrap_or_else(|_| "ironclaw-lab".to_string()),
-            std::env::var("MNESIS_CANARY_PRINCIPAL")
-                .unwrap_or_else(|_| "ironclaw-integration-reader".to_string()),
-            OwnerAxes::default(),
-        ),
+    let owner_scope = OwnerScope::narrowest(
+        std::env::var("MNESIS_CANARY_TENANT").unwrap_or_else(|_| "ironclaw-lab".to_string()),
+        std::env::var("MNESIS_CANARY_PRINCIPAL")
+            .unwrap_or_else(|_| "ironclaw-integration-reader".to_string()),
+        OwnerAxes::default(),
+    );
+    let session_key = owner_scope.key().expect("the canary owner scope keys");
+    let attribution = ProviderAttribution {
+        owner_scope,
         mission_id: None,
         invocation_id: "11111111-2222-4333-8444-555555555555".to_string(),
         correlation_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),
         deadline_at_ms,
     }
     .encode()
-    .expect("the canary attribution encodes")
+    .expect("the canary attribution encodes");
+    (attribution, session_key)
 }
 
 fn invocation() -> ironclaw_memory::MemoryInvocation {
@@ -524,6 +613,7 @@ async fn a_stalled_lane_ends_on_the_client_deadline_rather_than_pinning_the_run(
             body: json!({"query": "anything", "limit": 4}),
             idempotent: false,
             attribution: None,
+            session_key: None,
         })
         .await
         .expect_err("a stalled response must not resolve as success");
@@ -576,6 +666,7 @@ async fn tls_is_required_and_never_degrades_to_cleartext() {
             body: json!({"query": "anything", "limit": 4}),
             idempotent: false,
             attribution: None,
+            session_key: None,
         })
         .await
         .expect_err("a server that cannot complete a TLS handshake must not be talked to");

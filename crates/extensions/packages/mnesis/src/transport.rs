@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::attribution::PROVIDER_ATTRIBUTION_HEADER;
@@ -9,7 +9,7 @@ use crate::config::{MnesisConfig, MnesisLimits};
 use crate::error::MnesisError;
 use crate::url_check::{EndpointProfile, check_endpoint};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MnesisLane {
     Knowledge,
     Memory,
@@ -30,6 +30,9 @@ pub struct MnesisRequest {
     pub body: Value,
     pub idempotent: bool,
     pub attribution: Option<String>,
+    /// Owner scope alone. Per-request identity here would open a session the
+    /// next call cannot reuse.
+    pub session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +112,11 @@ impl MnesisTransport for Arc<dyn MnesisTransport> {
     }
 }
 
+const MCP_SESSION_HEADER: &str = "Mcp-Session-Id";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+const MAX_TRACKED_SESSIONS: usize = 64;
+
 pub struct MnesisHttpTransport {
     client: reqwest::Client,
     knowledge_endpoint: String,
@@ -116,6 +124,9 @@ pub struct MnesisHttpTransport {
     knowledge_authorization: reqwest::header::HeaderValue,
     memory_authorization: reqwest::header::HeaderValue,
     limits: MnesisLimits,
+    sessions: std::sync::Mutex<
+        std::collections::HashMap<(MnesisLane, String), reqwest::header::HeaderValue>,
+    >,
 }
 
 impl std::fmt::Debug for MnesisHttpTransport {
@@ -173,7 +184,102 @@ impl MnesisHttpTransport {
             knowledge_authorization,
             memory_authorization,
             limits: config.limits.clone(),
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    fn cached_session(&self, lane: MnesisLane, key: &str) -> Option<reqwest::header::HeaderValue> {
+        match self.sessions.lock() {
+            Ok(sessions) => sessions.get(&(lane, key.to_string())).cloned(),
+            Err(_) => None,
+        }
+    }
+
+    fn remember_session(&self, lane: MnesisLane, key: &str, session: reqwest::header::HeaderValue) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        let entry = (lane, key.to_string());
+        if sessions.len() >= MAX_TRACKED_SESSIONS && !sessions.contains_key(&entry) {
+            sessions.clear();
+        }
+        sessions.insert(entry, session);
+    }
+
+    fn forget_session(&self, lane: MnesisLane, key: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(&(lane, key.to_string()));
+        }
+    }
+
+    async fn open_session(
+        &self,
+        lane: MnesisLane,
+        attribution: Option<&str>,
+    ) -> Result<reqwest::header::HeaderValue, MnesisTransportError> {
+        let mut builder = self.client.post(self.endpoint(lane)).header(
+            reqwest::header::AUTHORIZATION,
+            self.authorization(lane).clone(),
+        );
+        if let Some(attribution) = attribution {
+            builder = builder.header(PROVIDER_ATTRIBUTION_HEADER, attribution);
+        }
+        let response = builder
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "capabilities": {},
+                    "clientInfo": {"name": "ironclaw-mnesis", "version": "1"},
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                },
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                let retryable = error.is_timeout() || error.is_connect() || error.is_request();
+                MnesisTransportError::with_source(
+                    "the Mnesis session handshake failed",
+                    retryable,
+                    error,
+                )
+            })?;
+
+        let status = response.status().as_u16();
+        let session = response
+            .headers()
+            .get(MCP_SESSION_HEADER)
+            .cloned()
+            .ok_or_else(|| {
+                MnesisTransportError::new(
+                    "the Mnesis lane accepted initialize without issuing a session",
+                )
+            });
+        let _ = self.bounded_body(response, "initialize").await?;
+
+        if !(200..300).contains(&status) {
+            return Err(if (500..600).contains(&status) {
+                MnesisTransportError::retryable("the Mnesis lane refused the session handshake")
+            } else {
+                MnesisTransportError::new("the Mnesis lane refused the session handshake")
+            });
+        }
+        session
+    }
+
+    async fn session_for(
+        &self,
+        lane: MnesisLane,
+        key: &str,
+        attribution: Option<&str>,
+    ) -> Result<reqwest::header::HeaderValue, MnesisTransportError> {
+        if let Some(session) = self.cached_session(lane, key) {
+            return Ok(session);
+        }
+        let session = self.open_session(lane, attribution).await?;
+        self.remember_session(lane, key, session.clone());
+        Ok(session)
     }
 
     fn endpoint(&self, lane: MnesisLane) -> &str {
@@ -254,6 +360,19 @@ impl MnesisHttpTransport {
     }
 }
 
+fn session_was_rejected(status: u16, body: &Value) -> bool {
+    if status == 404 {
+        return true;
+    }
+    if status != 400 {
+        return false;
+    }
+    body.get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.contains("not initialized"))
+}
+
 fn authorization_header(bearer: &str) -> Result<reqwest::header::HeaderValue, MnesisError> {
     let mut value =
         reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer}")).map_err(|error| {
@@ -304,6 +423,15 @@ impl MnesisTransport for MnesisHttpTransport {
             1
         };
 
+        let mut session = match request.session_key.as_deref() {
+            Some(key) => Some(
+                self.session_for(request.lane, key, request.attribution.as_deref())
+                    .await?,
+            ),
+            None => None,
+        };
+        let mut rehandshaked = false;
+
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -313,6 +441,9 @@ impl MnesisTransport for MnesisHttpTransport {
             );
             if let Some(attribution) = &request.attribution {
                 builder = builder.header(PROVIDER_ATTRIBUTION_HEADER, attribution);
+            }
+            if let Some(session) = &session {
+                builder = builder.header(MCP_SESSION_HEADER, session.clone());
             }
             let outcome = builder.json(&request.body).send().await.map_err(|error| {
                 let retryable = error.is_timeout() || error.is_connect() || error.is_request();
@@ -329,6 +460,18 @@ impl MnesisTransport for MnesisHttpTransport {
                         operation = request.operation,
                         "Mnesis response"
                     );
+                    if let Some(key) = request.session_key.as_deref()
+                        && !rehandshaked
+                        && session_was_rejected(status, &body)
+                    {
+                        rehandshaked = true;
+                        self.forget_session(request.lane, key);
+                        session = Some(
+                            self.session_for(request.lane, key, request.attribution.as_deref())
+                                .await?,
+                        );
+                        continue;
+                    }
                     return Ok(MnesisResponse { status, body });
                 }
                 Err(error) => error,
@@ -532,6 +675,7 @@ mod tests {
                 body: Value::Null,
                 idempotent: true,
                 attribution: None,
+                session_key: None,
             })
             .await
             .unwrap();
@@ -544,6 +688,7 @@ mod tests {
                 body: Value::Null,
                 idempotent: false,
                 attribution: None,
+                session_key: None,
             })
             .await
             .unwrap();
