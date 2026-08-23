@@ -428,11 +428,16 @@ jobs:
                   timeout --signal=INT --kill-after=30s 28m
                   "${incremental_env[@]}" cargo nextest run --profile ci
                   -p "${package}" "--${kind}" "${name}"
-                  "${target_feature_args[@]}" --all-targets --ignore-rust-version)
+                  "${target_feature_args[@]}" --ignore-rust-version)
                 printf -v REPRO '%q ' "${cmd[@]}"
                 echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-                "${cmd[@]}"
+                # Capture the status so the report of a FAILING run still gets
+                # staged: under `bash -e` the step would otherwise abort here
+                # and lose exactly the JUnit file worth reading.
+                status=0
+                "${cmd[@]}" || status=$?
                 cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
+                [ "${status}" -eq 0 ] || exit "${status}"
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
@@ -445,8 +450,10 @@ jobs:
                 --all-targets --ignore-rust-version)
               printf -v REPRO '%q ' "${cmd[@]}"
               echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
-              "${cmd[@]}"
+              status=0
+              "${cmd[@]}" || status=$?
               cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-bulk.xml" 2>/dev/null || true
+              [ "${status}" -eq 0 ] || exit "${status}"
             fi
             echo "::endgroup::"
           fi
@@ -602,12 +609,24 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Every lane's nextest writes the same `target/nextest/ci/junit.xml`.
+      # The roll-up downloads `reborn-junit-*` with `merge-multiple: true`,
+      # which flattens them into one directory -- identical inner filenames
+      # would silently overwrite each other and lose whole partitions. Stage
+      # under a partition-unique name first.
+      - name: Stage JUnit report
+        if: always()
+        run: |
+          mkdir -p junit-reports
+          cp target/nextest/ci/junit.xml \
+            "junit-reports/root-${{ matrix.partition }}.xml" 2>/dev/null || true
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-junit-root-${{ matrix.partition }}
-          path: target/nextest/ci/junit.xml
+          path: junit-reports/
           if-no-files-found: ignore
 
   reborn-group-tests:
@@ -936,14 +955,22 @@ jobs:
           name: reborn-integration-cov-part-${{ matrix.lane }}
           path: part-${{ matrix.lane }}.lcov
 
+      # Same collision as the root partitions above: stage under a
+      # lane-unique name before the merge-multiple download flattens them.
+      - name: Stage JUnit report
+        if: always()
+        run: |
+          mkdir -p junit-reports
+          cp target/nextest/ci/junit.xml \
+            "junit-reports/lane-${{ matrix.lane }}.xml" 2>/dev/null || true
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-junit-lane-${{ matrix.lane }}
-          path: target/nextest/ci/junit.xml
+          path: junit-reports/
           if-no-files-found: ignore
-          if-no-files-found: error
 
   coverage-report:
     name: Reborn integration-tier coverage report

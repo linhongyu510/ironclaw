@@ -11,6 +11,7 @@ from pathlib import Path
 
 import ws12_workflow_contracts
 from ws12_workflow_contracts import (
+    validate_no_duplicate_yaml_keys,
     validate_no_eval_in_workflow_run_blocks,
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
@@ -2125,6 +2126,57 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("fixed sequential loop" in error for error in errors), errors)
 
+
+
+
+class NoDuplicateYamlKeysTests(unittest.TestCase):
+    """A duplicated mapping key silently discards the intended value.
+
+    PyYAML's safe_load keeps the LAST duplicate, so a local
+    `yaml.safe_load` sanity check passes while the author's value is
+    dropped. That is how a JUnit upload ended up pinned to
+    `if-no-files-found: error`, which would have hard-failed every
+    coverage lane (they legitimately produce no junit.xml).
+    """
+
+    def _workflows_dir(self, root):
+        directory = root / ".github" / "workflows"
+        directory.mkdir(parents=True)
+        return directory
+
+    def test_duplicate_key_is_reported_with_file_and_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._workflows_dir(root)
+            (directory / "dupe.yml").write_text(
+                "jobs:\n"
+                "  build:\n"
+                "    with:\n"
+                "      if-no-files-found: ignore\n"
+                "      if-no-files-found: error\n",
+                encoding="utf-8",
+            )
+            errors = validate_no_duplicate_yaml_keys(root)
+            self.assertTrue(
+                any("if-no-files-found" in e and "dupe.yml" in e for e in errors),
+                errors,
+            )
+
+    def test_clean_workflow_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._workflows_dir(root)
+            (directory / "ok.yml").write_text(
+                "jobs:\n"
+                "  build:\n"
+                "    with:\n"
+                "      if-no-files-found: ignore\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], validate_no_duplicate_yaml_keys(root))
+
+    def test_live_workflows_have_no_duplicate_keys(self):
+        self.assertEqual([], validate_no_duplicate_yaml_keys(ROOT))
 
 
 class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):

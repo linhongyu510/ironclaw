@@ -37,6 +37,16 @@ def _first_line(text: str | None) -> str:
 
 
 def parse_junit(path: str) -> list[FailedTest]:
+    # Refuse a DTD outright instead of parsing it. JUnit XML has no
+    # legitimate use for one, and expat expands INTERNAL entities, so a
+    # billion-laughs payload would hang this step. The file is CI-produced
+    # but its content (test names, failure messages) comes from the branch
+    # under test, so it is not trusted input. Dependency-free on purpose:
+    # defusedxml is not a dependency of this repo.
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        head = handle.read(4096)
+    if "<!DOCTYPE" in head or "<!ENTITY" in head:
+        raise SystemExit(f"{path}: refusing JUnit XML containing a DTD")
     tree = ET.parse(path)
     root = tree.getroot()
     testsuites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))

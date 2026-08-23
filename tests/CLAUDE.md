@@ -63,7 +63,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **59** group scenarios · **62** flat integration bins (55 in
-`tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+`tests/integration/`, 7 in `tests/integration/auth/`) · **40** top-level Rust bins ·
 **102** Python scenario files (**870** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
@@ -303,7 +303,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (39)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (40)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -350,7 +350,7 @@ manual-run and scheduled-run denial evidence),
 **Policy & format**: `e2e_trace_runtime_policy_org_ceiling_yolo.rs` (org policy
 ceiling × yolo narrowing), `e2e_trace_runtime_policy_serde.rs` (wire-stable policy
 enums), `trace_format.rs`, `trace_llm_tests.rs`,
-`reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom).
+`reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom), `hermetic_network_guard_probe.rs` (the hermetic wrapper's network guard must survive nextest's own process spawning, not just a directly-launched binary; `#[ignore]`d — driven by scripts/ci/test-hermetic-test-process.sh under IRONCLAW_HERMETIC_NEXTEST_CONTROL=1).
 
 ---
 

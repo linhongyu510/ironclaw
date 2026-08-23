@@ -1781,6 +1781,52 @@ def validate_no_eval_in_workflow_run_blocks(
     return errors
 
 
+def validate_no_duplicate_yaml_keys(root: Path = ROOT) -> list[str]:
+    """No workflow may declare the same mapping key twice.
+
+    PyYAML's safe_load silently keeps the LAST duplicate, so a local
+    `yaml.safe_load` sanity check passes while the value the author
+    intended is discarded -- and GitHub's own parser is stricter. That is
+    exactly the green-locally/red-in-CI class this repo keeps paying for:
+    a duplicated `if-no-files-found` on a JUnit upload pinned the step to
+    `error`, so coverage lanes (which legitimately produce no junit.xml)
+    would have hard-failed.
+    """
+
+    import yaml
+
+    class _NoDuplicates(yaml.SafeLoader):
+        pass
+
+    errors: list[str] = []
+
+    def _mapping(loader, node, deep=False):
+        seen: dict = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ValueError(
+                    f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
+                )
+            seen[key] = loader.construct_object(value_node, deep=deep)
+        return seen
+
+    _NoDuplicates.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping
+    )
+
+    for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
+        try:
+            yaml.load(path.read_text(encoding="utf-8"), _NoDuplicates)
+        except ValueError as error:
+            rel = path.relative_to(root).as_posix()
+            errors.append(f"{rel}: {error}")
+        except yaml.YAMLError as error:
+            rel = path.relative_to(root).as_posix()
+            errors.append(f"{rel}: could not parse: {error}")
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -1811,6 +1857,7 @@ def validate_workflow_texts(
     errors.extend(validate_crate_scope_filters(workflows, root))
     errors.extend(validate_crate_name_residue(workflows, root))
     errors.extend(validate_webui_frontend_sites(workflows, root))
+    errors.extend(validate_no_duplicate_yaml_keys(root))
     errors.extend(validate_no_eval_in_workflow_run_blocks(workflows))
     try:
         sccache_action = (root / SCCACHE_SETUP_ACTION).read_text(encoding="utf-8")
