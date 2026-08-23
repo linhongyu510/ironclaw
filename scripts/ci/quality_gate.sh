@@ -6,14 +6,19 @@
 # function exits the script with no REPRO line at all.
 set -Eeuo pipefail
 
+# LAST_REPRO: set by a wrapper function (run_cargo_ci) right before it
+# returns non-zero, to its own real argv. BASH_COMMAND at trap time would
+# otherwise read "run_cargo_ci cargo clippy ..." — a function name that does
+# not exist outside this script and so is not paste-able as a repro command.
+LAST_REPRO=""
+
 report_repro() {
     local status=$?
     trap - ERR
-    echo "REPRO: ${BASH_COMMAND}" >&2
-    if [[ "${BASH_COMMAND}" == run_cargo_ci* ]]; then
-        echo "       (run_cargo_ci wraps this with quality_gate.sh's own scrubbed env:" >&2
-        echo "        NEARAI_*/IRONCLAW_LLM_*/LLM_BACKEND unset, IRONCLAW_DISABLE_OS_KEYCHAIN=1," >&2
-        echo "        CARGO_INCREMENTAL=0, CARGO_PROFILE_TEST_DEBUG=0, RUST_MIN_STACK=67108864)" >&2
+    if [ -n "${LAST_REPRO}" ]; then
+        echo "REPRO: ${LAST_REPRO}" >&2
+    else
+        echo "REPRO: ${BASH_COMMAND}" >&2
     fi
     exit "${status}"
 }
@@ -25,9 +30,22 @@ cargo fmt --all -- --check
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/run-cargo-ci-env.sh"
 
 # Delegates to the canonical scrub in scripts/ci/lib/run-cargo-ci-env.sh; the
-# function NAME is kept so nothing else in this script has to change.
+# function NAME is kept so nothing else in this script has to change. On
+# failure, records its own real argv into LAST_REPRO (see comment above) —
+# `printf '%q '` makes it exactly what report_repro should print, not what
+# BASH_COMMAND would (the wrapper's name).
 run_cargo_ci() {
-    run_cargo_ci_env "$@"
+    LAST_REPRO=""
+    local status=0
+    # `cmd || status=$?`, not `if cmd; then ... fi; status=$?`: an `if` with
+    # no `else` branch that took the false path resets $? to 0 at `fi`
+    # regardless of the condition's real exit status — verified live — so a
+    # post-if `$?` read would silently always capture 0 here.
+    run_cargo_ci_env "$@" || status=$?
+    if [ "${status}" -ne 0 ]; then
+        LAST_REPRO="$(printf '%q ' "$@")"
+    fi
+    return "${status}"
 }
 
 echo "==> clippy (CI parity: all features, all warnings)"

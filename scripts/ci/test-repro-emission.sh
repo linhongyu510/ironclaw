@@ -55,6 +55,32 @@ set -e
 grep -qF "REPRO: bash scripts/ci/run-hermetic-deterministic-suite.sh rust-e2e architecture-boundaries" \
     <<<"$output" || fail "run-hermetic-deterministic-suite.sh must print the exact stage + args as REPRO"
 
+# 3. quality_gate.sh: a failure INSIDE the run_cargo_ci wrapper function must
+#    print the wrapper's own real argv as REPRO ("cargo clippy ..."), not
+#    "run_cargo_ci cargo clippy ..." — run_cargo_ci is a function name that
+#    does not exist outside this script, so BASH_COMMAND alone is not
+#    paste-able. This is also exactly the case a regressed `set -E` would
+#    break: without errtrace the ERR trap would not fire from inside
+#    run_cargo_ci at all, and the script would exit with no REPRO line.
+sandbox="$(make_sandbox)"
+cat >"$sandbox/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "fmt" ]; then exit 0; fi
+if [ "$1" = "clippy" ]; then exit 1; fi
+exit 0
+STUB
+chmod +x "$sandbox/bin/cargo"
+set +e
+output="$(cd "$sandbox" && env PATH="$sandbox/bin:/usr/bin:/bin" \
+    bash scripts/ci/quality_gate.sh 2>&1)"
+status=$?
+set -e
+[ "$status" -ne 0 ] || fail "quality_gate.sh must fail when clippy fails"
+grep -qF "REPRO: cargo clippy --locked --all --tests --examples --all-features -- -D warnings" <<<"$output" \
+    || fail "a failure inside run_cargo_ci must print its own real argv as REPRO"
+grep -qF "REPRO: run_cargo_ci" <<<"$output" \
+    && fail "REPRO must never print the internal wrapper function name (not runnable outside the script)"
+
 if [ "$failures" -gt 0 ]; then
     echo "test-repro-emission: $failures assertion(s) failed" >&2
     exit 1

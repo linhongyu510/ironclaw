@@ -52,6 +52,14 @@ done
 
 failures=()
 
+# LAST_REPRO: a wrapper function that is not itself paste-able outside this
+# script (its NAME does not exist in a fresh shell) sets this to its own real,
+# `printf '%q '`-escaped invocation right before returning non-zero. run_gate
+# prefers it when present and falls back to printing "$@" verbatim, which is
+# already paste-able for the plain gate commands that don't go through a
+# wrapper.
+LAST_REPRO=""
+
 run_gate() {
     local label="$1"
     shift
@@ -60,12 +68,18 @@ run_gate() {
     else
         echo "==> ${label}"
     fi
+    LAST_REPRO=""
     if ! "$@"; then
         failures+=("${label}")
         echo "    FAILED: ${label}"
-        # REPRO invariant (Global Constraints): this is literally "$@", the
-        # array run_gate was handed — it cannot drift from what actually ran.
-        echo "    REPRO: $(printf '%q ' "$@")"
+        if [ -n "${LAST_REPRO}" ]; then
+            echo "    REPRO: ${LAST_REPRO}"
+        else
+            # REPRO invariant (Global Constraints): this is literally "$@",
+            # the array run_gate was handed — it cannot drift from what
+            # actually ran.
+            echo "    REPRO: $(printf '%q ' "$@")"
+        fi
         if [ "${ci_mode}" -eq 1 ]; then
             echo "::error title=preflight gate failed::${label}"
         fi
@@ -80,12 +94,27 @@ source "${REPO_ROOT}/scripts/ci/lib/run-cargo-ci-env.sh"
 # Delegates to the canonical scrub in scripts/ci/lib/run-cargo-ci-env.sh — the
 # extraction the old comment here promised once a third caller showed up
 # (.githooks/pre-push's changed-package clippy is that caller). The function
-# NAME is kept so nothing else in this script has to change.
+# NAME is kept so nothing else in this script has to change. On failure,
+# records its own real argv into LAST_REPRO — run_gate's default REPRO would
+# otherwise print "run_cargo_ci_scrubbed cargo clippy ...", and that function
+# name does not exist outside this script.
 run_cargo_ci_scrubbed() {
-    run_cargo_ci_env "$@"
+    LAST_REPRO=""
+    local status=0
+    # `cmd || status=$?`, not `if cmd; then ... fi; status=$?`: an `if` with
+    # no `else` branch that took the false path resets $? to 0 at `fi`
+    # regardless of the condition's real exit status — verified live — so a
+    # post-if `$?` read would silently always capture 0 here.
+    run_cargo_ci_env "$@" || status=$?
+    if [ "${status}" -ne 0 ]; then
+        LAST_REPRO="$(printf '%q ' "$@")"
+    fi
+    return "${status}"
 }
 
 queue_plan_listing() {
+    local -a underlying_cmd=(python3 scripts/ci/reborn_pr_test_plan.py --event merge_group)
+    LAST_REPRO=""
     python3 - <<'PY'
 import json
 import subprocess
@@ -108,6 +137,14 @@ print(f"  integration lanes: {plan['integration_lanes']}")
 for key in ("run_group_tests", "run_qa_replay", "run_sandbox_docker"):
     print(f"  {key}: {plan[key]}")
 PY
+    local status=$?
+    if [ "${status}" -ne 0 ]; then
+        # queue_plan_listing is a shell function with no standalone
+        # equivalent — print the real underlying command it runs (the
+        # planner subprocess this heredoc calls), not the function name.
+        LAST_REPRO="$(printf '%q ' "${underlying_cmd[@]}")"
+    fi
+    return "${status}"
 }
 
 if [ "${queue_shape}" -eq 1 ]; then

@@ -26,11 +26,35 @@ make_sandbox() {
             chmod +x "$stub"
         done
         for stub in scripts/check_no_panics.py scripts/ci/check-target-tree.py \
-                    scripts/ci/check-guidance.py scripts/ci/docs_publication_boundary.py \
-                    scripts/ci/reborn_pr_test_plan.py; do
+                    scripts/ci/check-guidance.py scripts/ci/docs_publication_boundary.py; do
             mkdir -p "$(dirname "$stub")"
-            printf 'import os,sys\nopen(os.environ["PREFLIGHT_TEST_LOG"],"a").write("ran %%s %%s\\n" %% (os.path.basename(sys.argv[0]), " ".join(sys.argv[1:])))\nif os.path.basename(sys.argv[0]) == "reborn_pr_test_plan.py":\n    print("{\\"crate_buckets\\":[{\\"name\\":\\"reborn-core\\",\\"packages\\":[\\"a\\"]}],\\"root_partitions\\":[0,1,2,3],\\"integration_lanes\\":[0,1,2,3,\\"groups\\"],\\"run_group_tests\\":true,\\"run_qa_replay\\":true,\\"run_sandbox_docker\\":true}")\n' >"$stub"
+            printf 'import os,sys\nopen(os.environ["PREFLIGHT_TEST_LOG"],"a").write("ran %%s %%s\\n" %% (os.path.basename(sys.argv[0]), " ".join(sys.argv[1:])))\n' >"$stub"
         done
+        # The planner stub honors PREFLIGHT_PLANNER_FAIL_MODE so the
+        # queue_plan_listing planner-failure branch (preflight-gates.sh's
+        # `if result.returncode != 0` and its bad-JSON path) is exercisable —
+        # "nonzero" simulates the subprocess itself failing, "badjson" makes
+        # it succeed with output json.loads() cannot parse.
+        cat >scripts/ci/reborn_pr_test_plan.py <<'PY'
+import os
+import sys
+
+open(os.environ["PREFLIGHT_TEST_LOG"], "a").write(
+    "ran %s %s\n" % (os.path.basename(sys.argv[0]), " ".join(sys.argv[1:]))
+)
+mode = os.environ.get("PREFLIGHT_PLANNER_FAIL_MODE", "")
+if mode == "nonzero":
+    sys.stderr.write("planner stub: simulated failure\n")
+    sys.exit(1)
+if mode == "badjson":
+    print("{not valid json")
+    sys.exit(0)
+print(
+    '{"crate_buckets":[{"name":"reborn-core","packages":["a"]}],'
+    '"root_partitions":[0,1,2,3],"integration_lanes":[0,1,2,3,"groups"],'
+    '"run_group_tests":true,"run_qa_replay":true,"run_sandbox_docker":true}'
+)
+PY
         # Stub cargo: logs argv; exits per PREFLIGHT_FAIL_MATCH.
         cat >bin/cargo <<'STUB'
 #!/usr/bin/env bash
@@ -142,12 +166,44 @@ expect "planner full-plan listing invoked" "$log" \
 expect "bucket list rendered" "$output" "reborn-core"
 expect_absent "queue-shape skips default gates" "$log" "cargo fmt --all -- --check"
 
-# 6. --queue-shape collects all three clippy failures in one lap.
+# 6. --queue-shape collects all three clippy failures in one lap, and each
+#    REPRO is the real, paste-able cargo invocation — not the internal
+#    run_cargo_ci_scrubbed wrapper name, which does not exist outside this
+#    script (finding 4).
 sandbox="$(make_sandbox)"
 extra_env=(PREFLIGHT_FAIL_MATCH="clippy")
 run_preflight "$sandbox" --queue-shape
 [ "$status" -eq 1 ] || { echo "FAIL: --queue-shape with failing clippy exited $status" >&2; failures=$((failures+1)); }
 expect "all three shapes reported" "$output" "3 gate(s) FAILED"
+expect "queue-shape clippy REPRO is the real cargo invocation" "$output" \
+    "REPRO: cargo clippy --locked --all --tests --examples --all-features -- -D warnings"
+expect_absent "queue-shape REPRO never prints the wrapper function name" "$output" \
+    "REPRO: run_cargo_ci_scrubbed"
+
+# 7. --queue-shape: the planner returning a non-zero exit status must fail
+#    the "planner full-plan listing" gate (preflight-gates.sh's own
+#    `if result.returncode != 0` branch, previously never exercised — the
+#    stub always emitted valid JSON), and its REPRO must be the real
+#    underlying python3 invocation, not the queue_plan_listing function name
+#    (which has no standalone equivalent).
+sandbox="$(make_sandbox)"
+extra_env=(PREFLIGHT_PLANNER_FAIL_MODE=nonzero)
+run_preflight "$sandbox" --queue-shape
+[ "$status" -eq 1 ] || { echo "FAIL: --queue-shape with a nonzero-exit planner exited $status" >&2; failures=$((failures+1)); }
+expect "planner nonzero-exit failure reported" "$output" "1 gate(s) FAILED"
+expect "planner nonzero-exit REPRO is the real python3 invocation" "$output" \
+    "REPRO: python3 scripts/ci/reborn_pr_test_plan.py --event merge_group"
+expect_absent "planner REPRO never prints the queue_plan_listing function name" "$output" \
+    "REPRO: queue_plan_listing"
+
+# 8. --queue-shape: the planner succeeding but emitting unparseable JSON is a
+#    distinct uncovered path from the explicit returncode!=0 branch — must
+#    also fail the gate.
+sandbox="$(make_sandbox)"
+extra_env=(PREFLIGHT_PLANNER_FAIL_MODE=badjson)
+run_preflight "$sandbox" --queue-shape
+[ "$status" -eq 1 ] || { echo "FAIL: --queue-shape with bad planner JSON exited $status" >&2; failures=$((failures+1)); }
+expect "bad-JSON planner failure reported" "$output" "1 gate(s) FAILED"
 
 if [ "$failures" -gt 0 ]; then
     echo "test-preflight-gates: $failures assertion(s) failed" >&2
