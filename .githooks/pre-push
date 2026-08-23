@@ -62,15 +62,38 @@ if [ "${IRONCLAW_PREPUSH_FULL:-0}" != "1" ]; then
         echo "==> pre-push default tier: changed-package clippy (the PR-lane shape; skip with IRONCLAW_PREPUSH_CHANGED_CLIPPY=0)"
         remote_name="${1:-origin}"
         base_branch="${IRONCLAW_PREPUSH_BASE_BRANCH:-main}"
-        merge_base_for_clippy="$(git merge-base HEAD "refs/remotes/${remote_name}/${base_branch}")"
+        base_ref_for_clippy="refs/remotes/${remote_name}/${base_branch}"
+        # Self-sufficient regardless of IRONCLAW_PREPUSH_MERGE_CHECK: that
+        # step's fetch is what normally populates this remote-tracking ref,
+        # but when it is skipped (=0) nothing else does — fetch it here too,
+        # rather than assuming an earlier step already ran.
+        if ! git rev-parse --verify --quiet "${base_ref_for_clippy}^{commit}" >/dev/null; then
+            git fetch --quiet "$remote_name" "+refs/heads/${base_branch}:${base_ref_for_clippy}"
+        fi
+        merge_base_for_clippy="$(git merge-base HEAD "${base_ref_for_clippy}")"
         changed_file_list="$(mktemp)"
         git diff --name-only "${merge_base_for_clippy}...HEAD" >"${changed_file_list}"
+        # Captured to a temp file with an explicit exit-status check, not a
+        # process substitution: `done < <(cmd1 | cmd2)` runs cmd1|cmd2 in a
+        # backgrounded subshell whose exit status the `while` loop never
+        # observes, so a failing discovery command under `set -euo pipefail`
+        # silently degrades to an empty stream ("no changed workspace
+        # packages") instead of failing the hook.
+        changed_packages_list="$(mktemp)"
+        if ! python3 "$SCRIPT_DIR/changed_workspace_packages.py" \
+            --changed-files "${changed_file_list}" \
+            | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))' \
+            >"${changed_packages_list}"; then
+            rm -f "${changed_file_list}" "${changed_packages_list}"
+            echo "ERROR: failed to discover changed workspace packages" >&2
+            exit 1
+        fi
+        rm -f "${changed_file_list}"
         changed_packages=()
         while IFS= read -r pkg; do
             [ -n "$pkg" ] && changed_packages+=("$pkg")
-        done < <(python3 "$SCRIPT_DIR/changed_workspace_packages.py" \
-            --changed-files "${changed_file_list}" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))')
-        rm -f "${changed_file_list}"
+        done <"${changed_packages_list}"
+        rm -f "${changed_packages_list}"
         if [ "${#changed_packages[@]}" -gt 0 ]; then
             package_args=()
             for pkg in "${changed_packages[@]}"; do

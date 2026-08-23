@@ -84,6 +84,33 @@ grep -q "^ran cargo clippy -p a -- -D warnings$" "$repo/log" \
 grep -q "^NEARAI_API_KEY=" "$repo/envlog" \
     && fail "SECURITY: changed-package clippy compile must not see NEARAI_API_KEY (unscrubbed compile, fix 1)"
 
+# 1b. IRONCLAW_PREPUSH_MERGE_CHECK=0 must not break the changed-package
+#     clippy step's own merge-base lookup. That lookup reads
+#     refs/remotes/origin/main, which normally exists only because the
+#     (here skipped) merge-check step fetched it — the lookup must be
+#     self-sufficient (fix 2). Prune the ref first (git push's own
+#     opportunistic tracking-ref update would otherwise already have
+#     created it, masking the bug this test targets) to reproduce the real
+#     "never fetched yet" case.
+repo="$(make_repo)"
+git -C "$repo" update-ref -d refs/remotes/origin/main
+run_hook "$repo" pre-push IRONCLAW_PREPUSH_MERGE_CHECK=0
+[ "$status" -eq 0 ] || fail "IRONCLAW_PREPUSH_MERGE_CHECK=0 must not fail the changed-package clippy step: $output"
+grep -qF "merge check" <<<"$output" && fail "IRONCLAW_PREPUSH_MERGE_CHECK=0 must skip the merge check entirely"
+grep -q "ran cargo clippy -p a -- -D warnings" "$repo/log" \
+    || fail "IRONCLAW_PREPUSH_MERGE_CHECK=0 must still run changed-package clippy"
+
+# 1c. A failing changed-package discovery command must fail the hook, not
+#     silently report "nothing to lint" — process substitution
+#     (`done < <(cmd1 | cmd2)`) swallows a failure under set -e, so the fix
+#     captures to a file and checks the exit status explicitly (fix 3).
+repo="$(make_repo)"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n' >"$repo/scripts/ci/changed_workspace_packages.py"
+run_hook "$repo" pre-push
+[ "$status" -ne 0 ] || fail "a failing changed_workspace_packages.py must fail the hook, not report 'nothing to lint'"
+grep -qF "no changed workspace packages" <<<"$output" \
+    && fail "must not false-green when discovery fails (process-substitution swallow)"
+
 # 2. IRONCLAW_PREPUSH_FULL=1: full gauntlet runs; Emulate CLI absent is a
 #    WARNING and a skip, not a hard failure.
 repo="$(make_repo)"
