@@ -974,6 +974,7 @@ SCCACHE_FALLBACK_STEP = "Fall back to local compilation"
 SETUP_RUST_ACTION = ".github/actions/setup-rust/action.yml"
 RUSTUP_TOOLCHAIN_PIN_STEP = "Pin the resolved toolchain for the rest of this job"
 MOLD_INSTALL_STEP = "Install mold and clang"
+MOLD_VERIFY_STEP = "Verify mold linker is active"
 MOLD_EXPORT_STEP = "Export mold RUSTFLAGS"
 # The one canonical mold invocation; a job's own env may append extra flags
 # after it (the nightly lanes add -Zcrate-attr=...), but this prefix is the
@@ -1108,7 +1109,7 @@ def validate_setup_rust_action(text: str | None) -> list[str]:
             "RUSTUP_TOOLCHAIN from steps.install.outputs.name, or a job's "
             "cargo invocations can drift from what this step actually installed"
         )
-    for step_name in (MOLD_INSTALL_STEP, MOLD_EXPORT_STEP):
+    for step_name in (MOLD_INSTALL_STEP, MOLD_VERIFY_STEP, MOLD_EXPORT_STEP):
         body = step_body(text, step_name)
         if body is None:
             errors.append(f"{SETUP_RUST_ACTION}: missing the {step_name!r} step")

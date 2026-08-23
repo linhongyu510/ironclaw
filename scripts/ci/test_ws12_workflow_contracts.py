@@ -72,6 +72,10 @@ class SetupRustActionContractTests(unittest.TestCase):
         "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
         "      shell: bash\n"
         "      run: scripts/ci/install-ci-apt-packages.sh clang mold\n"
+        "    - name: Verify mold linker is active\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: rustc --version\n"
         "    - name: Export mold RUSTFLAGS\n"
         "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
         "      shell: bash\n"
@@ -98,6 +102,32 @@ class SetupRustActionContractTests(unittest.TestCase):
         )
         errors = validate_setup_rust_action(bad)
         self.assertTrue(any("Linux" in e for e in errors))
+
+    def test_missing_mold_verify_linux_guard_fails(self):
+        """An unguarded 'Verify mold linker is active' step runs the mold
+        link check on every runner OS, not just Linux — the same
+        mold: true-is-unsafe-elsewhere failure mode the install/export steps
+        are already pinned against."""
+        bad = self.OK.replace(
+            "if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n      shell: bash\n      run: rustc --version\n",
+            "shell: bash\n      run: rustc --version\n",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("Verify mold linker is active" in e and "Linux" in e for e in errors), errors)
+
+    def test_missing_mold_verify_step_fails(self):
+        bad = self.OK.replace(
+            "    - name: Verify mold linker is active\n"
+            "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+            "      shell: bash\n"
+            "      run: rustc --version\n",
+            "",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(
+            any("missing the 'Verify mold linker is active' step" in e for e in errors),
+            errors,
+        )
 
     def test_ok_passes(self):
         self.assertEqual([], validate_setup_rust_action(self.OK))
