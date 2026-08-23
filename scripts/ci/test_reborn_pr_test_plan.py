@@ -2088,10 +2088,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
+        # The bulk crate-bucket arm passes the package/feature args and both
+        # flags. It is asserted as ARGV (quoted `[@]` expansions inside a
+        # `cmd=(...)` array), not as a flat `[*]` string: the string form was
+        # eval-ed, and a planner-derived target name comes from a changed
+        # filename, so `tests/$(cmd).rs` executed on the runner. Keep this
+        # pinned to the array form so the injectable shape cannot return
+        # silently (validate_no_eval_in_workflow_run_blocks enforces the rest).
         self.assertIn(
-            '${feature_args[*]} --all-targets --ignore-rust-version',
+            '"${package_args[@]}" "${feature_args[@]}"\n'
+            '                --all-targets --ignore-rust-version)',
             workflow,
         )
+        self.assertIn('printf -v REPRO \'%q \' "${cmd[@]}"', workflow)
+        self.assertNotIn('eval "${REPRO}"', workflow)
         self.assertIn(
             'cargo llvm-cov --branch --skip-functions \\\n'
             '                "${package_args[@]}" "${feature_args[@]}"',
@@ -2146,9 +2156,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}",
             workflow,
         )
+        # Exact-target arm, pinned as ARGV. `name` is a changed file's stem,
+        # so the previous flat-string form was an injection sink once it was
+        # eval-ed; keep the quoted array shape pinned here.
         self.assertIn(
-            "${incremental_env[*]} cargo nextest run --profile ci "
-            "-p ${package} --${kind} ${name}",
+            '"${incremental_env[@]}" cargo nextest run --profile ci\n'
+            '                  -p "${package}" "--${kind}" "${name}"',
             workflow,
         )
 
