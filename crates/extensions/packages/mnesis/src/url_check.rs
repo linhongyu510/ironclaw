@@ -234,8 +234,6 @@ mod tests {
 
     #[test]
     fn private_ranges_stay_reachable_because_the_allowlist_is_the_control() {
-        // Pinned as a decision, not an oversight: an internally hosted Mnesis is
-        // supported, and narrowing it is the allowlist's job.
         production("https://10.0.0.5/memory/mcp").unwrap();
         production("https://192.168.1.10:8443/rar/mcp").unwrap();
         let allowlist = vec!["mnesis.internal".to_string()];
