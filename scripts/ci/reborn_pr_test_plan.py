@@ -589,10 +589,19 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
 # both walk the bare directory and are deliberately excluded.
 _GITHUB_FILE_LITERAL = re.compile(r'"(\.github/[\w./-]+)"')
 _GITHUB_DIRECTORY_LITERALS = {".github/workflows", ".github/actions", ".github"}
+# `reborn_linked_device_supply_chain_pin.rs`'s CODEOWNERS residual asserts
+# none of FOUR locations exist — GitHub, GitLab, and a docs-root convention
+# each recognise CODEOWNERS from a different root, so `_GITHUB_FILE_LITERAL`
+# (which requires a `.github/` prefix) only ever sees one of the four. Matched
+# separately, and by exact literal rather than a general non-`.github/` file
+# regex, so this stays a targeted pin on the one filename that test enumerates
+# instead of a broad (and noisy) root/docs/gitlab file scan.
+_CODEOWNERS_LITERAL = re.compile(r'"(CODEOWNERS|docs/CODEOWNERS|\.gitlab/CODEOWNERS)"')
 
 
 def repo_config_file_literals_in_test_sources() -> dict[str, list[Path]]:
-    """Every `.github/<file>` literal any workspace test target reads.
+    """Every `.github/<file>` or CODEOWNERS-location literal any workspace
+    test target reads.
 
     Scans every `tests/*.rs` file (root and per-crate — `crates/**/tests/*.rs`
     via rglob) rather than a hand-maintained list, so a new test added later
@@ -611,6 +620,8 @@ def repo_config_file_literals_in_test_sources() -> dict[str, list[Path]]:
             last_segment = literal.rsplit("/", 1)[-1]
             if "." in last_segment or last_segment == "CODEOWNERS":
                 hits[literal].append(rs_file.relative_to(ROOT))
+        for match in _CODEOWNERS_LITERAL.finditer(text):
+            hits[match.group(1)].append(rs_file.relative_to(ROOT))
     return hits
 
 
@@ -652,6 +663,17 @@ REPO_CONFIG_TEST_OWNERS = {
         "reborn_linked_device_supply_chain_pin"
     ),
     ".github/CODEOWNERS": _architecture_tests_owner(
+        "reborn_linked_device_supply_chain_pin"
+    ),
+    # The same test's residual enumerates all four CODEOWNERS locations
+    # GitHub/GitLab/docs conventions recognise — route every one to it so
+    # adding any of them schedules the test that must then assert its
+    # presence, instead of only catching `.github/CODEOWNERS`.
+    "CODEOWNERS": _architecture_tests_owner("reborn_linked_device_supply_chain_pin"),
+    "docs/CODEOWNERS": _architecture_tests_owner(
+        "reborn_linked_device_supply_chain_pin"
+    ),
+    ".gitlab/CODEOWNERS": _architecture_tests_owner(
         "reborn_linked_device_supply_chain_pin"
     ),
     # run 32310981177 / PR #7756 / fix 064ebde65: smoke.rs pins apt-installer

@@ -1293,6 +1293,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
 
+    def test_every_codeowners_location_routes_to_the_supply_chain_test(self) -> None:
+        """`reborn_linked_device_bumps_are_kept_off_the_automated_update_path`
+        asserts none of FOUR CODEOWNERS locations exist (CODEOWNERS,
+        `.github/CODEOWNERS`, `docs/CODEOWNERS`, `.gitlab/CODEOWNERS`), so
+        adding any one of them must schedule that test — not just the
+        `.github/` one."""
+        for path in ("CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS"):
+            with self.subTest(path=path):
+                plan = self.plan_real_owners([path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
+
     def test_production_change_schedules_the_workspace_scanning_architecture_tests(
         self,
     ) -> None:
