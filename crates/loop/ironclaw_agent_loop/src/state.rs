@@ -108,6 +108,13 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub completion_nudge_pending: bool,
 
+    /// One-shot budget-threshold reminders about file deliverables the user's
+    /// request named and the run has not produced yet. `#[serde(default)]`
+    /// keeps older checkpoints decodable, and a restart cannot re-fire a level
+    /// that already went out.
+    #[serde(default)]
+    pub deliverable_reminder: DeliverableReminderState,
+
     /// One-shot, typed host-authored repair context for the next model call
     /// after a model-error retry budget is exhausted. It remains checkpointed
     /// until the executor has issued the request, so restart cannot lose it.
@@ -179,6 +186,81 @@ pub struct LoopExecutionState {
     pub pending_auth_resume: Option<PendingAuthResume>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_external_tool_resume: Option<PendingExternalToolResume>,
+}
+
+/// How urgent a deliverable reminder is. Two levels, each firing at most once
+/// per run: one when the budget is nearly spent, one when it is almost gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableReminderLevel {
+    /// ~80% of the run's budget consumed.
+    Approaching,
+    /// ~90% consumed — the last realistic chance to write the file.
+    Final,
+}
+
+/// A scheduled reminder: the missing paths and, when the run has a declared
+/// deadline, how much time is left.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeliverableReminder {
+    pub level: DeliverableReminderLevel,
+    /// Deliverables CONFIRMED absent when the threshold was crossed.
+    pub missing_paths: Vec<String>,
+    /// Whole minutes of wall clock left — declared budget minus elapsed —
+    /// present ONLY when the run has a wall-clock budget
+    /// (`ResourceBudgetPolicy::max_wall_clock_seconds`, narrowed by declared
+    /// `TurnLimits`). `None` means no deadline was declared, and the reminder
+    /// then says nothing about time rather than inventing a number.
+    ///
+    /// Deliberately coarse. Second-precision text would differ on every firing,
+    /// and repeated prompt text that churns is a prompt-cache hazard (#7001);
+    /// minutes plus the once-per-level cap bounds a run to two distinct strings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_minutes: Option<u64>,
+}
+
+/// One-shot bookkeeping for the deliverable reminders. `fired` flags are
+/// checkpointed so a resumed run never repeats a level it already sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeliverableReminderState {
+    #[serde(default)]
+    pub approaching_fired: bool,
+    #[serde(default)]
+    pub final_fired: bool,
+    /// Scheduled by the budget stage, consumed and cleared by the next prompt
+    /// build. Checkpointed so a restart between the two does not lose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<DeliverableReminder>,
+}
+
+impl DeliverableReminderState {
+    /// Whether `level` may still fire. Each level is once per run.
+    pub fn can_fire(&self, level: DeliverableReminderLevel) -> bool {
+        match level {
+            DeliverableReminderLevel::Approaching => !self.approaching_fired && !self.final_fired,
+            DeliverableReminderLevel::Final => !self.final_fired,
+        }
+    }
+
+    /// Record that `level` fired and schedule its reminder for the next prompt.
+    ///
+    /// Crossing straight to `Final` also retires `Approaching`: a run that only
+    /// reaches the budget check after 90% must not emit both reminders back to
+    /// back.
+    pub fn schedule(&mut self, reminder: DeliverableReminder) {
+        match reminder.level {
+            DeliverableReminderLevel::Approaching => self.approaching_fired = true,
+            DeliverableReminderLevel::Final => {
+                self.approaching_fired = true;
+                self.final_fired = true;
+            }
+        }
+        self.pending = Some(reminder);
+    }
+
+    pub fn take_pending(&mut self) -> Option<DeliverableReminder> {
+        self.pending.take()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -361,6 +443,7 @@ impl LoopExecutionState {
             budget_ledger: BudgetLedger::fresh_for_run(),
             completion_nudges_used: 0,
             completion_nudge_pending: false,
+            deliverable_reminder: DeliverableReminderState::default(),
             pending_model_error_observation: None,
             pending_model_retry_directive: None,
             terminal_warning_state: TerminalWarningState::default(),

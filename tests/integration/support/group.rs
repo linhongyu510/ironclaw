@@ -385,6 +385,21 @@ impl GroupCapability {
     /// re-read an auth block's `credential_requirements` from. Recording
     /// backends return `None`; the host-runtime backend always resolves a store
     /// (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    /// Real workspace existence check for the deliverable reminder. Only the
+    /// host-runtime backend has a workspace to stat; the echo backends leave it
+    /// unwired, which keeps the reminder dormant exactly as it is in a
+    /// deployment without a workspace mount.
+    pub(crate) fn deliverable_probe(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_contracts::deliverable::LoopDeliverableProbe>> {
+        match self {
+            Self::HostRuntime(harness) => harness.deliverable_probe().ok(),
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
+        }
+    }
+
     pub(crate) fn gate_record_store(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>> {
@@ -1270,6 +1285,7 @@ impl RebornIntegrationGroupBuilder {
             thread_service: runtime_thread_service,
             thread_scope: group_thread_scope,
             legacy_result_artifacts: None,
+            deliverable_probe: capability.deliverable_probe(),
             model_gateway,
             loop_checkpoint_store,
             milestone_sink: runtime_milestone_sink,

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::turn::{ModelInvalidOutputDetailReason, SanitizedFailure, TurnOriginKind};
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, LoopExit, LoopFailureKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole,
+    LoopInlineMessagePlacement, LoopInlineMessageRole,
 };
 
 use crate::{
@@ -102,6 +102,7 @@ pub(super) fn completion_nudge_control_message() -> Result<LoopInlineMessage, Ag
     Ok(LoopInlineMessage {
         role: LoopInlineMessageRole::User,
         safe_body,
+        placement: LoopInlineMessagePlacement::Lead,
     })
 }
 

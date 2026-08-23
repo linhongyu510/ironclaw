@@ -20,12 +20,12 @@ use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionMaterializationStore,
     InstructionSafetyContext, LoopCapabilityPort, LoopContextPort, LoopContextRequest,
     LoopContextSnippet, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
-    LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-    LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
-    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
-    RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    LoopInlineMessagePlacement, LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRunContext, LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService,
+    ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -3084,6 +3084,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
                 vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::System,
                     safe_body: LoopInlineMessageBody::new(inline_text).unwrap(),
+                    placement: LoopInlineMessagePlacement::Lead,
                 }],
             )
             .await,

@@ -5,8 +5,17 @@ use crate::state::{CheckpointKind, LoopExecutionState, TerminalWarningObservatio
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    StageContext, attach_failure_explanation, failed_exit,
+    StageContext, attach_failure_explanation, deliverable_reminder, failed_exit,
 };
+
+/// Consumed share of one budget axis. An absent or zero ceiling contributes
+/// nothing rather than dividing by zero.
+fn fraction(used: u64, limit: u64) -> f64 {
+    if limit == 0 {
+        return 0.0;
+    }
+    used as f64 / limit as f64
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BudgetStage;
@@ -89,17 +98,26 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
         // to this stage on the NEXT iteration. This is consistent with the
         // budget stage's enforcement granularity generally (a hard stop
         // after the next checkpoint boundary, not a preemptive cutoff).
+        let mut wall_clock_elapsed_seconds: Option<u64> = None;
+        // Declared budget minus elapsed, and ONLY when a wall-clock budget
+        // exists. With no declared budget there is no deadline to report, and
+        // the reminder must omit its time clause rather than invent a number.
+        let mut wall_clock_remaining_seconds: Option<u64> = None;
         if let Some(limit_seconds) = wall_clock_limit_seconds {
             let now = chrono::Utc::now();
             // First pass arms the clock (initial state carries no timestamp
             // so it stays deterministic); older checkpoints without the
             // field re-arm from resume time instead of failing the run.
             let started_at = state.budget_ledger.arm_wall_clock(now);
-            if now.signed_duration_since(started_at).num_seconds() >= i64::from(limit_seconds) {
+            let elapsed = now.signed_duration_since(started_at).num_seconds();
+            if elapsed >= i64::from(limit_seconds) {
                 return self
                     .hard_budget_exit(ctx, state, LoopFailureKind::WallClockLimit)
                     .await;
             }
+            let elapsed = u64::try_from(elapsed).unwrap_or(0);
+            wall_clock_elapsed_seconds = Some(elapsed);
+            wall_clock_remaining_seconds = Some(u64::from(limit_seconds).saturating_sub(elapsed));
         }
 
         if state.budget_ledger.model_calls_made() >= policy.max_model_calls {
@@ -115,6 +133,45 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
         }
 
         let iteration_limit = ctx.planner.budget().iteration_limit(&state);
+
+        // Deliverable reminder. Budget consumption is the MAX across the axes
+        // that can actually stop this run, because whichever runs out first is
+        // the one that matters. Dormant unless the host reports a required file
+        // confirmed missing, so a run with no extracted deliverable never even
+        // reaches the stat.
+        let mut consumed = fraction(u64::from(state.iteration), u64::from(iteration_limit));
+        consumed = consumed.max(fraction(
+            u64::from(state.budget_ledger.model_calls_made()),
+            u64::from(policy.max_model_calls),
+        ));
+        if let Some(elapsed) = wall_clock_elapsed_seconds
+            && let Some(limit_seconds) = wall_clock_limit_seconds
+        {
+            consumed = consumed.max(fraction(elapsed, u64::from(limit_seconds)));
+        }
+        if let Some(level) = deliverable_reminder::level_for_consumed(consumed)
+            && state.deliverable_reminder.can_fire(level)
+        {
+            let missing = ctx.host.missing_deliverables().await;
+            if !missing.is_empty() {
+                tracing::debug!(
+                    component = "agent_loop",
+                    operation = "deliverable_reminder",
+                    ?level,
+                    missing = missing.len(),
+                    consumed,
+                    "scheduling a deliverable reminder for the next model request"
+                );
+                state
+                    .deliverable_reminder
+                    .schedule(deliverable_reminder::build_reminder(
+                        level,
+                        &missing,
+                        wall_clock_remaining_seconds,
+                    ));
+            }
+        }
+
         if state.iteration < iteration_limit
             || state.terminal_warning_state.pending().is_some()
             || state.terminal_warning_state.active().is_some()

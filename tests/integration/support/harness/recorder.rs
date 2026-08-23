@@ -39,6 +39,18 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    /// Only the host-runtime backend has a real workspace to stat. The Echo
+    /// backend leaves the probe unwired, which is exactly production behavior
+    /// for a deployment without a workspace mount: the reminder stays dormant.
+    pub(crate) fn deliverable_probe(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_loop_contracts::deliverable::LoopDeliverableProbe>> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => harness.deliverable_probe().ok(),
+        }
+    }
+
     pub(crate) fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         match self {
             Self::Recording(_) => Vec::new(),

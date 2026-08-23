@@ -47,6 +47,7 @@ use ironclaw_host_api::{
         ProjectId, SecretHandle, TenantId, UserId,
     },
     mount::{MountGrant, MountPermissions, MountView},
+    path::HostPath,
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
     runtime::RuntimeKind,
@@ -1362,6 +1363,36 @@ impl HostRuntimeCapabilityHarness {
 
     pub(crate) fn workspace_file_path(&self, relative: &str) -> PathBuf {
         self.workspace_root.join(relative.trim_start_matches('/'))
+    }
+
+    /// A real deliverable probe over this harness's on-disk workspace, mirroring
+    /// production's read-only `/workspace` grant. The reminder therefore fires
+    /// (or does not) on the SAME evidence production uses: an actual stat of the
+    /// actual file the scripted model did or did not write.
+    pub(crate) fn deliverable_probe(
+        &self,
+    ) -> HarnessResult<Arc<dyn ironclaw_loop_contracts::deliverable::LoopDeliverableProbe>> {
+        // `/workspace` is a mount ALIAS; the virtual target it resolves to is
+        // `/projects/workspace`, mirroring `WORKSPACE_TARGET` in composition's
+        // `runtime_mounts`. A `VirtualPath` must start at a known root, so the
+        // alias itself is not a legal target.
+        let workspace_target =
+            VirtualPath::new("/projects/workspace").expect("valid workspace target");
+        let mut disk = ironclaw_filesystem::DiskFilesystem::new();
+        disk.mount_local(
+            workspace_target.clone(),
+            HostPath::from_path_buf(self.workspace_root.clone()),
+        )?;
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("valid workspace alias"),
+            workspace_target,
+            MountPermissions::read_only(),
+        )])?;
+        Ok(Arc::new(
+            ironclaw_turn_runner::loop_driver_host::WorkspaceDeliverableProbe::new(Arc::new(
+                ScopedFilesystem::with_fixed_view(Arc::new(disk), mounts),
+            )),
+        ))
     }
 
     pub(crate) async fn approve_standalone_gate(

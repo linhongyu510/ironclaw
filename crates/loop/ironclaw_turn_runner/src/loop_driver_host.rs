@@ -24,7 +24,9 @@ use ironclaw_host_api::{
     artifact::ArtifactNamespaceId,
     capability_surface::CapabilitySurfacePolicy,
     ids::{CapabilityId, ExtensionId, RunId},
+    path::ScopedPath,
     resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityResolveError,
@@ -39,7 +41,7 @@ use ironclaw_loop_host::{
     host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_outbound::ReplyAttachmentIntentPort;
-use ironclaw_threads::{SessionThreadService, ThreadScope};
+use ironclaw_threads::{SessionThreadService, ThreadMessageId, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
@@ -120,6 +122,9 @@ fn trace_host_factory_latency_error<E: ?Sized>(
     );
 }
 
+use ironclaw_loop_contracts::deliverable::{
+    DeliverablePath, DeliverableSpec, LoopDeliverableProbe,
+};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
     CommunicationContextProvider, EphemeralInstructionMaterializationStore,
@@ -1052,6 +1057,10 @@ where
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
+    /// Workspace existence check for required file deliverables. Absent means
+    /// the deliverable reminder is disabled for every host this factory builds,
+    /// including the one extra transcript read it would otherwise cost.
+    deliverable_probe: Option<Arc<dyn LoopDeliverableProbe>>,
     reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1173,6 +1182,7 @@ where
             attachment_read_port: None,
             prompt_diagnostic_sink: None,
             legacy_result_artifacts: None,
+            deliverable_probe: None,
             reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1274,6 +1284,13 @@ where
         artifacts: Arc<ironclaw_threads::DurableToolArtifactStore>,
     ) -> Self {
         self.legacy_result_artifacts = Some(artifacts);
+        self
+    }
+
+    /// Enable the deliverable reminder by supplying the workspace existence
+    /// check it needs. Without this the feature stays off entirely.
+    pub fn with_deliverable_probe(mut self, probe: Arc<dyn LoopDeliverableProbe>) -> Self {
+        self.deliverable_probe = Some(probe);
         self
     }
 
@@ -1570,6 +1587,58 @@ where
     pub fn with_model_policy_guard(mut self, policy_guard: Arc<dyn LoopModelPolicyGuard>) -> Self {
         self.model_policy_guard = policy_guard;
         self
+    }
+
+    /// Read the accepted user request and extract the file deliverables it
+    /// names, once per run at host build.
+    ///
+    /// Fails open at every step: no probe wired, an accepted ref that is not a
+    /// transcript message (trigger and interaction refs are not), a missing row,
+    /// an unreadable row, or empty content all yield an empty spec — and an
+    /// empty spec means the reminder never fires for this run. Costing one point
+    /// read per run is the price of not having to re-derive the requirement on
+    /// every iteration; it is skipped entirely when no probe is wired.
+    async fn extract_deliverable_spec(
+        &self,
+        scope: &ThreadScope,
+        run_context: &LoopRunContext,
+    ) -> DeliverableSpec {
+        if self.deliverable_probe.is_none() {
+            return DeliverableSpec::default();
+        }
+        let Some(message_id) = accepted_request_message_id(run_context) else {
+            return DeliverableSpec::default();
+        };
+        let record = match self
+            .thread_service
+            .read_thread_message(scope, &run_context.thread_id, message_id)
+            .await
+        {
+            Ok(Some(record)) => record,
+            Ok(None) => return DeliverableSpec::default(),
+            Err(error) => {
+                tracing::debug!(
+                    component = "loop_driver_host",
+                    operation = "extract_deliverable_spec",
+                    %error,
+                    "accepted request could not be read; deliverable reminder stays dormant"
+                );
+                return DeliverableSpec::default();
+            }
+        };
+        let Some(content) = record.content.as_deref() else {
+            return DeliverableSpec::default();
+        };
+        let spec = crate::deliverable_extraction::extract_from_request(content);
+        if !spec.is_empty() {
+            tracing::debug!(
+                component = "loop_driver_host",
+                operation = "extract_deliverable_spec",
+                deliverables = spec.paths().len(),
+                "run has required file deliverables"
+            );
+        }
+        spec
     }
 
     pub async fn build_text_only_host(
@@ -2123,6 +2192,10 @@ where
         let cancellation: Arc<dyn LoopCancellationPort> =
             Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 
+        let deliverable_spec = self
+            .extract_deliverable_spec(&effective_scope, &run_context)
+            .await;
+
         Ok(RebornLoopDriverHost {
             run_context,
             context,
@@ -2137,6 +2210,8 @@ where
             progress,
             compaction,
             cancellation,
+            deliverable_spec,
+            deliverable_probe: self.deliverable_probe.clone(),
             _event_subscription: event_subscription,
         })
     }
@@ -2221,6 +2296,10 @@ pub struct RebornLoopDriverHost {
     progress: Arc<dyn LoopProgressPort>,
     compaction: Arc<dyn LoopCompactionPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
+    /// File deliverables extracted from this run's user request. Empty for
+    /// almost every run, which keeps the reminder feature dormant.
+    deliverable_spec: DeliverableSpec,
+    deliverable_probe: Option<Arc<dyn LoopDeliverableProbe>>,
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
 
@@ -2233,6 +2312,86 @@ impl fmt::Debug for RebornLoopDriverHost {
             .field("run_id", &self.run_context.run_id)
             .field("loop_driver_id", &self.run_context.loop_driver_id)
             .finish()
+    }
+}
+
+/// The transcript row id behind a run's accepted message ref, when there is one.
+///
+/// Not every accepted ref is a message id — trigger and interaction refs use
+/// other shapes — so `None` is an ordinary outcome, not an error.
+fn accepted_request_message_id(run_context: &LoopRunContext) -> Option<ThreadMessageId> {
+    let message_ref = run_context.accepted_message_ref.as_ref()?.as_str();
+    let raw_message_id = message_ref.strip_prefix("msg:")?;
+    ThreadMessageId::parse(raw_message_id).ok()
+}
+
+/// Existence check for required deliverables, over the run's workspace mount.
+///
+/// Reports a path missing ONLY on a confirmed `NotFound`. Any other stat
+/// failure means the answer is unknown, and an unknown must not be rendered to
+/// the model as "you have not written this file".
+pub struct WorkspaceDeliverableProbe<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + ?Sized,
+{
+    filesystem: Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+}
+
+impl<F> WorkspaceDeliverableProbe<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + ?Sized,
+{
+    pub fn new(filesystem: Arc<ironclaw_filesystem::ScopedFilesystem<F>>) -> Self {
+        Self { filesystem }
+    }
+}
+
+impl<F> LoopDeliverableProbe for WorkspaceDeliverableProbe<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + ?Sized + 'static,
+{
+    fn missing<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+        paths: &'a [DeliverablePath],
+    ) -> Pin<Box<dyn Future<Output = Vec<DeliverablePath>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut missing = Vec::new();
+            for path in paths {
+                let scoped_path = match ScopedPath::new(path.as_str()) {
+                    Ok(scoped_path) => scoped_path,
+                    Err(error) => {
+                        tracing::debug!(
+                            component = "loop_driver_host",
+                            operation = "deliverable_probe",
+                            path = path.as_str(),
+                            %error,
+                            "deliverable path is not a scoped path; treating it as unknown"
+                        );
+                        continue;
+                    }
+                };
+                match self.filesystem.stat(scope, &scoped_path).await {
+                    Ok(_) => {}
+                    Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {
+                        missing.push(path.clone());
+                    }
+                    Err(error) => {
+                        // Unknown, not absent. Staying silent is the honest
+                        // outcome: a reminder naming a file that may well exist
+                        // is worse than no reminder at all.
+                        tracing::debug!(
+                            component = "loop_driver_host",
+                            operation = "deliverable_probe",
+                            path = path.as_str(),
+                            %error,
+                            "deliverable existence could not be determined"
+                        );
+                    }
+                }
+            }
+            missing
+        })
     }
 }
 
@@ -2438,6 +2597,27 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
     ) -> Pin<Box<dyn Future<Output = Result<(), AgentLoopHostError>> + Send + 'a>> {
         Box::pin(async move {
             finalize_selected_terminal_output(exit, self.structured_finalization.as_deref()).await
+        })
+    }
+
+    /// Stat the run's required deliverables through the workspace filesystem.
+    ///
+    /// Dormant twice over: nothing happens when the request named no
+    /// deliverable, and nothing happens when no probe was wired. At most a
+    /// couple of stats, and only on an iteration where a budget threshold is
+    /// crossed.
+    fn missing_deliverables(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Vec<DeliverablePath>> + Send + '_>> {
+        Box::pin(async move {
+            let Some(probe) = self.deliverable_probe.as_ref() else {
+                return Vec::new();
+            };
+            if self.deliverable_spec.is_empty() {
+                return Vec::new();
+            }
+            let scope = self.run_context.scope.to_resource_scope();
+            probe.missing(&scope, self.deliverable_spec.paths()).await
         })
     }
 

@@ -1015,7 +1015,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Pure vocabulary on both sides; delivery, dispatch, and artifact
         // behavior stay in their owning loop, kernel, and threads crates.
         // Count read from this test's own failure message.
-        ("ironclaw_loop_contracts", 13_758),
+        // 13_758 -> 13_975 (2026-08-24, deliverable reminder): adds
+        // `deliverable.rs` (the validated `DeliverablePath` newtype, the
+        // `DeliverableSpec` DTO and the `LoopDeliverableProbe` port) plus the
+        // `LoopInlineMessagePlacement` arm. The EXTRACTION logic that first
+        // landed here was moved out to
+        // `ironclaw_turn_runner::deliverable_extraction` precisely because this
+        // ratchet caught it; what remains is vocabulary and one port, with the
+        // existence check and the sentence parsing both in their owning crate.
+        // Count read from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_975),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning

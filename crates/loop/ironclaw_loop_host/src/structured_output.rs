@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::output::OutputContract;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+    LoopInlineMessagePlacement, LoopInlineMessageRole, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRunContext,
 };
 use std::sync::Arc;
 
@@ -56,6 +57,7 @@ pub fn add_structured_output_guidance(
         LoopInlineMessage {
             role: LoopInlineMessageRole::System,
             safe_body: guidance,
+            placement: LoopInlineMessagePlacement::Lead,
         },
     );
     Ok(request)

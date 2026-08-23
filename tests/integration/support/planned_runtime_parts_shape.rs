@@ -64,6 +64,7 @@ where
         model_gateway: _,
         loop_checkpoint_store: _,
         milestone_sink: _,
+        deliverable_probe: _,
         capability_factory: _,
         capability_surface_resolver: _,
         capability_result_writer: _,

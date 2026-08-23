@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageBody,
-    LoopInlineMessageRole, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-    LoopRunContext, sanitize_model_visible_text,
+    LoopInlineMessagePlacement, LoopInlineMessageRole, LoopPromptBundle, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRunContext, sanitize_model_visible_text,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -215,7 +215,11 @@ fn materialize_sanitized_inline_message(
             format!("invalid {label} prompt: {reason}"),
         )
     })?;
-    Ok(LoopInlineMessage { role, safe_body })
+    Ok(LoopInlineMessage {
+        role,
+        safe_body,
+        placement: LoopInlineMessagePlacement::Lead,
+    })
 }
 
 fn log_dropped_subagent_prompt_capabilities(dropped_capabilities: &[CapabilityId]) {

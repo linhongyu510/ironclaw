@@ -34,6 +34,7 @@ pub mod retry_disposition;
 // ironclaw_composition; they classify runner-owned categories). Re-exported
 // at the crate root so intra-cluster `crate::FailureLane` refs resolve and
 // composition can re-export them through its service for the CLI.
+mod deliverable_extraction;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;

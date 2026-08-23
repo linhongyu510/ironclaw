@@ -359,6 +359,10 @@ impl<'a> PromptPlanningPipeline<'a> {
         // available). Clearing here bounds the nudge to exactly this iteration and
         // keeps a later model-error retry from re-injecting it.
         self.state.completion_nudge_pending = false;
+        // Same one-shot discipline for the deliverable reminder: it was injected
+        // into this bundle, so it must not ride along on a later retry. The
+        // `fired` flags stay set, which is what caps each level at once per run.
+        self.state.deliverable_reminder.pending = None;
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
             surface,
@@ -729,6 +733,14 @@ pub(super) async fn build_prompt_bundle_for_surface(
         context_request
             .inline_messages
             .push(super::completion_nudge_control_message()?);
+    }
+    // Deliverable reminder scheduled by the budget stage this iteration. It is
+    // TAIL-placed, so it rides after the transcript and leaves the cached system
+    // prefix untouched. Cleared by `PromptStage::run` once the bundle is built.
+    if let Some(reminder) = state.deliverable_reminder.pending.as_ref() {
+        context_request.inline_messages.push(
+            super::deliverable_reminder::reminder_control_message(reminder)?,
+        );
     }
     let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;

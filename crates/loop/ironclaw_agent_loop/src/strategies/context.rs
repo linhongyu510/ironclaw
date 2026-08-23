@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
-    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopPromptBundleRequest,
-    PromptMode,
+    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessagePlacement, LoopInlineMessageRole,
+    LoopPromptBundleRequest, PromptMode,
 };
 
 use crate::state::{LoopExecutionState, ModelErrorRecoveryObservation, RepeatedCallWarningPhase};
@@ -122,6 +122,7 @@ pub(crate) fn repeated_call_warning_control_message() -> LoopInlineMessage {
         role: LoopInlineMessageRole::System,
         safe_body: LoopInlineMessageBody::new(REPEATED_CALL_WARNING_CONTROL_TEXT)
             .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
+        placement: LoopInlineMessagePlacement::Lead,
     }
 }
 
@@ -130,6 +131,7 @@ pub(crate) fn invalid_model_output_repair_control_message() -> LoopInlineMessage
         role: LoopInlineMessageRole::System,
         safe_body: LoopInlineMessageBody::new(INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT)
             .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
+        placement: LoopInlineMessagePlacement::Lead,
     }
 }
 
@@ -140,6 +142,7 @@ pub(crate) fn model_error_observation_control_message(
     Ok(LoopInlineMessage {
         role: LoopInlineMessageRole::System,
         safe_body: LoopInlineMessageBody::new(observation.model_instruction())?,
+        placement: LoopInlineMessagePlacement::Lead,
     })
 }
 
@@ -150,6 +153,7 @@ pub(crate) fn terminal_warning_control_message(
     Ok(LoopInlineMessage {
         role: LoopInlineMessageRole::System,
         safe_body: LoopInlineMessageBody::new(observation.model_instruction())?,
+        placement: LoopInlineMessagePlacement::Lead,
     })
 }
 

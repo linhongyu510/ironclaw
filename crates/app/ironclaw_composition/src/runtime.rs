@@ -3855,6 +3855,14 @@ async fn build_runtime_with_resource_governor_inner(
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>
         }),
         legacy_result_artifacts: Some(Arc::clone(&services.artifact_store)),
+        // Read-only workspace handle — the same one the skill setup-marker stat
+        // already uses with `run_context.scope.to_resource_scope()`, so
+        // `/workspace/...` resolves identically here.
+        deliverable_probe: Some(Arc::new(
+            ironclaw_turn_runner::loop_driver_host::WorkspaceDeliverableProbe::new(Arc::clone(
+                &services.workspace_filesystem,
+            )),
+        )),
         prompt_diagnostic_sink: Some(prompt_diagnostic_sink),
         reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME

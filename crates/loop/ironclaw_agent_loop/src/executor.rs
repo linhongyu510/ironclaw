@@ -8,6 +8,7 @@ mod canonical;
 mod capabilities;
 mod capability_helpers;
 mod checkpoint;
+mod deliverable_reminder;
 mod exit_helpers;
 mod failure_explanation;
 mod gates;

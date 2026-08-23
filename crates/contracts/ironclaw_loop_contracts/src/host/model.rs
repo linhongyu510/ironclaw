@@ -101,10 +101,29 @@ pub enum LoopInlineMessageRole {
     Assistant,
 }
 
+/// Where an inline message sits relative to the thread transcript.
+///
+/// [`Self::Lead`] is the historical behavior and stays the default: the message
+/// is emitted ahead of the identity/system block. [`Self::Tail`] emits it AFTER
+/// the transcript, which is the right place for a late steering reminder — it
+/// leaves the cached system prefix byte-stable and puts the instruction where
+/// recency actually helps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopInlineMessagePlacement {
+    #[default]
+    Lead,
+    Tail,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInlineMessage {
     pub role: LoopInlineMessageRole,
     pub safe_body: LoopInlineMessageBody,
+    /// Defaulted so checkpoints written before tail placement existed decode
+    /// unchanged, as `Lead`.
+    #[serde(default)]
+    pub placement: LoopInlineMessagePlacement,
 }
 
 /// Request for a host-managed prompt bundle.

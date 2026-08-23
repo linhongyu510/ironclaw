@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 use ironclaw_common::provider_transcript::is_only_provider_transcript_artifact_lines;
 use ironclaw_loop_contracts::{
-    AssistantReply, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+    AssistantReply, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessagePlacement,
+    LoopInlineMessageRole,
 };
 
 use crate::state::{LoopExecutionState, ReplyAdmissionRejection};
@@ -107,6 +108,7 @@ pub(crate) fn reply_admission_control_message(
         role: LoopInlineMessageRole::System,
         safe_body: LoopInlineMessageBody::new(reply_admission_control_text(rejection))
             .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
+        placement: LoopInlineMessagePlacement::Lead,
     }
 }
 

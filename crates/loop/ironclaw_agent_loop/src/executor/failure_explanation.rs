@@ -3,8 +3,9 @@ use std::time::Duration;
 use ironclaw_host_api::turn::LoopMessageRef;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopFailureKind,
-    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView,
-    LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
+    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessagePlacement, LoopInlineMessageRole,
+    LoopModelCapabilityView, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
+    ParentLoopOutput, PromptMode,
 };
 
 use crate::state::LoopExecutionState;
@@ -180,10 +181,12 @@ fn build_explanation_prompt_request(
             LoopInlineMessage {
                 role: LoopInlineMessageRole::System,
                 safe_body: inline_message_body(failure_context(state, reason_kind), reason_kind)?,
+                placement: LoopInlineMessagePlacement::Lead,
             },
             LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
                 safe_body: inline_message_body(final_instruction(reason_kind), reason_kind)?,
+                placement: LoopInlineMessagePlacement::Lead,
             },
         ],
     })

@@ -14,8 +14,8 @@ use ironclaw_host_api::turn::LoopMessageRef;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
     CapabilityDescriptorView, LoopContextBundle, LoopContextMessage, LoopContextSnippet,
-    LoopInlineMessage, LoopInlineMessageRole, LoopModelMessage, LoopRunContext,
-    PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilitySurface,
+    LoopInlineMessage, LoopInlineMessagePlacement, LoopInlineMessageRole, LoopModelMessage,
+    LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilitySurface,
     prompt_text::{
         PromptTextSurface, PromptTextValidationError, validate_model_safe_text,
         validate_prompt_text, validate_prompt_text_with_diagnostics,
@@ -256,7 +256,14 @@ impl InstructionBundleBuilder {
         if !request.inline_messages.is_empty() {
             requires_materialization_store = true;
         }
-        for (ordinal, message) in request.inline_messages.into_iter().enumerate() {
+        // Ordinals are assigned over the WHOLE inline list before the split, so
+        // a lead and a tail message can never mint the same synthetic ref.
+        let (lead_inline_messages, tail_inline_messages): (Vec<_>, Vec<_>) = request
+            .inline_messages
+            .into_iter()
+            .enumerate()
+            .partition(|(_, message)| message.placement == LoopInlineMessagePlacement::Lead);
+        for (ordinal, message) in lead_inline_messages {
             push_inline_message(
                 &mut messages,
                 &mut materialized_messages,
@@ -419,6 +426,21 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        // Tail inline messages ride AFTER the transcript. A late steering
+        // reminder belongs here: the leading system/identity block stays
+        // byte-identical so the cached prompt prefix survives, and the model
+        // reads the instruction last, next to the work it applies to.
+        for (ordinal, message) in tail_inline_messages {
+            push_inline_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                ordinal,
+                message,
+                &mut synthetic_refs,
             )?;
         }
 
@@ -1072,6 +1094,7 @@ mod tests {
                     role: LoopInlineMessageRole::User,
                     safe_body: LoopInlineMessageBody::new(inline_body.clone())
                         .expect("inline message body should accept generic model-content budget"),
+                    placement: LoopInlineMessagePlacement::Lead,
                 }],
             })
             .expect("instruction bundle should accept large inline-message bodies");

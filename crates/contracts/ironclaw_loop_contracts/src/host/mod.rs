@@ -40,11 +40,11 @@ pub use input::{
     LoopCancelReasonKind, LoopInput, LoopInputAck, LoopInputBatch, LoopInputPort, LoopInterruptKind,
 };
 pub use model::{
-    AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,
-    LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopModelToolChoice, LoopModelUsage, LoopPromptBundle, LoopPromptBundleAuthority,
-    LoopPromptBundleGrant, LoopPromptBundleRequest, LoopPromptDiagnosticMetadata, LoopPromptPort,
-    ModelStreamChunk, ParentLoopOutput, PromptMode,
+    AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessagePlacement,
+    LoopInlineMessageRole, LoopModelCapabilityView, LoopModelMessage, LoopModelPort,
+    LoopModelRequest, LoopModelResponse, LoopModelToolChoice, LoopModelUsage, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRequest,
+    LoopPromptDiagnosticMetadata, LoopPromptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
 };
 pub use progress::{
     AgentLoopDriverHost, BatchPolicyKind, LoopCancellationPort, LoopCancellationSignal,

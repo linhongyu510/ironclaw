@@ -464,7 +464,7 @@ mod tests {
         EphemeralInstructionMaterializationStore, InMemoryLoopHostMilestoneSink, LoopContextBundle,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
         LoopContextWindowTruncation, LoopInlineMessage, LoopInlineMessageBody,
-        LoopInlineMessageRole, LoopRuntimeContext, ResolvedRunProfile,
+        LoopInlineMessagePlacement, LoopInlineMessageRole, LoopRuntimeContext, ResolvedRunProfile,
     };
 
     struct PanicContextPort;
@@ -516,6 +516,7 @@ mod tests {
                 inline_messages: vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::User,
                     safe_body: LoopInlineMessageBody::new("safe inline nudge").unwrap(),
+                    placement: LoopInlineMessagePlacement::Lead,
                 }],
             })
             .await
@@ -555,6 +556,7 @@ mod tests {
                         "safe failure explanation context".to_string(),
                     )
                     .unwrap(),
+                    placement: LoopInlineMessagePlacement::Lead,
                 }],
             })
             .await

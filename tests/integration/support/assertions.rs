@@ -542,6 +542,35 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// How many captured model requests carry `needle` in some message content.
+    ///
+    /// The counting form exists for one-shot injections: "the reminder reached
+    /// the model" and "the reminder reached the model exactly once" are
+    /// different claims, and only the second one proves a fire-once cap.
+    pub async fn count_model_requests_containing(&self, needle: &str) -> usize {
+        self.scripted_llm
+            .captured_requests()
+            .iter()
+            .filter(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message.content.contains(needle))
+            })
+            .count()
+    }
+
+    /// Assert that NO captured model request carries `needle`.
+    pub async fn assert_no_model_message_content_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let count = self.count_model_requests_containing(needle).await;
+        if count == 0 {
+            return Ok(());
+        }
+        Err(format!("{count} model request(s) unexpectedly contained {needle:?}").into())
+    }
+
     /// Assert that the final interactive model request still carries `needle`.
     /// This avoids a vacuous pass from an earlier request when testing context
     /// retained across a long-running turn.

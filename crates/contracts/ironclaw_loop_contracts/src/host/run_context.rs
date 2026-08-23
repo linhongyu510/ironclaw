@@ -391,6 +391,23 @@ pub trait LoopRunInfoPort: Send + Sync {
     fn supplemental_model_usage(&self) -> Option<crate::LoopModelUsage> {
         None
     }
+
+    /// Which of this run's required file deliverables do NOT exist yet.
+    ///
+    /// The default reports nothing missing, so hosts and test doubles without
+    /// deliverable tracking stay source-compatible and the reminder stays
+    /// dormant for them. Concrete hosts override it with a real stat through the
+    /// run's scoped filesystem.
+    ///
+    /// Infallible by design: a stat that fails for any reason other than "not
+    /// found" means the host CANNOT TELL, and an unverifiable path must be left
+    /// out rather than reported missing. Nothing downstream may claim a file is
+    /// absent on weaker evidence than a confirmed absence.
+    fn missing_deliverables(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Vec<crate::deliverable::DeliverablePath>> + Send + '_>> {
+        Box::pin(async { Vec::new() })
+    }
 }
 
 #[cfg(test)]

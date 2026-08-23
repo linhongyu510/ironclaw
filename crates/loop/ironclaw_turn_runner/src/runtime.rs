@@ -355,6 +355,10 @@ where
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     pub legacy_result_artifacts: Option<Arc<ironclaw_threads::DurableToolArtifactStore>>,
+    /// Workspace existence check backing the deliverable reminder. `None`
+    /// disables the reminder for every host this runtime builds.
+    pub deliverable_probe:
+        Option<Arc<dyn ironclaw_loop_contracts::deliverable::LoopDeliverableProbe>>,
     /// Process-local operator diagnostics captured at the resolved prompt boundary.
     pub prompt_diagnostic_sink: Option<Arc<dyn HostManagedPromptDiagnosticSink>>,
     /// Shared run-scoped intent store used by the explicit attachment
@@ -865,6 +869,9 @@ where
     host_factory = host_factory.with_cancellation_factory(cancellation_factory);
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
+    }
+    if let Some(probe) = parts.deliverable_probe {
+        host_factory = host_factory.with_deliverable_probe(probe);
     }
     if let Some(artifacts) = parts.legacy_result_artifacts {
         host_factory = host_factory.with_legacy_result_artifacts(artifacts);
