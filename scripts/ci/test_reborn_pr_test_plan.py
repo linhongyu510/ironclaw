@@ -1266,6 +1266,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     f"{owner!r} (owner of {path!r}) resolves to neither a root test "
                     "partition nor a real crate directory",
                 )
+                # A plausible-looking path is not a real owner: a rename or
+                # deletion of the owner file leaves a string that still
+                # starts with a real crate directory (or matches a root
+                # partition key) while pointing at nothing, silently
+                # de-fanging this mapping. Assert the file is actually there.
+                self.assertTrue(
+                    (planner.ROOT / owner).is_file(),
+                    f"{owner!r} (owner of {path!r}) does not exist on disk",
+                )
 
     def test_workflow_files_read_by_cli_smoke_route_to_the_smoke_test(self) -> None:
         # These workflow files route to `ironclaw` via REPO_CONFIG_TEST_OWNERS,
