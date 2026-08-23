@@ -431,6 +431,19 @@ fi
 # nextest_child_process_is_network_guarded ... ok" / "1 passed"; sabotaged
 # run exits non-zero via a genuine panic: "assertion `left == right`
 # failed: ... left: TimedOut, right: PermissionDenied".
+# The control below is the only part of this self-test that invokes cargo.
+# It therefore needs a prepared Rust dependency graph: nextest shells out to
+# `cargo metadata`, which cannot resolve offline inside the hermetic wrapper
+# unless the registry cache is already warm. `fast-checks` is deliberately a
+# cache-less, toolchain-light lane, so this stays OFF by default and the
+# stub-based checks above run everywhere unchanged. Jobs that already have a
+# toolchain, a restored cargo registry and cargo-nextest opt in by setting
+# IRONCLAW_HERMETIC_NEXTEST_CONTROL=1 (see reborn-tests.yml).
+if [[ "${IRONCLAW_HERMETIC_NEXTEST_CONTROL:-0}" != "1" ]]; then
+  echo "hermetic test-process self-test: OK (nextest network-guard control not requested)"
+  exit 0
+fi
+
 if command -v cargo-nextest >/dev/null 2>&1; then
   set +e
   guarded_output="$(
@@ -465,7 +478,7 @@ if command -v cargo-nextest >/dev/null 2>&1; then
     exit 1
   fi
 elif [[ "${CI:-}" == "true" ]]; then
-  echo "cargo-nextest is required in CI for the nextest negative control but was not found on PATH" >&2
+  echo "cargo-nextest is required when IRONCLAW_HERMETIC_NEXTEST_CONTROL=1 but was not found on PATH" >&2
   exit 1
 else
   echo "WARNING: cargo-nextest not installed locally; skipping the nextest negative control (it still runs in CI)" >&2

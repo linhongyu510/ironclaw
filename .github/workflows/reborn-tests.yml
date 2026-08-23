@@ -555,6 +555,16 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
+      # The hermetic wrapper's network guard must survive nextest's own
+      # process spawning, not just a directly-launched test binary. This is
+      # the only place that control can run: it shells out to cargo, so it
+      # needs the toolchain, a warm registry and cargo-nextest -- all of
+      # which this job already has and fast-checks deliberately does not.
+      - name: Hermetic nextest network-guard control
+        env:
+          IRONCLAW_HERMETIC_NEXTEST_CONTROL: "1"
+        run: bash scripts/ci/test-hermetic-test-process.sh
+
       - name: Run Reborn root tests
         run: |
           REPRO='REBORN_ROOT_TEST_PARTITIONS=4 REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }} RUST_MIN_STACK=67108864 scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/run-reborn-root-partition.sh'
