@@ -468,16 +468,38 @@ fn seeded_tool_result_row_parts(
     // the model via the result reference / observation.
     let safe_summary = ToolResultSafeSummary::new(summary_text.clone())
         .unwrap_or_else(|_| ToolResultSafeSummary::redacted_tool_result_summary());
-    let observation = serde_json::json!({
-        "schema_version": 1,
-        "status": if result.is_error { "error" } else { "success" },
-        "summary": summary_text,
-        "detail": {
+    // A seeded preview that is the WHOLE output is a COMPLETE inline result, so
+    // it must carry the `inline_result` tag. Minting it as `result_reference`
+    // labelled a fresh row with the RETIRED shape, and the replay gate in
+    // `ironclaw_loop_host::tool_result_content_for_context_message` reads that
+    // tag as "needs lazy artifact migration": every prompt build then attempted
+    // `project_legacy_result` for a row that has no durable tool-result record
+    // behind it, failed deterministically, and degraded back to the reference it
+    // already was. Only a genuinely truncated preview keeps the reference shape,
+    // where the result ref really is the model's recovery channel.
+    //
+    // `PREPARED_SEED_PREVIEW_MAX_BYTES` (24 KiB) is below
+    // `ARTIFACT_INLINE_PREVIEW_MAX_BYTES` (64 KiB), so an untruncated preview
+    // always fits the inline-result bound.
+    let detail = if preview.len() == full_bytes.len() {
+        serde_json::json!({
+            "kind": "inline_result",
+            "content": preview,
+            "byte_len": preview.len(),
+        })
+    } else {
+        serde_json::json!({
             "kind": "result_reference",
             "result_ref": result_ref,
             "byte_len": full_bytes.len(),
             "preview": preview,
-        },
+        })
+    };
+    let observation = serde_json::json!({
+        "schema_version": 1,
+        "status": if result.is_error { "error" } else { "success" },
+        "summary": summary_text,
+        "detail": detail,
         "trust": "untrusted_tool_output",
     });
     let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
@@ -1015,6 +1037,25 @@ mod tests {
         )
         .expect("strict envelope parse");
         assert_eq!(envelope.result_ref, result_ref);
+
+        // A seeded preview that IS the whole output is a COMPLETE inline result
+        // and must say so. Tagging it `result_reference` labelled a fresh row
+        // with the retired shape, and `ironclaw_loop_host`'s replay gate reads
+        // that tag as "needs lazy artifact migration" — so every prompt build
+        // attempted a legacy projection for a row with no durable record behind
+        // it and failed deterministically.
+        let detail = envelope
+            .model_observation
+            .as_ref()
+            .and_then(|observation| observation.get("detail"))
+            .expect("seeded rows carry a model-visible observation detail");
+        assert_eq!(detail["kind"], "inline_result");
+        assert_eq!(detail["content"], "the release went great");
+        assert_eq!(
+            detail["byte_len"].as_u64(),
+            Some("the release went great".len() as u64)
+        );
+
         assert_eq!(seed.tool_result_records.len(), 1);
         assert_eq!(seed.tool_result_records[0].0, result_ref);
         assert_eq!(
@@ -1027,6 +1068,47 @@ mod tests {
         assert_eq!(
             again.rows[2].tool_result_ref, tool_row.tool_result_ref,
             "seeded result refs are deterministic"
+        );
+    }
+
+    /// The other half of the shape rule: a seeded result too large to carry
+    /// inline keeps the reference observation. There the result ref genuinely is
+    /// the model's recovery channel and the durable record backs it, so the
+    /// inline-result promotion must NOT claim a truncated preview is complete.
+    #[test]
+    fn oversized_seeded_tool_result_keeps_the_reference_observation() {
+        let mut request = request();
+        let long = "x".repeat(PREPARED_SEED_PREVIEW_MAX_BYTES + 512);
+        let mut messages = tool_round_messages("call_big123", "web.search");
+        messages[2].content = vec![ContentPart::ToolResult(
+            ironclaw_llm::agent_message::ToolResultContent {
+                call_id: "call_big123".into(),
+                outcome: ironclaw_llm::agent_message::ToolResultOutcome::Text {
+                    text: long.clone(),
+                },
+                is_error: false,
+            },
+        )];
+        request.messages = messages;
+        let thread_id = request.thread_id.clone();
+        validate_prepared_context_request(&request).expect("tool history validates");
+        let seed = prepared_seed(&request, &thread_id, Utc::now()).expect("seed");
+
+        let envelope = ToolResultReferenceEnvelope::from_json_str(
+            seed.rows[2].content.as_deref().expect("content"),
+        )
+        .expect("strict envelope parse");
+        let detail = envelope
+            .model_observation
+            .as_ref()
+            .and_then(|observation| observation.get("detail"))
+            .expect("seeded rows carry a model-visible observation detail");
+        assert_eq!(detail["kind"], "result_reference");
+        assert_eq!(detail["byte_len"].as_u64(), Some(long.len() as u64));
+        assert_eq!(
+            detail["preview"].as_str().map(str::len),
+            Some(PREPARED_SEED_PREVIEW_MAX_BYTES),
+            "the preview is the truncated head, not the whole output"
         );
     }
 
