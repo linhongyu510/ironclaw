@@ -30,6 +30,7 @@ mod doctor;
 mod home;
 mod profile;
 mod retired_sections;
+pub mod run_limits;
 mod secrets_guard;
 
 pub use boot::RebornBootConfig;

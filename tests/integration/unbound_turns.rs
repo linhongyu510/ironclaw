@@ -668,6 +668,7 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             output: OutputContract::AssistantMessage,
             requested_model: None,
             idempotency_key: "unbound-owner-accept".to_string(),
+            limits: Default::default(),
         })
         .await?;
     let ironclaw_product_contracts::inbound::ProductInboundAck::Accepted {
@@ -771,6 +772,92 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             .iter()
             .all(|thread| thread.thread_id != thread_id),
         "an owned unbound thread must still be hidden from the listing"
+    );
+    Ok(())
+}
+
+/// A wall-clock ceiling declared on the submission reaches the durable
+/// journal, which is what makes the deadline visible to the run.
+///
+/// `ResourceBudgetPolicy::max_wall_clock_seconds` is enforced by the loop's
+/// budget stage but nothing in the tree ever set it: the interactive tier
+/// defaults to `None` and every `PreparedTurnDeclarations` producer passed
+/// `TurnLimits::default()`. A run could not see its own deadline, so it could
+/// not plan against one. `TurnLimits` is narrowing-only, so a declared ceiling
+/// can shorten a run and never extend it.
+#[tokio::test]
+async fn unbound_submission_journals_its_declared_wall_clock_ceiling() -> HarnessResult<()> {
+    use ironclaw_assistant::{UnboundTurnService, UnboundTurnSubmission};
+    use ironclaw_host_api::prepared_context::TurnLimits;
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+
+    let group = RebornIntegrationGroup::builtin_tools().await?;
+    let harness = group.thread("conv-unbound-wall-clock").build().await?;
+    let thread_service = harness.thread_service_for_test()?;
+    let coordinator = harness.turn_coordinator_for_test();
+
+    let caller = UserId::new(CALLER)?;
+    let service = UnboundTurnService::new(
+        thread_service.clone(),
+        coordinator.clone(),
+        AgentId::new(AGENT)?,
+        Some(ProjectId::new(PROJECT)?),
+    );
+
+    let public_id = "unbound-wall-clock";
+    let thread_id = ironclaw_host_api::ids::ThreadId::new(public_id)?;
+    let script_scope = TurnScope::new_with_owner(
+        TenantId::new(TENANT)?,
+        Some(AgentId::new(AGENT)?),
+        Some(ProjectId::new(PROJECT)?),
+        thread_id.clone(),
+        Some(caller.clone()),
+    );
+    group
+        .register_scope_script_for_test(
+            script_scope.clone(),
+            "unbound-wall-clock",
+            vec![RebornScriptedReply::text("done")],
+        )
+        .await?;
+
+    service
+        .accept_and_submit(UnboundTurnSubmission {
+            caller: ProductSurfaceCaller::new(
+                TenantId::new(TENANT)?,
+                caller.clone(),
+                Some(AgentId::new(AGENT)?),
+                Some(ProjectId::new(PROJECT)?),
+            ),
+            public_id: public_id.to_string(),
+            system_prompt: "You are a background task.".to_string(),
+            messages: vec![AgentMessage {
+                role: AgentMessageRole::User,
+                content: vec![ContentPart::text("do the thing")],
+            }],
+            tools: Vec::new(),
+            output: OutputContract::AssistantMessage,
+            requested_model: None,
+            idempotency_key: "unbound-wall-clock-accept".to_string(),
+            limits: TurnLimits {
+                max_wall_clock_seconds: Some(600),
+                ..TurnLimits::default()
+            },
+        })
+        .await?;
+
+    let owner_scope = ThreadScope {
+        owner_user_id: Some(caller.clone()),
+        ..ownerless_thread_scope()?
+    };
+    let record = thread_service
+        .read_prepared_context(&owner_scope, &thread_id)
+        .await?
+        .ok_or("prepared-context record must be journaled")?;
+    assert_eq!(
+        record.declarations.limits.max_wall_clock_seconds,
+        Some(600),
+        "the declared wall-clock ceiling must survive into the journal"
     );
     Ok(())
 }

@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, ThreadId};
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
-use ironclaw_host_api::{output::OutputContract, prepared_context::PreparedTurnDeclarations};
+use ironclaw_host_api::{
+    output::OutputContract,
+    prepared_context::{PreparedTurnDeclarations, TurnLimits},
+};
 use ironclaw_product_contracts::{inbound::ProductInboundAck, surface::ProductSurfaceCaller};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, PreparedContextRequest,
@@ -89,6 +92,11 @@ pub struct UnboundTurnSubmission {
     /// from it (`{key}:submit`). The caller owns its namespace — this
     /// service serves any product surface, so it must not bake one in.
     pub idempotency_key: String,
+    /// Narrowing-only per-run ceilings journaled with the declarations. The
+    /// default is unlimited, matching every historical caller; a surface that
+    /// knows its own deadline (an OpenAI-compatible harness with an external
+    /// timeout) supplies one so the RUN can see it too.
+    pub limits: TurnLimits,
 }
 
 /// Prepared-context door + unbound-run resolver over the SAME thread service
@@ -173,7 +181,7 @@ impl UnboundTurnService {
                 declarations: PreparedTurnDeclarations {
                     tools: submission.tools,
                     output: submission.output,
-                    limits: Default::default(),
+                    limits: submission.limits,
                 },
                 idempotency_key: submission.idempotency_key.clone(),
                 thread_id: thread_id.clone(),
@@ -672,6 +680,7 @@ mod tests {
                 output: output.clone(),
                 requested_model: None,
                 idempotency_key: "forwarded-output-contract-key".to_string(),
+                limits: Default::default(),
             })
             .await
             .expect("unbound submission");

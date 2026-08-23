@@ -1347,6 +1347,7 @@ fn prepared_gateway(
             AgentId::new(format!("agent-{suffix}")).expect("agent"),
             None,
         )),
+        limits: TurnLimits::default(),
     }
 }
 
@@ -1667,6 +1668,7 @@ async fn prepared_gateway_resolves_native_structured_assistant_output() {
             AgentId::new("agent-sres").expect("agent"),
             None,
         )),
+        limits: TurnLimits::default(),
     };
 
     let request = OpenAiChatCompletionProjectionRequest {

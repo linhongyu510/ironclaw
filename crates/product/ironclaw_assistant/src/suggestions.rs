@@ -353,6 +353,8 @@ async fn submit_suggestion_generation(
         output: output.clone(),
         requested_model: None,
         idempotency_key: accept_key.to_string(),
+        // Suggestions are short and have no external deadline of their own.
+        limits: Default::default(),
     };
     let run_id = match existing_run_id {
         Some(run_id) => run_id,

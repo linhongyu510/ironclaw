@@ -26,6 +26,7 @@ use ironclaw_assistant::{
     UnboundTurnSubmission,
 };
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::prepared_context::TurnLimits;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
@@ -100,6 +101,14 @@ pub async fn build_openai_compat_route_mount(
     // chat requests: same thread service and coordinator the runtime's own
     // turn path uses, scoped to the deployment's default agent/project axes
     // with the authenticated caller threaded through as the thread owner.
+    // Deployment-configured wall-clock ceiling for this lane (unset = none,
+    // the historical behavior). Set it slightly under the calling harness's own
+    // timeout so a run reaches its internal deadline first and can still finish
+    // deliberately rather than being killed from outside mid-work.
+    let prepared_run_limits = TurnLimits {
+        max_wall_clock_seconds: ironclaw_config::run_limits::prepared_run_max_wall_clock_seconds(),
+        ..TurnLimits::default()
+    };
     let prepared_turn_gateway = Arc::new(OpenAiCompatPreparedTurnGateway {
         service: Arc::new(UnboundTurnService::new(
             runtime.product_thread_service(),
@@ -107,6 +116,7 @@ pub async fn build_openai_compat_route_mount(
             _default_agent_id.clone(),
             _default_project_id.clone(),
         )),
+        limits: prepared_run_limits,
     });
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         product_surface.clone(),
@@ -219,6 +229,8 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
 /// `ironclaw_assistant::UnboundTurnService`.
 struct OpenAiCompatPreparedTurnGateway {
     service: Arc<UnboundTurnService>,
+    /// Narrowing-only ceilings applied to every run this lane accepts.
+    limits: TurnLimits,
 }
 
 impl OpenAiCompatPreparedTurnGateway {
@@ -299,6 +311,7 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
                 output: request.output,
                 requested_model: request.requested_model,
                 idempotency_key,
+                limits: self.limits,
             })
             .await
             .map_err(map_prepared_turn_error)
