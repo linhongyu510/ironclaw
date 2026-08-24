@@ -365,19 +365,29 @@ RELEASE_STEP_CONDITION = "if: ${{ matrix.container }}"
 def _composite_step_condition(text: str) -> str | None:
     """The `if:` guarding the composite step, or None if the step is unguarded.
 
-    Scans the step's own lines: from the `- name:`/`- uses:` that carries the
-    composite backwards to the step start, so a neighbouring step's condition
-    cannot be mistaken for this one's.
+    Scans the step's WHOLE body, not just the lines above `uses:`. YAML mapping
+    keys are unordered, so `uses:` may legally precede `if:`; stopping at the
+    `uses:` line reported such a step as unconditional and would have rejected
+    a correct release workflow. The step is bounded by its own `- ` marker and
+    the next line at or left of that marker.
     """
     lines = text.splitlines()
     for index, line in enumerate(lines):
         if SETUP_RUST_USES not in line.split("#")[0]:
             continue
-        # Walk back to the start of this step (the `- ` marker).
         start = index
         while start > 0 and not lines[start].lstrip().startswith("- "):
             start -= 1
-        for candidate in lines[start : index + 1]:
+        marker_indent = len(lines[start]) - len(lines[start].lstrip())
+        end = len(lines)
+        for offset in range(start + 1, len(lines)):
+            follower = lines[offset]
+            if not follower.strip():
+                continue
+            if len(follower) - len(follower.lstrip()) <= marker_indent:
+                end = offset
+                break
+        for candidate in lines[start:end]:
             stripped = candidate.split("#")[0].strip().lstrip("- ").strip()
             if stripped.startswith("if:"):
                 return stripped
@@ -486,7 +496,11 @@ def validate_release_workflow_installs_rust(
 # scripts, YAML `KEY: value` in workflow job envs. Matching only `=` made this
 # guard blind to the 14 workflow lines this PR deleted -- the majority of what
 # it exists to keep deleted.
-DEBUG_POLICY_ASSIGNMENT = re.compile(r"CARGO_PROFILE_[A-Z]+_DEBUG\s*[:=]")
+# The key may be bare, double-quoted, or single-quoted -- all three are valid
+# YAML for the same mapping key, and a quoted one bypassed this guard.
+DEBUG_POLICY_ASSIGNMENT = re.compile(
+    r"[\"']?CARGO_PROFILE_[A-Z]+_DEBUG[\"']?\s*[:=]"
+)
 # Where the value could be written. `scripts/` covers the shell/python side;
 # `.github/` covers workflow and composite-action env blocks, which is where
 # five job envs carried it before this change.

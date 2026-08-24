@@ -1090,10 +1090,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan,
             {
                 "mode": "full",
-                "reasons": [
-                    "shared reborn action changed; this PR runs the "
-                    "exhaustive plan"
-                ],
+                "reasons": ["shared reborn action changed; this PR runs the exhaustive plan"],
                 "changed_packages": [],
                 "affected_packages": ["alpha", "beta", "gamma"],
                 "crate_buckets": [
@@ -1112,7 +1109,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             self.plan(
                 "pull_request",
                 [
-                    ".github/actions/setup-rust/action.yml",
+                    ".github/actions/install-cargo-component/action.yml",
                     ".github/actions/some-undecided-action/action.yml",
                 ],
             )

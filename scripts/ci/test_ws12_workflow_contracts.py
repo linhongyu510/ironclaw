@@ -228,6 +228,26 @@ class SingleDebugPolicyOwnerTests(unittest.TestCase):
         )
         self.assertEqual([], validate_single_debug_policy_owner(root))
 
+    def test_quoted_yaml_keys_are_rejected(self) -> None:
+        """Bare, double-quoted and single-quoted are one YAML key.
+
+        Quoting the key bypassed this guard entirely.
+        """
+        for form in (
+            'CARGO_PROFILE_DEV_DEBUG: 0',
+            '"CARGO_PROFILE_DEV_DEBUG": 0',
+            "'CARGO_PROFILE_DEV_DEBUG': 0",
+        ):
+            with self.subTest(form=form):
+                root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+                (root / ".github" / "workflows").mkdir(parents=True)
+                (root / ".github" / "workflows" / "d.yml").write_text(
+                    f"jobs:\n  b:\n    env:\n      {form}\n", encoding="utf-8"
+                )
+                self.assertEqual(
+                    1, len(validate_single_debug_policy_owner(root)), form
+                )
+
     def test_the_live_tree_has_exactly_one_owner(self) -> None:
         self.assertEqual([], validate_single_debug_policy_owner(ROOT))
 
@@ -912,6 +932,53 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
             self.assertTrue(
                 any("dist-build-setup.yml" in e for e in errors), errors
             )
+
+    def test_uses_before_if_is_still_read_as_conditional(self) -> None:
+        """YAML mapping keys are unordered; `uses:` may precede `if:`.
+
+        The first version of this check scanned only the lines ABOVE the
+        composite `uses:` line, so a step written in that order reported
+        `<unconditional>` and would have rejected a correct release workflow —
+        a false positive on the release path.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- {self.STEP}\n  if: ${{{{ matrix.container }}}}\n", encoding="utf-8"
+            )
+            reordered = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Install Rust\n"
+                f"        {self.STEP}\n"
+                "        if: ${{ matrix.container }}\n"
+            )
+            self.assertEqual(
+                [],
+                validate_release_workflow_installs_rust(
+                    {".github/workflows/ironclaw-release.yml": reordered}, root
+                ),
+            )
+
+    def test_a_neighbouring_steps_condition_is_not_borrowed(self) -> None:
+        """Bounding matters in the other direction too."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            borrowed = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Something else\n"
+                "        if: ${{ matrix.container }}\n"
+                "        run: echo hi\n"
+                f"      - {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": borrowed}, root
+            )
+            self.assertTrue(any("<unconditional>" in e for e in errors), errors)
 
     def test_the_live_release_lane_reaches_the_composite(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)
