@@ -734,6 +734,15 @@ async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
         panic!("allow path with a sealed actor must mint an Authorized witness");
     };
     assert_eq!(authorized.lane(), RuntimeLane::Wasm);
+    assert_eq!(
+        authorized.descriptor(),
+        Some(
+            registry
+                .get_capability(&CapabilityId::new("echo.say").unwrap())
+                .unwrap()
+        ),
+        "the witness must freeze the exact descriptor that authorization evaluated"
+    );
     let invocation = authorized.invocation();
     assert_eq!(
         invocation.capability,

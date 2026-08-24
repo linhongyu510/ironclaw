@@ -915,7 +915,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // dependencies; execution, staging, and proxy substitution stay in
         // the kernel and sandbox crates. Re-captured at the exact 20_878
         // measured count minus the standing 150-line working tolerance.
-        ("ironclaw_host_api", 20_728),
+        // 20_878 -> 21_027 (authorized descriptor freeze): +149 lines carry the
+        // exact capability descriptor evaluated by authorization through the
+        // sealed one-shot witness, durable process continuation, and dispatch
+        // request. This closes the gap where runtime credential requirements
+        // were discarded before sandbox execution. Trusted-runtime serde is
+        // scoped to the host-written continuation record; authorization,
+        // credential staging, and execution remain in their owning kernel and
+        // runtime crates. Re-captured at the exact 21_027 measured count minus
+        // the standing 150-line working tolerance.
+        ("ironclaw_host_api", 20_877),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

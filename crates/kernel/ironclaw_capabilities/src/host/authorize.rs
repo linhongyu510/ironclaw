@@ -706,6 +706,7 @@ where
         Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
             self.authorization_grant(),
             invocation,
+            descriptor.clone(),
             lane,
             mounts,
             reservation,

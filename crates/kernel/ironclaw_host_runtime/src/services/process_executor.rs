@@ -613,6 +613,7 @@ mod tests {
                     process_id,
                     parent_process_id: None,
                 },
+                descriptor: None,
                 lane,
                 mounts: Some(MountView::default()),
                 resource_reservation: None,

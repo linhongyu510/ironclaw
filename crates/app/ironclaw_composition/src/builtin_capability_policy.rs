@@ -81,6 +81,12 @@ impl BuiltinCapabilityPolicy {
                 EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
             )
         });
+        // Active extension manifests may bind an invocation-scoped credential to
+        // a direct executable in the user sandbox. The base local-host shell
+        // remains credentialless; only this sandbox projection admits UseSecret.
+        if !shell.effects.contains(&EffectKind::UseSecret) {
+            shell.effects.push(EffectKind::UseSecret);
+        }
         // The sandbox transport supplies its own per-user `/workspace` bind.
         // Passing the host runtime's tenant-workspace grant would either expose
         // the wrong storage boundary or fail its trusted-mount resolution.
@@ -813,6 +819,7 @@ mod tests {
             assert!(!shell.effects.contains(&effect));
         }
         assert!(shell.effects.contains(&EffectKind::Network));
+        assert!(shell.effects.contains(&EffectKind::UseSecret));
         assert_eq!(
             shell.network,
             CapabilityNetworkProfile::SandboxManagedEgress
@@ -840,6 +847,7 @@ mod tests {
             .grant(&CapabilityId::new("builtin.shell").expect("capability id"))
             .expect("shell grant");
         assert!(local_shell.effects.contains(&EffectKind::Network));
+        assert!(!local_shell.effects.contains(&EffectKind::UseSecret));
         assert_eq!(local_shell.network, CapabilityNetworkProfile::DevWildcard);
         assert_eq!(local_shell.mounts, CapabilityMountProfile::Ambient);
     }

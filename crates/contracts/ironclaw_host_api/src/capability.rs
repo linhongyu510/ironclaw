@@ -241,7 +241,7 @@ impl OriginGateMatrix {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
     pub id: CapabilityId,
     pub provider: ExtensionId,

@@ -270,6 +270,12 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          archive workflows — GitHub as a code host, not the github extension",
     ),
     (
+        "crates/lanes/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
+        "api.github.com",
+        "default sandboxed-shell egress allowlist includes the GitHub API host for ordinary \
+         `gh` CLI workflows — GitHub as a code host, not the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",
@@ -2159,6 +2165,7 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
         BTreeSet::from([
             "google",
             "github",
+            "api.github.com",
             "slack",
             "gmail",
             "google_calendar",
@@ -2171,7 +2178,7 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
             "www.googleapis.com",
         ]),
         "path-scoped carve-outs are reserved for the four documented collision domains \
-         (LLM providers, SSO login, GitHub-as-skill-source, vendor-safety detection — \
+         (LLM providers, SSO login, GitHub-as-skill/code-host, vendor-safety detection — \
          credential-format scanners plus the trace payload-redaction classifier); \
          new terms here are a gate regression"
     );
