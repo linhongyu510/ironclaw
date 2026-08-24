@@ -443,7 +443,7 @@ jobs:
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
+    if: ${{ always() }}  # PROBE: force the Windows lane onto this PR
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
