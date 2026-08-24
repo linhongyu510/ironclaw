@@ -308,10 +308,19 @@ impl ManagedEgressRuntime {
         create_material_directory(&proxy_material_root, 0o711).await?;
         let ca_cert_path = proxy_material_root.join("ca.crt");
         let ca_key_path = proxy_material_root.join("ca.key");
-        write_atomic_material_file(&ca_cert_path, self.ca.root_certificate_pem().as_bytes())
-            .await?;
+        write_atomic_material_file_if_changed(
+            &ca_cert_path,
+            self.ca.root_certificate_pem().as_bytes(),
+            0o644,
+        )
+        .await?;
         let ca_key = self.ca.proxy_private_key_pem();
-        write_atomic_private_material_file(&ca_key_path, ca_key.expose_secret().as_bytes()).await?;
+        write_atomic_material_file_if_changed(
+            &ca_key_path,
+            ca_key.expose_secret().as_bytes(),
+            0o600,
+        )
+        .await?;
         let invocation_id_path = proxy_material_root.join("invocation-id");
         if !tokio::fs::try_exists(&invocation_id_path)
             .await
@@ -584,7 +593,7 @@ impl ManagedEgressRuntime {
         let cleanup_result = remove_credential_material(material_root).await;
         let clear_result = async {
             let config = render_proxy_config_with_ca(&self.policy, &bundle.proxy_ip)?;
-            write_atomic_material_file(&material_root.join("proxy.yaml"), config.as_bytes())
+            write_bind_mounted_proxy_config(&material_root.join("proxy.yaml"), config.as_bytes())
                 .await?;
             restart_proxy_container(docker, &bundle.proxy_host).await
         }
@@ -1761,6 +1770,71 @@ async fn write_atomic_private_material_file(
     .await
 }
 
+/// Keeps an existing file bind mount valid when the material has not changed.
+///
+/// Docker Desktop pins file bind mounts to the source inode. Replacing an
+/// unchanged CA file makes that mount disappear from a running user container.
+/// A changed CA still uses the atomic writer; its posture change recreates the
+/// dependent containers before they execute another command.
+async fn write_atomic_material_file_if_changed(
+    path: &std::path::Path,
+    contents: &[u8],
+    mode: u32,
+) -> Result<(), RuntimeProcessError> {
+    match tokio::fs::read(path).await {
+        Ok(existing) => {
+            let existing = Zeroizing::new(existing);
+            if existing.as_slice() == contents {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox managed-egress material read failed: {error}"
+            )));
+        }
+    }
+    write_atomic_material_file_with_mode(
+        path.to_path_buf(),
+        Zeroizing::new(contents.to_vec()),
+        mode,
+    )
+    .await
+}
+
+/// Rewrites the existing proxy config without replacing its inode.
+///
+/// Docker Desktop can retain a stale directory-bind dentry across an atomic
+/// rename. The proxy reads this file only at startup, and the lifecycle gate
+/// serializes updates with restarts, so an in-place write followed by `sync_all`
+/// gives the container one stable mounted file to reopen.
+async fn write_bind_mounted_proxy_config(
+    path: &std::path::Path,
+    contents: &[u8],
+) -> Result<(), RuntimeProcessError> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy config open failed: {error}"
+            ))
+        })?;
+    tokio::io::AsyncWriteExt::write_all(&mut file, contents)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy config write failed: {error}"
+            ))
+        })?;
+    file.sync_all().await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!("sandbox proxy config sync failed: {error}"))
+    })
+}
+
 async fn write_proxy_credential_material(
     material_root: &std::path::Path,
     bundle_json: &[u8],
@@ -1769,7 +1843,7 @@ async fn write_proxy_credential_material(
     let result = async {
         write_atomic_private_material_file(&material_root.join("credentials.json"), bundle_json)
             .await?;
-        write_atomic_material_file(&material_root.join("proxy.yaml"), proxy_config).await
+        write_bind_mounted_proxy_config(&material_root.join("proxy.yaml"), proxy_config).await
     }
     .await;
     if let Err(write_error) = result {
@@ -2246,6 +2320,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_mounted_proxy_config_rewrite_preserves_the_mounted_inode() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("proxy.yaml");
+        write_atomic_material_file(&config, b"first").await.unwrap();
+
+        #[cfg(unix)]
+        let original_inode = tokio::fs::metadata(&config).await.unwrap().ino();
+
+        write_bind_mounted_proxy_config(&config, b"second")
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&config).await.unwrap(), b"second");
+        #[cfg(unix)]
+        assert_eq!(
+            tokio::fs::metadata(&config).await.unwrap().ino(),
+            original_inode,
+            "Docker Desktop bind mounts track the original config inode"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_ca_material_preserves_the_file_bind_inode() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("ca.crt");
+        write_atomic_material_file_if_changed(&certificate, b"same-root", 0o644)
+            .await
+            .unwrap();
+
+        #[cfg(unix)]
+        let original_inode = tokio::fs::metadata(&certificate).await.unwrap().ino();
+
+        write_atomic_material_file_if_changed(&certificate, b"same-root", 0o644)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&certificate).await.unwrap(), b"same-root");
+        #[cfg(unix)]
+        assert_eq!(
+            tokio::fs::metadata(&certificate).await.unwrap().ino(),
+            original_inode,
+            "an unchanged CA must remain visible through an existing file bind mount"
+        );
+    }
+
+    #[tokio::test]
     async fn credential_cleanup_removes_bundle_and_legacy_material() {
         let directory = tempfile::tempdir().unwrap();
         let bundle = directory.path().join("credentials.json");
@@ -2290,6 +2416,9 @@ mod tests {
         let runtime = test_runtime(directory.path().to_path_buf());
         let bundle = test_bundle(directory.path());
         let credential = test_credential("icsbx_test_placeholder", "Authorization", "secret");
+        write_atomic_material_file(&directory.path().join("proxy.yaml"), b"base")
+            .await
+            .unwrap();
 
         let result = runtime
             .configure_credentials_with_restart(&bundle, &[credential], || async {
@@ -2336,6 +2465,9 @@ mod tests {
             "Authorization",
             RAW_SECRET_SENTINEL,
         );
+        write_atomic_material_file(&directory.path().join("proxy.yaml"), b"base")
+            .await
+            .unwrap();
 
         runtime
             .configure_credentials_with_restart(
