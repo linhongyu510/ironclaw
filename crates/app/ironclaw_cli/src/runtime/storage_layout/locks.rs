@@ -77,6 +77,24 @@ pub(super) fn open_migration_lock_file(path: &Path) -> anyhow::Result<File> {
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
     };
 
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || !metadata.is_file() =>
+        {
+            bail!(
+                "expected an ordinary non-reparse-point file at {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect advisory lock entry {}", path.display()));
+        }
+    }
+
     let mut options = OpenOptions::new();
     options
         .read(true)
