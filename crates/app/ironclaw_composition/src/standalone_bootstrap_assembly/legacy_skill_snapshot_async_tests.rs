@@ -4,8 +4,9 @@ use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{ids::UserId, path::VirtualPath};
 
 use super::{
-    MAX_INSTALL_BUNDLE_FILE_BYTES, SKILL_DISK_IMPORT_MARKER_ROOT,
+    MAX_INSTALL_BUNDLE_FILE_BYTES, SKILL_DISK_IMPORT_MARKER_ROOT, disk_skill_files,
     import_host_disk_skills_into_database, import_host_disk_skills_into_database_with_collector,
+    validate_legacy_skill_snapshot_tree,
 };
 
 const TENANT: &str = "import-tenant";
@@ -147,5 +148,83 @@ async fn marked_snapshot_file_is_skipped_before_an_oversized_read() {
             .await
             .is_err(),
         "a marker-covered disk copy must not be re-imported"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn collected_skill_file_replaced_by_symlink_is_rejected_at_verified_read() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempfile::tempdir().expect("temp storage root");
+    seed_skill_on_disk(storage.path(), "replace-before-read");
+    let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
+        .expect("skill snapshot validation retains its root");
+    let (selected, _) = disk_skill_files(&storage.path().join("tenants"))
+        .expect("skill snapshot collection succeeds")
+        .into_iter()
+        .next()
+        .expect("seeded skill file is collected");
+    let outside = storage.path().join("outside.txt");
+    std::fs::write(&outside, b"outside bytes").expect("outside file");
+    std::fs::remove_file(&selected).expect("remove collected file");
+    symlink(&outside, &selected).expect("replace collected file with symlink");
+
+    let relative = selected
+        .strip_prefix(storage.path())
+        .expect("relative path");
+    let error = ironclaw_filesystem::read_ordinary_host_file(
+        &snapshot_root,
+        relative,
+        MAX_INSTALL_BUNDLE_FILE_BYTES,
+    )
+    .expect_err("verified read must reject the replacement symlink");
+    assert!(error.to_string().contains("symlink"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() {
+    use std::os::unix::fs::symlink;
+
+    let storage = tempfile::tempdir().expect("temp storage root");
+    let outside = tempfile::tempdir().expect("outside snapshot root");
+    seed_skill_on_disk(storage.path(), "replace-directory-before-read");
+    seed_skill_on_disk(outside.path(), "replace-directory-before-read");
+    let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
+        .expect("skill snapshot validation retains its root");
+    let (selected, _) = disk_skill_files(&storage.path().join("tenants"))
+        .expect("skill snapshot collection succeeds")
+        .into_iter()
+        .next()
+        .expect("seeded skill file is collected");
+    let selected_directory = selected.parent().expect("selected skill directory");
+    std::fs::rename(
+        selected_directory,
+        storage.path().join("retired-skill-directory"),
+    )
+    .expect("retire validated skill directory");
+    let outside_directory = outside
+        .path()
+        .join("tenants")
+        .join(TENANT)
+        .join("users")
+        .join(USER)
+        .join("skills/replace-directory-before-read");
+    symlink(&outside_directory, selected_directory)
+        .expect("replace validated skill directory with outside symlink");
+
+    let relative = selected
+        .strip_prefix(storage.path())
+        .expect("relative path");
+    let error = ironclaw_filesystem::read_ordinary_host_file(
+        &snapshot_root,
+        relative,
+        MAX_INSTALL_BUNDLE_FILE_BYTES,
+    )
+    .expect_err("verified read must reject a replaced ancestor directory");
+    assert!(
+        error.to_string().contains("without following links"),
+        "{error}"
     );
 }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_filesystem::{DiskDirectoryCapability, DiskFilesystem};
+use ironclaw_filesystem::{DiskDirectoryCapability, DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES;
@@ -43,10 +43,8 @@ async fn record_skill_disk_import(
     filesystem: &ironclaw_filesystem::CompositeRootFilesystem,
     marker: &ironclaw_host_api::path::VirtualPath,
 ) -> Result<(), RebornBuildError> {
-    use ironclaw_filesystem::RootFilesystem;
-    RootFilesystem::write_file(filesystem, marker, b"1")
-        .await
-        .map_err(RebornBuildError::Filesystem)
+    RootFilesystem::write_file(filesystem, marker, b"1").await?;
+    Ok(())
 }
 
 pub(crate) async fn import_host_disk_skills_into_database(
@@ -62,38 +60,21 @@ pub(crate) async fn import_host_disk_skills_into_database(
     .await
 }
 
-enum LegacySkillSnapshotDecision {
-    Read {
-        target: VirtualPath,
-        marker: VirtualPath,
-    },
-    Skip,
-}
-
-enum LegacySkillSnapshotEvent {
-    Candidate {
-        virtual_path: String,
-        decision: tokio::sync::oneshot::Sender<LegacySkillSnapshotDecision>,
-    },
-    Payload {
-        target: VirtualPath,
-        marker: VirtualPath,
-        bytes: Vec<u8>,
-        consumed: tokio::sync::oneshot::Sender<()>,
-    },
-}
+type SnapshotRead = (
+    tokio::sync::oneshot::Sender<Result<Vec<u8>, RebornBuildError>>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+type SnapshotCandidate = (String, tokio::sync::oneshot::Sender<Option<SnapshotRead>>);
 
 async fn import_host_disk_skills_into_database_with_collector<F>(
     filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     collect: F,
 ) -> Result<(), RebornBuildError>
 where
-    F: FnOnce(tokio::sync::mpsc::Sender<LegacySkillSnapshotEvent>) -> Result<(), RebornBuildError>
+    F: FnOnce(tokio::sync::mpsc::Sender<SnapshotCandidate>) -> Result<(), RebornBuildError>
         + Send
         + 'static,
 {
-    use ironclaw_filesystem::RootFilesystem;
-
     let complete_marker = VirtualPath::new(SKILL_DISK_IMPORT_COMPLETE_MARKER)?;
     match RootFilesystem::stat(filesystem.as_ref(), &complete_marker).await {
         Ok(_) => return Ok(()),
@@ -101,59 +82,50 @@ where
         Err(error) => return Err(RebornBuildError::Filesystem(error)),
     }
 
-    // Capacity one plus the per-payload consumption acknowledgement ensures
-    // the blocking producer can never retain or start a second payload while
-    // the async consumer still owns the first one.
+    // Capacity one plus the consumption acknowledgement prevents the producer
+    // from starting another read while the async consumer owns a payload.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
     let collection = tokio::task::spawn_blocking(move || collect(event_tx));
     let mut imported = 0usize;
     let processing = async {
-        while let Some(event) = event_rx.recv().await {
-            match event {
-                LegacySkillSnapshotEvent::Candidate {
-                    virtual_path,
-                    decision,
-                } => {
-                    let target = VirtualPath::new(&virtual_path)?;
-                    let marker =
-                        VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
-                    // A marker-covered disk copy must not even be opened: it
-                    // may now be unreadable or larger than the import limit.
-                    match RootFilesystem::stat(filesystem.as_ref(), &marker).await {
-                        Ok(_) => {
-                            let _ = decision.send(LegacySkillSnapshotDecision::Skip);
-                            continue;
-                        }
-                        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
-                        Err(error) => return Err(RebornBuildError::Filesystem(error)),
-                    }
-                    // A database entry wins: it is either newer or the product
-                    // of a previous import. Record its marker before skipping.
-                    match RootFilesystem::stat(filesystem.as_ref(), &target).await {
-                        Ok(_) => {
-                            record_skill_disk_import(filesystem, &marker).await?;
-                            let _ = decision.send(LegacySkillSnapshotDecision::Skip);
-                        }
-                        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {
-                            let _ =
-                                decision.send(LegacySkillSnapshotDecision::Read { target, marker });
-                        }
-                        Err(error) => return Err(RebornBuildError::Filesystem(error)),
-                    }
+        while let Some((virtual_path, decision)) = event_rx.recv().await {
+            let target = VirtualPath::new(&virtual_path)?;
+            let marker =
+                VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
+            // Marker-covered disk copies must not even be opened.
+            match RootFilesystem::stat(filesystem.as_ref(), &marker).await {
+                Ok(_) => {
+                    let _ = decision.send(None);
+                    continue;
                 }
-                LegacySkillSnapshotEvent::Payload {
-                    target,
-                    marker,
-                    bytes,
-                    consumed,
-                } => {
-                    RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
-                    record_skill_disk_import(filesystem, &marker).await?;
-                    imported += 1;
-                    drop(bytes);
-                    let _ = consumed.send(());
-                }
+                Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(RebornBuildError::Filesystem(error)),
             }
+            // A database entry wins and receives its marker before skipping.
+            match RootFilesystem::stat(filesystem.as_ref(), &target).await {
+                Ok(_) => {
+                    record_skill_disk_import(filesystem, &marker).await?;
+                    let _ = decision.send(None);
+                    continue;
+                }
+                Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(RebornBuildError::Filesystem(error)),
+            }
+            let (payload_tx, payload_rx) = tokio::sync::oneshot::channel();
+            let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
+            if decision.send(Some((payload_tx, consumed_rx))).is_err() {
+                continue;
+            }
+            let bytes = payload_rx
+                .await
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("legacy skill snapshot payload task stopped: {error}"),
+                })??;
+            RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
+            record_skill_disk_import(filesystem, &marker).await?;
+            imported += 1;
+            drop(bytes);
+            let _ = consumed_tx.send(());
         }
         Ok::<(), RebornBuildError>(())
     }
@@ -163,9 +135,9 @@ where
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("legacy skill snapshot collection task failed: {error}"),
-        });
+        })?;
     processing?;
-    collection??;
+    collection?;
     if imported > 0 {
         tracing::info!(
             imported,
@@ -179,7 +151,7 @@ where
 fn stream_legacy_skill_snapshot(
     storage_root: &Path,
     owner_user_id: &UserId,
-    events: tokio::sync::mpsc::Sender<LegacySkillSnapshotEvent>,
+    events: tokio::sync::mpsc::Sender<SnapshotCandidate>,
 ) -> Result<(), RebornBuildError> {
     let snapshot_root = validate_legacy_skill_snapshot_tree(storage_root)?;
     let tenants_root = storage_root.join("tenants");
@@ -187,19 +159,13 @@ fn stream_legacy_skill_snapshot(
     skill_files.extend(unscoped_disk_skill_files(storage_root, owner_user_id)?);
     for (host_path, virtual_path) in skill_files {
         let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
-        if events
-            .blocking_send(LegacySkillSnapshotEvent::Candidate {
-                virtual_path,
-                decision: decision_tx,
-            })
-            .is_err()
-        {
+        if events.blocking_send((virtual_path, decision_tx)).is_err() {
             return Ok(());
         }
         let Ok(decision) = decision_rx.blocking_recv() else {
             return Ok(());
         };
-        let LegacySkillSnapshotDecision::Read { target, marker } = decision else {
+        let Some((payload, consumed)) = decision else {
             continue;
         };
         let relative_path =
@@ -211,20 +177,17 @@ fn stream_legacy_skill_snapshot(
                         host_path.display()
                     ),
                 })?;
-        let bytes = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &host_path)?;
-        let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
-        if events
-            .blocking_send(LegacySkillSnapshotEvent::Payload {
-                target,
-                marker,
-                bytes,
-                consumed: consumed_tx,
-            })
-            .is_err()
-        {
+        let bytes = ironclaw_filesystem::read_ordinary_host_file(
+            &snapshot_root,
+            relative_path,
+            MAX_INSTALL_BUNDLE_FILE_BYTES,
+        )
+        .map_err(|error| snapshot_io_error("read legacy skill snapshot file", &host_path, error));
+        let read_succeeded = bytes.is_ok();
+        if payload.send(bytes).is_err() {
             return Ok(());
         }
-        if consumed_rx.blocking_recv().is_err() {
+        if !read_succeeded || consumed.blocking_recv().is_err() {
             return Ok(());
         }
     }
@@ -453,19 +416,6 @@ fn snapshot_io_error(context: &str, path: &Path, error: std::io::Error) -> Rebor
     }
 }
 
-fn read_legacy_skill_snapshot_file(
-    snapshot_root: &DiskDirectoryCapability,
-    relative_path: &Path,
-    display_path: &Path,
-) -> Result<Vec<u8>, RebornBuildError> {
-    ironclaw_filesystem::read_ordinary_host_file(
-        snapshot_root,
-        relative_path,
-        MAX_INSTALL_BUNDLE_FILE_BYTES,
-    )
-    .map_err(|error| snapshot_io_error("read legacy skill snapshot file", display_path, error))
-}
-
 /// Initializes standalone host content after storage roots are prepared.
 pub(crate) async fn bootstrap_standalone_host(
     system_root: &Path,
@@ -595,10 +545,7 @@ mod skill_disk_import_tests {
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{ids::UserId, path::VirtualPath};
 
-    use super::{
-        disk_skill_files, import_host_disk_skills_into_database, read_legacy_skill_snapshot_file,
-        validate_legacy_skill_snapshot_tree,
-    };
+    use super::import_host_disk_skills_into_database;
 
     const TENANT: &str = "import-tenant";
     const USER: &str = "import-user";
@@ -851,79 +798,6 @@ mod skill_disk_import_tests {
             .expect_err("an unbounded legacy snapshot must fail closed");
 
         assert!(error.to_string().contains("depth"), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn collected_skill_file_replaced_by_symlink_is_rejected_at_verified_read() {
-        use std::os::unix::fs::symlink;
-
-        let storage = tempfile::tempdir().expect("temp storage root");
-        seed_skill_on_disk(storage.path(), "replace-before-read");
-        let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
-            .expect("skill snapshot validation retains its root");
-        let files = disk_skill_files(&storage.path().join("tenants"))
-            .expect("skill snapshot collection succeeds");
-        let (selected, _) = files
-            .into_iter()
-            .next()
-            .expect("seeded skill file is collected");
-        let outside = storage.path().join("outside.txt");
-        std::fs::write(&outside, b"outside bytes").expect("outside file");
-        std::fs::remove_file(&selected).expect("remove collected file");
-        symlink(&outside, &selected).expect("replace collected file with symlink");
-
-        let relative_path = selected
-            .strip_prefix(storage.path())
-            .expect("selected file remains under snapshot root");
-        let error = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &selected)
-            .expect_err("verified read must reject the replacement symlink");
-
-        assert!(error.to_string().contains("symlink"), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() {
-        use std::os::unix::fs::symlink;
-
-        let storage = tempfile::tempdir().expect("temp storage root");
-        let outside = tempfile::tempdir().expect("outside snapshot root");
-        seed_skill_on_disk(storage.path(), "replace-directory-before-read");
-        seed_skill_on_disk(outside.path(), "replace-directory-before-read");
-        let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
-            .expect("skill snapshot validation retains its root");
-        let files = disk_skill_files(&storage.path().join("tenants"))
-            .expect("skill snapshot collection succeeds");
-        let (selected, _) = files
-            .into_iter()
-            .next()
-            .expect("seeded skill file is collected");
-        let selected_directory = selected.parent().expect("selected skill directory");
-        let retired_directory = storage.path().join("retired-skill-directory");
-        std::fs::rename(selected_directory, &retired_directory)
-            .expect("retire validated skill directory");
-        let outside_directory = outside
-            .path()
-            .join("tenants")
-            .join(TENANT)
-            .join("users")
-            .join(USER)
-            .join("skills")
-            .join("replace-directory-before-read");
-        symlink(&outside_directory, selected_directory)
-            .expect("replace validated skill directory with outside symlink");
-
-        let relative_path = selected
-            .strip_prefix(storage.path())
-            .expect("selected file remains under snapshot root");
-        let error = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &selected)
-            .expect_err("verified read must reject a replaced ancestor directory");
-
-        assert!(
-            error.to_string().contains("without following links"),
-            "{error}"
-        );
     }
 
     #[cfg(unix)]
