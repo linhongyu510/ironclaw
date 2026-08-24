@@ -395,6 +395,9 @@ impl<'a> CapabilityCatalog<'a> {
             .map(|package| package.id.as_str().to_string())
             .collect::<Vec<_>>();
         context_ids.sort_unstable();
+        if context_ids.is_empty() {
+            return Ok(());
+        }
 
         let contexts = descriptor
             .parameters_schema
@@ -405,17 +408,15 @@ impl<'a> CapabilityCatalog<'a> {
                     "built-in shell schema is missing credential_contexts".to_string(),
                 )
             })?;
-        if !context_ids.is_empty() {
-            let items = contexts
-                .get_mut("items")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| {
-                    HostRuntimeError::invalid_request(
-                        "built-in shell credential_contexts schema is missing items".to_string(),
-                    )
-                })?;
-            items.insert("enum".to_string(), json!(context_ids));
-        }
+        let items = contexts
+            .get_mut("items")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                HostRuntimeError::invalid_request(
+                    "built-in shell credential_contexts schema is missing items".to_string(),
+                )
+            })?;
+        items.insert("enum".to_string(), json!(context_ids));
 
         let description = contexts
             .get("description")
@@ -427,11 +428,7 @@ impl<'a> CapabilityCatalog<'a> {
                         .to_string(),
                 )
             })?;
-        let active_contexts = if context_ids.is_empty() {
-            "none".to_string()
-        } else {
-            context_ids.join(", ")
-        };
+        let active_contexts = context_ids.join(", ");
         contexts.insert(
             "description".to_string(),
             Value::String(format!(

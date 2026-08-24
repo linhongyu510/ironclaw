@@ -81,9 +81,7 @@ impl BuiltinCapabilityPolicy {
                 EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
             )
         });
-        // Active extension manifests may bind an invocation-scoped credential to
-        // a direct executable in the user sandbox. The base local-host shell
-        // remains credentialless; only this sandbox projection admits UseSecret.
+        // Only the user-sandbox projection admits manifest-backed invocation credentials.
         if !shell.effects.contains(&EffectKind::UseSecret) {
             shell.effects.push(EffectKind::UseSecret);
         }
