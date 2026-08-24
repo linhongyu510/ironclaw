@@ -595,9 +595,23 @@ REPO_CONFIG_TEST_OWNERS = {
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
+# cargo-dist's build-setup fragment. cargo-dist re-inlines it into
+# `.github/workflows/ironclaw-release.yml` on every `dist generate`, so it is
+# workflow source that happens to live outside `.github/workflows/` — the same
+# static control as the file it is inlined into, and read by no Reborn lane.
+# The planner fails closed on unclassified paths, so a `.github/` file with no
+# rule takes the whole PR's plan step down rather than mis-scheduling it.
+PR_STATIC_CONTROL_FRAGMENTS = (".github/dist-build-setup.yml",)
 SHARED_REBORN_ACTION_PREFIXES = (
     ".github/actions/setup-sccache-dist/",
     ".github/actions/setup-rust/",
+    # The deliberate mapping the arm below asks for. `install-cargo-component`
+    # is consumed by `coverage.yml` and `platform-and-compat.yml`; a change to
+    # it can move what those lanes build, and no narrow lane exercises it
+    # safely, so it takes the exhaustive plan like its two siblings. Until this
+    # entry existed it hit the fail-closed arm, so a PR editing only that file
+    # took the whole plan step down instead of scheduling anything.
+    ".github/actions/install-cargo-component/",
 )
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
@@ -951,7 +965,7 @@ def build_plan(
             exact_test_targets[package].add(("test", Path(owner).stem))
             reasons.append(f"repository config parsed by {owner}: {path}")
             continue
-        if path in PR_STATIC_CONTROL_PATHS or path.startswith(
+        if path in PR_STATIC_CONTROL_FRAGMENTS or path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")

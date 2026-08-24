@@ -1226,6 +1226,95 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".github/labeler.yml"])
 
+    def test_dist_build_setup_fragment_is_classified_as_static_control(self) -> None:
+        """`.github/dist-build-setup.yml` is workflow source outside `workflows/`.
+
+        Regression for a real red on PR #7821: that PR edited the fragment,
+        the planner had no rule for it, and the fail-closed arm took the whole
+        `Build affected-area test plan` step down — the plan step failed before
+        it could schedule anything, so a PR touching only CI plumbing could not
+        report. Exactly the `pull_request_template.md` gap above, one directory
+        over.
+
+        cargo-dist re-inlines this file into `.github/workflows/`
+        `ironclaw-release.yml` on every `dist generate`, so it is the same
+        static control as the workflow it becomes, and no Reborn lane reads it.
+
+        Paired assertions, same shape as the sibling tests: accepted AND
+        selects no Rust lane, with a real change riding along still selecting
+        its lane, and an undecided `.github/` neighbour still refusing.
+        """
+        plan = self.plan("pull_request", [".github/dist-build-setup.yml"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        paired = self.plan(
+            "pull_request",
+            [".github/dist-build-setup.yml", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".github/labeler.yml"])
+
+    def test_every_workflow_source_under_github_is_classified(self) -> None:
+        """Every file that makes CI *run* must be classified, with no gaps.
+
+        Scoped deliberately to `.github/actions/**` and the cargo-dist
+        fragment — the composite actions and workflow source that jobs
+        execute. `.github/workflows/**` is already covered wholesale by
+        `PR_STATIC_CONTROL_PREFIXES`.
+
+        NOT a sweep of all of `.github/`. Fail-closed on an undecided path is
+        this planner's intended behaviour, and the sibling test above pins
+        `.github/labeler.yml` refusing on purpose. The line drawn here is
+        between "config someone may deliberately leave undecided" and "source
+        a job runs", where a refusal is always a latent red plan step.
+
+        This test found `.github/actions/install-cargo-component/action.yml`,
+        unmapped since it was added; `.github/dist-build-setup.yml` is the gap
+        that actually went red on PR #7821.
+
+        Known remaining refusals outside this scope, reported rather than
+        silently mapped: `.github/labeler.yml` (pinned as refusing by the test
+        above) and the six `.github/scripts/*.sh|.py` PR-automation helpers.
+        `ci-job-result-ok.sh` in particular is invoked by workflows, so it is a
+        latent plan-step break of the same class — mapping it is a deliberate
+        policy call for the planner's owner, not a drive-by.
+        """
+        root = Path(__file__).resolve().parents[2]
+        sources = sorted(
+            str(child.relative_to(root))
+            for child in (root / ".github" / "actions").rglob("*")
+            if child.is_file()
+        )
+        sources.append(".github/dist-build-setup.yml")
+        self.assertTrue(
+            (root / ".github" / "dist-build-setup.yml").is_file(),
+            "the cargo-dist fragment should exist; update this test if it moved",
+        )
+        self.assertGreater(len(sources), 1, ".github/actions should not be empty")
+
+        refused = []
+        for path in sources:
+            try:
+                # Real owners, not the fake workspace: some entries name a
+                # real crate file as their owner, which the synthetic package
+                # list cannot resolve.
+                self.plan_real_owners([path])
+            except ValueError as error:
+                message = str(error)
+                if "unclassified pull-request path" in message or (
+                    "unmapped test or CI path" in message
+                ):
+                    refused.append(f"{path}: {message}")
+                else:
+                    raise
+        self.assertEqual([], refused)
+
     def test_dependabot_config_routes_to_linked_device_supply_chain_test(self) -> None:
         """The config is an asserted input of the linked-device pin test."""
         plan = self.plan_real_owners([".github/dependabot.yml"])
