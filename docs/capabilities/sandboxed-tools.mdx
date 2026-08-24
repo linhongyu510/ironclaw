@@ -12,7 +12,7 @@ This is IronClaw's recommended approach for custom integrations that need strong
 
 ## How It Works
 
-```
+```text
 model selects a tool
     ↓
 authorization reads the manifest and plans obligations for this call
@@ -54,7 +54,7 @@ Every execution is bounded by three limits applied at instantiation:
 
 These are compiled-in defaults, not tunable knobs — there is no `WASM_FUEL_LIMIT`-style environment variable and no configuration field for them today. Changing them means changing the runtime's defaults where it is composed.
 
-Two further per-execution budgets apply to host calls: logging is capped at 1,000 entries per execution and 4 KB per message, and an HTTP request defaults to a 30-second timeout (a tool may pass its own, capped at the execution deadline).
+Two further per-execution budgets apply to host calls: logging is capped at 1,000 entries per execution and 4 KB per message, and an HTTP request defaults to a 30-second timeout (a tool may pass a shorter one; longer values are clamped to 30 seconds or to the remaining execution deadline, whichever is smaller).
 
 Per-call egress size is bounded by the manifest's `max_egress_bytes`, and output size by the resource ceiling authorization attaches to the call.
 
@@ -110,9 +110,9 @@ The example is condensed from the shipped `github` package. The real `github.cre
 |-------|---------|
 | `id` | Namespaced tool id (`<extension>.<tool>`). |
 | `effects` | Effect classes claimed by this tool: `network`, `use_secret`, `external_write`, `read_filesystem`, `write_filesystem`, `spawn_process`, `financial`, and others. Authorization plans obligations from these. |
-| `default_permission` | `allow`, `ask`, or `deny`. `ask` pauses the call for user approval. |
+| `default_permission` | `allow`, `ask`, or `deny`. `ask` makes the tool eligible for approval prompting — it pauses only when global auto-approve (on by default) is off or a per-tool ask-each-time override is set. `deny` is never durably auto-approved. |
 | `visibility` | Whether the tool is offered to the model at all. |
-| `origin_gate_matrix` | Per-origin reachability — `loop_run` (an agent turn), `product` (a direct product action), `automation` (an unattended trigger). A tool can be reachable from a supervised turn and `forbidden` from a scheduled run. |
+| `origin_gate_matrix` | Per-origin reachability — `loop_run` (an agent turn, including one started by a scheduled trigger), `product` (a direct product action), `automation` (routine/heartbeat work that is not model-initiated). A tool can be reachable from an agent turn and `forbidden` to automation. |
 | `network_targets` | Allowed outbound destinations by `scheme` and `host_pattern` (optionally `port`). Together with every credential `audience` below, this is the tool's allowlist; unlisted destinations are refused before the connection opens, and private-IP ranges are refused whenever a tool has any egress targets. |
 | `max_egress_bytes` | Per-call ceiling on outbound bytes. |
 | `input_schema_ref` / `output_schema_ref` / `prompt_doc_ref` | Paths to the JSON Schema for parameters (required for a bespoke tool), the optional result schema, and the model-facing prompt doc. |
@@ -196,7 +196,7 @@ Modules are compiled by wasmtime on first load and the prepared module is cached
 ## Security Notes
 
 <Warning>
-Read the manifest before installing an extension from an untrusted source — specifically `network_targets`, `credentials`, `effects`, and `default_permission`. Those four fields are the whole of what you are granting.
+Read the manifest before installing an extension from an untrusted source — specifically `network_targets`, `credentials`, `effects`, `default_permission`, and `origin_gate_matrix` (a manifest can declare an origin `ungated` or `consent_sufficient`). Those five fields are the whole of what you are granting.
 </Warning>
 
 <AccordionGroup>

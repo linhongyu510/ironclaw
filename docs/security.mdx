@@ -39,7 +39,7 @@ IronClaw takes a **defense in depth** approach — independent layers that a req
 
 The critical detail is where the credential enters. It is **not** in the tool. A sandboxed tool builds an unauthenticated request; the host attaches the credential only after the request has passed the leak scan, and the allowlist is enforced before any connection opens — so a destination the tool did not declare never receives the credential:
 
-```
+```text
 model picks a tool
     ↓
 authorization plans obligations for this call
@@ -109,8 +109,8 @@ What each field controls:
 | Field | What it governs |
 |-------|-----------------|
 | `effects` | The effect classes this tool claims — `network`, `use_secret`, `external_write`, `write_filesystem`, `spawn_process`, `financial`, and similar. Authorization plans obligations from these. |
-| `default_permission` | `allow`, `ask`, or `deny`. `ask` means the call pauses for your approval before it runs. |
-| `origin_gate_matrix` | Which invocation origins may reach this tool at all — an agent loop run, a direct product action, or an unattended automation. A tool can be reachable from a supervised turn and `forbidden` from a scheduled trigger. |
+| `default_permission` | `allow`, `ask`, or `deny`. `ask` makes the tool eligible for approval prompting; whether a call actually pauses depends on your approval settings (see below). `deny` can never be durably auto-approved. |
+| `origin_gate_matrix` | Which invocation origins may reach this tool at all — `loop_run` (an agent turn, including one started by a scheduled trigger), `product` (a direct product action), or `automation` (routine/heartbeat work that is not model-initiated). A tool can be reachable from an agent turn and `forbidden` to automation. |
 | `network_targets` | Outbound destinations, by scheme and host pattern (optionally port). Together with every credential `audience`, this is the allowlist; anything not on it is refused before the connection opens. HTTP method is not part of the match. |
 | `[[tools.credentials]]` | The credential to attach for a matching `audience`, and how (`header` with an optional prefix, query parameter, path placeholder, JSON body pointer, HTTP Basic, or VAPID authorization). The tool never receives the value. |
 | `max_egress_bytes` | Per-call ceiling on how many bytes this tool may send. Response size is bounded separately by the host. |
@@ -157,8 +157,8 @@ IronClaw's honest position on this is that **structural containment, not pattern
 
 1. **Untrusted content is fenced.** Error text and diagnostics from tools and providers are scanned for injection patterns before they reach the model; when any survive, the text is wrapped in explicit `EXTERNAL, UNTRUSTED` delimiters with an instruction to treat it as data, and any attempt to forge a closing delimiter inside that content is escaped on the way in.
 2. **Secret values are scrubbed from that same text** using the full leak-detector registry, so a hijacked tool call can't turn an error message into an exfiltration channel.
-3. **Capabilities are gated by origin.** `origin_gate_matrix` means a tool the model can reach during a supervised turn can be `forbidden` to an unattended scheduled run — the origin where a successful injection would be least likely to be noticed.
-4. **Effects need approval.** A tool whose `default_permission` is `ask` stops and waits for you. An injection that convinces the model to send an email still has to convince *you* to approve it.
+3. **Capabilities are gated by origin.** `origin_gate_matrix` means a tool the model can reach during an agent turn can be `forbidden` to routine/heartbeat automation. Scheduled trigger runs are agent turns and follow the `loop_run` policy — so an injected trigger payload still meets the same approval gates as an interactive turn.
+4. **Effects can require approval.** Tools carrying `financial`, `modify_approval`, or `modify_budget` effects always stop and wait for you, as does any tool you set to *ask each time* or whose manifest gates an origin `ask_always`. For everything else, note the default: global auto-approve is **on** for new users, so an `ask` tool such as Gmail send runs without a prompt until you turn auto-approve off or set a per-tool override. An injection that convinces the model to send an email only has to convince *you* if you have made that choice.
 
 And underneath all of that, the sandbox is the boundary that does not depend on detecting anything: a fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for that structural mitigation.
 
