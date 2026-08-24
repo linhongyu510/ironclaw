@@ -218,6 +218,7 @@ jobs:
           python3 scripts/ci/test_cut_ironclaw_release.py
           scripts/ci/test-hermetic-test-process.sh
           scripts/ci/test-hermetic-nextest-control-gating.sh
+          python3 scripts/ci/test_nextest_config.py
           scripts/ci/test-reborn-docker-entrypoint.sh
           # #7144: this 204-test module had never been run by any lane, so five
           # of its assertions had silently drifted out of sync with the code they

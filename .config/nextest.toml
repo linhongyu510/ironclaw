@@ -43,6 +43,35 @@ test-threads = "num-cpus"
 # aggregator (Task 1) to report failing TEST names, not just job names.
 path = "junit.xml"
 
+# --- Serialised groups -------------------------------------------------
+#
+# `ironclaw`'s CLI smoke tests boot a real `serve` listener. Their helper
+# picks a port by binding :0, reading the number, then RELEASING it before
+# the child re-binds -- a TOCTOU window the helper's own comment refuses to
+# paper over ("a small serialization fix, not a port-reservation
+# framework -- do not extend it into a pool or retry-with-backoff
+# mechanism"). Under `cargo test` those 20 tests shared one process and the
+# window stayed narrow; nextest runs each test in its own process, widening
+# it until two tests race for the same port and the loser reports
+# "connect to serve listener failed: Connection refused".
+#
+# Observed on this branch: onboard_login_link_then_bearer_authorizes_a_
+# protected_request, 1 of 1417 tests, in the reborn-core bucket.
+#
+# The rule this follows is the plan's own: a nextest-only failure gets
+# serialised here, never "fixed" by editing the test. Only the listener
+# tests join the group -- the other ~128 smoke tests stay parallel.
+[test-groups]
+cli-serve-listener = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(ironclaw) & binary(smoke) & (test(~serve) | test(~onboard_) | test(~stored_key_reaches) | test(a_real_env_var_beats_the_config_default_end_to_end))'
+test-group = "cli-serve-listener"
+
+[[profile.ci.overrides]]
+filter = 'package(ironclaw) & binary(smoke) & (test(~serve) | test(~onboard_) | test(~stored_key_reaches) | test(a_real_env_var_beats_the_config_default_end_to_end))'
+test-group = "cli-serve-listener"
+
 # Per-test windows for the handful of scenarios that genuinely need more
 # than 60s (live-recorded fixtures + heavy integration).
 [[profile.default.overrides]]
