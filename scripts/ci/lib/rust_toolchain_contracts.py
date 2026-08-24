@@ -352,6 +352,39 @@ DIST_BUILD_SETUP = ".github/dist-build-setup.yml"
 RELEASE_BUILD_JOB = "build-local-artifacts"
 
 
+# The condition cargo-dist's container build job carries on its Rust install,
+# in both the fragment and the generated workflow. Pinned, not merely tolerated:
+# the contract used to assert the step's TEXT existed and said nothing about
+# when it runs, so `if:` could be narrowed, widened, or dropped silently. The
+# value itself is deliberate -- container images ship without cargo, hosted
+# runners resolve rust-toolchain.toml themselves -- and it matches the
+# pre-composite step exactly, so release behaviour is unchanged by this PR.
+RELEASE_STEP_CONDITION = "if: ${{ matrix.container }}"
+
+
+def _composite_step_condition(text: str) -> str | None:
+    """The `if:` guarding the composite step, or None if the step is unguarded.
+
+    Scans the step's own lines: from the `- name:`/`- uses:` that carries the
+    composite backwards to the step start, so a neighbouring step's condition
+    cannot be mistaken for this one's.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if SETUP_RUST_USES not in line.split("#")[0]:
+            continue
+        # Walk back to the start of this step (the `- ` marker).
+        start = index
+        while start > 0 and not lines[start].lstrip().startswith("- "):
+            start -= 1
+        for candidate in lines[start : index + 1]:
+            stripped = candidate.split("#")[0].strip().lstrip("- ").strip()
+            if stripped.startswith("if:"):
+                return stripped
+        return None
+    return None
+
+
 def _has_composite_step(text: str) -> bool:
     """True when some EXECUTABLE line invokes the composite.
 
@@ -396,6 +429,19 @@ def validate_release_workflow_installs_rust(
                 "names the container build job; if it was renamed, update "
                 "RELEASE_BUILD_JOB so this contract keeps guarding it."
             )
+        elif _has_composite_step(block) and _composite_step_condition(
+            block
+        ) != RELEASE_STEP_CONDITION:
+            found = _composite_step_condition(block) or "<unconditional>"
+            errors.append(
+                f"{RELEASE_WORKFLOW}: job {RELEASE_BUILD_JOB!r} guards its "
+                f"Rust install with {found!r}, not {RELEASE_STEP_CONDITION!r}. "
+                "That condition decides which matrix entries reach the "
+                "composite at all; changing it changes which release binaries "
+                "are built with the pinned toolchain and mold, so it is a "
+                "deliberate edit in both this file and "
+                f"{DIST_BUILD_SETUP}, not a silent one."
+            )
         elif not _has_composite_step(block):
             errors.append(
                 f"{RELEASE_WORKFLOW}: job {RELEASE_BUILD_JOB!r} has no "
@@ -409,6 +455,16 @@ def validate_release_workflow_installs_rust(
     except OSError as error:
         errors.append(f"{DIST_BUILD_SETUP}: could not read fragment: {error}")
     else:
+        if _has_composite_step(fragment) and _composite_step_condition(
+            fragment
+        ) != RELEASE_STEP_CONDITION:
+            found = _composite_step_condition(fragment) or "<unconditional>"
+            errors.append(
+                f"{DIST_BUILD_SETUP}: guards its Rust install with {found!r}, "
+                f"not {RELEASE_STEP_CONDITION!r} — the fragment and the "
+                "generated workflow would disagree the next time cargo-dist "
+                "regenerates."
+            )
         if not _has_composite_step(fragment):
             errors.append(
                 f"{DIST_BUILD_SETUP}: no `{SETUP_RUST_USES}` step. cargo-dist "

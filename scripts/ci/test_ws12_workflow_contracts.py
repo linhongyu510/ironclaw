@@ -797,7 +797,12 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
         """
         body = "jobs:\n  plan:\n    steps:\n      - run: dist plan\n"
         body += "  build-local-artifacts:\n    steps:\n"
-        body += f"      - {step}\n" if step else "      - run: dist build\n"
+        if step:
+            body += "      - name: Install Rust\n"
+            body += "        if: ${{ matrix.container }}\n"
+            body += f"        {step}\n"
+        else:
+            body += "      - run: dist build\n"
         return body
 
 
@@ -806,7 +811,8 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".github").mkdir()
             (root / ".github" / "dist-build-setup.yml").write_text(
-                f"- {self.STEP}\n", encoding="utf-8"
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n",
+                encoding="utf-8",
             )
             errors = validate_release_workflow_installs_rust(
                 {".github/workflows/ironclaw-release.yml": "jobs:\n  build:\n"},
@@ -836,7 +842,8 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".github").mkdir()
             (root / ".github" / "dist-build-setup.yml").write_text(
-                f"- {self.STEP}\n", encoding="utf-8"
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n",
+                encoding="utf-8",
             )
             self.assertEqual(
                 [],
@@ -844,6 +851,66 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
                     {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
                     root,
                 ),
+            )
+
+    def test_a_changed_release_condition_is_rejected(self) -> None:
+        """The `if:` decides which matrix entries reach the composite at all.
+
+        Raised on review: the contract asserted the step TEXT existed and said
+        nothing about when it runs, so the condition could be narrowed,
+        widened, or dropped and nothing would notice — while the PR claimed
+        every Rust job reaches the composite.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            wrong = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Install Rust\n"
+                "        if: ${{ matrix.os == 'linux' }}\n"
+                f"        {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": wrong}, root
+            )
+            self.assertTrue(
+                any("guards its Rust install with" in e for e in errors), errors
+            )
+
+    def test_an_unconditional_release_step_is_also_flagged(self) -> None:
+        """Widening is a deliberate edit too — it changes what gets built."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            unguarded = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                f"      - {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": unguarded}, root
+            )
+            self.assertTrue(any("<unconditional>" in e for e in errors), errors)
+
+    def test_the_fragment_condition_must_match_the_generated_workflow(self) -> None:
+        """Drift between the two is what regeneration would silently apply."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.os }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
+                root,
+            )
+            self.assertTrue(
+                any("dist-build-setup.yml" in e for e in errors), errors
             )
 
     def test_the_live_release_lane_reaches_the_composite(self):

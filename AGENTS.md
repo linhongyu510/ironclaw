@@ -28,7 +28,13 @@ same PR or the gate fails. 35 CI jobs across 11 workflow files need a toolchain
 and all 35 reach the composite today, with no allowlist — re-check with
 `python3 scripts/ci/ws12_workflow_contracts.py`, whose
 `validate_rust_jobs_reach_the_composite` fails the build on a job that runs
-cargo, or a hermetic runner, without it. The two `nightly-2025-11-01` coverage
+cargo, or a hermetic runner, without it. That count covers `.github/workflows`
+only; the cargo-dist release lane is outside it, because no job there names
+`cargo` (it shells out to `dist build`). There, the composite runs for
+container matrix entries only — hosted-runner entries resolve the pin from
+`rust-toolchain.toml` themselves but get no mold and no explicit
+`RUSTUP_TOOLCHAIN` export. That condition is itself pinned, in both the
+generated workflow and `.github/dist-build-setup.yml`. The two `nightly-2025-11-01` coverage
 lanes pass an explicit `toolchain:` input, and Docker builds are the one path
 outside this contract
 (the build context excludes `rust-toolchain.toml`, so images stay on their
