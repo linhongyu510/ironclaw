@@ -202,34 +202,20 @@ impl Authorized {
     #[cfg(any(test, feature = "test-support"))]
     pub fn seal_for_test_with_mounts(
         invocation: Invocation,
+        descriptor: Option<CapabilityDescriptor>,
         lane: RuntimeLane,
         mounts: Option<MountView>,
         reservation: Option<ResourceReservation>,
         deadline: Timestamp,
     ) -> Self {
+        debug_assert!(
+            descriptor
+                .as_ref()
+                .is_none_or(|descriptor| descriptor.id == invocation.capability)
+        );
         Self {
             invocation,
-            descriptor: None,
-            lane,
-            mounts,
-            reservation,
-            deadline,
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn seal_for_test_with_descriptor_and_mounts(
-        invocation: Invocation,
-        descriptor: CapabilityDescriptor,
-        lane: RuntimeLane,
-        mounts: Option<MountView>,
-        reservation: Option<ResourceReservation>,
-        deadline: Timestamp,
-    ) -> Self {
-        debug_assert_eq!(descriptor.id, invocation.capability);
-        Self {
-            invocation,
-            descriptor: Some(descriptor),
+            descriptor,
             lane,
             mounts,
             reservation,

@@ -569,6 +569,7 @@ fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -
     };
     Authorized::seal_for_test_with_mounts(
         invocation,
+        None,
         lane,
         request.mounts,
         request.resource_reservation,

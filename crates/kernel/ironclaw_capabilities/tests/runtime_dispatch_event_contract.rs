@@ -572,6 +572,7 @@ fn authorized_in_process(
     };
     Authorized::seal_for_test_with_mounts(
         invocation,
+        None,
         lane,
         request.mounts,
         request.resource_reservation,

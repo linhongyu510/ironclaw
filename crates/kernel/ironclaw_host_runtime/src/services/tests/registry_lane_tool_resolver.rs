@@ -147,23 +147,14 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
         process_id: None,
         parent_process_id: None,
     };
-    match authorized_descriptor {
-        Some(descriptor) => Authorized::seal_for_test_with_descriptor_and_mounts(
-            invocation,
-            descriptor,
-            lane,
-            request.mounts,
-            request.resource_reservation,
-            chrono::DateTime::<chrono::Utc>::MAX_UTC,
-        ),
-        None => Authorized::seal_for_test_with_mounts(
-            invocation,
-            lane,
-            request.mounts,
-            request.resource_reservation,
-            chrono::DateTime::<chrono::Utc>::MAX_UTC,
-        ),
-    }
+    Authorized::seal_for_test_with_mounts(
+        invocation,
+        authorized_descriptor,
+        lane,
+        request.mounts,
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    )
 }
 
 fn wasm_capability_request(input: Value) -> Authorized {
