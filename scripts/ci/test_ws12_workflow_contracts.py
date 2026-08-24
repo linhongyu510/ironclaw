@@ -219,7 +219,7 @@ class RustJobsReachTheCompositeTests(unittest.TestCase):
             {".github/workflows/demo.yml": self.workflow(with_composite=False)}
         )
         self.assertEqual(1, len(errors), errors)
-        self.assertIn("runs cargo but never reaches", errors[0])
+        self.assertIn("needs a Rust toolchain but never reaches", errors[0])
         self.assertIn("'build'", errors[0])
 
     def test_a_cargo_job_with_the_composite_passes(self) -> None:
