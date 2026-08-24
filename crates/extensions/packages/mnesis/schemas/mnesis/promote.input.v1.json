@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis promote arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The query pattern to promote"
+    },
+    "targetStage": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "Target stage: 1=Cached, 2=Crystallized, 3=Reflexive, 4=Instinctive"
+    }
+  },
+  "required": [
+    "query",
+    "targetStage"
+  ]
+}

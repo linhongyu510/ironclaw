@@ -107,6 +107,28 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "ironclaw.memory.read",
     "ironclaw.memory.tree",
     "mnesis.hosted.memory.knowledge.search",
+    "mnesis.hosted.memory.memory_query_related",
+    "mnesis.hosted.memory.memory_stats",
+    "mnesis.hosted.memory.memory_temporal_query",
+    "mnesis.hosted.memory.task_read",
+    "mnesis.hosted.memory.challenge_retrieval",
+    "mnesis.hosted.memory.compilation_status",
+    "mnesis.hosted.memory.contradictions",
+    "mnesis.hosted.memory.duplicates",
+    "mnesis.hosted.memory.get_context",
+    "mnesis.hosted.memory.get_decision",
+    "mnesis.hosted.memory.get_evidence",
+    "mnesis.hosted.memory.get_sources",
+    "mnesis.hosted.memory.get_stats",
+    "mnesis.hosted.memory.health",
+    "mnesis.hosted.memory.list_related",
+    "mnesis.hosted.memory.metrics",
+    "mnesis.hosted.memory.reflexes",
+    "mnesis.hosted.memory.routing",
+    "mnesis.hosted.memory.search",
+    "mnesis.hosted.memory.speculative",
+    "mnesis.hosted.memory.stale",
+    "mnesis.hosted.memory.verify_grounding",
     "builtin.read_file",
     "builtin.list_dir",
     "builtin.glob",
@@ -219,8 +241,8 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
     }
     assert_eq!(
         EXPECTED_UNGATED_SEED.len(),
-        18,
-        "the reviewed S5 seed is 18 ids; a size change is a reviewed diff"
+        40,
+        "the reviewed S5 seed is 40 ids; a size change is a reviewed diff"
     );
 }
 

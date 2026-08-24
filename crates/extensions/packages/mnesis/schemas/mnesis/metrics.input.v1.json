@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis metrics arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "days": {
+      "default": 7,
+      "description": "Number of days to analyze (default: 7)",
+      "type": "number"
+    }
+  }
+}

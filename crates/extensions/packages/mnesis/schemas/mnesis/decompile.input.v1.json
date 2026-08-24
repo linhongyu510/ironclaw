@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis decompile arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The query pattern to decompile"
+    },
+    "targetStage": {
+      "default": 0,
+      "description": "Target stage (default: 0 = fully decompile)",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 3
+    }
+  },
+  "required": [
+    "query"
+  ]
+}

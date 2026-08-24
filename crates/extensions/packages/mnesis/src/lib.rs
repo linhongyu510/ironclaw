@@ -1,4 +1,5 @@
 mod attribution;
+mod catalog;
 mod config;
 mod error;
 mod idempotency;
@@ -15,6 +16,7 @@ pub const MEMORY_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 pub use attribution::{
     OwnerAxes, OwnerRecordClass, OwnerScope, PROVIDER_ATTRIBUTION_HEADER, ProviderAttribution,
 };
+pub use catalog::{CATALOG_TOOLS, CatalogTool, catalog_tool};
 pub use config::{
     DEFAULT_CONNECT_TIMEOUT_SECS, DEFAULT_MAX_IDLE_CONNECTIONS, DEFAULT_MAX_RESPONSE_BYTES,
     DEFAULT_MAX_RETRIES, DEFAULT_REQUEST_TIMEOUT_SECS, DEFAULT_RETRY_BACKOFF_MS,

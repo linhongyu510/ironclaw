@@ -507,6 +507,16 @@ impl FirstPartyCapabilityHandler for MnesisMemoryToolHandler {
 
         let start = std::time::Instant::now();
         let invocation = memory_invocation_for_request(&request);
+
+        if let Some(tool) = ironclaw_memory_mnesis::catalog_tool(request.capability_id.as_str()) {
+            let output = self
+                .provider
+                .call_tool(invocation, tool, request.input.clone())
+                .await
+                .map_err(map_memory_service_error)?;
+            return finish_memory_tool_result(output, start);
+        }
+
         let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)
             .map_err(map_memory_service_error)?;
         let response = match request.capability_id.as_str() {

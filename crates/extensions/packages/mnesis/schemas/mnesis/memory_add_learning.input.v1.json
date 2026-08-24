@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis memory_add_learning arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failure",
+        "insight",
+        "mistake",
+        "decision"
+      ]
+    },
+    "context": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "description": "Brief description of what happened"
+    },
+    "learning": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "description": "The extractable knowledge"
+    },
+    "approach": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "description": "How the problem was approached"
+    },
+    "neurons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "maxItems": 64,
+      "default": []
+    },
+    "emotional_valence": {
+      "type": "string",
+      "enum": [
+        "positive",
+        "negative",
+        "neutral"
+      ],
+      "default": "neutral"
+    },
+    "consolidation_strength": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.8
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "description": "Stable retry identity"
+    }
+  },
+  "required": [
+    "session_id",
+    "event_type",
+    "context",
+    "learning",
+    "approach"
+  ],
+  "additionalProperties": false
+}

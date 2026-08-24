@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis memory_temporal_query arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "What to search for"
+    },
+    "as_of_date": {
+      "type": "string",
+      "description": "ISO date string (e.g. 2026-03-15) — show state as of this date"
+    },
+    "limit": {
+      "type": "number",
+      "default": 10
+    }
+  },
+  "required": [
+    "query",
+    "as_of_date"
+  ],
+  "additionalProperties": false
+}

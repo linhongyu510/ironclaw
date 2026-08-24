@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis memory_add_session arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000
+    },
+    "duration": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "default": "unknown"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "problem": {
+            "$ref": "#/properties/summary"
+          },
+          "approach": {
+            "$ref": "#/properties/summary"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failure",
+              "partial",
+              "mistake_then_success"
+            ]
+          },
+          "neurons": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "maxItems": 64,
+            "default": []
+          }
+        },
+        "required": [
+          "problem",
+          "approach",
+          "outcome"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 128
+    },
+    "patterns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "maxItems": 128,
+      "default": []
+    },
+    "learnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/properties/summary"
+      },
+      "maxItems": 128,
+      "default": []
+    },
+    "emotional_arc": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "default": "neutral"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "maxItems": 512,
+      "default": []
+    },
+    "blockers": {
+      "$ref": "#/properties/summary"
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "description": "Stable retry identity"
+    }
+  },
+  "required": [
+    "title",
+    "summary",
+    "problems"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis get_execution_attestation arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "artifact": {
+      "description": "Evidence artifact to return; omit for the generation manifest",
+      "type": "string",
+      "enum": [
+        "cpu-quote.bin",
+        "execution-identity.cose",
+        "gpu-attestation.json",
+        "gpu-diagnostic-observation.cose",
+        "gpu-diagnostic-probe.cbor",
+        "gpu-diagnostic-profile.cbor",
+        "policy.cbor",
+        "runtime-configuration.bin"
+      ]
+    },
+    "identityId": {
+      "type": "string",
+      "pattern": "^xei1:[0-9a-f]{64}$",
+      "description": "Execution identity referenced by a signed retrieval response"
+    }
+  },
+  "required": [
+    "identityId"
+  ]
+}

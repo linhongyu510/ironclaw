@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis memory_query_related arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "memory_id": {
+      "type": "string"
+    },
+    "hops": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 5,
+      "default": 2
+    },
+    "relationship_filter": {
+      "type": "string",
+      "enum": [
+        "RELATES_TO",
+        "LEADS_TO",
+        "OCCURRED_BEFORE",
+        "PREFERS_OVER",
+        "EXEMPLIFIES",
+        "CONTRADICTS",
+        "REINFORCES",
+        "EVOLVED_INTO",
+        "DERIVED_FROM",
+        "PART_OF",
+        "ANY"
+      ],
+      "default": "ANY"
+    }
+  },
+  "required": [
+    "memory_id"
+  ],
+  "additionalProperties": false
+}

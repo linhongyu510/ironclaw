@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mnesis catalog tool result",
+  "description": "The MCP tool result as the engine returned it. Catalog tools are forwarded verbatim and answer in heterogeneous shapes - some in `content` text, some in `structuredContent` - so this stays open rather than asserting a shape the engine does not promise.",
+  "type": "object",
+  "properties": {
+    "content": {
+      "type": "array",
+      "description": "Engine-authored result text.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    "structuredContent": {
+      "type": "object",
+      "description": "Structured result fields, where the tool returns them."
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis memory_run_maintenance arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "phase": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 10,
+      "description": "Run only this phase number (1=decay 2=cluster 3=patterns 4=hubs 5=links 6=dmn 7=hebbian 8=rar-promotion 9=gaps 10=pruning). Omit for all."
+    }
+  },
+  "additionalProperties": false
+}

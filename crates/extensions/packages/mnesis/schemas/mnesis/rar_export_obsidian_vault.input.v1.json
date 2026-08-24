@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis rar_export_obsidian_vault arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "vault_root": {
+      "description": "Server-selected vault root; an explicit value must match it",
+      "type": "string"
+    },
+    "top_entities": {
+      "default": 250,
+      "description": "Number of top entities by frequency to include (default: 250)",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "max_related_per_node": {
+      "default": 20,
+      "description": "Cap wikilinks per node to avoid hub-of-everything (default: 20)",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

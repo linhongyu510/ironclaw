@@ -31,3 +31,413 @@ visibility = "model"
 origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/knowledge/search.input.v1.json"
 output_schema_ref = "schemas/knowledge/search.output.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_add_fact"
+description = "Add a durable fact to semantic memory. Also writes to knowledge-base for RAR indexing."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_add_fact.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_add_learning"
+description = "Add a new learning or insight to episodic memory."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_add_learning.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_add_session"
+description = "Add a session summary and publish its continuity entry."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_add_session.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_export_obsidian_vault"
+description = "Generate a synthetic read-only Obsidian vault from Memory state and active graph relationships."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_export_obsidian_vault.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_feedback"
+description = "Provide outcome feedback on a memory. Adjusts half-life: good = +5d, bad = -3d (min 7d). ENHANCED_DECAY is enabled by default."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_feedback.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_graph_export"
+description = "Export the full memory graph as JSON for 3D visualization. Includes all memory types, temporal edges, and tag-based implicit links."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_graph_export.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_knowledge_gaps"
+description = "Detect and fill knowledge gaps with web research and staged RAR knowledge files. Publication waits for an evaluated index generation."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_knowledge_gaps.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_query_related"
+description = "Find memories related to a given memory via multi-hop graph traversal."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_query_related.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_run_maintenance"
+description = "Run consolidation maintenance phases on demand (decay, clustering, patterns, hubs, link inference, and more). Omit phase to run all. Use after bulk memory imports or to verify a consolidation fix."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_run_maintenance.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_stats"
+description = "Get statistics about the memory system including decay status."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_stats.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.memory_temporal_query"
+description = "Query memories as they existed at a specific point in time. Shows which relationships were active and what we knew then."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/memory_temporal_query.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.task_read"
+description = "Read tasks for a project or category. Omit category to list all categories/projects with active tasks."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/task_read.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.task_update_status"
+description = "Quick status update for a task by ID. Use status='archived' to move completed tasks to archive."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/task_update_status.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.task_write"
+description = "Write or update tasks. Persists across sessions."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/task_write.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.bootstrap"
+description = "Seed the reflex store with bootstrap reflexes from the synth-data pipeline. Ingests configured knowledge sources, extracts Q&A pairs from section headings, and creates Bootstrap-source reflexes. Safe to run multiple times (skips existing)."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/bootstrap.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.challenge_retrieval"
+description = "Request committed evidence openings for a signed retrieval transcript."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/challenge_retrieval.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.compilation_status"
+description = "View the 5-stage compilation lifecycle status: stage distribution, convergence state, drift signals, cluster stats, classifier accuracy, and compilation metrics."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/compilation_status.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.consolidation"
+description = "Trigger or view the last consolidation cycle. The consolidation agent merges duplicates, prunes stale chunks, applies decay, and heals indexes."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/consolidation.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.contradictions"
+description = "List knowledge contradictions detected during indexing. Shows conflicting chunks with descriptions."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/contradictions.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.decompile"
+description = "Manually demote (decompile) a query pattern to a lower stage. Default: fully decompile to Stage 0."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/decompile.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.duplicates"
+description = "Find and list duplicate chunks in the RAR system"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/duplicates.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.feedback"
+description = "Record feedback on search results. Call this after search_knowledge to indicate if results were helpful."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/feedback.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_context"
+description = "Retrieve authorized company context with signed retrieval evidence."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_context.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_decision"
+description = "Retrieve recorded decision context with signed retrieval evidence."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_decision.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_evidence"
+description = "Retrieve source evidence relevant to a claim with a signed transcript."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_evidence.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_execution_attestation"
+description = "Read the verified execution attestation manifest or one evidence artifact."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_execution_attestation.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_sources"
+description = "List all available knowledge sources in the RAR system"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_sources.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.get_stats"
+description = "Get statistics about the vector store and indexed knowledge"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/get_stats.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.health"
+description = "Run a full health check on the RAR system. Returns health scores, duplicate detection, staleness checks, and recommendations."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/health.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.list_related"
+description = "Retrieve related company knowledge with signed retrieval evidence."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/list_related.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.metrics"
+description = "Get RAR search metrics and statistics over a time period"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/metrics.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.promote"
+description = "Manually crystallize a query result or advance an evidence-backed compilation stage."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/promote.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.rar_export_obsidian_vault"
+description = "Generate the rar/ subtree of the synthetic Obsidian vault. Writes RAPTOR clusters (L1+L2+L3) and top entities as markdown notes with wikilinks. Skips raw chunks (L0) to keep node count tractable. Idempotent."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/rar_export_obsidian_vault.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.reflex_add"
+description = "Manually pin a reflex for a specific query. Creates a User-source reflex that is never auto-demoted. Use for queries you know should always resolve instantly."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/reflex_add.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.reflexes"
+description = "View reflex store state: active reflexes, hit rates, source breakdown. Shows the O(1) cached query-result mappings that bypass the full pipeline."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/reflexes.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.routing"
+description = "View routing decision distribution: tier percentages, avg latency per tier, reflex hit rates. Shows how queries are being routed across the intelligence tiers."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/routing.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.search"
+description = "Search authorized company knowledge and return signed retrieval evidence."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/search.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.speculative"
+description = "View speculative retrieval stats (branch prediction for queries)"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/speculative.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.stale"
+description = "Find chunks where the source file has been modified since indexing"
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/stale.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.training"
+description = "Export training data for embedding fine-tuning. Extracts query/chunk triplets from search history."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/training.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.verify_grounding"
+description = "Check if an LLM response is grounded in retrieved passages. Returns grounding score, grounded/ungrounded claims, and passage coverage."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/verify_grounding.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"

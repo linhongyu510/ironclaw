@@ -9,6 +9,7 @@ use ironclaw_memory::{
 use serde_json::{Value, json};
 
 use crate::attribution::{OwnerAxes, OwnerScope, ProviderAttribution};
+use crate::catalog::CatalogTool;
 use crate::idempotency::{WriteIdentity, assert_interaction_bounds, operation_id};
 use crate::transport::{
     MAX_CONTEXT_SNIPPETS, MnesisRequest, MnesisResponse, MnesisTool, MnesisTransport,
@@ -221,6 +222,44 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             return Ok(());
         }
         Err(lane_failure(&response))
+    }
+
+    /// Forwards one catalog tool to its lane and returns the MCP result intact.
+    pub async fn call_tool(
+        &self,
+        invocation: MemoryInvocation,
+        tool: &CatalogTool,
+        arguments: Value,
+    ) -> Result<Value, MemoryServiceError> {
+        let LaneIdentity {
+            attribution,
+            session_key,
+        } = self.attribution_for(&invocation)?;
+        let operation = tool.wire_name;
+        let response = self
+            .transport
+            .execute(MnesisRequest {
+                lane: tool.lane,
+                operation,
+                body: tool_call(operation, arguments),
+                idempotent: tool.idempotent,
+                attribution: Some(attribution),
+                session_key: Some(session_key),
+            })
+            .await
+            .map_err(MemoryServiceError::unavailable_from)?;
+
+        if !response.is_success() {
+            return Err(lane_failure(&response));
+        }
+        if tool_call_failed(&response.body) {
+            return Err(MemoryServiceError::operation());
+        }
+        Ok(response
+            .body
+            .get("result")
+            .cloned()
+            .unwrap_or(response.body))
     }
 }
 

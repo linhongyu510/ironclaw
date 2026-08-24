@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis reflex_add arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The query to pin"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "result",
+        "tier"
+      ],
+      "description": "Reflex type: result (pin specific results) or tier (pin routing tier)"
+    },
+    "tier": {
+      "description": "For tier reflexes: 1=fast, 2=standard, 3=deep",
+      "type": "number"
+    }
+  },
+  "required": [
+    "query",
+    "type"
+  ]
+}

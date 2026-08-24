@@ -33,9 +33,11 @@ fn every_schema_ref_resolves_to_a_file_in_the_package() {
     }
 }
 
+/// Administrative capability may be declared, but never invoked unattended: the
+/// model can see these tools and must still be granted each one.
 #[test]
-fn the_tool_inventory_carries_no_administrative_capability() {
-    let forbidden = [
+fn every_administrative_tool_is_gated() {
+    let administrative = [
         "reindex",
         "consolidat",
         "promote",
@@ -46,15 +48,27 @@ fn the_tool_inventory_carries_no_administrative_capability() {
         "attestation",
         "maintenance",
         "rotate",
-        "generation_promote",
     ];
-    let lowered = MANIFEST.to_ascii_lowercase();
-    for term in forbidden {
+    let mut checked = 0;
+    for block in MANIFEST.split("[[tools]]").skip(1) {
+        let id = block
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("id = "))
+            .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+            .expect("every tool block declares an id");
+        if !administrative.iter().any(|term| id.contains(term)) {
+            continue;
+        }
+        checked += 1;
         assert!(
-            !lowered.contains(term),
-            "the model-visible surface must not expose {term}"
+            block.contains("loop_run = \"gated_unless_granted\""),
+            "administrative tool {id} must be gated for loop_run"
         );
     }
+    assert!(
+        checked > 0,
+        "the scan matched no administrative tool, so it proves nothing"
+    );
 }
 
 #[test]
@@ -66,10 +80,21 @@ fn the_write_path_is_host_driven_and_never_model_visible() {
          credentialed canary proves its tool round-trips, because a declared hook whose tool \
          the server does not register fails every threaded turn"
     );
-    for effect in ["write_filesystem", "network"] {
+    assert!(
+        !lowered.contains("network"),
+        "no declared tool may carry the network effect: the lanes are reached through the \
+         provider's mediated transport, matching how the sibling REST provider declares itself"
+    );
+    // A model-visible write is allowed, but never ungated. The transcript write
+    // stays a lifecycle hook; a tool that mutates memory must be a decision the
+    // user can withhold.
+    for block in MANIFEST.split("[[tools]]").skip(1) {
+        if !block.contains("write_filesystem") {
+            continue;
+        }
         assert!(
-            !lowered.contains(effect),
-            "no declared tool may carry the {effect} effect"
+            block.contains("loop_run = \"gated_unless_granted\""),
+            "a tool carrying write_filesystem must be gated for loop_run: {block}"
         );
     }
     // `record_interaction` is a host-driven lifecycle hook, never a capability the

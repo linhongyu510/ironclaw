@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis consolidation arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "force": {
+      "default": false,
+      "description": "Force a new consolidation cycle now",
+      "type": "boolean"
+    }
+  }
+}

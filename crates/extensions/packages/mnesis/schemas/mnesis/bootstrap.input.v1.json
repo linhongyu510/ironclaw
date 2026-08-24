@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis bootstrap arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "force": {
+      "default": false,
+      "description": "Re-run even if already bootstrapped",
+      "type": "boolean"
+    },
+    "maxTierReflexes": {
+      "default": 200,
+      "description": "Max tier routing reflexes to create",
+      "type": "number"
+    },
+    "maxResultReflexes": {
+      "default": 50,
+      "description": "Max cached result reflexes to create",
+      "type": "number"
+    }
+  }
+}
