@@ -19,23 +19,17 @@ The workspace-root `integration` feature is empty with zero consumers — a bare
 
 **Cargo features are a last resort.** A feature is a second build of the workspace, compiled and tested forever. Add one only for a heavy optional dependency, a build shape that ships with it OFF, a CI lane selector, a dev-only seam (always named `test-support`), or a privilege boundary — and say which in the manifest comment. Deployment shape belongs in `DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar: `.claude/rules/cargo-features.md`.
 
-**Toolchain pin.** `rust-toolchain.toml` at the repo root pins the stable
-toolchain (channel + clippy/rustfmt) for local and CI builds. Every CI job
-installs Rust through `.github/actions/setup-rust`, whose `toolchain` input
-defaults to the same version; a lane that intentionally runs a different
-toolchain (the two `nightly-2025-11-01` coverage lanes) passes an explicit
-`toolchain:` input to that same composite, which exports `RUSTUP_TOOLCHAIN`
-naming exactly what it installed — so `rust-toolchain.toml` can never
-silently override a job's chosen toolchain. `scripts/ci/ws12_workflow_contracts.py`
-fails the build if any workflow calls `dtolnay/rust-toolchain` directly
-instead of through the composite, if any workflow bootstraps Rust another way
-(`sh.rustup.rs`, `rustup-init`, `rustup toolchain install`), and if the
-composite's default toolchain ever drifts from this file's `channel`. The
-cargo-dist-generated release workflow is covered too: its build jobs pick the
-composite up from `.github/dist-build-setup.yml`, which cargo-dist re-includes
-on every regeneration, so there is no lane outside this contract. To bump Rust: edit both
-`rust-toolchain.toml`'s `channel` and `.github/actions/setup-rust/action.yml`'s
-`toolchain` input default, in the same PR.
+**Toolchain pin.** `rust-toolchain.toml` at the repo root is the single source
+of truth for the Rust toolchain, local and CI. Never install Rust in a workflow
+directly — every job goes through `.github/actions/setup-rust`, and
+`scripts/ci/lib/rust_toolchain_contracts.py` fails the build on a direct
+`dtolnay/rust-toolchain` call, any other bootstrap, a release lane that installs
+no Rust at all, or a job-level `RUSTFLAGS` key that would shadow the composite's
+export. To bump Rust, edit `rust-toolchain.toml`'s `channel` and
+`.github/actions/setup-rust/action.yml`'s `toolchain` input default in the same
+PR; the gate fails on any mismatch. The precedence rules, the nightly-lane
+carve-out, and why Docker builds are unaffected are documented where they are
+enforced, in `rust-toolchain.toml`'s own header.
 
 ## Discover code before changing it
 
