@@ -54,8 +54,45 @@ pub(crate) async fn import_host_disk_skills_into_database(
     owner_user_id: &UserId,
     filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
 ) -> Result<(), RebornBuildError> {
+    let storage_root = storage_root.to_path_buf();
+    let owner_user_id = owner_user_id.clone();
+    import_host_disk_skills_into_database_with_collector(filesystem, move |events| {
+        stream_legacy_skill_snapshot(&storage_root, &owner_user_id, events)
+    })
+    .await
+}
+
+enum LegacySkillSnapshotDecision {
+    Read {
+        target: VirtualPath,
+        marker: VirtualPath,
+    },
+    Skip,
+}
+
+enum LegacySkillSnapshotEvent {
+    Candidate {
+        virtual_path: String,
+        decision: tokio::sync::oneshot::Sender<LegacySkillSnapshotDecision>,
+    },
+    Payload {
+        target: VirtualPath,
+        marker: VirtualPath,
+        bytes: Vec<u8>,
+        consumed: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+async fn import_host_disk_skills_into_database_with_collector<F>(
+    filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
+    collect: F,
+) -> Result<(), RebornBuildError>
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<LegacySkillSnapshotEvent>) -> Result<(), RebornBuildError>
+        + Send
+        + 'static,
+{
     use ironclaw_filesystem::RootFilesystem;
-    use ironclaw_host_api::path::VirtualPath;
 
     let complete_marker = VirtualPath::new(SKILL_DISK_IMPORT_COMPLETE_MARKER)?;
     match RootFilesystem::stat(filesystem.as_ref(), &complete_marker).await {
@@ -64,29 +101,107 @@ pub(crate) async fn import_host_disk_skills_into_database(
         Err(error) => return Err(RebornBuildError::Filesystem(error)),
     }
 
+    // Capacity one plus the per-payload consumption acknowledgement ensures
+    // the blocking producer can never retain or start a second payload while
+    // the async consumer still owns the first one.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+    let collection = tokio::task::spawn_blocking(move || collect(event_tx));
+    let mut imported = 0usize;
+    let processing = async {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                LegacySkillSnapshotEvent::Candidate {
+                    virtual_path,
+                    decision,
+                } => {
+                    let target = VirtualPath::new(&virtual_path)?;
+                    let marker =
+                        VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
+                    // A marker-covered disk copy must not even be opened: it
+                    // may now be unreadable or larger than the import limit.
+                    match RootFilesystem::stat(filesystem.as_ref(), &marker).await {
+                        Ok(_) => {
+                            let _ = decision.send(LegacySkillSnapshotDecision::Skip);
+                            continue;
+                        }
+                        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
+                        Err(error) => return Err(RebornBuildError::Filesystem(error)),
+                    }
+                    // A database entry wins: it is either newer or the product
+                    // of a previous import. Record its marker before skipping.
+                    match RootFilesystem::stat(filesystem.as_ref(), &target).await {
+                        Ok(_) => {
+                            record_skill_disk_import(filesystem, &marker).await?;
+                            let _ = decision.send(LegacySkillSnapshotDecision::Skip);
+                        }
+                        Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {
+                            let _ =
+                                decision.send(LegacySkillSnapshotDecision::Read { target, marker });
+                        }
+                        Err(error) => return Err(RebornBuildError::Filesystem(error)),
+                    }
+                }
+                LegacySkillSnapshotEvent::Payload {
+                    target,
+                    marker,
+                    bytes,
+                    consumed,
+                } => {
+                    RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
+                    record_skill_disk_import(filesystem, &marker).await?;
+                    imported += 1;
+                    drop(bytes);
+                    let _ = consumed.send(());
+                }
+            }
+        }
+        Ok::<(), RebornBuildError>(())
+    }
+    .await;
+    drop(event_rx);
+    let collection = collection
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("legacy skill snapshot collection task failed: {error}"),
+        });
+    processing?;
+    collection??;
+    if imported > 0 {
+        tracing::info!(
+            imported,
+            "imported host-disk skills into the database-backed skill tree"
+        );
+    }
+    record_skill_disk_import(filesystem, &complete_marker).await?;
+    Ok(())
+}
+
+fn stream_legacy_skill_snapshot(
+    storage_root: &Path,
+    owner_user_id: &UserId,
+    events: tokio::sync::mpsc::Sender<LegacySkillSnapshotEvent>,
+) -> Result<(), RebornBuildError> {
     let snapshot_root = validate_legacy_skill_snapshot_tree(storage_root)?;
     let tenants_root = storage_root.join("tenants");
     let mut skill_files = disk_skill_files(&tenants_root)?;
     skill_files.extend(unscoped_disk_skill_files(storage_root, owner_user_id)?);
-    let mut imported = 0usize;
     for (host_path, virtual_path) in skill_files {
-        let target = VirtualPath::new(&virtual_path)?;
-        let marker = VirtualPath::new(format!("{SKILL_DISK_IMPORT_MARKER_ROOT}{virtual_path}"))?;
-        // Already migrated. Re-reading the disk copy here resurrects a skill the user has deleted.
-        match RootFilesystem::stat(filesystem.as_ref(), &marker).await {
-            Ok(_) => continue,
-            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
-            Err(error) => return Err(RebornBuildError::Filesystem(error)),
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        if events
+            .blocking_send(LegacySkillSnapshotEvent::Candidate {
+                virtual_path,
+                decision: decision_tx,
+            })
+            .is_err()
+        {
+            return Ok(());
         }
-        // A database entry wins: it is either newer or the product of a previous import.
-        match RootFilesystem::stat(filesystem.as_ref(), &target).await {
-            Ok(_) => {
-                record_skill_disk_import(filesystem, &marker).await?;
-                continue;
-            }
-            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
-            Err(error) => return Err(RebornBuildError::Filesystem(error)),
-        }
+        let Ok(decision) = decision_rx.blocking_recv() else {
+            return Ok(());
+        };
+        let LegacySkillSnapshotDecision::Read { target, marker } = decision else {
+            continue;
+        };
         let relative_path =
             host_path
                 .strip_prefix(storage_root)
@@ -97,17 +212,22 @@ pub(crate) async fn import_host_disk_skills_into_database(
                     ),
                 })?;
         let bytes = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &host_path)?;
-        RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
-        record_skill_disk_import(filesystem, &marker).await?;
-        imported += 1;
+        let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
+        if events
+            .blocking_send(LegacySkillSnapshotEvent::Payload {
+                target,
+                marker,
+                bytes,
+                consumed: consumed_tx,
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+        if consumed_rx.blocking_recv().is_err() {
+            return Ok(());
+        }
     }
-    if imported > 0 {
-        tracing::info!(
-            imported,
-            "imported host-disk skills into the database-backed skill tree"
-        );
-    }
-    record_skill_disk_import(filesystem, &complete_marker).await?;
     Ok(())
 }
 
@@ -463,6 +583,9 @@ mod bootstrap_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod legacy_skill_snapshot_async_tests;
 
 #[cfg(test)]
 mod skill_disk_import_tests {
