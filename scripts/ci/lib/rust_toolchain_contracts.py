@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Contracts for the single Rust toolchain setup path.
+
+One question, one module: *what toolchain, linker, and build flags does a
+Rust job get?* The answer is `.github/actions/setup-rust` and nothing else,
+and these six validators are what make that true rather than aspirational.
+
+Split out of `ws12_workflow_contracts.py`, which had grown past 2,100 lines
+covering unrelated lanes (stress suites, crate scope filters, WebUI sites).
+Wiring stays in that module's `validate_workflow_texts`; only the
+toolchain-shaped rules live here.
+
+Note which direction each check runs. Five assert an ABSENCE — no dtolnay,
+no raw bootstrap, no shadowing RUSTFLAGS. Absence-only guards cannot notice
+that the thing they protect has been deleted, which is exactly how a release
+workflow with no Rust install at all once passed this suite. That is what
+`validate_release_workflow_installs_rust` is for; keep the pair in mind
+before adding a seventh.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from workflow_text import JOB_HEADING, job_body, step_body
+
+ROOT = Path(__file__).resolve().parents[3]
+
+SETUP_RUST_ACTION = ".github/actions/setup-rust/action.yml"
+RUSTUP_TOOLCHAIN_PIN_STEP = "Pin the resolved toolchain for the rest of this job"
+MOLD_INSTALL_STEP = "Install mold and clang"
+MOLD_VERIFY_STEP = "Verify mold linker is active"
+MOLD_EXPORT_STEP = "Export mold RUSTFLAGS"
+# The one canonical mold invocation; a job's own env may append extra flags
+# after it (the nightly lanes add -Zcrate-attr=...), but this prefix is the
+# only place it may be written out — everywhere else must go through here.
+MOLD_RUSTFLAGS = "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+
+
+def validate_setup_rust_action(text: str | None) -> list[str]:
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold.
+
+    Contract: every job that installs Rust through this composite gets a
+    RUSTUP_TOOLCHAIN export naming exactly the toolchain dtolnay/rust-toolchain
+    just installed (steps.install.outputs.name — not a second, possibly wrong,
+    guess at the resolved version), and mold's install/verify/RUSTFLAGS steps
+    are gated on Linux so `mold: true` is safe to pass on any runner OS.
+    """
+    if text is None:
+        return [f"{SETUP_RUST_ACTION}: could not read the composite action file"]
+    errors: list[str] = []
+    pin_step = step_body(text, RUSTUP_TOOLCHAIN_PIN_STEP)
+    if pin_step is None:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: missing the {RUSTUP_TOOLCHAIN_PIN_STEP!r} step"
+        )
+    elif "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" not in pin_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {RUSTUP_TOOLCHAIN_PIN_STEP!r} must export "
+            "RUSTUP_TOOLCHAIN from steps.install.outputs.name, or a job's "
+            "cargo invocations can drift from what this step actually installed"
+        )
+    for step_name in (MOLD_INSTALL_STEP, MOLD_VERIFY_STEP, MOLD_EXPORT_STEP):
+        body = step_body(text, step_name)
+        if body is None:
+            errors.append(f"{SETUP_RUST_ACTION}: missing the {step_name!r} step")
+            continue
+        if "runner.os == 'Linux'" not in body:
+            errors.append(
+                f"{SETUP_RUST_ACTION}: {step_name!r} must gate on "
+                "runner.os == 'Linux' so mold: true is safe on any runner"
+            )
+    export_step = step_body(text, MOLD_EXPORT_STEP)
+    if export_step is not None and MOLD_RUSTFLAGS not in export_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {MOLD_EXPORT_STEP!r} must export the "
+            f"canonical mold RUSTFLAGS prefix '{MOLD_RUSTFLAGS}'"
+        )
+    return errors
+
+
+DTOLNAY_ACTION = "dtolnay/rust-toolchain@"
+
+
+def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
+    """Every workflow must install Rust through .github/actions/setup-rust.
+
+    A negative substring check, not a per-site window scan: this is what
+    T1's earlier per-input-drift design collapsed to once every job routes
+    through one composite. Also forbids re-writing out the canonical mold
+    RUSTFLAGS prefix by hand anywhere a workflow's own env block might set
+    it — the composite is the only place that string may appear.
+    """
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if DTOLNAY_ACTION in text:
+            errors.append(
+                f"{path}: calls {DTOLNAY_ACTION!r} directly — install Rust "
+                "through .github/actions/setup-rust instead"
+            )
+        if MOLD_RUSTFLAGS in text:
+            errors.append(
+                f"{path}: writes out the canonical mold RUSTFLAGS prefix "
+                f"'{MOLD_RUSTFLAGS}' directly — pass mold: true to "
+                ".github/actions/setup-rust instead, which prepends it onto "
+                "this job's existing RUSTFLAGS"
+            )
+    return errors
+
+
+SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
+JOBS_KEY = re.compile(r"^jobs:[ \t]*$", re.MULTILINE)
+ANCHOR_DEF = re.compile(r"^\s*-\s*&(?P<name>[\w-]+)\s*$", re.MULTILINE)
+# Job-level `env:` (jobs.<job>.env, two-space job + four-space `env:` + this
+# key at six spaces) and workflow-level top `env:` (two-space key straight
+# under the file's own `env:`) are both re-applied to every step of a job on
+# top of $GITHUB_ENV, so both shadow the composite's mold export the same
+# way. They need separate patterns, not one merged indentation class: the
+# workflow-level form sits in the file's preamble, before any job heading, so
+# it is checked once per file rather than by slicing per-job blocks.
+# Any RUSTFLAGS key inside a job, at job-env depth (6 spaces) or
+# step-env depth (10) — a step-level env shadows the composite's
+# $GITHUB_ENV write for that step exactly like a job-level one, so
+# pinning the exact job depth left a third of the shapes unguarded.
+JOB_ENV_RUSTFLAGS = re.compile(r"^ {6,}RUSTFLAGS:", re.MULTILINE)
+WORKFLOW_ENV_RUSTFLAGS = re.compile(r"^ {2}RUSTFLAGS:", re.MULTILINE)
+
+
+def validate_no_job_env_rustflags_with_setup_rust(
+    workflows: dict[str, str],
+) -> list[str]:
+    """A job installing Rust via the composite must not set its own RUSTFLAGS.
+
+    GitHub re-applies a job-level `env:` mapping to every step of that job,
+    on top of whatever earlier steps wrote to $GITHUB_ENV. So a job-level
+    `RUSTFLAGS:` shadows the composite's export for the rest of the job and
+    silently drops the mold linker flags — a slower build, never a red
+    check, which is exactly the drift class this action exists to remove. A
+    workflow-level top `env:` key shadows every job in the file identically,
+    so it is checked the same way. Jobs pass their extra flags through the
+    composite's `extra_rustflags` input instead, so one place composes the
+    final value.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if SETUP_RUST_USES not in text:
+            continue
+        # Bound job headings to the `jobs:` block. JOB_HEADING matches ANY
+        # two-space `key:` line, so the `on:` trigger's children (`push:`,
+        # `workflow_call:`, ...) match too — taking headings[0] blindly
+        # truncated the preamble at the first trigger and made the
+        # workflow-level check dead code on every real workflow.
+        jobs_key = JOBS_KEY.search(text)
+        jobs_start = jobs_key.start() if jobs_key else 0
+        headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= jobs_start]
+        # A job can reach the composite through a YAML alias (`- *install-rust`)
+        # instead of the literal `uses:` line, as release-plz.yml does. Resolve
+        # which anchors carry the composite so an aliased job is still checked.
+        rust_anchors = set()
+        for anchor in ANCHOR_DEF.finditer(text):
+            following = ANCHOR_DEF.search(text, anchor.end())
+            stop = following.start() if following else len(text)
+            next_job = JOB_HEADING.search(text, anchor.end())
+            if next_job and next_job.start() < stop:
+                stop = next_job.start()
+            if SETUP_RUST_USES in text[anchor.start():stop]:
+                rust_anchors.add(anchor.group("name"))
+        preamble = text[:jobs_start] if jobs_key else text
+        if WORKFLOW_ENV_RUSTFLAGS.search(preamble):
+            errors.append(
+                f"{path}: workflow-level env sets a RUSTFLAGS key while a "
+                "job in this file installs Rust through "
+                ".github/actions/setup-rust — a workflow-level env key "
+                "shadows the composite's $GITHUB_ENV write for every job in "
+                "the file identically to a job-level one; pass extra flags "
+                "as the composite's extra_rustflags input instead"
+            )
+        for index, heading in enumerate(headings):
+            start = heading.start()
+            end = (
+                headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(text)
+            )
+            block = text[start:end]
+            uses_composite = SETUP_RUST_USES in block or any(
+                f"*{anchor}" in block for anchor in rust_anchors
+            )
+            if not uses_composite:
+                continue
+            if JOB_ENV_RUSTFLAGS.search(block):
+                errors.append(
+                    f"{path}: job {heading.group('name')!r} sets a job- or "
+                    "step-level RUSTFLAGS env key while installing Rust through "
+                    ".github/actions/setup-rust — job env shadows the "
+                    "composite's $GITHUB_ENV write and drops the mold linker "
+                    "flags; pass them as the composite's extra_rustflags "
+                    "input instead"
+                )
+    return errors
+
+
+RUST_BOOTSTRAP_PATTERNS = (
+    # Raw rustup bootstraps.
+    "sh.rustup.rs",
+    "rustup-init",
+    "rustup toolchain install",
+    # Third-party toolchain actions. The composite is the only sanctioned
+    # installer, so a workflow reaching for a different vendor action is the
+    # same drift as a curl bootstrap: unpinned toolchain, no mold, no
+    # rust-toolchain.toml sync. (`dtolnay/rust-toolchain` has its own check
+    # with a more specific message; it is deliberately not repeated here.)
+    "actions-rs/toolchain",
+    "actions-rust-lang/setup-rust-toolchain",
+    "hecrj/setup-rust-action",
+    "raftario/setup-rust-action",
+)
+# Residual risk, named rather than papered over: a job whose `container:`
+# image ships Rust preinstalled installs nothing, so no text pattern can see
+# it. Such a job would silently build on the image's toolchain instead of the
+# pin. Nothing in .github/workflows does this today; if one appears it needs a
+# structural check (assert every Rust-building job calls the composite), not a
+# wider substring list.
+# No workflow may bootstrap Rust outside the composite. cargo-dist
+# re-includes .github/dist-build-setup.yml on every regeneration, so the
+# release build jobs install Rust through the composite from there — there
+# is no lane this contract cannot cover.
+ACCEPTED_RUST_BOOTSTRAPS: dict[str, int] = {}
+
+
+def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]:
+    """Every hand-written workflow installs Rust through the composite.
+
+    `validate_no_direct_dtolnay_usage` only sees the vendor action. A raw
+    `curl https://sh.rustup.rs | sh` installs Rust just as effectively and
+    matches no such string, so it would otherwise pass this gate forever --
+    unpinned, without mold, and unchecked against rust-toolchain.toml.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
+        if not hits:
+            continue
+        allowed = ACCEPTED_RUST_BOOTSTRAPS.get(path, 0)
+        if hits > allowed:
+            errors.append(
+                f"{path}: {hits} raw Rust bootstrap(s) "
+                f"({', '.join(RUST_BOOTSTRAP_PATTERNS)}); "
+                f"{allowed} accepted here. Install Rust through "
+                ".github/actions/setup-rust so the toolchain stays pinned, "
+                "mold stays wired, and rust-toolchain.toml stays enforced. "
+                "A genuinely unavoidable bootstrap must be added to "
+                "ACCEPTED_RUST_BOOTSTRAPS with the reason."
+            )
+    for path, expected in ACCEPTED_RUST_BOOTSTRAPS.items():
+        text = workflows.get(path)
+        if text is None:
+            continue
+        hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
+        if hits < expected:
+            errors.append(
+                f"{path}: expected {expected} accepted Rust bootstrap(s), "
+                f"found {hits}. If the generator stopped emitting it, drop "
+                "the entry from ACCEPTED_RUST_BOOTSTRAPS."
+            )
+    return errors
+
+
+RELEASE_WORKFLOW = ".github/workflows/ironclaw-release.yml"
+DIST_BUILD_SETUP = ".github/dist-build-setup.yml"
+
+
+def validate_release_workflow_installs_rust(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """The release lane must actually REACH the composite, not merely lack a bootstrap.
+
+    Every other check here asserts an absence — no dtolnay, no raw bootstrap,
+    no shadowing RUSTFLAGS. Absence-only checks called a release workflow with
+    NO Rust install whatsoever "clean": removing the old `curl | sh` step
+    without adding anything passed the whole suite, and a container build
+    would have died on `cargo: command not found`.
+
+    ironclaw-release.yml is generated by cargo-dist from the fragment at
+    .github/dist-build-setup.yml, so the step has to exist in BOTH: the
+    fragment so `dist generate` keeps emitting it, and the checked-in
+    workflow because that is the file GitHub actually runs.
+    """
+
+    errors: list[str] = []
+    release = workflows.get(RELEASE_WORKFLOW)
+    if release is not None and SETUP_RUST_USES not in release:
+        errors.append(
+            f"{RELEASE_WORKFLOW}: no `{SETUP_RUST_USES}` step. The container "
+            "build jobs have no other Rust install path, so this lane would "
+            "fail with 'cargo: command not found'. Re-run `dist generate` or "
+            f"re-inline the step from {DIST_BUILD_SETUP}."
+        )
+    try:
+        fragment = (root / DIST_BUILD_SETUP).read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"{DIST_BUILD_SETUP}: could not read fragment: {error}")
+    else:
+        if SETUP_RUST_USES not in fragment:
+            errors.append(
+                f"{DIST_BUILD_SETUP}: no `{SETUP_RUST_USES}` step. cargo-dist "
+                "re-inlines this fragment on regeneration, so dropping it here "
+                "silently removes the release lane's Rust install the next time "
+                "the workflow is regenerated."
+            )
+    return errors
+
+
+def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
+    """rust-toolchain.toml and the composite's default must name one version."""
+    try:
+        file_text = (root / "rust-toolchain.toml").read_text(encoding="utf-8")
+    except OSError:
+        return ["rust-toolchain.toml: missing (single source of truth for the CI toolchain)"]
+    channel_match = re.search(r'^channel = "(\d+\.\d+\.\d+)"$', file_text, re.MULTILINE)
+    if channel_match is None:
+        return ['rust-toolchain.toml: channel must be an exact stable version ("X.Y.Z")']
+    channel = channel_match.group(1)
+    try:
+        action_text = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        return [f"{SETUP_RUST_ACTION}: missing"]
+    # Scoped to the `toolchain:` input's own entry, not the whole file: a
+    # `re.search` over the entire action text would resolve to whichever
+    # `default: "..."` happens to appear first, which is only the toolchain
+    # input's by accident of every other input's default being empty and
+    # sitting after it in the file today.
+    # `job_body` bounds a two-space `name:` block, which is exactly the
+    # shape of an action.yml `inputs:` entry — no second helper needed.
+    toolchain_input = job_body(action_text, "toolchain")
+    if toolchain_input is None:
+        return [f"{SETUP_RUST_ACTION}: no `toolchain:` input found"]
+    default_match = re.search(r'default:\s*"([^"]+)"', toolchain_input)
+    if default_match is None or default_match.group(1) != channel:
+        found = default_match.group(1) if default_match else "<none>"
+        return [
+            f"{SETUP_RUST_ACTION}: toolchain input default {found!r} != "
+            f"rust-toolchain.toml channel {channel!r}"
+        ]
+    return []

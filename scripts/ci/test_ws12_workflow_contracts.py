@@ -5,14 +5,26 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import ws12_workflow_contracts
-from ws12_workflow_contracts import (
-    validate_release_workflow_installs_rust,
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+
+import rust_toolchain_contracts  # noqa: E402
+import ws12_workflow_contracts  # noqa: E402
+from rust_toolchain_contracts import (  # noqa: E402
+    SETUP_RUST_ACTION,
+    validate_no_direct_dtolnay_usage,
+    validate_no_job_env_rustflags_with_setup_rust,
     validate_no_unmanaged_rust_bootstrap,
+    validate_release_workflow_installs_rust,
+    validate_setup_rust_action,
+    validate_toolchain_pin_sync,
+)
+from workflow_text import STEP_HEADING, job_body, step_body  # noqa: E402
+from ws12_workflow_contracts import (  # noqa: E402
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
     CRATE_SCOPE_FILTERS,
@@ -22,27 +34,19 @@ from ws12_workflow_contracts import (
     NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
-    SETUP_RUST_ACTION,
-    STEP_HEADING,
     STRESS_WORKFLOW,
     WEBUI_FRONTEND_CRATE,
     WEBUI_NESTED_LOCKFILE_PATTERN,
     crate_directory,
     extract_job_block,
     github_glob_to_regex,
-    job_body,
     load_workflows,
-    step_body,
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
-    validate_no_direct_dtolnay_usage,
-    validate_no_job_env_rustflags_with_setup_rust,
     validate_production_lint_targets,
-    validate_setup_rust_action,
-    validate_toolchain_pin_sync,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -379,7 +383,7 @@ class UnmanagedRustBootstrapTests(unittest.TestCase):
         self.assertTrue(any("ironclaw-release" in e for e in errors), errors)
 
     def test_no_accepted_bootstraps_remain(self):
-        self.assertEqual({}, ws12_workflow_contracts.ACCEPTED_RUST_BOOTSTRAPS)
+        self.assertEqual({}, rust_toolchain_contracts.ACCEPTED_RUST_BOOTSTRAPS)
 
     def test_alternate_vendor_toolchain_actions_are_caught(self):
         """The composite is the only sanctioned installer.
