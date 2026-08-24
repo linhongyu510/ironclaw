@@ -331,10 +331,12 @@ impl LayoutManifest {
     /// requested value. The transition is deliberately monotonic: asking for
     /// the weaker floor can never lower an already isolated manifest.
     pub fn with_stronger_workspace_access_floor(mut self, requested: WorkspaceAccessFloor) -> Self {
-        if self.security.workspace_access_floor == WorkspaceAccessFloor::SingleTrustedOperator
-            && requested == WorkspaceAccessFloor::PerCallerIsolated
-        {
-            self.security.workspace_access_floor = requested;
+        match workspace_access_floor_transition(self.security.workspace_access_floor, requested) {
+            WorkspaceAccessFloorTransition::StrengthensAccessFloor => {
+                self.security.workspace_access_floor = requested;
+            }
+            WorkspaceAccessFloorTransition::Compatible
+            | WorkspaceAccessFloorTransition::WeakensAccessFloor => {}
         }
         self
     }
@@ -372,7 +374,8 @@ impl LayoutManifest {
             stored.security.workspace_access_floor,
             requested.security.workspace_access_floor,
         ) {
-            WorkspaceAccessFloorTransition::Compatible => {}
+            WorkspaceAccessFloorTransition::Compatible
+            | WorkspaceAccessFloorTransition::StrengthensAccessFloor => {}
             WorkspaceAccessFloorTransition::WeakensAccessFloor => {
                 return ProfileTransitionAdmission::Rejected {
                     reason: format!(
@@ -480,6 +483,7 @@ const fn tenancy_transition(stored: TenancyModel, requested: TenancyModel) -> Te
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceAccessFloorTransition {
     Compatible,
+    StrengthensAccessFloor,
     WeakensAccessFloor,
 }
 
@@ -493,7 +497,7 @@ const fn workspace_access_floor_transition(
             WorkspaceAccessFloor::SingleTrustedOperator,
         ) => WorkspaceAccessFloorTransition::Compatible,
         (WorkspaceAccessFloor::SingleTrustedOperator, WorkspaceAccessFloor::PerCallerIsolated) => {
-            WorkspaceAccessFloorTransition::Compatible
+            WorkspaceAccessFloorTransition::StrengthensAccessFloor
         }
         (WorkspaceAccessFloor::PerCallerIsolated, WorkspaceAccessFloor::SingleTrustedOperator) => {
             WorkspaceAccessFloorTransition::WeakensAccessFloor
@@ -516,6 +520,35 @@ where
             "unsupported layout manifest schema_version {version}; expected {}",
             LayoutManifest::SCHEMA_VERSION
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_access_floor_transition_classifies_every_edge() {
+        use WorkspaceAccessFloor::{PerCallerIsolated, SingleTrustedOperator};
+        use WorkspaceAccessFloorTransition::{
+            Compatible, StrengthensAccessFloor, WeakensAccessFloor,
+        };
+
+        for (stored, requested, expected) in [
+            (SingleTrustedOperator, SingleTrustedOperator, Compatible),
+            (
+                SingleTrustedOperator,
+                PerCallerIsolated,
+                StrengthensAccessFloor,
+            ),
+            (PerCallerIsolated, SingleTrustedOperator, WeakensAccessFloor),
+            (PerCallerIsolated, PerCallerIsolated, Compatible),
+        ] {
+            assert_eq!(
+                workspace_access_floor_transition(stored, requested),
+                expected
+            );
+        }
     }
 }
 

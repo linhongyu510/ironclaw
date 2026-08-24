@@ -59,34 +59,38 @@ fn open_directory_no_follow(path: &std::path::Path) -> io::Result<Dir> {
 
 /// Reads a regular host file through a no-follow descriptor open.
 ///
-/// The parent is retained as a directory capability, the final component is
-/// opened without following symlinks, and file type and caller-supplied byte
-/// limit are verified from the open handle before any bytes are read. The
-/// limit is enforced again while reading so concurrent growth stays bounded.
-pub fn read_ordinary_host_file(path: &HostPath, max_bytes: usize) -> io::Result<Vec<u8>> {
-    let path = path.as_path();
-    let parent = path.parent().ok_or_else(|| {
+/// Every path component is resolved relative to the caller's retained root
+/// capability. Ancestor directories and the final component are opened
+/// without following symlinks, and file type and caller-supplied byte limit
+/// are verified from the open handle before any bytes are read. The limit is
+/// enforced again while reading so concurrent growth stays bounded.
+pub fn read_ordinary_host_file(
+    root: &DiskDirectoryCapability,
+    relative_path: &std::path::Path,
+    max_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let parent_path = relative_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "ordinary host file must have a parent directory",
+            "ordinary host file must have a capability-relative parent",
         )
     })?;
-    let file_name = path.file_name().ok_or_else(|| {
+    let file_name = relative_path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "ordinary host file must have a final path component",
         )
     })?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|error| with_context("resolve ordinary host file ancestors", error))?;
-    let parent = DiskDirectoryCapability::open_existing_no_follow(&canonical_parent)
-        .map_err(|error| with_context("open ordinary host file parent", error))?;
+    let parent = root.open_existing_directory(parent_path).map_err(|error| {
+        with_context(
+            "open ordinary host file parent without following links",
+            error,
+        )
+    })?;
     // Give a symlink selected at inspection time a stable InvalidData error.
     // The no-follow open below remains necessary to reject a replacement
     // symlink installed after this descriptor-relative metadata check.
     let selected_metadata = parent
-        .directory()
         .symlink_metadata(file_name)
         .map_err(|error| with_context("inspect ordinary host file entry", error))?;
     if selected_metadata.file_type().is_symlink() {
@@ -95,7 +99,6 @@ pub fn read_ordinary_host_file(path: &HostPath, max_bytes: usize) -> io::Result<
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let file = parent
-        .directory()
         .open_with(file_name, &options)
         .map_err(|error| with_context("open ordinary host file without following links", error))?;
     let metadata = file

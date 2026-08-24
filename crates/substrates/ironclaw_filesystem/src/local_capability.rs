@@ -473,7 +473,7 @@ impl DiskDirectoryCapability {
         Ok(directory)
     }
 
-    fn open_existing_directory(&self, relative: &Path) -> io::Result<Dir> {
+    pub(crate) fn open_existing_directory(&self, relative: &Path) -> io::Result<Dir> {
         let mut directory = self.directory.try_clone()?;
         for component in relative.components() {
             let Component::Normal(name) = component else {

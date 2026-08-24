@@ -12,9 +12,8 @@ pub(in super::super) fn write_manifest_last(
     let contents = toml::to_string(manifest).context("serialize durable layout manifest")?;
     match write_atomic_synced(&manifest_path, &contents, false) {
         Ok(()) => Ok(()),
-        Err(create_error) => {
-            converge_concurrent_manifest(&manifest_path, manifest).map_err(|_| create_error)
-        }
+        Err(create_error) => converge_concurrent_manifest(&manifest_path, manifest)
+            .with_context(|| format!("initial manifest publication failed: {create_error:#}")),
     }
 }
 

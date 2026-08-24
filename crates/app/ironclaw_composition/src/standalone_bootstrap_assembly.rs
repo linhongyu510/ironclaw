@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::{DiskDirectoryCapability, DiskFilesystem};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES;
@@ -64,7 +64,7 @@ pub(crate) async fn import_host_disk_skills_into_database(
         Err(error) => return Err(RebornBuildError::Filesystem(error)),
     }
 
-    validate_legacy_skill_snapshot_tree(storage_root)?;
+    let snapshot_root = validate_legacy_skill_snapshot_tree(storage_root)?;
     let tenants_root = storage_root.join("tenants");
     let mut skill_files = disk_skill_files(&tenants_root)?;
     skill_files.extend(unscoped_disk_skill_files(storage_root, owner_user_id)?);
@@ -87,7 +87,16 @@ pub(crate) async fn import_host_disk_skills_into_database(
             Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => {}
             Err(error) => return Err(RebornBuildError::Filesystem(error)),
         }
-        let bytes = read_legacy_skill_snapshot_file(&host_path)?;
+        let relative_path =
+            host_path
+                .strip_prefix(storage_root)
+                .map_err(|_| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "legacy skill snapshot file escaped its admitted root: {}",
+                        host_path.display()
+                    ),
+                })?;
+        let bytes = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &host_path)?;
         RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes).await?;
         record_skill_disk_import(filesystem, &marker).await?;
         imported += 1;
@@ -216,17 +225,22 @@ fn collect_files_under(
 /// allow a snapshot to import data from outside that tree. Only selected
 /// `skills` roots matter: unrelated archived state in the snapshot is never
 /// read and must not block this one-time import.
-fn validate_legacy_skill_snapshot_tree(storage_root: &Path) -> Result<(), RebornBuildError> {
+fn validate_legacy_skill_snapshot_tree(
+    storage_root: &Path,
+) -> Result<DiskDirectoryCapability, RebornBuildError> {
     validate_legacy_skill_snapshot_directory(storage_root)?;
+    let snapshot_root = DiskDirectoryCapability::admit_existing(storage_root).map_err(|error| {
+        snapshot_io_error("retain legacy skill snapshot root", storage_root, error)
+    })?;
     validate_legacy_skill_snapshot_root(&storage_root.join("skills"))?;
 
     let tenants_root = storage_root.join("tenants");
     if !validate_legacy_skill_snapshot_directory_if_present(&tenants_root)? {
-        return Ok(());
+        return Ok(snapshot_root);
     }
     let tenants = match std::fs::read_dir(&tenants_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(snapshot_root),
         Err(error) => {
             return Err(snapshot_io_error(
                 "read tenants directory",
@@ -254,7 +268,7 @@ fn validate_legacy_skill_snapshot_tree(storage_root: &Path) -> Result<(), Reborn
             validate_legacy_skill_snapshot_root(&user.path().join("skills"))?;
         }
     }
-    Ok(())
+    Ok(snapshot_root)
 }
 
 fn validate_legacy_skill_snapshot_root(path: &Path) -> Result<(), RebornBuildError> {
@@ -319,12 +333,17 @@ fn snapshot_io_error(context: &str, path: &Path, error: std::io::Error) -> Rebor
     }
 }
 
-fn read_legacy_skill_snapshot_file(path: &Path) -> Result<Vec<u8>, RebornBuildError> {
+fn read_legacy_skill_snapshot_file(
+    snapshot_root: &DiskDirectoryCapability,
+    relative_path: &Path,
+    display_path: &Path,
+) -> Result<Vec<u8>, RebornBuildError> {
     ironclaw_filesystem::read_ordinary_host_file(
-        &HostPath::from_path_buf(path.to_path_buf()),
+        snapshot_root,
+        relative_path,
         MAX_INSTALL_BUNDLE_FILE_BYTES,
     )
-    .map_err(|error| snapshot_io_error("read legacy skill snapshot file", path, error))
+    .map_err(|error| snapshot_io_error("read legacy skill snapshot file", display_path, error))
 }
 
 /// Initializes standalone host content after storage roots are prepared.
@@ -455,6 +474,7 @@ mod skill_disk_import_tests {
 
     use super::{
         disk_skill_files, import_host_disk_skills_into_database, read_legacy_skill_snapshot_file,
+        validate_legacy_skill_snapshot_tree,
     };
 
     const TENANT: &str = "import-tenant";
@@ -717,6 +737,8 @@ mod skill_disk_import_tests {
 
         let storage = tempfile::tempdir().expect("temp storage root");
         seed_skill_on_disk(storage.path(), "replace-before-read");
+        let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
+            .expect("skill snapshot validation retains its root");
         let files = disk_skill_files(&storage.path().join("tenants"))
             .expect("skill snapshot collection succeeds");
         let (selected, _) = files
@@ -728,8 +750,52 @@ mod skill_disk_import_tests {
         std::fs::remove_file(&selected).expect("remove collected file");
         symlink(&outside, &selected).expect("replace collected file with symlink");
 
-        let error = read_legacy_skill_snapshot_file(&selected)
+        let relative_path = selected
+            .strip_prefix(storage.path())
+            .expect("selected file remains under snapshot root");
+        let error = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &selected)
             .expect_err("verified read must reject the replacement symlink");
+
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("temp storage root");
+        let outside = tempfile::tempdir().expect("outside snapshot root");
+        seed_skill_on_disk(storage.path(), "replace-directory-before-read");
+        seed_skill_on_disk(outside.path(), "replace-directory-before-read");
+        let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
+            .expect("skill snapshot validation retains its root");
+        let files = disk_skill_files(&storage.path().join("tenants"))
+            .expect("skill snapshot collection succeeds");
+        let (selected, _) = files
+            .into_iter()
+            .next()
+            .expect("seeded skill file is collected");
+        let selected_directory = selected.parent().expect("selected skill directory");
+        let retired_directory = storage.path().join("retired-skill-directory");
+        std::fs::rename(selected_directory, &retired_directory)
+            .expect("retire validated skill directory");
+        let outside_directory = outside
+            .path()
+            .join("tenants")
+            .join(TENANT)
+            .join("users")
+            .join(USER)
+            .join("skills")
+            .join("replace-directory-before-read");
+        symlink(&outside_directory, selected_directory)
+            .expect("replace validated skill directory with outside symlink");
+
+        let relative_path = selected
+            .strip_prefix(storage.path())
+            .expect("selected file remains under snapshot root");
+        let error = read_legacy_skill_snapshot_file(&snapshot_root, relative_path, &selected)
+            .expect_err("verified read must reject a replaced ancestor directory");
 
         assert!(
             error.to_string().contains("without following links"),

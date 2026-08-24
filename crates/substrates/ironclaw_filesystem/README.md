@@ -39,8 +39,9 @@ here is what lets the rest of the workspace stay backend-agnostic.
   symlink traversal, mount escape, and raw-host-path prevention).
 - `inspect_ordinary_host_tree` — the bounded, descriptor-relative no-follow
   validator shared by host-only migration callers; product-specific tree
-  grammar remains with each caller. `read_ordinary_host_file` pairs it with a
-  verified no-follow descriptor read for selected ordinary files.
+  grammar remains with each caller. `read_ordinary_host_file` pairs a retained
+  `DiskDirectoryCapability` with a capability-relative path, resolving every
+  ancestor and the final ordinary file without following links.
 
 ## Depends on / consumed by
 

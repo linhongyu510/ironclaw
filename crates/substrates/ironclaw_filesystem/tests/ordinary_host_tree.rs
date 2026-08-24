@@ -1,5 +1,6 @@
 use ironclaw_filesystem::{
-    MAX_ORDINARY_HOST_TREE_DEPTH, inspect_ordinary_host_tree, read_ordinary_host_file,
+    DiskDirectoryCapability, MAX_ORDINARY_HOST_TREE_DEPTH, inspect_ordinary_host_tree,
+    read_ordinary_host_file,
 };
 use ironclaw_host_api::path::HostPath;
 
@@ -103,7 +104,8 @@ fn ordinary_host_file_read_rejects_a_symlink_instead_of_following_it() {
     let selected = temp.path().join("selected.txt");
     symlink(&outside, &selected).expect("selected symlink");
 
-    let error = read_ordinary_host_file(&HostPath::from_path_buf(selected), 1024)
+    let root = DiskDirectoryCapability::admit_existing(temp.path()).expect("retain test root");
+    let error = read_ordinary_host_file(&root, std::path::Path::new("selected.txt"), 1024)
         .expect_err("verified read must not follow a replacement symlink");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("symlink"), "{error}");
@@ -115,7 +117,8 @@ fn ordinary_host_file_read_rejects_bytes_beyond_the_caller_limit() {
     let selected = temp.path().join("selected.txt");
     std::fs::write(&selected, b"12345").expect("oversized selected file");
 
-    let error = read_ordinary_host_file(&HostPath::from_path_buf(selected), 4)
+    let root = DiskDirectoryCapability::admit_existing(temp.path()).expect("retain test root");
+    let error = read_ordinary_host_file(&root, std::path::Path::new("selected.txt"), 4)
         .expect_err("verified read must stay within the caller's byte limit");
 
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);

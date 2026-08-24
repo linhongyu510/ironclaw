@@ -2,6 +2,31 @@ use super::*;
 
 #[cfg(unix)]
 #[test]
+fn manifest_create_race_keeps_convergence_failure_in_the_error_chain() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing_target = temp.path().join("missing-layout-target");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    symlink(&missing_target, &manifest_path).expect("dangling competing manifest");
+    let manifest = LayoutManifest::new(embedded_single_user_requirement());
+
+    let error = write_manifest_last(temp.path(), &manifest)
+        .expect_err("failed convergence must remain the returned source error");
+    let chain = format!("{error:#}");
+
+    assert!(
+        chain.contains("initial manifest publication failed"),
+        "create failure should be retained as context: {chain}"
+    );
+    assert!(
+        chain.contains("expected an ordinary non-symlink file"),
+        "convergence failure should remain in the source chain: {chain}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn atomic_layout_write_stays_with_admitted_parent_after_path_replacement() {
     use ironclaw_filesystem::DiskDirectoryCapability;
 
