@@ -185,6 +185,49 @@ class SingleDebugPolicyOwnerTests(unittest.TestCase):
         root = self.tree("# override per-run: CARGO_PROFILE_DEV_DEBUG=2 cargo test\n")
         self.assertEqual([], validate_single_debug_policy_owner(root))
 
+    def test_a_workflow_job_env_second_writer_is_rejected(self) -> None:
+        """YAML `KEY: value` in a workflow job env is the shape actually deleted.
+
+        Reported independently by two review lanes. The first version of this
+        guard scanned only `scripts/**` for `KEY=value`, so it could not see
+        the 14 workflow lines this PR removed — the majority of what it exists
+        to keep removed. A future PR re-adding one would have passed clean.
+        """
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "demo.yml").write_text(
+            "jobs:\n  build:\n    env:\n      CARGO_PROFILE_DEV_DEBUG: 0\n",
+            encoding="utf-8",
+        )
+        errors = validate_single_debug_policy_owner(root)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn(".github/workflows/demo.yml:4", errors[0])
+
+    def test_a_quoted_yaml_value_is_rejected(self) -> None:
+        """One deleted line was `CARGO_PROFILE_DEV_DEBUG: "0"` — quoted."""
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "d.yml").write_text(
+            '          CARGO_PROFILE_DEV_DEBUG: "0"\n', encoding="utf-8"
+        )
+        self.assertEqual(1, len(validate_single_debug_policy_owner(root)))
+
+    def test_the_hermetic_passthrough_survives_the_widened_syntax(self) -> None:
+        """`[:=]` must still not match the `case`-pattern allowlist.
+
+        That entry is how a developer's CARGO_PROFILE_DEV_DEBUG=2 override
+        reaches the child process; matching it would break the escape hatch
+        this contract deliberately preserves.
+        """
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "scripts" / "ci").mkdir(parents=True)
+        (root / "scripts" / "ci" / "h.sh").write_text(
+            "      CARGO_INCREMENTAL|CARGO_PROFILE_DEV_DEBUG|"
+            "CARGO_PROFILE_TEST_DEBUG|CARGO_TEST_ARGS|\\\n",
+            encoding="utf-8",
+        )
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
     def test_the_live_tree_has_exactly_one_owner(self) -> None:
         self.assertEqual([], validate_single_debug_policy_owner(ROOT))
 

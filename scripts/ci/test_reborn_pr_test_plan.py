@@ -1071,6 +1071,52 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 ],
             )
 
+    def test_shared_install_cargo_component_action_widens_to_exhaustive_plan(self) -> None:
+        """install-cargo-component is the third shared action, and needs the same pin.
+
+        Its two siblings each have a widening test; this one had only the
+        `.github/actions/**` sweep, which asserts the planner does not RAISE
+        but never checks the mode it returns. A mis-ordering against
+        PR_STATIC_CONTROL_FRAGMENTS could drop this path to a `none` or
+        `selected` plan and the sweep would still pass.
+        """
+        plan = self.plan("pull_request", [".github/actions/install-cargo-component/action.yml"])
+        # Full field-by-field equality, not a handful of spot checks: an
+        # exhaustive plan has ten fields besides `reasons` that a partial
+        # assertion would leave silently unpinned (e.g. `run_sandbox_docker`
+        # regressing to False on a "full" plan would pass every check this
+        # test used to make).
+        self.assertEqual(
+            plan,
+            {
+                "mode": "full",
+                "reasons": [
+                    "shared reborn action changed; this PR runs the "
+                    "exhaustive plan"
+                ],
+                "changed_packages": [],
+                "affected_packages": ["alpha", "beta", "gamma"],
+                "crate_buckets": [
+                    {"name": "selected", "packages": ["alpha", "beta", "gamma"]}
+                ],
+                "root_partitions": [0, 1, 2, 3],
+                "integration_lanes": [0, 1, 2, 3, "groups"],
+                "run_group_tests": True,
+                "run_qa_replay": True,
+                "run_sandbox_docker": True,
+                "coverage_mode": "full",
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/setup-rust/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
+            )
+
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
 

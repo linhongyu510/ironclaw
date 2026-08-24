@@ -426,7 +426,16 @@ def validate_release_workflow_installs_rust(
 # in a passthrough allowlist (a `case` pattern, no `=`), which is how a
 # developer's `CARGO_PROFILE_DEV_DEBUG=2` override survives the hermetic
 # barrier. That entry must keep working, so it must not match here.
-DEBUG_POLICY_ASSIGNMENT = re.compile(r"CARGO_PROFILE_[A-Z]+_DEBUG\s*=")
+# Both syntaxes, because the value was written in both: shell `KEY=value` in
+# scripts, YAML `KEY: value` in workflow job envs. Matching only `=` made this
+# guard blind to the 14 workflow lines this PR deleted -- the majority of what
+# it exists to keep deleted.
+DEBUG_POLICY_ASSIGNMENT = re.compile(r"CARGO_PROFILE_[A-Z]+_DEBUG\s*[:=]")
+# Where the value could be written. `scripts/` covers the shell/python side;
+# `.github/` covers workflow and composite-action env blocks, which is where
+# five job envs carried it before this change.
+DEBUG_POLICY_SEARCH_ROOTS = ("scripts", ".github")
+DEBUG_POLICY_SUFFIXES = (".sh", ".py", ".yml", ".yaml")
 DEBUG_POLICY_OWNER = "Cargo.toml"
 
 
@@ -438,11 +447,20 @@ def validate_single_debug_policy_owner(root: Path = ROOT) -> list[str]:
     defaults standing in two scripts -- so the change's own claim of a single
     owner was not true of the whole tree. Two audit lanes reported it
     independently.
+
+    The first version of this guard then repeated the mistake in miniature: it
+    scanned only `scripts/**` for `KEY=value`, so it could not see the 14
+    workflow lines -- the majority of what it was written to keep deleted. Two
+    review lanes reported THAT independently. Scope and syntax now cover both
+    places the value was actually written.
     """
 
     errors: list[str] = []
-    for path in sorted((root / "scripts").rglob("*")):
-        if not path.is_file() or path.suffix not in (".sh", ".py"):
+    candidates: list[Path] = []
+    for search_root in DEBUG_POLICY_SEARCH_ROOTS:
+        candidates.extend(sorted((root / search_root).rglob("*")))
+    for path in candidates:
+        if not path.is_file() or path.suffix not in DEBUG_POLICY_SUFFIXES:
             continue
         # Test files carry the forbidden string on purpose, as fixtures and
         # as the sabotage input that proves this check fires. Scanning them
