@@ -196,7 +196,37 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// Union re-measured on 2026-08-19 after merging main again (its own record
 /// had moved 41_991 -> 42_142 meanwhile). Re-captured with
 /// `bash scripts/ci/check-composition-budget.sh --print` on the merged tree.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_436;
+/// ✎ Re-measured 2026-08-14 on the unbound-turns surfaces branch (main
+/// merged): the OpenAI-compat prepared-lane behavior lives in
+/// `ironclaw_assistant::UnboundPreparedTurnService`; composition's growth is
+/// the wire-DTO mapping, port adapter, and mount wiring, ratcheted to the
+/// observed count.
+/// ✎ Re-measured 42_086 -> 41_991 on 2026-08-14 (post-merge re-measure, same
+/// day): the changelog, the prior manifest figure, and a live `--print` run
+/// had drifted out of agreement; `bash scripts/ci/check-composition-budget.sh
+/// --print` is the single authoritative re-capture, and this record moves
+/// with `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed`
+/// to the same figure in this commit.
+/// ✎ Re-measured 42_142 -> 42_198 on 2026-08-19 after merging main
+/// into fix/7681-private-connect-nudge-with-one-click-link. Main's own growth
+/// (#7712's checkpoint-policy field, #7717's libSQL write-lane fix) had
+/// already consumed the prior ceiling+tolerance window; this branch's own
+/// delta is the #7681 connect-link notice wiring in
+/// `extension_host_assembly.rs` (~11 lines), predating that growth. Measured
+/// on the merged tree with `bash scripts/ci/check-composition-budget.sh
+/// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
+/// `loc_ceiling`/`loc_observed` to the same figure in this commit.
+/// ✎ Re-seeded 42_198 -> 42_371 on 2026-08-24 for #7833 (unattended-safe
+/// suggestion tools). The manifest's `loc_ceiling`/`loc_observed` moved to
+/// 42_371 in the same PR to absorb `unattended_denied_capability_ids()`'s
+/// assembly wiring; this record moves with them to the same figure in this
+/// commit, per the pairing this file's own history keeps. Measured with
+/// `bash scripts/ci/check-composition-budget.sh --print`, not padded.
+/// Union re-measured 43_436 -> 43_513 on 2026-08-24 after merging #7833 into
+/// the profile-stable storage branch. This is the exact merged-tree
+/// production-source count, preserving both branches' assembly changes; it
+/// moves with the composition-budget manifest's merged recapture.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_513;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 845 Arc<dyn> (governed prod, excl slack/extension_host)".
