@@ -10,12 +10,19 @@ covering unrelated lanes (stress suites, crate scope filters, WebUI sites).
 Wiring stays in that module's `validate_workflow_texts`; only the
 toolchain-shaped rules live here.
 
-Note which direction each check runs. Five assert an ABSENCE — no dtolnay,
-no raw bootstrap, no shadowing RUSTFLAGS. Absence-only guards cannot notice
-that the thing they protect has been deleted, which is exactly how a release
-workflow with no Rust install at all once passed this suite. That is what
-`validate_release_workflow_installs_rust` is for; keep the pair in mind
-before adding a seventh.
+Note which direction each check runs, because the mix is what makes the
+suite trustworthy. Three assert an ABSENCE — no dtolnay action, no raw
+bootstrap, no shadowing RUSTFLAGS key. Absence-only guards cannot notice that
+the thing they protect has been deleted: a job that installs nothing at all
+satisfies every one of them. That is exactly how a release workflow with no
+Rust install passed this suite.
+
+The other four assert a PRESENCE or an equality and are therefore
+deletion-safe for their own subject: the composite has the steps it must have,
+its default equals rust-toolchain.toml's channel, the release lane and its
+cargo-dist fragment both reach the composite, and every job that runs cargo
+reaches it. Before adding an eighth, work out which direction it runs and what
+deletion it would miss.
 """
 
 from __future__ import annotations
@@ -147,27 +154,9 @@ def validate_no_job_env_rustflags_with_setup_rust(
     for path, text in workflows.items():
         if SETUP_RUST_USES not in text:
             continue
-        # Bound job headings to the `jobs:` block. JOB_HEADING matches ANY
-        # two-space `key:` line, so the `on:` trigger's children (`push:`,
-        # `workflow_call:`, ...) match too — taking headings[0] blindly
-        # truncated the preamble at the first trigger and made the
-        # workflow-level check dead code on every real workflow.
+        anchors = _composite_anchors(text)
         jobs_key = JOBS_KEY.search(text)
-        jobs_start = jobs_key.start() if jobs_key else 0
-        headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= jobs_start]
-        # A job can reach the composite through a YAML alias (`- *install-rust`)
-        # instead of the literal `uses:` line, as release-plz.yml does. Resolve
-        # which anchors carry the composite so an aliased job is still checked.
-        rust_anchors = set()
-        for anchor in ANCHOR_DEF.finditer(text):
-            following = ANCHOR_DEF.search(text, anchor.end())
-            stop = following.start() if following else len(text)
-            next_job = JOB_HEADING.search(text, anchor.end())
-            if next_job and next_job.start() < stop:
-                stop = next_job.start()
-            if SETUP_RUST_USES in text[anchor.start():stop]:
-                rust_anchors.add(anchor.group("name"))
-        preamble = text[:jobs_start] if jobs_key else text
+        preamble = text[: jobs_key.start()] if jobs_key else text
         if WORKFLOW_ENV_RUSTFLAGS.search(preamble):
             errors.append(
                 f"{path}: workflow-level env sets a RUSTFLAGS key while a "
@@ -177,22 +166,12 @@ def validate_no_job_env_rustflags_with_setup_rust(
                 "the file identically to a job-level one; pass extra flags "
                 "as the composite's extra_rustflags input instead"
             )
-        for index, heading in enumerate(headings):
-            start = heading.start()
-            end = (
-                headings[index + 1].start()
-                if index + 1 < len(headings)
-                else len(text)
-            )
-            block = text[start:end]
-            uses_composite = SETUP_RUST_USES in block or any(
-                f"*{anchor}" in block for anchor in rust_anchors
-            )
-            if not uses_composite:
+        for name, block in _job_blocks(text):
+            if not _reaches_composite(block, anchors):
                 continue
             if JOB_ENV_RUSTFLAGS.search(block):
                 errors.append(
-                    f"{path}: job {heading.group('name')!r} sets a job- or "
+                    f"{path}: job {name!r} sets a job- or "
                     "step-level RUSTFLAGS env key while installing Rust through "
                     ".github/actions/setup-rust — job env shadows the "
                     "composite's $GITHUB_ENV write and drops the mold linker "
@@ -265,6 +244,94 @@ def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]
                 f"{path}: expected {expected} accepted Rust bootstrap(s), "
                 f"found {hits}. If the generator stopped emitting it, drop "
                 "the entry from ACCEPTED_RUST_BOOTSTRAPS."
+            )
+    return errors
+
+
+def _composite_anchors(text: str) -> set[str]:
+    """Anchor names whose YAML block reaches the composite.
+
+    A job can pick the composite up through an alias (`- *install-rust`)
+    rather than a literal `uses:` line, as release-plz.yml does, so both
+    contracts below have to resolve aliases before deciding a job misses it.
+    """
+    anchors: set[str] = set()
+    for anchor in ANCHOR_DEF.finditer(text):
+        following = ANCHOR_DEF.search(text, anchor.end())
+        stop = following.start() if following else len(text)
+        next_job = JOB_HEADING.search(text, anchor.end())
+        if next_job and next_job.start() < stop:
+            stop = next_job.start()
+        if SETUP_RUST_USES in text[anchor.start():stop]:
+            anchors.add(anchor.group("name"))
+    return anchors
+
+
+def _job_blocks(text: str) -> list[tuple[str, str]]:
+    """(job name, block) for each job, bounded to the `jobs:` mapping.
+
+    JOB_HEADING matches ANY two-space `key:` line, so the `on:` trigger's
+    children (`push:`, `workflow_call:`, ...) match too — slicing from the
+    first heading blindly truncated the preamble at the first trigger and
+    made the workflow-level checks dead code on every real workflow.
+    """
+    jobs_key = JOBS_KEY.search(text)
+    jobs_start = jobs_key.start() if jobs_key else 0
+    headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= jobs_start]
+    blocks = []
+    for index, heading in enumerate(headings):
+        end = (
+            headings[index + 1].start()
+            if index + 1 < len(headings)
+            else len(text)
+        )
+        blocks.append((heading.group("name"), text[heading.start():end]))
+    return blocks
+
+
+def _reaches_composite(block: str, anchors: set[str]) -> bool:
+    return SETUP_RUST_USES in block or any(f"*{a}" in block for a in anchors)
+
+
+# A cargo/rustc/rustup command actually being invoked -- not `Cargo.toml` in a
+# `paths:` filter, not `cargo` inside a URL or a comment. Bounded on both sides
+# by non-path, non-word characters so `target/cargo-timings` and
+# `scripts/cargo-foo.sh` do not count as running the compiler.
+CARGO_INVOCATION = re.compile(r"(?<![\w./-])(?:cargo|rustc|rustup)(?![\w./-])")
+
+
+def validate_rust_jobs_reach_the_composite(workflows: dict[str, str]) -> list[str]:
+    """Any job that runs cargo must install Rust through the composite.
+
+    The release-lane check below is the same rule written for one file. It
+    was added after a workflow lost its Rust install entirely and every
+    absence-only guard called that clean -- but it only ever protected
+    `ironclaw-release.yml`. Deleting the composite step from any other
+    workflow reproduced the identical failure with the suite still green,
+    because "no dtolnay, no bootstrap, no shadowing RUSTFLAGS" is all
+    trivially true of a job that installs nothing at all.
+
+    Scoped to jobs that actually invoke the compiler, so a docs or frontend
+    job needs no exemption. All 31 cargo-running jobs in the tree satisfy
+    this today, which is why it ships with no allowlist: an entry here would
+    mean a lane building Rust on an unpinned toolchain.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        anchors = _composite_anchors(text)
+        for name, block in _job_blocks(text):
+            code = "\n".join(line.split("#")[0] for line in block.splitlines())
+            if not CARGO_INVOCATION.search(code):
+                continue
+            if _reaches_composite(block, anchors):
+                continue
+            errors.append(
+                f"{path}: job {name!r} runs cargo but never reaches "
+                f"`{SETUP_RUST_USES}`. It would build on whatever toolchain "
+                "the runner image happens to ship, unpinned and without mold "
+                "-- or fail outright with 'cargo: command not found'. Install "
+                "Rust through the composite."
             )
     return errors
 

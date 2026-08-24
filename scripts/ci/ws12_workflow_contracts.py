@@ -26,6 +26,7 @@ from rust_toolchain_contracts import (  # noqa: E402
     validate_no_job_env_rustflags_with_setup_rust,
     validate_no_unmanaged_rust_bootstrap,
     validate_release_workflow_installs_rust,
+    validate_rust_jobs_reach_the_composite,
     validate_setup_rust_action,
     validate_toolchain_pin_sync,
 )
@@ -1786,6 +1787,7 @@ def validate_workflow_texts(
     errors.extend(validate_no_direct_dtolnay_usage(workflows))
     errors.extend(validate_no_unmanaged_rust_bootstrap(workflows))
     errors.extend(validate_release_workflow_installs_rust(workflows, root))
+    errors.extend(validate_rust_jobs_reach_the_composite(workflows))
     errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
     errors.extend(validate_toolchain_pin_sync(root))
     return errors

@@ -24,7 +24,6 @@ JOB_HEADING = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
 # neighbouring `Check all-target lints` legitimately passes `--tests
 # --examples`; unbounded, this contract would blame this step for them.
 STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
-JOB_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
 
 
 def step_body(text: str, step_name: str) -> str | None:

@@ -20,10 +20,11 @@ from rust_toolchain_contracts import (  # noqa: E402
     validate_no_job_env_rustflags_with_setup_rust,
     validate_no_unmanaged_rust_bootstrap,
     validate_release_workflow_installs_rust,
+    validate_rust_jobs_reach_the_composite,
     validate_setup_rust_action,
     validate_toolchain_pin_sync,
 )
-from workflow_text import STEP_HEADING, job_body, step_body  # noqa: E402
+from workflow_text import JOB_HEADING, STEP_HEADING, job_body, step_body  # noqa: E402
 from ws12_workflow_contracts import (  # noqa: E402
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
@@ -56,6 +57,145 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+class RustJobsReachTheCompositeTests(unittest.TestCase):
+    """Every job that runs cargo must reach the composite, not just the release lane.
+
+    The release-lane guard was written after a workflow lost its Rust install
+    and every absence-only check called that clean — but it only covered one
+    file. Deleting the composite step from any other workflow reproduced the
+    identical bug with the suite green, because "no dtolnay, no bootstrap, no
+    shadowing RUSTFLAGS" is trivially true of a job that installs nothing.
+    """
+
+    COMPOSITE = "      - uses: ./.github/actions/setup-rust\n"
+
+    def workflow(self, *, with_composite: bool) -> str:
+        return (
+            "name: demo\n"
+            "on:\n"
+            "  push:\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            + (self.COMPOSITE if with_composite else "")
+            + "      - run: cargo test --workspace\n"
+        )
+
+    def test_a_cargo_job_without_the_composite_is_rejected(self) -> None:
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/demo.yml": self.workflow(with_composite=False)}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("runs cargo but never reaches", errors[0])
+        self.assertIn("'build'", errors[0])
+
+    def test_a_cargo_job_with_the_composite_passes(self) -> None:
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite(
+                {".github/workflows/demo.yml": self.workflow(with_composite=True)}
+            ),
+        )
+
+    def test_a_job_that_never_runs_cargo_needs_no_composite(self) -> None:
+        text = (
+            "name: docs\n"
+            "on:\n"
+            "  push:\n"
+            "jobs:\n"
+            "  lint-docs:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: npm run lint\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/d.yml": text})
+        )
+
+    def test_cargo_in_a_path_filter_or_comment_is_not_an_invocation(self) -> None:
+        """`Cargo.toml` in a paths filter must not demand a Rust install."""
+        text = (
+            "name: paths\n"
+            "on:\n"
+            "  push:\n"
+            '    paths:\n      - "Cargo.toml"\n      - "**/cargo-timings/**"\n'
+            "jobs:\n"
+            "  notify:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      # we could run cargo here one day\n"
+            "      - run: echo hi\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/p.yml": text})
+        )
+
+    def test_a_job_reaching_the_composite_by_yaml_alias_passes(self) -> None:
+        """release-plz.yml picks the composite up through an anchor alias."""
+        text = (
+            "name: alias\n"
+            "on:\n"
+            "  push:\n"
+            "x-steps:\n"
+            "  - &install-rust\n"
+            "    uses: ./.github/actions/setup-rust\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - *install-rust\n"
+            "      - run: cargo build\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/a.yml": text})
+        )
+
+    def test_every_live_cargo_job_reaches_the_composite(self) -> None:
+        """Ships with no allowlist: an exemption would be an unpinned lane."""
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite(
+                ws12_workflow_contracts.load_workflows(ROOT)
+            ),
+        )
+
+
+class WorkflowTextHelperTests(unittest.TestCase):
+    """The shared helpers must define each pattern exactly once.
+
+    ws12_workflow_contracts.py used to bind JOB_HEADING twice, the second
+    silently shadowing the first for every validator below it. Both patterns
+    happened to be equivalent, so nothing broke — but an edit to the dead one
+    would have had no effect and no test would have said so. Splitting the
+    helpers out is only a fix if the duplicate actually dies with it.
+    """
+
+    def test_each_pattern_is_defined_exactly_once(self) -> None:
+        source = (Path(__file__).resolve().parent / "lib" / "workflow_text.py").read_text(
+            encoding="utf-8"
+        )
+        for name in ("JOB_HEADING", "STEP_HEADING"):
+            self.assertEqual(
+                1,
+                source.count(f"{name} = re.compile"),
+                f"{name} must be bound exactly once; a second binding silently "
+                "shadows the first for every caller below it",
+            )
+
+    def test_job_heading_matches_a_two_space_job_key(self) -> None:
+        text = "jobs:\n  build-Rust_1:\n    runs-on: ubuntu-latest\n"
+        self.assertEqual(
+            ["build-Rust_1"], [m.group("name") for m in JOB_HEADING.finditer(text)]
+        )
+
+    def test_job_heading_ignores_deeper_keys(self) -> None:
+        text = "jobs:\n  build:\n    steps:\n      - name: x\n"
+        self.assertEqual(
+            ["build"], [m.group("name") for m in JOB_HEADING.finditer(text)]
+        )
 
 
 class SetupRustActionContractTests(unittest.TestCase):
