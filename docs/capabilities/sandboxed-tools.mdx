@@ -16,7 +16,7 @@ This is IronClaw's recommended approach for custom integrations that need strong
 model selects a tool
     ↓
 authorization reads the manifest and plans obligations for this call
-  (network policy, one-shot credential staging, resource ceilings)
+  (network policy, credential staging, resource ceilings)
     ↓
 host loads the module and instantiates it with a fuel + memory budget
     ↓
@@ -52,7 +52,7 @@ Every execution is bounded by three limits applied at instantiation:
 | Memory | 10 MB linear memory | Growth beyond the cap is refused; the guest's `memory.grow` fails and the module cannot obtain more memory. |
 | Wall clock | 60 seconds | Execution is interrupted via wasmtime's epoch deadline. |
 
-These are host-side defaults, not environment-tunable knobs — there is no `WASM_FUEL_LIMIT`-style variable. A deployment that needs different bounds configures them where the runtime is composed.
+These are compiled-in defaults, not tunable knobs — there is no `WASM_FUEL_LIMIT`-style environment variable and no configuration field for them today. Changing them means changing the runtime's defaults where it is composed.
 
 Two further per-execution budgets apply to host calls: logging is capped at 1,000 entries per execution and 4 KB per message, and an HTTP request defaults to a 30-second timeout (a tool may pass its own, capped at the execution deadline).
 
@@ -98,7 +98,7 @@ audience = { scheme = "https", host = "api.github.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 ```
 
-The example is condensed from the shipped `github` package. The real `github.create_repo` entry declares no `network_targets` at all: its credential `audience` alone puts `api.github.com` on the allowlist (see below).
+The example is condensed from the shipped `github` package. The real `github.create_repo` entry declares neither `network_targets` nor `max_egress_bytes` — both are shown here to illustrate the fields. Its credential `audience` alone puts `api.github.com` on the allowlist (see below).
 
 ### `[runtime]`
 
@@ -138,20 +138,20 @@ There is no manifest field that lets a tool *read* a secret. Credential material
 
 ## Host Functions
 
-The WIT interface (`near:agent@0.3.0`) declares six host functions. The production host starts deny-all and grants four — three unconditionally, plus `http-request` when the call has a staged network policy:
+The tool WIT interface (`near:agent@0.4.1`) declares six host functions. The production host starts deny-all and grants four — three unconditionally, plus `http-request` when the call has a staged network policy:
 
 | Function | Available in production | Notes |
 |----------|------------------------|-------|
 | `log(level, message)` | Yes | Collected and emitted after execution. 1,000 entries max, 4 KB per message. |
 | `now-millis()` | Yes | Milliseconds since the Unix epoch. |
-| `http-request(method, url, headers-json, body, timeout-ms)` | Yes, when a network policy is staged | The entry point for the credential-injection flow. Denied outright when the call has no staged policy. |
+| `http-request(method, url, headers-json, body?, timeout-ms?)` | Yes, when a network policy is staged | The entry point for the credential-injection flow; `body` and `timeout-ms` are optional, and failures come back as a typed `http-failure` record. Denied outright when the call has no staged policy. |
 | `workspace-read(path)` | No | Denied by the production host. |
 | `secret-exists(name)` | Yes | Answers from the credentials staged for this one invocation: `true` only if material was staged for that handle. Returns a boolean, never a value. |
 | `tool-invoke(alias, params-json)` | No | Declared for future chained tool calls; denied today. |
 
-That is the entire surface. A WASM tool cannot call arbitrary OS functions, spawn processes, open files, or reach the network except through `http-request`.
+That is the entire surface for a tool module. A WASM tool cannot call arbitrary OS functions, spawn processes, open files, or reach the network except through `http-request`.
 
-The tool side of the interface is three exports: `execute(request) -> response`, `schema() -> string` (a JSON Schema for the tool's parameters), and `description() -> string`.
+The tool side of the interface is three exports: `execute(request) -> response` (a `success(string)` / `failure(guest-failure)` variant), `schema() -> string` (a JSON Schema for the tool's parameters), and `description() -> string`.
 
 ---
 
@@ -178,8 +178,8 @@ ironclaw extension search
 ironclaw extension install my-tool
 ```
 
-`extension install` takes an **extension id** from `extension search` — never a file path
-or a URL. Passing `./my-tool.wasm` or an `https://` URL fails.
+`extension install` takes an **extension id** from `extension search` — there is no file-path
+or URL form. Passing `./my-tool.wasm` or an `https://` URL is just an unknown id.
 
 To add a package you built yourself, import the packaged archive from **Extensions** in
 the [web interface](/using/webui). That is the supported path for getting a new package
@@ -201,7 +201,7 @@ Read the manifest before installing an extension from an untrusted source — sp
 
 <AccordionGroup>
   <Accordion title="Credential injection is one-way" icon="lock">
-    The host attaches credentials to outgoing requests. There is no host function that returns secret material, and production egress accepts only credentials staged one-shot by authorization for that exact call. A compromised module still cannot read the secret store.
+    The host attaches credentials to outgoing requests. There is no host function that returns secret material, and production egress accepts only credentials staged by authorization for that exact invocation. A compromised module still cannot read the secret store.
   </Accordion>
 
   <Accordion title="Tool-supplied auth headers are refused" icon="ban">
@@ -209,7 +209,7 @@ Read the manifest before installing an extension from an untrusted source — sp
   </Accordion>
 
   <Accordion title="No process spawning" icon="shield">
-    Modules cannot spawn child processes, execute shell commands, or load dynamic libraries. The interface exposed to a module is the six functions above plus a capability-less WASI Preview 2 context — no preopened directories, no environment, no inherited stdio, no sockets.
+    Modules cannot spawn child processes, execute shell commands, or load dynamic libraries. The interface exposed to a module is the six functions above plus a capability-less WASI Preview 2 context — no preopened directories, no environment, no inherited stdio, and no usable sockets (the socket interface is linked, but every address and name lookup is denied).
   </Accordion>
 
   <Accordion title="Fuel prevents denial-of-service" icon="zap">
