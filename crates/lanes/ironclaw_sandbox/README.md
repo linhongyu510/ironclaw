@@ -52,10 +52,12 @@ posture no longer matches. A per-user creation gate converges concurrent first
 calls on one container. Active-exec accounting prevents the idle sweeper from
 stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
-For managed egress, idle suspension removes the proxy and its upstream network
-but retains the stopped worker's private network. This keeps the proxy DNS
-endpoint stable and preserves container-local state on wake. Final retention
-cleanup removes the stopped container and private network together.
+For managed egress, idle suspension removes the proxy container and every
+invocation credential file, but retains the stopped worker's private network
+and its host-side CA/key material. Keeping the CA file's inode alive preserves
+the worker's read-only Docker file bind across wake-up; a posture-version
+change recycles older workers once. Final retention cleanup removes the stopped
+container, private network, and retained proxy material together.
 
 One IronClaw process owns a local Docker workspace root at a time. The
 transport acquires a transport-local advisory owner lock on the workspace root

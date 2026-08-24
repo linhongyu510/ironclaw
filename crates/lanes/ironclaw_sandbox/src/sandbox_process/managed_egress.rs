@@ -986,12 +986,19 @@ impl ManagedEgressRuntime {
         remove_material_directory(&self.material_root.join(proxy_name)).await
     }
 
+    /// Stops the idle proxy without invalidating the persistent worker's CA
+    /// file bind mount. Docker Desktop pins file binds to the source inode, so
+    /// the CA material must outlive every suspension of the user container.
     pub(super) async fn suspend_bundle(
         &self,
         docker: &Docker,
         key: &RebornSandboxUserKey,
     ) -> Result<(), RuntimeProcessError> {
-        self.remove_proxy(docker, key).await
+        let proxy_name = key.proxy_name();
+        self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+            .await?;
+        remove_proxy_if_present(docker, &proxy_name).await?;
+        remove_credential_material(&self.material_root.join(proxy_name)).await
     }
 
     pub(super) async fn rollback_provisioned_bundle(
@@ -1000,7 +1007,7 @@ impl ManagedEgressRuntime {
         key: &RebornSandboxUserKey,
         user_container_name: &str,
     ) -> Result<(), RuntimeProcessError> {
-        self.suspend_bundle(docker, key).await?;
+        self.remove_proxy(docker, key).await?;
         if !container_attached_to_network(docker, user_container_name, &key.network_name()).await? {
             remove_network_if_present(docker, &key.network_name()).await?;
         }
@@ -1013,7 +1020,7 @@ impl ManagedEgressRuntime {
         key: &RebornSandboxUserKey,
         user_container_name: &str,
     ) -> Result<(), RuntimeProcessError> {
-        self.suspend_bundle(docker, key).await?;
+        self.remove_proxy(docker, key).await?;
         disconnect_container_if_attached(docker, &key.network_name(), user_container_name).await?;
         remove_network_if_present(docker, &key.network_name()).await
     }
@@ -1434,7 +1441,7 @@ pub(super) fn proxy_posture(
         ))
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"ironclaw-managed-egress-v4\0");
+    hasher.update(b"ironclaw-managed-egress-v5\0");
     hasher.update(proxy_image.as_bytes());
     hasher.update([0]);
     hasher.update(ca_certificate);
@@ -2377,6 +2384,8 @@ mod tests {
         let bundle = directory.path().join("credentials.json");
         let legacy = directory.path().join("credential-0.secret");
         let marker = directory.path().join("invocation-id");
+        let certificate = directory.path().join("ca.crt");
+        let private_key = directory.path().join("ca.key");
         write_atomic_private_material_file(&bundle, br#"{"atlas":"secret"}"#)
             .await
             .unwrap();
@@ -2384,12 +2393,20 @@ mod tests {
             .await
             .unwrap();
         write_atomic_material_file(&marker, b"keep").await.unwrap();
+        write_atomic_material_file(&certificate, b"certificate")
+            .await
+            .unwrap();
+        write_atomic_private_material_file(&private_key, b"private-key")
+            .await
+            .unwrap();
 
         remove_credential_material(directory.path()).await.unwrap();
 
         assert!(!bundle.exists());
         assert!(!legacy.exists());
         assert!(marker.exists());
+        assert_eq!(tokio::fs::read(&certificate).await.unwrap(), b"certificate");
+        assert_eq!(tokio::fs::read(&private_key).await.unwrap(), b"private-key");
     }
 
     #[tokio::test]

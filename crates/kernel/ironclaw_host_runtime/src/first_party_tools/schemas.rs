@@ -272,12 +272,12 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "items": { "type": "string" },
                     "maxItems": ironclaw_host_api::process::MAX_SHELL_CREDENTIAL_CONTEXTS,
                     "uniqueItems": true,
-                    "description": "Optional active extension IDs whose complete manifest-declared credential requirements this invocation may use. For a CLI or API that needs authenticated account access, select the matching extension ID and run the requested authenticated command directly. Use extension IDs, never provider names, secret handles, environment-variable names, or executable names. Authorization and the managed proxy still enforce each credential's exact destination."
+                    "description": "Required explicit credential authority for this shell invocation. Select active extension IDs whose complete manifest-declared credential requirements are needed, or use [] only when the command needs no authenticated account access. For a CLI or API that needs authentication, select the matching extension ID and run the requested authenticated command directly. Use extension IDs, never provider names, secret handles, environment-variable names, or executable names. Authorization and the managed proxy still enforce each credential's exact destination."
                 },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
             },
-            "required": ["command"],
+            "required": ["command", "credential_contexts"],
             "additionalProperties": false
         }),
         // NOTE: this schema is published by the host_runtime first-party
@@ -1260,8 +1260,8 @@ mod tests {
         }));
         assert_eq!(
             schema["required"],
-            serde_json::json!(["command"]),
-            "credential contexts stay optional for ordinary shell commands"
+            serde_json::json!(["command", "credential_contexts"]),
+            "every shell call must explicitly select credential authority or an empty list"
         );
     }
 
