@@ -22,7 +22,7 @@ use bollard::{
 use fs2::FileExt;
 use ironclaw_host_api::{
     process::{
-        CommandExecutionOutput, CommandExecutionRequest, DirectSandboxCommandRequest,
+        CommandExecutionOutput, CommandExecutionRequest, CredentialedSandboxCommandRequest,
         RuntimeProcessError, SandboxCommandCredential, SandboxCommandTransport,
     },
     resource::ResourceScope,
@@ -489,13 +489,13 @@ impl From<CommandExecutionRequest> for SandboxExecutionRequest {
     }
 }
 
-impl From<DirectSandboxCommandRequest> for SandboxExecutionRequest {
-    fn from(request: DirectSandboxCommandRequest) -> Self {
+impl From<CredentialedSandboxCommandRequest> for SandboxExecutionRequest {
+    fn from(request: CredentialedSandboxCommandRequest) -> Self {
         Self {
             scope: request.scope,
             mounts: request.mounts,
-            executable: request.executable,
-            args: request.args,
+            executable: "sh".to_string(),
+            args: vec!["-c".to_string(), request.command],
             workdir: request.workdir,
             timeout_secs: request.timeout_secs,
             extra_env: request.extra_env,
@@ -902,9 +902,9 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         })?
     }
 
-    async fn run_credentialed_direct_command(
+    async fn run_credentialed_command(
         &self,
-        request: DirectSandboxCommandRequest,
+        request: CredentialedSandboxCommandRequest,
         credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         if self.managed_egress.is_none() {
@@ -923,7 +923,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         })?
     }
 
-    fn supports_credentialed_direct_command(&self) -> bool {
+    fn supports_credentialed_command(&self) -> bool {
         self.managed_egress.is_some()
     }
 

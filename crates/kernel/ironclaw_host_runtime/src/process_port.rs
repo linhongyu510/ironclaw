@@ -19,7 +19,7 @@ use ironclaw_host_api::{
     action::NetworkScheme,
     http::RuntimeCredentialTarget,
     process::{
-        CommandExecutionOutput, CommandExecutionRequest, DirectSandboxCommandRequest,
+        CommandExecutionOutput, CommandExecutionRequest, CredentialedSandboxCommandRequest,
         RuntimeProcessError, SandboxCommandCredential, SandboxCommandCredentialBinding,
         SandboxCommandTransport,
     },
@@ -87,17 +87,17 @@ pub trait RuntimeProcessPort: Send + Sync {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 
-    async fn run_credentialed_direct_command(
+    async fn run_credentialed_command(
         &self,
-        _request: DirectSandboxCommandRequest,
+        _request: CredentialedSandboxCommandRequest,
         _credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Err(RuntimeProcessError::ExecutionFailed(
-            "process port does not support credentialed direct-argv execution".to_string(),
+            "process port does not support credentialed shell execution".to_string(),
         ))
     }
 
-    fn supports_credentialed_direct_command(&self) -> bool {
+    fn supports_credentialed_command(&self) -> bool {
         false
     }
 }
@@ -145,22 +145,22 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
         Ok(output)
     }
 
-    async fn run_credentialed_direct_command(
+    async fn run_credentialed_command(
         &self,
-        request: DirectSandboxCommandRequest,
+        request: CredentialedSandboxCommandRequest,
         credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         let mut output = self
             .transport
-            .run_credentialed_direct_command(request, credentials)
+            .run_credentialed_command(request, credentials)
             .await?;
         output.output = truncate_output(&output.output);
         output.sandboxed = true;
         Ok(output)
     }
 
-    fn supports_credentialed_direct_command(&self) -> bool {
-        self.transport.supports_credentialed_direct_command()
+    fn supports_credentialed_command(&self) -> bool {
+        self.transport.supports_credentialed_command()
     }
 }
 
@@ -169,7 +169,7 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
 ///
 /// Credential selection remains with the capability adapter. This port only
 /// materializes the exact descriptor requirements carried by the authorized
-/// direct-exec request; it never discovers credentials from the secret store.
+/// shell request; it never discovers credentials from the secret store.
 #[derive(Clone)]
 pub(crate) struct StagedCredentialProcessPort {
     inner: Arc<dyn RuntimeProcessPort>,
@@ -197,13 +197,13 @@ impl RuntimeProcessPort for StagedCredentialProcessPort {
         self.inner.run_command(request).await
     }
 
-    fn supports_credentialed_direct_command(&self) -> bool {
-        self.inner.supports_credentialed_direct_command()
+    fn supports_credentialed_command(&self) -> bool {
+        self.inner.supports_credentialed_command()
     }
 
-    async fn run_credentialed_direct_command(
+    async fn run_credentialed_command(
         &self,
-        mut request: DirectSandboxCommandRequest,
+        mut request: CredentialedSandboxCommandRequest,
         credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         if !credentials.is_empty() {
@@ -259,13 +259,13 @@ impl RuntimeProcessPort for StagedCredentialProcessPort {
             ));
         }
         self.inner
-            .run_credentialed_direct_command(request, credentials)
+            .run_credentialed_command(request, credentials)
             .await
     }
 }
 
 fn validate_credential_bindings(
-    request: &DirectSandboxCommandRequest,
+    request: &CredentialedSandboxCommandRequest,
     bindings: &[SandboxCommandCredentialBinding],
 ) -> Result<(), RuntimeProcessError> {
     let mut handles = HashSet::with_capacity(bindings.len());
@@ -297,13 +297,10 @@ fn validate_credential_bindings(
                     .to_string(),
             ));
         }
-        let executable = request.executable.as_str();
-        if executable.contains(['/', '\\'])
-            || requirement.placeholder_env.as_deref() != Some(binding.placeholder_env.as_str())
-            || requirement.direct_executable.as_deref() != Some(executable)
-        {
+        if requirement.placeholder_env.as_deref() != Some(binding.placeholder_env.as_str()) {
             return Err(RuntimeProcessError::ExecutionFailed(
-                "authorized command credentials do not match this executable".to_string(),
+                "authorized shell credential does not match its placeholder environment"
+                    .to_string(),
             ));
         }
         if !valid_env_name(&binding.placeholder_env)
@@ -599,7 +596,8 @@ mod tests {
     #[derive(Debug)]
     struct RecordingSandboxTransport {
         requests: Mutex<Vec<CommandExecutionRequest>>,
-        direct_requests: Mutex<Vec<(DirectSandboxCommandRequest, Vec<RecordedCredential>)>>,
+        credentialed_requests:
+            Mutex<Vec<(CredentialedSandboxCommandRequest, Vec<RecordedCredential>)>>,
         output: String,
     }
 
@@ -607,7 +605,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
-                direct_requests: Mutex::new(Vec::new()),
+                credentialed_requests: Mutex::new(Vec::new()),
                 output: "echo sandbox".to_string(),
             }
         }
@@ -635,9 +633,9 @@ mod tests {
             })
         }
 
-        async fn run_credentialed_direct_command(
+        async fn run_credentialed_command(
             &self,
-            request: DirectSandboxCommandRequest,
+            request: CredentialedSandboxCommandRequest,
             credentials: Vec<SandboxCommandCredential>,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             let credentials = credentials
@@ -651,7 +649,9 @@ mod tests {
                     secret: credential.expose_secret().to_string(),
                 })
                 .collect();
-            self.direct_requests.lock().push((request, credentials));
+            self.credentialed_requests
+                .lock()
+                .push((request, credentials));
             Ok(CommandExecutionOutput {
                 output: self.output.clone(),
                 saved_output: None,
@@ -661,7 +661,7 @@ mod tests {
             })
         }
 
-        fn supports_credentialed_direct_command(&self) -> bool {
+        fn supports_credentialed_command(&self) -> bool {
             true
         }
     }
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staged_credential_process_port_materializes_authorized_bindings_without_provider_special_cases()
+    async fn staged_credential_process_port_materializes_invocation_placeholders_for_compound_shell()
      {
         use ironclaw_secrets::SecretMaterial;
 
@@ -727,13 +727,13 @@ mod tests {
         }
         let port = StagedCredentialProcessPort::new(sandbox_port, store);
 
-        port.run_credentialed_direct_command(
-            DirectSandboxCommandRequest {
+        port.run_credentialed_command(
+            CredentialedSandboxCommandRequest {
                 capability_id: capability_id.clone(),
                 scope,
                 mounts: None,
-                executable: "api-client".to_string(),
-                args: vec!["resource".to_string(), "list".to_string()],
+                command: "set -e; api-client resource list | jq '.items'; api-client audit"
+                    .to_string(),
                 workdir: None,
                 timeout_secs: Some(10),
                 extra_env: HashMap::new(),
@@ -744,9 +744,12 @@ mod tests {
         .await
         .unwrap();
 
-        let requests = transport.direct_requests.lock();
+        let requests = transport.credentialed_requests.lock();
         let (request, credentials) = &requests[0];
-        assert_eq!(request.executable, "api-client");
+        assert_eq!(
+            request.command,
+            "set -e; api-client resource list | jq '.items'; api-client audit"
+        );
         assert!(request.credential_bindings.is_empty());
         assert_eq!(
             credentials,
@@ -800,21 +803,19 @@ mod tests {
                     prefix: header_prefix.map(str::to_string),
                 },
                 placeholder_env: Some(placeholder_env.to_string()),
-                direct_executable: Some("api-client".to_string()),
                 required: true,
             },
         }
     }
 
-    fn direct_request(
+    fn credentialed_request(
         bindings: Vec<SandboxCommandCredentialBinding>,
-    ) -> DirectSandboxCommandRequest {
-        DirectSandboxCommandRequest {
+    ) -> CredentialedSandboxCommandRequest {
+        CredentialedSandboxCommandRequest {
             capability_id: CapabilityId::new(crate::SHELL_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
             mounts: None,
-            executable: "api-client".to_string(),
-            args: vec!["resource".to_string(), "list".to_string()],
+            command: "api-client resource list".to_string(),
             workdir: None,
             timeout_secs: Some(10),
             extra_env: HashMap::new(),
@@ -823,12 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn user_sandbox_process_port_delegates_direct_support_to_transport() {
+    fn user_sandbox_process_port_delegates_credential_support_to_transport() {
         let supported = UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport::default()));
         let unsupported = UserSandboxProcessPort::new(Arc::new(FailingSandboxTransport));
 
-        assert!(supported.supports_credentialed_direct_command());
-        assert!(!unsupported.supports_credentialed_direct_command());
+        assert!(supported.supports_credentialed_command());
+        assert!(!unsupported.supports_credentialed_command());
     }
 
     #[tokio::test]
@@ -863,7 +864,7 @@ mod tests {
             let inner: Arc<dyn RuntimeProcessPort> =
                 Arc::new(UserSandboxProcessPort::new(transport.clone()));
             let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
-            let request = direct_request(vec![binding.clone()]);
+            let request = credentialed_request(vec![binding.clone()]);
             store
                 .insert(
                     &request.scope,
@@ -875,7 +876,7 @@ mod tests {
             let port = StagedCredentialProcessPort::new(inner, store.clone());
 
             let error = port
-                .run_credentialed_direct_command(request.clone(), Vec::new())
+                .run_credentialed_command(request.clone(), Vec::new())
                 .await
                 .unwrap_err();
 
@@ -884,7 +885,7 @@ mod tests {
                 "expected fail-closed binding rejection for {case}: {error}"
             );
             assert!(
-                transport.direct_requests.lock().is_empty(),
+                transport.credentialed_requests.lock().is_empty(),
                 "invalid binding reached the sandbox transport: {case}"
             );
             assert!(
@@ -919,7 +920,7 @@ mod tests {
             "x-api-key",
             None,
         );
-        let request = direct_request(vec![staged.clone(), unstaged]);
+        let request = credentialed_request(vec![staged.clone(), unstaged]);
         let transport = Arc::new(RecordingSandboxTransport::default());
         let inner: Arc<dyn RuntimeProcessPort> =
             Arc::new(UserSandboxProcessPort::new(transport.clone()));
@@ -935,7 +936,7 @@ mod tests {
         let port = StagedCredentialProcessPort::new(inner, store.clone());
 
         let error = port
-            .run_credentialed_direct_command(request.clone(), Vec::new())
+            .run_credentialed_command(request.clone(), Vec::new())
             .await
             .unwrap_err();
 
@@ -945,7 +946,7 @@ mod tests {
                 "an authorized sandbox credential was not staged for this invocation".to_string()
             )
         );
-        assert!(transport.direct_requests.lock().is_empty());
+        assert!(transport.credentialed_requests.lock().is_empty());
         assert!(
             store
                 .take(
@@ -1048,7 +1049,7 @@ mod tests {
     async fn user_sandbox_process_port_truncates_transport_output() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport {
             requests: Mutex::new(Vec::new()),
-            direct_requests: Mutex::new(Vec::new()),
+            credentialed_requests: Mutex::new(Vec::new()),
             output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
         });
         let port = UserSandboxProcessPort::new(transport);

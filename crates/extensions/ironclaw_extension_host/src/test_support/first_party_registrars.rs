@@ -151,7 +151,6 @@ fn runtime_credentials(
             prefix: Some("Bearer ".to_string()),
         },
         placeholder_env: None,
-        direct_executable: None,
         required: true,
     }])
 }

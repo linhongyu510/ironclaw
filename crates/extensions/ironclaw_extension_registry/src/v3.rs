@@ -203,8 +203,6 @@ struct RawToolCredentialV3 {
     injection: RuntimeCredentialTarget,
     #[serde(default)]
     placeholder_env: Option<String>,
-    #[serde(default)]
-    direct_executable: Option<String>,
     #[serde(default = "default_credential_required")]
     required: bool,
 }
@@ -457,7 +455,6 @@ pub(crate) fn parse_v3(
                     },
                     credential.injection.clone(),
                     None,
-                    None,
                     true,
                     &recipes,
                     &mut referenced_vendors,
@@ -654,7 +651,6 @@ pub(crate) fn parse_v3(
                             credential.audience,
                             credential.injection,
                             credential.placeholder_env,
-                            credential.direct_executable,
                             credential.required,
                             &recipes,
                             &mut referenced_vendors,
@@ -911,7 +907,6 @@ fn account_setup_for_recipe(recipe: &VendorAuthRecipe) -> RuntimeCredentialAccou
     }
 }
 
-#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, private normalization helper pending a CredentialContext bundle if it grows, extension-runtime P2
 fn credential_from_v3(
     handle: &str,
     vendor: &str,
@@ -919,7 +914,6 @@ fn credential_from_v3(
     audience: RawAudienceV3,
     injection: RuntimeCredentialTarget,
     placeholder_env: Option<String>,
-    direct_executable: Option<String>,
     required: bool,
     recipes: &BTreeMap<VendorId, VendorAuthRecipe>,
     referenced_vendors: &mut BTreeMap<VendorId, ()>,
@@ -951,7 +945,6 @@ fn credential_from_v3(
         },
         target: injection,
         placeholder_env,
-        direct_executable,
         required,
     })
 }

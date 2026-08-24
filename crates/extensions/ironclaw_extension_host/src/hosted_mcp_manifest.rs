@@ -233,7 +233,6 @@ pub(crate) fn manifest_with_admitted_oauth(
             prefix: Some("Bearer ".to_string()),
         },
         placeholder_env: None,
-        direct_executable: None,
         required: true,
     };
     let mut resolved = seed.resolved().clone();

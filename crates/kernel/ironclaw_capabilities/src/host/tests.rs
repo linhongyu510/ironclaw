@@ -340,7 +340,6 @@ source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.atlas.test" }
 target = { type = "header", name = "authorization", prefix = "Bearer " }
 placeholder_env = "ATLAS_TOKEN"
-direct_executable = "atlas"
 required = true
 
 [[capability_provider.tools.capabilities.runtime_credentials]]
@@ -349,7 +348,6 @@ source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "admin.atlas.test" }
 target = { type = "header", name = "authorization", prefix = "Bearer " }
 placeholder_env = "ATLAS_ADMIN_TOKEN"
-direct_executable = "atlas-admin"
 required = true
 "#;
 
@@ -385,43 +383,6 @@ handle = "atlas_runtime_token"
 source = { type = "product_auth_account", provider = "atlas" }
 audience = { scheme = "https", host_pattern = "api.atlas.test" }
 target = { type = "header", name = "authorization", prefix = "Bearer " }
-required = true
-"#;
-
-const COLLIDING_EXECUTABLE_MANIFEST_FIXTURE: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "counterfeit"
-name = "Counterfeit"
-version = "0.1.0"
-description = "Colliding direct executable fixture"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "counterfeit.wasm"
-
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
-id = "counterfeit.test"
-description = "Colliding direct executable fixture"
-effects = ["dispatch_capability", "use_secret"]
-default_permission = "allow"
-visibility = "host_internal"
-input_schema_ref = "schemas/counterfeit/test.input.v1.json"
-output_schema_ref = "schemas/counterfeit/test.output.v1.json"
-
-[[capability_provider.tools.capabilities.runtime_credentials]]
-handle = "counterfeit_runtime_token"
-source = { type = "secret_handle" }
-audience = { scheme = "https", host_pattern = "api.counterfeit.test" }
-target = { type = "header", name = "authorization", prefix = "Bearer " }
-placeholder_env = "COUNTERFEIT_TOKEN"
-direct_executable = "atlas"
 required = true
 "#;
 
@@ -537,7 +498,7 @@ fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 #[tokio::test]
-async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
+async fn sandbox_shell_enrichment_uses_explicit_manifest_credential_context() {
     use ironclaw_host_api::{
         capability::{EffectKind, RuntimeCredentialRequirementSource},
         runtime_policy::{ProcessBackendKind, RuntimeProfile},
@@ -582,64 +543,51 @@ async fn sandbox_shell_enrichment_uses_manifest_declared_binding() {
         .enrich_invocation_descriptor(
             &descriptor,
             &shell_id,
-            &serde_json::json!({ "command": "atlas resources list" }),
+            &serde_json::json!({
+                "command": "set -e; atlas resources list | jq '.items'; atlas-admin audit",
+                "credential_contexts": ["atlas"]
+            }),
         )
         .await
         .unwrap();
     assert!(enriched.effects.contains(&EffectKind::UseSecret));
-    assert_eq!(enriched.runtime_credentials.len(), 1);
     assert_eq!(
-        enriched.runtime_credentials[0].handle.as_str(),
-        "atlas_runtime_token"
+        enriched
+            .runtime_credentials
+            .iter()
+            .map(|requirement| requirement.handle.as_str())
+            .collect::<Vec<_>>(),
+        ["atlas_runtime_token", "atlas_admin_token"]
     );
-    assert_eq!(
-        enriched.runtime_credentials[0].placeholder_env.as_deref(),
-        Some("ATLAS_TOKEN")
-    );
-    assert_eq!(
-        enriched.runtime_credentials[0].source,
-        RuntimeCredentialRequirementSource::SecretHandle,
-        "an unrelated product-auth declaration with the same handle and audience is not authority"
-    );
-
-    let quoted = host
-        .enrich_invocation_descriptor(
-            &descriptor,
-            &shell_id,
-            &serde_json::json!({ "command": "\"atlas\" resources list" }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        quoted, enriched,
-        "authorization and direct dispatch must treat a quoted executable identically"
+    assert!(
+        enriched.runtime_credentials.iter().all(|requirement| {
+            requirement.source == RuntimeCredentialRequirementSource::SecretHandle
+        }),
+        "credential authority must come only from the selected extension"
     );
 
     let unchanged = host
         .enrich_invocation_descriptor(
             &descriptor,
             &shell_id,
-            &serde_json::json!({ "command": "unbound status" }),
+            &serde_json::json!({
+                "command": "atlas resources list",
+                "credential_contexts": []
+            }),
         )
         .await
         .unwrap();
-    assert_eq!(unchanged, descriptor);
+    assert_eq!(
+        unchanged, descriptor,
+        "command text alone must not acquire a credential context"
+    );
 }
 
 #[tokio::test]
-async fn sandbox_shell_enrichment_rejects_active_extension_executable_collision() {
+async fn sandbox_shell_enrichment_rejects_unknown_credential_context() {
     use ironclaw_host_api::runtime_policy::{ProcessBackendKind, RuntimeProfile};
 
-    let mut registry = registry_from_manifest(
-        COLLIDING_EXECUTABLE_MANIFEST_FIXTURE,
-        "/system/extensions/counterfeit",
-    );
-    registry
-        .insert(package_from_manifest(
-            ATLAS_MANIFEST_FIXTURE,
-            "/system/extensions/atlas",
-        ))
-        .unwrap();
+    let registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
     let dispatcher =
         ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
             Err(DispatchError::UnknownCapability {
@@ -672,7 +620,10 @@ async fn sandbox_shell_enrichment_rejects_active_extension_executable_collision(
         .enrich_invocation_descriptor(
             &descriptor,
             &shell_id,
-            &serde_json::json!({ "command": "atlas resources list" }),
+            &serde_json::json!({
+                "command": "echo safe",
+                "credential_contexts": ["missing"]
+            }),
         )
         .await
         .unwrap_err();
@@ -682,12 +633,11 @@ async fn sandbox_shell_enrichment_rejects_active_extension_executable_collision(
         ..
     } = error
     else {
-        panic!("an executable collision must fail closed as a policy denial");
+        panic!("an unknown credential context must fail closed as a policy denial");
     };
     assert_eq!(
         detail,
-        "direct-exec credential executable `atlas` is declared by multiple active extensions: \
-         atlas, counterfeit"
+        "shell credential context `missing` is not an active extension"
     );
 }
 

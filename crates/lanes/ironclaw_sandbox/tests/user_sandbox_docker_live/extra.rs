@@ -808,7 +808,7 @@ async fn different_users_receive_distinct_private_networks_and_proxies() {
 
 #[tokio::test]
 #[ignore = "requires Docker, public Internet access, and IRONCLAW_TEST_GITHUB_TOKEN"]
-async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
+async fn compound_github_cli_script_uses_proxy_placeholder_without_exposing_real_token() {
     let Some((_image, _serial)) =
         docker_worker_and_proxy_images("sandbox GitHub credential canary").await
     else {
@@ -835,29 +835,21 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
         ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
         InvocationId::new()
     );
-    let command = DirectSandboxCommandRequest {
+    let command = CredentialedSandboxCommandRequest {
         capability_id: ironclaw_host_api::ids::CapabilityId::new("builtin.shell")
             .expect("valid shell capability id"),
         scope: scope.resource_scope(),
         mounts: None,
-        executable: "gh".to_string(),
-        args: vec![
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            "nearai/ironclaw".to_string(),
-            "--limit".to_string(),
-            "1".to_string(),
-            "--json".to_string(),
-            "number".to_string(),
-        ],
+        command: "set -e; gh pr list --repo nearai/ironclaw --limit 1 --json number \
+                  >/tmp/first.json; gh pr list --repo nearai/ironclaw --limit 1 --json number"
+            .to_string(),
         workdir: None,
         timeout_secs: Some(60),
         extra_env: HashMap::from([("GH_TOKEN".to_string(), placeholder.clone())]),
         credential_bindings: Vec::new(),
     };
     let result = transport
-        .run_credentialed_direct_command(
+        .run_credentialed_command(
             command,
             vec![SandboxCommandCredential::new(
                 ironclaw_host_api::ids::SecretHandle::new("github_runtime_token")
@@ -871,7 +863,7 @@ async fn github_cli_uses_proxy_bound_placeholder_without_exposing_real_token() {
             )],
         )
         .await
-        .expect("credentialed gh command reaches GitHub through the proxy");
+        .expect("compound credentialed gh script reaches GitHub through the proxy");
 
     assert!(
         !result.output.contains(&token),

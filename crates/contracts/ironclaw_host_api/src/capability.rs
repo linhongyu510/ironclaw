@@ -290,14 +290,13 @@ pub struct RuntimeCredentialRequirement {
     pub provider_scopes: Vec<String>,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
-    /// Environment variable that receives an invocation-scoped placeholder for
-    /// direct process execution. The real credential remains proxy-side.
+    /// Environment variable that receives a fresh invocation-scoped
+    /// placeholder when this requirement is selected as part of an authorized
+    /// shell credential context. The real credential remains proxy-side.
+    /// `None` means the requirement is not available to generic shell
+    /// execution.
     #[serde(default)]
     pub placeholder_env: Option<String>,
-    /// Executable basename eligible for direct process mediation. This is
-    /// paired with `placeholder_env`; neither field grants credential access.
-    #[serde(default)]
-    pub direct_executable: Option<String>,
     pub required: bool,
 }
 
@@ -524,7 +523,7 @@ mod credential_setup_wire_tests {
     }
 
     #[test]
-    fn direct_process_binding_fields_default_and_round_trip() {
+    fn shell_placeholder_field_defaults_and_round_trips() {
         let legacy: super::RuntimeCredentialRequirement =
             serde_json::from_value(serde_json::json!({
                 "handle": "atlas_runtime_token",
@@ -542,11 +541,9 @@ mod credential_setup_wire_tests {
             }))
             .expect("legacy credential requirement");
         assert_eq!(legacy.placeholder_env, None);
-        assert_eq!(legacy.direct_executable, None);
 
         let mut declared = legacy;
         declared.placeholder_env = Some("ATLAS_TOKEN".to_string());
-        declared.direct_executable = Some("atlas".to_string());
         let round_trip: super::RuntimeCredentialRequirement = serde_json::from_value(
             serde_json::to_value(&declared).expect("declared requirement serializes"),
         )

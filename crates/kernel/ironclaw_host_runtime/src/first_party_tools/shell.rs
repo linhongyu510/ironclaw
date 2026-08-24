@@ -8,7 +8,7 @@ use ironclaw_host_api::{
     http::RuntimeCredentialTarget,
     path::{ScopedPath, VirtualPath},
     process::{
-        CommandExecutionRequest, DirectSandboxCommandRequest, RuntimeProcessError,
+        CommandExecutionRequest, CredentialedSandboxCommandRequest, RuntimeProcessError,
         SandboxCommandCredentialBinding, SavedCommandOutput, SavedCommandOutputSanitization,
     },
     resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
@@ -79,56 +79,7 @@ pub(super) async fn dispatch(
         ));
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
-    let supports_direct = request
-        .services
-        .process
-        .supports_credentialed_direct_command();
-    if !request.runtime_credentials.is_empty() && !supports_direct {
-        return Err(process_error(RuntimeProcessError::ExecutionFailed(
-            "authorized command credentials require the sandbox direct-exec boundary".to_string(),
-        )));
-    }
-    let direct_command = if supports_direct && !request.runtime_credentials.is_empty() {
-        let matched = request
-            .runtime_credentials
-            .iter()
-            .filter_map(|requirement| requirement.direct_executable.as_deref())
-            .find_map(|expected| {
-                shell_core::single_direct_argv(&parsed.command, expected)
-                    .map(|argv| (expected, argv))
-            });
-        let Some((executable, argv)) = matched else {
-            return Err(process_error(RuntimeProcessError::ExecutionFailed(
-                "authorized command credentials do not match this executable".to_string(),
-            )));
-        };
-        let bindings = direct_credential_bindings(&request.runtime_credentials, executable)
-            .map_err(process_error)?;
-        Some((argv, bindings))
-    } else {
-        None
-    };
-    let output = if let Some((mut argv, bindings)) = direct_command {
-        let executable = argv.remove(0);
-        request
-            .services
-            .process
-            .run_credentialed_direct_command(
-                DirectSandboxCommandRequest {
-                    capability_id: request.capability_id.clone(),
-                    scope: request.scope.clone(),
-                    mounts: request.mounts.clone(),
-                    executable,
-                    args: argv,
-                    workdir: parsed.workdir,
-                    timeout_secs: parsed.timeout_secs,
-                    extra_env: parsed.extra_env,
-                    credential_bindings: bindings,
-                },
-                Vec::new(),
-            )
-            .await
-    } else {
+    let output = if request.runtime_credentials.is_empty() {
         request
             .services
             .process
@@ -140,6 +91,30 @@ pub(super) async fn dispatch(
                 timeout_secs: parsed.timeout_secs,
                 extra_env: parsed.extra_env,
             })
+            .await
+    } else {
+        if !request.services.process.supports_credentialed_command() {
+            return Err(process_error(RuntimeProcessError::ExecutionFailed(
+                "authorized shell credentials require managed sandbox egress".to_string(),
+            )));
+        }
+        let bindings = credential_bindings(&request.runtime_credentials).map_err(process_error)?;
+        request
+            .services
+            .process
+            .run_credentialed_command(
+                CredentialedSandboxCommandRequest {
+                    capability_id: request.capability_id.clone(),
+                    scope: request.scope.clone(),
+                    mounts: request.mounts.clone(),
+                    command: parsed.command,
+                    workdir: parsed.workdir,
+                    timeout_secs: parsed.timeout_secs,
+                    extra_env: parsed.extra_env,
+                    credential_bindings: bindings,
+                },
+                Vec::new(),
+            )
             .await
     }
     .map_err(process_error)?;
@@ -336,18 +311,14 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
     FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
-fn direct_credential_bindings(
+fn credential_bindings(
     requirements: &[RuntimeCredentialRequirement],
-    executable: &str,
 ) -> Result<Vec<SandboxCommandCredentialBinding>, RuntimeProcessError> {
     let bindings = requirements
         .iter()
         .filter_map(|requirement| {
             let placeholder_env = requirement.placeholder_env.as_ref()?;
-            let direct_executable = requirement.direct_executable.as_deref()?;
-            if direct_executable != executable
-                || !matches!(requirement.target, RuntimeCredentialTarget::Header { .. })
-            {
+            if !matches!(requirement.target, RuntimeCredentialTarget::Header { .. }) {
                 return None;
             }
             Some(SandboxCommandCredentialBinding {
@@ -358,7 +329,8 @@ fn direct_credential_bindings(
         .collect::<Vec<_>>();
     if bindings.len() != requirements.len() {
         return Err(RuntimeProcessError::ExecutionFailed(
-            "authorized command credentials do not match this executable".to_string(),
+            "authorized shell credentials require placeholder environments and header targets"
+                .to_string(),
         ));
     }
     Ok(bindings)
@@ -395,7 +367,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingProcessPort {
-        direct_requests: Mutex<Vec<DirectSandboxCommandRequest>>,
+        credentialed_requests: Mutex<Vec<CredentialedSandboxCommandRequest>>,
     }
 
     #[async_trait::async_trait]
@@ -409,17 +381,17 @@ mod tests {
             ))
         }
 
-        fn supports_credentialed_direct_command(&self) -> bool {
+        fn supports_credentialed_command(&self) -> bool {
             true
         }
 
-        async fn run_credentialed_direct_command(
+        async fn run_credentialed_command(
             &self,
-            request: DirectSandboxCommandRequest,
+            request: CredentialedSandboxCommandRequest,
             credentials: Vec<SandboxCommandCredential>,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             assert!(credentials.is_empty());
-            self.direct_requests.lock().push(request);
+            self.credentialed_requests.lock().push(request);
             Ok(CommandExecutionOutput {
                 output: "[]".to_string(),
                 saved_output: None,
@@ -605,8 +577,7 @@ mod tests {
     #[test]
     fn generic_adapter_maps_declared_requirement_to_binding() {
         let requirement = atlas_requirement();
-        let bindings =
-            direct_credential_bindings(std::slice::from_ref(&requirement), "atlas").unwrap();
+        let bindings = credential_bindings(std::slice::from_ref(&requirement)).unwrap();
 
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].placeholder_env, "ATLAS_TOKEN");
@@ -614,12 +585,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_carries_non_github_declared_binding_to_direct_exec() {
+    async fn dispatch_preserves_compound_command_for_credentialed_shell() {
         let process = Arc::new(RecordingProcessPort::default());
+        let command = "set -e; atlas resources list | jq '.items'; atlas audit";
         let mut request = FirstPartyCapabilityRequest::request_for_test(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceScope::system(),
-            json!({"command": "atlas resources list"}),
+            json!({
+                "command": command,
+                "credential_contexts": ["atlas"]
+            }),
             None,
         );
         request.runtime_credentials = vec![atlas_requirement()];
@@ -627,56 +602,32 @@ mod tests {
 
         dispatch(&request).await.unwrap();
 
-        let requests = process.direct_requests.lock();
-        let direct = &requests[0];
-        assert_eq!(direct.capability_id, request.capability_id);
-        assert_eq!(direct.executable, "atlas");
-        assert_eq!(direct.args, ["resources", "list"]);
-        assert!(direct.extra_env.is_empty());
-        assert_eq!(direct.credential_bindings.len(), 1);
-        assert_eq!(direct.credential_bindings[0].placeholder_env, "ATLAS_TOKEN");
+        let requests = process.credentialed_requests.lock();
+        let credentialed = &requests[0];
+        assert_eq!(credentialed.capability_id, request.capability_id);
+        assert_eq!(credentialed.command, command);
+        assert!(credentialed.extra_env.is_empty());
+        assert_eq!(credentialed.credential_bindings.len(), 1);
         assert_eq!(
-            direct.credential_bindings[0].requirement,
+            credentialed.credential_bindings[0].placeholder_env,
+            "ATLAS_TOKEN"
+        );
+        assert_eq!(
+            credentialed.credential_bindings[0].requirement,
             request.runtime_credentials[0]
         );
     }
 
     #[tokio::test]
-    async fn dispatch_rejects_commands_without_an_exact_declared_executable() {
-        for command in [
-            "unbound resources list",
-            "/tmp/atlas resources list",
-            "./atlas resources list",
-        ] {
-            let process = Arc::new(RecordingProcessPort::default());
-            let mut request = FirstPartyCapabilityRequest::request_for_test(
-                CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
-                ResourceScope::system(),
-                json!({"command": command}),
-                None,
-            );
-            request.runtime_credentials = vec![atlas_requirement()];
-            request.services.process = process.clone();
-
-            let error = dispatch(&request).await.unwrap_err();
-
-            assert!(dispatch_safe_summary(&error).is_some_and(|summary| {
-                summary.contains("authorized command credentials do not match this executable")
-            }));
-            assert!(
-                process.direct_requests.lock().is_empty(),
-                "rejected executable must not reach the credentialed process path: {command}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatch_fails_at_direct_exec_boundary_when_transport_lacks_support() {
+    async fn dispatch_requires_managed_egress_for_credential_contexts() {
         let process = Arc::new(OrdinaryOnlyProcessPort::default());
         let mut request = FirstPartyCapabilityRequest::request_for_test(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceScope::system(),
-            json!({"command": "atlas resources list"}),
+            json!({
+                "command": "atlas resources list",
+                "credential_contexts": ["atlas"]
+            }),
             None,
         );
         request.runtime_credentials = vec![atlas_requirement()];
@@ -685,8 +636,7 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert!(dispatch_safe_summary(&error).is_some_and(|summary| {
-            summary
-                .contains("authorized command credentials require the sandbox direct-exec boundary")
+            summary.contains("authorized shell credentials require managed sandbox egress")
                 && !summary.contains("not staged")
         }));
         assert!(process.requests.lock().is_empty());
@@ -707,7 +657,6 @@ mod tests {
                 prefix: Some("Bearer ".to_string()),
             },
             placeholder_env: Some("ATLAS_TOKEN".to_string()),
-            direct_executable: Some("atlas".to_string()),
             required: true,
         }
     }

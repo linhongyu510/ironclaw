@@ -266,7 +266,14 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
+                "command": { "type": "string", "description": "Shell command to execute. Prefer one command that completes the whole job; combine local steps with shell syntax or a script." },
+                "credential_contexts": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "maxItems": ironclaw_host_api::process::MAX_SHELL_CREDENTIAL_CONTEXTS,
+                    "uniqueItems": true,
+                    "description": "Optional active extension IDs whose manifest-declared credential placeholders this invocation may use, for example `atlas`. Authorization and the managed proxy still enforce each credential's exact destination."
+                },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
             },
@@ -1222,6 +1229,28 @@ mod tests {
                 && branch["required"]
                     == serde_json::json!(["operation", "data", "path", "function"])
         }));
+    }
+
+    #[test]
+    fn shell_schema_exposes_bounded_credential_context_selection() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/shell.input.v1.json")
+            .expect("shell schema is registered");
+        let contexts = &schema["properties"]["credential_contexts"];
+
+        assert_eq!(contexts["type"], "array");
+        assert_eq!(contexts["items"]["type"], "string");
+        assert_eq!(contexts["maxItems"], 8);
+        assert_eq!(contexts["uniqueItems"], true);
+        assert!(
+            contexts["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("active extension IDs"))
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["command"]),
+            "credential contexts stay optional for ordinary shell commands"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::{collections::HashMap, process::Command, sync::Arc, time::Duration};
 use ironclaw_host_api::{
     ids::InvocationId,
     process::{
-        DirectSandboxCommandRequest, RuntimeProcessError, SandboxCommandCredential,
+        CredentialedSandboxCommandRequest, RuntimeProcessError, SandboxCommandCredential,
         SandboxCommandTransport,
     },
 };

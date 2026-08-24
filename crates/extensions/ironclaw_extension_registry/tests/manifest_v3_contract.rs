@@ -888,7 +888,7 @@ id = "zephyrite.echo"
 description = "Echoes input"
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "zephyrite_token", source = { type = "product_auth_account", provider = "zephyrite", setup = { kind = "oauth", scopes = ["echo:read"] } }, provider_scopes = ["echo:read"], audience = { scheme = "https", host_pattern = "api.zephyrite.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, placeholder_env = "ZEPHYRITE_TOKEN", direct_executable = "zephyrite" },
+  { handle = "zephyrite_token", source = { type = "product_auth_account", provider = "zephyrite", setup = { kind = "oauth", scopes = ["echo:read"] } }, provider_scopes = ["echo:read"], audience = { scheme = "https", host_pattern = "api.zephyrite.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, placeholder_env = "ZEPHYRITE_TOKEN" },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -924,7 +924,6 @@ scopes = ["echo:read"]
 audience = {{ scheme = "https", host = "api.zephyrite.example" }}
 injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
 placeholder_env = "ZEPHYRITE_TOKEN"
-direct_executable = "zephyrite"
 
 [auth.zephyrite]
 method = "oauth2_code"

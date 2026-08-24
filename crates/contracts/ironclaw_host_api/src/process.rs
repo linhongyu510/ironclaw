@@ -13,14 +13,18 @@
 //! capture, alias rewriting, and the local-host port. Only the shapes that
 //! cross the kernel↔lane seam live here.
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
     capability::RuntimeCredentialRequirement,
-    ids::{CapabilityId, SecretHandle},
+    ids::{CapabilityId, ExtensionId, SecretHandle},
     mount::MountView,
     resource::ResourceScope,
 };
@@ -53,8 +57,8 @@ pub struct CommandExecutionRequest {
     pub timeout_secs: Option<u64>,
     pub extra_env: HashMap<String, String>,
 }
-/// An authorized runtime credential mapped from its manifest-declared direct
-/// executable and placeholder environment variable.
+/// An authorized runtime credential mapped from its manifest-declared
+/// placeholder environment variable.
 ///
 /// The requirement is copied from the authorized capability descriptor. The
 /// host process adapter consumes its one-shot staged material; callers cannot
@@ -65,16 +69,15 @@ pub struct SandboxCommandCredentialBinding {
     pub requirement: RuntimeCredentialRequirement,
 }
 
-/// A validated executable plus argument vector. This request is separate from
-/// [`CommandExecutionRequest`] so existing shell transports cannot accidentally
-/// reinterpret a credentialed command as shell syntax.
+/// A shell command plus the exact manifest-backed credentials authorized for
+/// this invocation. The sandbox receives random placeholders; real credential
+/// material remains proxy-side.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirectSandboxCommandRequest {
+pub struct CredentialedSandboxCommandRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub mounts: Option<MountView>,
-    pub executable: String,
-    pub args: Vec<String>,
+    pub command: String,
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
     pub extra_env: HashMap<String, String>,
@@ -152,86 +155,54 @@ pub enum RuntimeProcessError {
     #[error("process execution failed: {0}")]
     ExecutionFailed(String),
 }
-/// Parse one direct command without invoking a shell.
-///
-/// Kernel credential enrichment and host-runtime shell dispatch share this
-/// parser so authorization and execution apply the same command predicate.
-/// The executable must be the exact declared bare basename. Shell operators,
-/// expansions, executable paths, and unsupported escapes fail closed.
-pub fn single_direct_argv(command: &str, expected_executable: &str) -> Option<Vec<String>> {
-    let argv = direct_shell_words(command)?;
-    let executable = argv.first()?;
-    if executable.contains(['/', '\\']) || executable != expected_executable {
-        return None;
+pub const MAX_SHELL_CREDENTIAL_CONTEXTS: usize = 8;
+
+/// Parse the optional extension IDs whose manifest credentials a shell
+/// invocation requests. The same parser is used before authorization and at
+/// runtime so malformed or duplicate selectors fail closed at both stages.
+pub fn shell_credential_contexts(
+    input: &serde_json::Value,
+) -> Result<Vec<ExtensionId>, ShellCredentialContextError> {
+    let Some(value) = input.get("credential_contexts") else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or(ShellCredentialContextError::NotArray)?;
+    if values.len() > MAX_SHELL_CREDENTIAL_CONTEXTS {
+        return Err(ShellCredentialContextError::TooMany {
+            maximum: MAX_SHELL_CREDENTIAL_CONTEXTS,
+        });
     }
-    Some(argv)
+
+    let mut contexts = Vec::with_capacity(values.len());
+    let mut unique = HashSet::with_capacity(values.len());
+    for value in values {
+        let raw = value
+            .as_str()
+            .ok_or(ShellCredentialContextError::InvalidExtensionId)?;
+        let context =
+            ExtensionId::new(raw).map_err(|_| ShellCredentialContextError::InvalidExtensionId)?;
+        if !unique.insert(context.clone()) {
+            return Err(ShellCredentialContextError::Duplicate {
+                context: context.to_string(),
+            });
+        }
+        contexts.push(context);
+    }
+    Ok(contexts)
 }
 
-fn direct_shell_words(command: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote = DirectShellQuote::None;
-    let mut escaped = false;
-    let mut word_started = false;
-    for ch in command.chars() {
-        if escaped {
-            if quote == DirectShellQuote::Double && !matches!(ch, '\\' | '"' | '$') {
-                return None;
-            }
-            current.push(ch);
-            escaped = false;
-            word_started = true;
-            continue;
-        }
-        match (quote, ch) {
-            (DirectShellQuote::Single, '\\') => {
-                current.push('\\');
-                word_started = true;
-            }
-            (_, '\\') => {
-                escaped = true;
-                word_started = true;
-            }
-            (DirectShellQuote::None, '\'') => {
-                quote = DirectShellQuote::Single;
-                word_started = true;
-            }
-            (DirectShellQuote::Single, '\'') => quote = DirectShellQuote::None,
-            (DirectShellQuote::None, '"') => {
-                quote = DirectShellQuote::Double;
-                word_started = true;
-            }
-            (DirectShellQuote::Double, '"') => quote = DirectShellQuote::None,
-            (DirectShellQuote::None | DirectShellQuote::Double, '$' | '`') => return None,
-            (DirectShellQuote::None, ';' | '|' | '&' | '<' | '>' | '\n' | '\r') => return None,
-            (DirectShellQuote::None, '*' | '?' | '[' | ']' | '{' | '}') => return None,
-            (DirectShellQuote::None, '~') if !word_started => return None,
-            (DirectShellQuote::None, ch) if ch.is_whitespace() => {
-                if word_started {
-                    words.push(std::mem::take(&mut current));
-                    word_started = false;
-                }
-            }
-            _ => {
-                current.push(ch);
-                word_started = true;
-            }
-        }
-    }
-    if escaped || quote != DirectShellQuote::None {
-        return None;
-    }
-    if word_started {
-        words.push(current);
-    }
-    Some(words)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectShellQuote {
-    None,
-    Single,
-    Double,
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ShellCredentialContextError {
+    #[error("credential_contexts must be an array of active extension IDs")]
+    NotArray,
+    #[error("credential_contexts entries must be valid extension IDs")]
+    InvalidExtensionId,
+    #[error("credential_contexts may contain at most {maximum} entries")]
+    TooMany { maximum: usize },
+    #[error("credential context `{context}` is duplicated")]
+    Duplicate { context: String },
 }
 
 /// Transport for user-sandbox command execution.
@@ -250,20 +221,20 @@ pub trait SandboxCommandTransport: Send + Sync {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 
-    async fn run_credentialed_direct_command(
+    async fn run_credentialed_command(
         &self,
-        _request: DirectSandboxCommandRequest,
+        _request: CredentialedSandboxCommandRequest,
         credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         let reason = if credentials.is_empty() {
-            "sandbox transport does not support direct-argv execution"
+            "sandbox transport does not support credentialed shell execution"
         } else {
             "sandbox transport does not support credential bindings"
         };
         Err(RuntimeProcessError::ExecutionFailed(reason.to_string()))
     }
 
-    fn supports_credentialed_direct_command(&self) -> bool {
+    fn supports_credentialed_command(&self) -> bool {
         false
     }
 
@@ -280,70 +251,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_request_preserves_argument_boundaries() {
-        let request = DirectSandboxCommandRequest {
+    fn credentialed_request_preserves_shell_command_text() {
+        let request = CredentialedSandboxCommandRequest {
             capability_id: CapabilityId::new("builtin.shell").unwrap(),
             scope: ResourceScope::system(),
             mounts: None,
-            executable: "printf".to_string(),
-            args: vec!["%s".to_string(), "one; echo injected".to_string()],
+            command: "set -e; atlas resources | jq '.[].name'".to_string(),
             workdir: None,
             timeout_secs: None,
             extra_env: HashMap::new(),
             credential_bindings: Vec::new(),
         };
 
-        assert_eq!(request.executable, "printf");
         assert_eq!(
-            request.args,
-            ["%s", "one; echo injected"],
-            "the credentialed process boundary must never reinterpret arguments as shell syntax"
+            request.command, "set -e; atlas resources | jq '.[].name'",
+            "credential mediation must not narrow a shell invocation to one executable"
         );
     }
 
     #[test]
-    fn direct_command_parser_is_shell_aware_and_binds_a_bare_executable() {
+    fn shell_credential_context_parser_bounds_and_deduplicates_extension_ids() {
         assert_eq!(
-            single_direct_argv(r#"gh api --field 'a\b' --raw-field "x\\y\"z\$""#, "gh"),
-            Some(vec![
-                "gh".to_string(),
-                "api".to_string(),
-                "--field".to_string(),
-                r"a\b".to_string(),
-                "--raw-field".to_string(),
-                "x\\y\"z$".to_string(),
-            ])
+            shell_credential_contexts(&serde_json::json!({
+                "credential_contexts": ["atlas", "zephyrite"]
+            }))
+            .unwrap()
+            .iter()
+            .map(ExtensionId::as_str)
+            .collect::<Vec<_>>(),
+            ["atlas", "zephyrite"]
         );
-        // A quoted head is a valid shell spelling of the same bare basename;
-        // authorization and dispatch must both accept it (PR #7810 review:
-        // the defect was the two predicates disagreeing on this form).
-        assert_eq!(
-            single_direct_argv(r#""gh" pr list"#, "gh"),
-            Some(vec!["gh".to_string(), "pr".to_string(), "list".to_string(),])
-        );
-        for command in [
-            "/tmp/gh pr list",
-            "./gh pr list",
-            r#"'C:\tools\gh' pr list"#,
-            "GH pr list",
-            "gh api x > out",
-            r#"gh api "a\q""#,
-            "gh api \"$TOKEN\"",
-            "gh api user | cat",
-        ] {
-            assert!(
-                single_direct_argv(command, "gh").is_none(),
-                "expected direct command rejection: {command}"
-            );
-        }
+        assert!(matches!(
+            shell_credential_contexts(&serde_json::json!({
+                "credential_contexts": ["atlas", "atlas"]
+            })),
+            Err(ShellCredentialContextError::Duplicate { .. })
+        ));
+        let too_many = vec!["atlas"; MAX_SHELL_CREDENTIAL_CONTEXTS + 1];
+        assert!(matches!(
+            shell_credential_contexts(&serde_json::json!({
+                "credential_contexts": too_many
+            })),
+            Err(ShellCredentialContextError::TooMany { .. })
+        ));
     }
 
     #[test]
     fn sandbox_credential_normalizes_case_insensitive_comparison_fields() {
         let credential = |approved_host: &str, header_name: &str| {
             SandboxCommandCredential::new(
-                SecretHandle::new("github_runtime_token").unwrap(),
-                "GH_TOKEN".to_string(),
+                SecretHandle::new("atlas_runtime_token").unwrap(),
+                "ATLAS_TOKEN".to_string(),
                 "icsbx_placeholder".to_string(),
                 approved_host.to_string(),
                 header_name.to_string(),
@@ -352,10 +310,10 @@ mod tests {
             )
         };
 
-        let lowercase = credential("api.github.com", "authorization");
-        let mixed_case = credential("API.GitHub.COM", "Authorization");
+        let lowercase = credential("api.atlas.test", "authorization");
+        let mixed_case = credential("API.Atlas.TEST", "Authorization");
 
-        assert_eq!(lowercase.approved_host, "api.github.com");
+        assert_eq!(lowercase.approved_host, "api.atlas.test");
         assert_eq!(lowercase.header_name, "authorization");
         assert_eq!(mixed_case.approved_host, lowercase.approved_host);
         assert_eq!(mixed_case.header_name, lowercase.header_name);

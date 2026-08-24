@@ -11,7 +11,6 @@ use ironclaw_host_api::{
     capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
     decision::{Decision, DenyReason},
     dispatch::{CapabilityDispatcher, DispatchAuthRequirement},
-    http::RuntimeCredentialTarget,
     ids::{ActivityId, CapabilityId, DenyRef, GateRef},
     invocation::{Actor, Invocation},
     lane::RuntimeLane,
@@ -69,101 +68,97 @@ where
             )),
         }
     }
-    /// Add the one direct-process credential declared for a sandboxed shell command.
+    /// Add explicitly selected, manifest-declared credentials to a sandboxed
+    /// shell invocation before authorization.
     ///
-    /// `self.registry` is the installed-and-active publication snapshot. Disabled
-    /// or uninstalled packages are absent. Matching by package preserves the
-    /// declaration owner, and duplicate owners for one executable fail closed
-    /// instead of depending on registry insertion order.
+    /// `credential_contexts` contains active extension IDs. Each selected
+    /// extension contributes only requirements that declare `placeholder_env`;
+    /// ordinary command text never acquires credentials implicitly. The frozen
+    /// descriptor then drives approval, credential staging, and proxy policy.
     pub(super) async fn enrich_invocation_descriptor(
         &self,
         descriptor: &CapabilityDescriptor,
         capability_id: &CapabilityId,
         input: &serde_json::Value,
     ) -> Result<CapabilityDescriptor, CapabilityInvocationError> {
-        if self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox
-            || capability_id.as_str() != "builtin.shell"
-        {
+        if capability_id.as_str() != "builtin.shell" {
             return Ok(descriptor.clone());
         }
-        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+        let contexts =
+            ironclaw_host_api::process::shell_credential_contexts(input).map_err(|error| {
+                CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(error.to_string()),
+                }
+            })?;
+        if contexts.is_empty() {
             return Ok(descriptor.clone());
-        };
+        }
+        if self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id.clone(),
+                reason: DenyReason::PolicyDenied,
+                detail: Some(
+                    "shell credential contexts require the managed user sandbox".to_string(),
+                ),
+            });
+        }
 
-        let mut matched = Vec::new();
-        for package in self.registry.extensions() {
-            let mut owner_match: Option<(String, RuntimeCredentialRequirement)> = None;
+        let mut selected: Vec<RuntimeCredentialRequirement> = Vec::new();
+        for context in contexts {
+            let Some(package) = self.registry.get_extension(&context) else {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` is not an active extension"
+                    )),
+                });
+            };
+            let mut context_selected = 0usize;
             for declared in package
                 .capabilities
                 .iter()
                 .flat_map(|candidate| candidate.runtime_credentials.iter())
+                .filter(|requirement| requirement.placeholder_env.is_some())
             {
-                let Some(executable) = declared.direct_executable.as_deref() else {
-                    continue;
-                };
-                if declared.placeholder_env.is_none()
-                    || !matches!(declared.target, RuntimeCredentialTarget::Header { .. })
+                context_selected += 1;
+                if let Some(existing) = selected
+                    .iter()
+                    .find(|existing| existing.handle == declared.handle)
                 {
-                    continue;
-                }
-                if owner_match
-                    .as_ref()
-                    .is_some_and(|(_, existing)| existing == declared)
-                {
-                    continue;
-                }
-                if ironclaw_host_api::process::single_direct_argv(command, executable).is_none() {
-                    continue;
-                }
-
-                if let Some((_, existing)) = &owner_match {
                     if existing != declared {
                         return Err(CapabilityInvocationError::AuthorizationDenied {
                             capability: capability_id.clone(),
                             reason: DenyReason::PolicyDenied,
                             detail: Some(format!(
-                                "active extension {} has conflicting direct-exec credential \
-                                 declarations for executable `{}`",
-                                package.id,
-                                executable.to_ascii_lowercase()
+                                "shell credential context `{context}` has conflicting declarations \
+                                 for handle `{}`",
+                                declared.handle
                             )),
                         });
                     }
                 } else {
-                    owner_match = Some((executable.to_ascii_lowercase(), declared.clone()));
+                    selected.push(declared.clone());
                 }
             }
-            if let Some((executable, requirement)) = owner_match {
-                matched.push((package.id.clone(), executable, requirement));
+            if context_selected == 0 {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` declares no shell credentials"
+                    )),
+                });
             }
         }
-
-        matched.sort_by(|(left, _, _), (right, _, _)| left.as_str().cmp(right.as_str()));
-        if matched.len() > 1 {
-            let executable = &matched[0].1;
-            let owners = matched
-                .iter()
-                .map(|(owner, _, _)| owner.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(CapabilityInvocationError::AuthorizationDenied {
-                capability: capability_id.clone(),
-                reason: DenyReason::PolicyDenied,
-                detail: Some(format!(
-                    "direct-exec credential executable `{executable}` is declared by multiple \
-                     active extensions: {owners}"
-                )),
-            });
-        }
-        let Some((_, _, requirement)) = matched.pop() else {
-            return Ok(descriptor.clone());
-        };
 
         let mut descriptor = descriptor.clone();
         if !descriptor.effects.contains(&EffectKind::UseSecret) {
             descriptor.effects.push(EffectKind::UseSecret);
         }
-        descriptor.runtime_credentials.push(requirement);
+        descriptor.runtime_credentials = selected;
         Ok(descriptor)
     }
 

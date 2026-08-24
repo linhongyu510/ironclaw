@@ -91,6 +91,8 @@ pub(super) fn parse_shell_request(
             ShellExecutionError::InvalidParameters("missing 'command' parameter".to_string())
         })?;
     let mut request = ShellExecutionRequest::new(command.to_string());
+    ironclaw_host_api::process::shell_credential_contexts(params)
+        .map_err(|error| ShellExecutionError::InvalidParameters(error.to_string()))?;
     request.workdir = parse_workdir(params)?;
     request.timeout_secs = parse_timeout(params)?;
     Ok(request)
@@ -330,10 +332,6 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
     segments
 }
 
-pub(super) fn single_direct_argv(command: &str, expected_executable: &str) -> Option<Vec<String>> {
-    ironclaw_host_api::process::single_direct_argv(command, expected_executable)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellQuote {
     None,
@@ -496,58 +494,6 @@ fn truncate_for_error(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn single_direct_argv_preserves_arguments_and_rejects_shell_interpretation() {
-        assert_eq!(
-            single_direct_argv(
-                r#"atlas api resources --filter '.name' --field 'a\b' --raw "x\\y\"z\$""#,
-                "atlas"
-            ),
-            Some(vec![
-                "atlas".to_string(),
-                "api".to_string(),
-                "resources".to_string(),
-                "--filter".to_string(),
-                ".name".to_string(),
-                "--field".to_string(),
-                r"a\b".to_string(),
-                "--raw".to_string(),
-                "x\\y\"z$".to_string(),
-            ])
-        );
-        // A quoted head is a valid spelling of the same bare basename;
-        // authorization enrichment and dispatch both accept it (PR #7810
-        // review: the two predicates must agree on this form).
-        assert_eq!(
-            single_direct_argv(r#""atlas" resources"#, "atlas"),
-            Some(vec!["atlas".to_string(), "resources".to_string()])
-        );
-        for command in [
-            "atlas resources | cat",
-            "echo atlas resources",
-            "atlas \"$RESOURCE\"",
-            "atlas $(resource)",
-            "atlas resource*",
-            "atlas resources &",
-            "atlas resources",
-            "ATLAS resources",
-            "atlas api x > out",
-            "/tmp/atlas resources",
-            "./atlas resources",
-            r#"atlas api "a\q""#,
-        ] {
-            let expected = if command == "atlas resources" {
-                "other"
-            } else {
-                "atlas"
-            };
-            assert!(
-                single_direct_argv(command, expected).is_none(),
-                "expected direct command rejection: {command}"
-            );
-        }
-    }
 
     #[test]
     fn split_shell_segments_ignores_operators_inside_quotes() {
