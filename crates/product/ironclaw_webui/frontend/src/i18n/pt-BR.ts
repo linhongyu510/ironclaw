@@ -902,7 +902,7 @@ registerPack("pt-BR", {
   "ironhub.link.saveKey": "Aplicar chave",
   "ironhub.link.clearKey": "Remover chave",
   "ironhub.link.clearFailed": "Não foi possível remover a chave compartilhada.",
-  "ironhub.link.keyTooShort": "Uma chave compartilhada tem pelo menos 32 caracteres.",
+  "ironhub.link.keyTooShort": "A chave compartilhada deve ter pelo menos 32 caracteres.",
   "ironhub.link.stateActive": "Ativa",
   "ironhub.link.stateStored": "Salva, reinício pendente",
   "ironhub.link.stateAbsent": "Não configurada",

@@ -348,6 +348,72 @@ mod concurrent_tests {
         }
     }
 
+    /// Both orders, forced. The racing test below can only observe whichever
+    /// interleaving tokio happens to pick, so these pin each outcome exactly.
+    #[tokio::test]
+    async fn a_clear_after_a_set_leaves_no_stored_key() {
+        let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let service = RebornIronhubLinkAdminService::new(
+            Some("https://agent.example.com/api/ironhub/register".to_string()),
+            /* booted_with_key */ true,
+            false,
+            Arc::clone(&store),
+        );
+        let key_store = IronhubSharedKeyStore::new(Arc::clone(&store));
+
+        service
+            .set_shared_key(
+                caller(),
+                SecretString::from("ihub_sk_TestSharedKey00000000000000000000000"),
+            )
+            .await
+            .expect("set accepted");
+        service
+            .clear_shared_key(caller())
+            .await
+            .expect("clear accepted");
+
+        assert!(!key_store.exists().await.expect("exists"));
+        let status = service.status().await.expect("status");
+        assert!(!status.key_stored);
+        assert!(
+            status.key_active,
+            "with nothing stored, the gateway's boot key is the only key in play"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_set_after_a_clear_leaves_the_stored_key_pending_a_restart() {
+        let store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let service = RebornIronhubLinkAdminService::new(
+            Some("https://agent.example.com/api/ironhub/register".to_string()),
+            /* booted_with_key */ true,
+            false,
+            Arc::clone(&store),
+        );
+        let key_store = IronhubSharedKeyStore::new(Arc::clone(&store));
+
+        service
+            .clear_shared_key(caller())
+            .await
+            .expect("clear accepted");
+        service
+            .set_shared_key(
+                caller(),
+                SecretString::from("ihub_sk_TestSharedKey00000000000000000000000"),
+            )
+            .await
+            .expect("set accepted");
+
+        assert!(key_store.exists().await.expect("exists"));
+        let status = service.status().await.expect("status");
+        assert!(status.key_stored);
+        assert!(
+            !status.key_active,
+            "a stored key written after boot can only be promoted by a restart"
+        );
+    }
+
     /// A set racing a clear must leave the reported status consistent with
     /// the final durable store state: never "stored but not active" while the
     /// store holds the stored key, nor "active" while the store holds a

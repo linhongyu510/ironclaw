@@ -24,8 +24,20 @@ use crate::RebornBuildError;
 pub const IRONHUB_REGISTER_PATH: &str = "/api/ironhub/register";
 const IRONHUB_REGISTER_ROUTE_ID: &str = "ironhub.register";
 
+/// The operator pastes this into IronHub, so a base URL that is not an
+/// absolute http(s) origin yields no register URL rather than a broken one.
 pub(crate) fn ironhub_register_url(agent_base_url: Option<String>) -> Option<String> {
-    agent_base_url.map(|base| format!("{}{IRONHUB_REGISTER_PATH}", base.trim_end_matches('/')))
+    agent_base_url
+        .filter(|base| {
+            let base = base.trim_end_matches('/');
+            (base.starts_with("https://") || base.starts_with("http://"))
+                && base.split("://").nth(1).is_some_and(|rest| {
+                    !rest.is_empty()
+                        && !rest.starts_with('/')
+                        && !rest.contains(char::is_whitespace)
+                })
+        })
+        .map(|base| format!("{}{IRONHUB_REGISTER_PATH}", base.trim_end_matches('/')))
 }
 
 #[derive(Clone)]
@@ -125,6 +137,38 @@ fn ironhub_link_status(error: IronhubLinkError) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_absolute_http_origin_produces_a_register_url() {
+        assert_eq!(
+            ironhub_register_url(Some("https://agent.example.com".to_string())),
+            Some(format!("https://agent.example.com{IRONHUB_REGISTER_PATH}"))
+        );
+        assert_eq!(
+            ironhub_register_url(Some("https://agent.example.com/".to_string())),
+            Some(format!("https://agent.example.com{IRONHUB_REGISTER_PATH}"))
+        );
+        assert_eq!(
+            ironhub_register_url(Some("http://127.0.0.1:8799".to_string())),
+            Some(format!("http://127.0.0.1:8799{IRONHUB_REGISTER_PATH}"))
+        );
+
+        for rejected in [
+            "agent.example.com",
+            "ftp://agent.example.com",
+            "javascript:alert(1)",
+            "https://",
+            "https:///nohost",
+            "https://has space",
+        ] {
+            assert_eq!(
+                ironhub_register_url(Some(rejected.to_string())),
+                None,
+                "{rejected} must not produce a register URL"
+            );
+        }
+        assert_eq!(ironhub_register_url(None), None);
+    }
 
     struct StubLink {
         unavailable: bool,
