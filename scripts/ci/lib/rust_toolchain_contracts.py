@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from workflow_text import JOB_HEADING, job_body, step_body
+from workflow_text import JOB_HEADING, job_blocks, job_body, step_body
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -205,8 +205,9 @@ RUST_BOOTSTRAP_PATTERNS = (
 # No workflow may bootstrap Rust outside the composite. cargo-dist
 # re-includes .github/dist-build-setup.yml on every regeneration, so the
 # release build jobs install Rust through the composite from there — there
-# is no lane this contract cannot cover.
-ACCEPTED_RUST_BOOTSTRAPS: dict[str, int] = {}
+# is no lane this contract cannot cover, and so no exemption mechanism here.
+# If a genuinely unavoidable bootstrap ever appears, add the escape hatch
+# then, with that lane as its first entry and its reason in the comment.
 
 
 def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]:
@@ -223,28 +224,12 @@ def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]
         hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
         if not hits:
             continue
-        allowed = ACCEPTED_RUST_BOOTSTRAPS.get(path, 0)
-        if hits > allowed:
-            errors.append(
-                f"{path}: {hits} raw Rust bootstrap(s) "
-                f"({', '.join(RUST_BOOTSTRAP_PATTERNS)}); "
-                f"{allowed} accepted here. Install Rust through "
-                ".github/actions/setup-rust so the toolchain stays pinned, "
-                "mold stays wired, and rust-toolchain.toml stays enforced. "
-                "A genuinely unavoidable bootstrap must be added to "
-                "ACCEPTED_RUST_BOOTSTRAPS with the reason."
-            )
-    for path, expected in ACCEPTED_RUST_BOOTSTRAPS.items():
-        text = workflows.get(path)
-        if text is None:
-            continue
-        hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
-        if hits < expected:
-            errors.append(
-                f"{path}: expected {expected} accepted Rust bootstrap(s), "
-                f"found {hits}. If the generator stopped emitting it, drop "
-                "the entry from ACCEPTED_RUST_BOOTSTRAPS."
-            )
+        errors.append(
+            f"{path}: {hits} raw Rust bootstrap(s) "
+            f"({', '.join(RUST_BOOTSTRAP_PATTERNS)}). Install Rust through "
+            ".github/actions/setup-rust so the toolchain stays pinned, mold "
+            "stays wired, and rust-toolchain.toml stays enforced."
+        )
     return errors
 
 
@@ -268,25 +253,14 @@ def _composite_anchors(text: str) -> set[str]:
 
 
 def _job_blocks(text: str) -> list[tuple[str, str]]:
-    """(job name, block) for each job, bounded to the `jobs:` mapping.
+    """Every job in the file, bounded to the `jobs:` mapping.
 
-    JOB_HEADING matches ANY two-space `key:` line, so the `on:` trigger's
-    children (`push:`, `workflow_call:`, ...) match too — slicing from the
-    first heading blindly truncated the preamble at the first trigger and
-    made the workflow-level checks dead code on every real workflow.
+    Slicing from the first heading blindly truncated the preamble at the
+    first `on:` trigger and made the workflow-level checks dead code on every
+    real workflow, so the `jobs:` offset is load-bearing here.
     """
     jobs_key = JOBS_KEY.search(text)
-    jobs_start = jobs_key.start() if jobs_key else 0
-    headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= jobs_start]
-    blocks = []
-    for index, heading in enumerate(headings):
-        end = (
-            headings[index + 1].start()
-            if index + 1 < len(headings)
-            else len(text)
-        )
-        blocks.append((heading.group("name"), text[heading.start():end]))
-    return blocks
+    return job_blocks(text, jobs_key.start() if jobs_key else 0)
 
 
 def _reaches_composite(block: str, anchors: set[str]) -> bool:
@@ -378,6 +352,53 @@ def validate_release_workflow_installs_rust(
                 "silently removes the release lane's Rust install the next time "
                 "the workflow is regenerated."
             )
+    return errors
+
+
+# Cargo.toml's `[profile.dev] debug = 0` owns the debug-info policy. Anything
+# else ASSIGNING one of these is a second writer of the same value -- harmless
+# while the values agree, and a silent divergence the day someone bumps one.
+# An assignment only: `run-hermetic-test-process.sh` names the same variables
+# in a passthrough allowlist (a `case` pattern, no `=`), which is how a
+# developer's `CARGO_PROFILE_DEV_DEBUG=2` override survives the hermetic
+# barrier. That entry must keep working, so it must not match here.
+DEBUG_POLICY_ASSIGNMENT = re.compile(r"CARGO_PROFILE_[A-Z]+_DEBUG\s*=")
+DEBUG_POLICY_OWNER = "Cargo.toml"
+
+
+def validate_single_debug_policy_owner(root: Path = ROOT) -> list[str]:
+    """Only Cargo.toml may set the debug-info profile values.
+
+    The migration deleted these env pairs from five workflow job envs on the
+    strength of the profile block owning them, but left the identical `:-0`
+    defaults standing in two scripts -- so the change's own claim of a single
+    owner was not true of the whole tree. Two audit lanes reported it
+    independently.
+    """
+
+    errors: list[str] = []
+    for path in sorted((root / "scripts").rglob("*")):
+        if not path.is_file() or path.suffix not in (".sh", ".py"):
+            continue
+        # Test files carry the forbidden string on purpose, as fixtures and
+        # as the sabotage input that proves this check fires. Scanning them
+        # would make the contract unable to have a regression test at all.
+        if path.name.startswith(("test_", "test-")):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            errors.append(f"{path}: could not read: {error}")
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            if DEBUG_POLICY_ASSIGNMENT.search(line.split("#")[0]):
+                errors.append(
+                    f"{path.relative_to(root)}:{number}: assigns a "
+                    "CARGO_PROFILE_*_DEBUG value, which "
+                    f"{DEBUG_POLICY_OWNER}'s `[profile.dev]` block owns. Two "
+                    "writers of one value diverge the day either is bumped; "
+                    "delete this and let the profile decide."
+                )
     return errors
 
 

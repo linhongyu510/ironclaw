@@ -26,6 +26,33 @@ JOB_HEADING = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
 STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
 
 
+def job_blocks(text: str, start: int = 0) -> list[tuple[str, str]]:
+    """(job name, block) for every two-space job key at or after `start`.
+
+    The one place that answers "where does a job's YAML block end" — the next
+    job heading, or end of file. Both callers that need job boundaries build
+    on this: `extract_job_block` filters it to one named job and refuses
+    anything but an exact match, and the toolchain contracts enumerate it from
+    the `jobs:` key onward.
+
+    `start` exists because JOB_HEADING matches ANY two-space `key:` line, so
+    the `on:` trigger's children (`push:`, `workflow_call:`, ...) match too.
+    A caller that must not treat those as jobs passes the offset of `jobs:`.
+    """
+    headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= start]
+    return [
+        (
+            heading.group("name"),
+            text[
+                heading.start() : headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(text)
+            ],
+        )
+        for index, heading in enumerate(headings)
+    ]
+
+
 def step_body(text: str, step_name: str) -> str | None:
     """Return one workflow step's body, bounded by the next step heading."""
     for heading in STEP_HEADING.finditer(text):

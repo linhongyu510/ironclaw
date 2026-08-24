@@ -22,6 +22,7 @@ from rust_toolchain_contracts import (  # noqa: E402
     validate_release_workflow_installs_rust,
     validate_rust_jobs_reach_the_composite,
     validate_setup_rust_action,
+    validate_single_debug_policy_owner,
     validate_toolchain_pin_sync,
 )
 from workflow_text import JOB_HEADING, STEP_HEADING, job_body, step_body  # noqa: E402
@@ -57,6 +58,43 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+class SingleDebugPolicyOwnerTests(unittest.TestCase):
+    """Cargo.toml's [profile.dev] is the only writer of the debug-info value."""
+
+    def tree(self, body: str) -> Path:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "scripts" / "ci").mkdir(parents=True)
+        (root / "scripts" / "ci" / "gate.sh").write_text(body, encoding="utf-8")
+        return root
+
+    def test_a_second_writer_is_rejected(self) -> None:
+        root = self.tree('CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"\n')
+        errors = validate_single_debug_policy_owner(root)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("scripts/ci/gate.sh:1", errors[0])
+        self.assertIn("Cargo.toml", errors[0])
+
+    def test_the_hermetic_passthrough_allowlist_still_passes(self) -> None:
+        """A `case` pattern naming the vars is not a second writer.
+
+        run-hermetic-test-process.sh lists them so a developer's
+        `CARGO_PROFILE_DEV_DEBUG=2` override survives the hermetic barrier.
+        Matching that entry would break the documented escape hatch.
+        """
+        root = self.tree(
+            "      CARGO_INCREMENTAL|CARGO_PROFILE_DEV_DEBUG|"
+            "CARGO_PROFILE_TEST_DEBUG|CARGO_TEST_ARGS|\\\n"
+        )
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
+    def test_a_comment_mentioning_the_override_still_passes(self) -> None:
+        root = self.tree("# override per-run: CARGO_PROFILE_DEV_DEBUG=2 cargo test\n")
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
+    def test_the_live_tree_has_exactly_one_owner(self) -> None:
+        self.assertEqual([], validate_single_debug_policy_owner(ROOT))
 
 
 class RustJobsReachTheCompositeTests(unittest.TestCase):
@@ -522,8 +560,24 @@ class UnmanagedRustBootstrapTests(unittest.TestCase):
         errors = validate_no_unmanaged_rust_bootstrap(workflows)
         self.assertTrue(any("ironclaw-release" in e for e in errors), errors)
 
-    def test_no_accepted_bootstraps_remain(self):
-        self.assertEqual({}, rust_toolchain_contracts.ACCEPTED_RUST_BOOTSTRAPS)
+    def test_a_bootstrap_is_rejected_with_no_exemption_available(self) -> None:
+        """There is no allowlist to add a lane to; the rule is unconditional.
+
+        The empty `ACCEPTED_RUST_BOOTSTRAPS` dict this replaces was an escape
+        hatch, fully built with symmetric over/under-use validation, for a
+        case the module's own comment said did not exist. Flagged by the
+        structural-discipline audit as speculative generality.
+        """
+        errors = validate_no_unmanaged_rust_bootstrap(
+            {".github/workflows/demo.yml": "      - run: curl https://sh.rustup.rs | sh\n"}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("raw Rust bootstrap", errors[0])
+        self.assertNotIn("ACCEPTED", errors[0])
+        self.assertFalse(
+            hasattr(rust_toolchain_contracts, "ACCEPTED_RUST_BOOTSTRAPS"),
+            "the exemption mechanism should be gone, not merely empty",
+        )
 
     def test_alternate_vendor_toolchain_actions_are_caught(self):
         """The composite is the only sanctioned installer.

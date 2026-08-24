@@ -28,9 +28,10 @@ from rust_toolchain_contracts import (  # noqa: E402
     validate_release_workflow_installs_rust,
     validate_rust_jobs_reach_the_composite,
     validate_setup_rust_action,
+    validate_single_debug_policy_owner,
     validate_toolchain_pin_sync,
 )
-from workflow_text import JOB_HEADING, STEP_HEADING, job_body, step_body  # noqa: E402
+from workflow_text import STEP_HEADING, job_blocks, job_body, step_body  # noqa: E402
 
 REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/reborn-tests.yml": (
@@ -455,16 +456,13 @@ def extract_job_block(text: str, job: str) -> tuple[str | None, str]:
     fail-closed stance as `extract_scope_regex`).
     """
 
-    headings = list(JOB_HEADING.finditer(text))
-    matches = [match for match in headings if match.group("name") == job]
+    matches = [block for name, block in job_blocks(text) if name == job]
     if len(matches) != 1:
         return None, (
             f"expected exactly one {job!r} job, found {len(matches)} — the "
             "scoped libsql-scripted-memory contract cannot resolve its block"
         )
-    start = matches[0].start()
-    following = next((m for m in headings if m.start() > start), None)
-    return text[start : following.start() if following else len(text)], ""
+    return matches[0], ""
 
 def extract_continued_commands(text: str, executable: str) -> list[str]:
     """Return shell commands whose first line is `<executable> \\`.
@@ -1790,6 +1788,7 @@ def validate_workflow_texts(
     errors.extend(validate_rust_jobs_reach_the_composite(workflows))
     errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
     errors.extend(validate_toolchain_pin_sync(root))
+    errors.extend(validate_single_debug_policy_owner(root))
     return errors
 
 
