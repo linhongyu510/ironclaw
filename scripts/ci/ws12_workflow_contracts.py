@@ -1227,17 +1227,57 @@ def validate_no_job_env_rustflags_with_setup_rust(
 # jobs, but kept as its own pattern: action.yml has no `jobs:` section, and
 # reusing JOB_HEADING here would conflate the two headings the moment either
 # one's shape changes for its own reason.
-INPUT_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
+RUST_BOOTSTRAP_PATTERNS = (
+    "sh.rustup.rs",
+    "rustup-init",
+    "rustup toolchain install",
+)
+# cargo-dist regenerates .github/workflows/ironclaw-release.yml wholesale
+# (see [workspace.metadata.dist], cargo-dist-version 0.31.0), so its
+# container-only bootstrap cannot be migrated onto the composite without
+# being clobbered on the next regeneration. It is therefore an ACCEPTED
+# exception, pinned to one occurrence: a second bootstrap appearing there,
+# or any bootstrap in a hand-written workflow, fails this gate.
+ACCEPTED_RUST_BOOTSTRAPS = {".github/workflows/ironclaw-release.yml": 1}
 
 
-def input_body(text: str, input_name: str) -> str | None:
-    """Return one composite action's `inputs:` entry, bounded by the next one."""
-    for heading in INPUT_HEADING.finditer(text):
-        if heading.group("name") != input_name:
+def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]:
+    """Every hand-written workflow installs Rust through the composite.
+
+    `validate_no_direct_dtolnay_usage` only sees the vendor action. A raw
+    `curl https://sh.rustup.rs | sh` installs Rust just as effectively and
+    matches no such string, so it would otherwise pass this gate forever --
+    unpinned, without mold, and unchecked against rust-toolchain.toml.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
+        if not hits:
             continue
-        following = INPUT_HEADING.search(text, heading.end())
-        return text[heading.end() : following.start() if following else len(text)]
-    return None
+        allowed = ACCEPTED_RUST_BOOTSTRAPS.get(path, 0)
+        if hits > allowed:
+            errors.append(
+                f"{path}: {hits} raw Rust bootstrap(s) "
+                f"({', '.join(RUST_BOOTSTRAP_PATTERNS)}); "
+                f"{allowed} accepted here. Install Rust through "
+                ".github/actions/setup-rust so the toolchain stays pinned, "
+                "mold stays wired, and rust-toolchain.toml stays enforced. "
+                "A genuinely unavoidable bootstrap must be added to "
+                "ACCEPTED_RUST_BOOTSTRAPS with the reason."
+            )
+    for path, expected in ACCEPTED_RUST_BOOTSTRAPS.items():
+        text = workflows.get(path)
+        if text is None:
+            continue
+        hits = sum(text.count(pattern) for pattern in RUST_BOOTSTRAP_PATTERNS)
+        if hits < expected:
+            errors.append(
+                f"{path}: expected {expected} accepted Rust bootstrap(s), "
+                f"found {hits}. If the generator stopped emitting it, drop "
+                "the entry from ACCEPTED_RUST_BOOTSTRAPS."
+            )
+    return errors
 
 
 def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
@@ -1259,7 +1299,9 @@ def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
     # `default: "..."` happens to appear first, which is only the toolchain
     # input's by accident of every other input's default being empty and
     # sitting after it in the file today.
-    toolchain_input = input_body(action_text, "toolchain")
+    # `job_body` bounds a two-space `name:` block, which is exactly the
+    # shape of an action.yml `inputs:` entry — no second helper needed.
+    toolchain_input = job_body(action_text, "toolchain")
     if toolchain_input is None:
         return [f"{SETUP_RUST_ACTION}: no `toolchain:` input found"]
     default_match = re.search(r'default:\s*"([^"]+)"', toolchain_input)
@@ -1998,6 +2040,7 @@ def validate_workflow_texts(
         setup_rust_action = None
     errors.extend(validate_setup_rust_action(setup_rust_action))
     errors.extend(validate_no_direct_dtolnay_usage(workflows))
+    errors.extend(validate_no_unmanaged_rust_bootstrap(workflows))
     errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
     errors.extend(validate_toolchain_pin_sync(root))
     return errors

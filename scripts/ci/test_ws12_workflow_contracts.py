@@ -11,6 +11,7 @@ from pathlib import Path
 
 import ws12_workflow_contracts
 from ws12_workflow_contracts import (
+    validate_no_unmanaged_rust_bootstrap,
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
     CRATE_SCOPE_FILTERS,
@@ -252,6 +253,56 @@ class JobEnvRustflagsShadowingTests(unittest.TestCase):
         self.assertEqual(
             [], validate_no_job_env_rustflags_with_setup_rust(workflows)
         )
+
+
+
+class UnmanagedRustBootstrapTests(unittest.TestCase):
+    """A curl bootstrap installs Rust as surely as the vendor action.
+
+    The dtolnay check greps one vendor string, so `curl sh.rustup.rs | sh`
+    passed it forever — unpinned, without mold, unchecked against
+    rust-toolchain.toml. cargo-dist regenerates ironclaw-release.yml, so its
+    container-only bootstrap is an accepted exception, pinned to one.
+    """
+
+    def test_bootstrap_in_a_hand_written_workflow_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+            )
+        }
+        errors = validate_no_unmanaged_rust_bootstrap(workflows)
+        self.assertTrue(any("x.yml" in e for e in errors), errors)
+
+    def test_rustup_init_and_toolchain_install_also_count(self):
+        for snippet in ("rustup-init -y", "rustup toolchain install 1.98.0"):
+            with self.subTest(snippet=snippet):
+                errors = validate_no_unmanaged_rust_bootstrap(
+                    {".github/workflows/x.yml": f"        run: {snippet}\n"}
+                )
+                self.assertTrue(errors, f"{snippet} should be caught")
+
+    def test_the_accepted_release_bootstrap_passes(self):
+        workflows = {
+            ".github/workflows/ironclaw-release.yml": (
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+            )
+        }
+        self.assertEqual([], validate_no_unmanaged_rust_bootstrap(workflows))
+
+    def test_a_second_bootstrap_in_the_accepted_file_fails(self):
+        workflows = {
+            ".github/workflows/ironclaw-release.yml": (
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+            )
+        }
+        errors = validate_no_unmanaged_rust_bootstrap(workflows)
+        self.assertTrue(any("2 raw Rust bootstrap" in e for e in errors), errors)
+
+    def test_live_workflows_hold_the_contract(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual([], validate_no_unmanaged_rust_bootstrap(workflows))
 
 
 class ToolchainPinSyncTests(unittest.TestCase):
