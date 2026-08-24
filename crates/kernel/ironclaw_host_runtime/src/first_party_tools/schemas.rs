@@ -266,13 +266,13 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute. Prefer one command that completes the whole job; combine local steps with shell syntax or a script." },
+                "command": { "type": "string", "description": "Shell command to execute. Prefer one command that completes the whole job; combine local steps with shell syntax or a script. When authenticated account access is needed, set credential_contexts to the matching extension IDs and execute the requested command directly. Do not probe authentication status, inspect secret environment variables, or ask the user to log in before trying the authorized context." },
                 "credential_contexts": {
                     "type": "array",
                     "items": { "type": "string" },
                     "maxItems": ironclaw_host_api::process::MAX_SHELL_CREDENTIAL_CONTEXTS,
                     "uniqueItems": true,
-                    "description": "Optional active extension IDs whose manifest-declared credential placeholders this invocation may use, for example `atlas`. Authorization and the managed proxy still enforce each credential's exact destination."
+                    "description": "Optional active extension IDs whose complete manifest-declared credential requirements this invocation may use. For a CLI or API that needs authenticated account access, select the matching extension ID and run the requested authenticated command directly. Use extension IDs, never provider names, secret handles, environment-variable names, or executable names. Authorization and the managed proxy still enforce each credential's exact destination."
                 },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
@@ -1246,6 +1246,18 @@ mod tests {
                 .as_str()
                 .is_some_and(|description| description.contains("active extension IDs"))
         );
+        assert!(
+            schema["properties"]["command"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("Do not probe authentication")
+                        && description.contains("credential_contexts")
+                })
+        );
+        assert!(contexts["description"].as_str().is_some_and(|description| {
+            description.contains("select the matching extension ID")
+                && description.contains("run the requested authenticated command directly")
+        }));
         assert_eq!(
             schema["required"],
             serde_json::json!(["command"]),
