@@ -2,7 +2,7 @@
 # - Every in-repo cargo/rustc run resolves this file (rustup precedence:
 #   RUSTUP_TOOLCHAIN env > directory override > this file > rustup default),
 #   so local clippy/rustfmt finally match CI's.
-# - CI workflows install Rust exclusively through
+# - Hand-written CI workflows install Rust through
 #   .github/actions/setup-rust, whose `toolchain` input defaults to the same
 #   version as `channel` below (kept in sync by
 #   scripts/ci/ws12_workflow_contracts.py); a lane that intentionally runs a
@@ -10,6 +10,10 @@
 #   an explicit `toolchain:` input, and the composite exports
 #   RUSTUP_TOOLCHAIN naming exactly what it installed either way, so this
 #   file can never silently override a job's chosen toolchain.
+# - One accepted exception: .github/workflows/ironclaw-release.yml is
+#   regenerated wholesale by cargo-dist and bootstraps Rust itself inside
+#   container builds. ws12_workflow_contracts.py pins that to exactly one
+#   occurrence and fails on any other raw bootstrap in any workflow.
 # - Bumping: change `channel` here AND the `toolchain` input default in
 #   .github/actions/setup-rust/action.yml in the same PR (the ws12 gate
 #   fails on any mismatch). Expect Swatinem/rust-cache keys to rotate with
