@@ -295,6 +295,15 @@ def _reaches_composite(block: str, anchors: set[str]) -> bool:
 # by non-path, non-word characters so `target/cargo-timings` and
 # `scripts/cargo-foo.sh` do not count as running the compiler.
 CARGO_INVOCATION = re.compile(r"(?<![\w./-])(?:cargo|rustc|rustup)(?![\w./-])")
+# The hermetic runners need a toolchain without naming one:
+# run-hermetic-test-process.sh probes `rustc --print sysroot` to build the
+# child PATH and exits 1 if it cannot resolve one. A lane that invokes them
+# therefore needs Rust exactly as much as a literal `cargo` line does, but
+# CARGO_INVOCATION cannot see it -- the workflow only mentions the script.
+# webui-v2-test-lanes was the one lane in this state: it compiles nothing, so
+# nobody noticed it needed rustc, and rustup installed the pinned toolchain
+# lazily mid-test, once per shard, racing its own component downloads.
+NEEDS_TOOLCHAIN_SCRIPT = re.compile(r"run-hermetic-(?:deterministic-suite|test-process)\.sh")
 
 
 def validate_rust_jobs_reach_the_composite(workflows: dict[str, str]) -> list[str]:
@@ -319,16 +328,19 @@ def validate_rust_jobs_reach_the_composite(workflows: dict[str, str]) -> list[st
         anchors = _composite_anchors(text)
         for name, block in _job_blocks(text):
             code = "\n".join(line.split("#")[0] for line in block.splitlines())
-            if not CARGO_INVOCATION.search(code):
+            if not (
+                CARGO_INVOCATION.search(code) or NEEDS_TOOLCHAIN_SCRIPT.search(code)
+            ):
                 continue
             if _reaches_composite(block, anchors):
                 continue
             errors.append(
-                f"{path}: job {name!r} runs cargo but never reaches "
-                f"`{SETUP_RUST_USES}`. It would build on whatever toolchain "
-                "the runner image happens to ship, unpinned and without mold "
-                "-- or fail outright with 'cargo: command not found'. Install "
-                "Rust through the composite."
+                f"{path}: job {name!r} needs a Rust toolchain but never reaches "
+                f"`{SETUP_RUST_USES}`. Either it builds on whatever toolchain "
+                "the runner image ships (unpinned, no mold), or rustup installs "
+                "the pin lazily on first use inside the repo -- mid-lane, once "
+                "per shard, racing its own component downloads. Install Rust "
+                "through the composite so it happens once, up front."
             )
     return errors
 

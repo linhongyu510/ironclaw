@@ -408,6 +408,17 @@ jobs:
           ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
 
+      # This lane runs a prebuilt binary and compiles nothing, but
+      # run-hermetic-test-process.sh probes `rustc --print sysroot` to put the
+      # toolchain's bin on the child PATH and exits 1 if it cannot resolve one.
+      # Inside the repo that probe hits rust-toolchain.toml, so rustup installed
+      # the pinned toolchain lazily, mid-lane, once per shard — which is where
+      # `component download failed for rustfmt: could not rename 'downloaded'
+      # file` came from. Installing once, up front, as a real step removes the
+      # lazy install; every other hermetic lane already does this.
+      - name: Install Rust
+        uses: ./.github/actions/setup-rust
+
       - name: Download default Reborn E2E binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

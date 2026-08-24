@@ -230,6 +230,45 @@ class RustJobsReachTheCompositeTests(unittest.TestCase):
             ),
         )
 
+    def test_a_hermetic_suite_job_needs_the_composite(self) -> None:
+        """The hermetic runners need rustc without naming it.
+
+        run-hermetic-test-process.sh probes `rustc --print sysroot` and exits 1
+        if it cannot resolve one, so a lane invoking it needs Rust exactly as
+        much as a literal `cargo` line does — but the workflow text only
+        mentions the script. webui-v2-test-lanes sat in that blind spot: it
+        compiles nothing, so nobody noticed it needed rustc, and rustup
+        installed the pin lazily mid-test, once per shard.
+        """
+        text = (
+            "name: e2e\non:\n  push:\n"
+            "jobs:\n"
+            "  lanes:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: scripts/ci/run-hermetic-deterministic-suite.sh command pytest\n"
+        )
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/e2e.yml": text}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("needs a Rust toolchain", errors[0])
+
+    def test_a_hermetic_job_with_the_composite_passes(self) -> None:
+        text = (
+            "name: e2e\non:\n  push:\n"
+            "jobs:\n"
+            "  lanes:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: ./.github/actions/setup-rust\n"
+            "      - run: scripts/ci/run-hermetic-test-process.sh pytest\n"
+        )
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite({".github/workflows/e2e.yml": text}),
+        )
+
     def test_a_job_that_never_runs_cargo_needs_no_composite(self) -> None:
         text = (
             "name: docs\n"
