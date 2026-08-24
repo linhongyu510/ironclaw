@@ -327,6 +327,49 @@ async fn disabled_memory_never_reaches_mnesis() {
 }
 
 #[tokio::test]
+async fn an_unconfigured_checkout_binds_mnesis_on_every_profile() {
+    for profile in [
+        RebornCompositionProfile::Standalone,
+        RebornCompositionProfile::HostedSingleTenant,
+        RebornCompositionProfile::Production,
+    ] {
+        let policy = resolve_memory_binding_policy(None, profile)
+            .unwrap_or_else(|error| panic!("{profile:?} must resolve a default binding: {error}"));
+        let transport = Arc::new(MockMnesisTransport::always_ok(hit("d", "n.md")));
+        let resolved =
+            resolve_memory_provider(Some(policy), &deps_over_mock(Arc::clone(&transport)))
+                .unwrap_or_else(|error| panic!("{profile:?} must resolve a provider: {error}"));
+        let package = resolved
+            .package
+            .as_ref()
+            .unwrap_or_else(|| panic!("{profile:?} must register the Mnesis package"));
+        assert_eq!(package.manifest.id.as_str(), MNESIS_MEMORY_EXTENSION_ID);
+    }
+}
+
+#[tokio::test]
+async fn the_default_binding_still_fails_closed_without_credentials() {
+    let policy = resolve_memory_binding_policy(None, RebornCompositionProfile::Standalone)
+        .expect("the default binding resolves");
+    let resolved = resolve_memory_provider(
+        Some(policy),
+        &MemoryProviderDeps::for_third_party(Mem0ConnectionConfig::default()),
+    )
+    .expect("resolution succeeds and yields an unbound provider");
+
+    assert!(
+        resolved.package.is_none(),
+        "no credentials must register no package"
+    );
+    assert!(
+        !resolved
+            .lifecycle
+            .declares(MemoryLifecycleHook::ReadLongTerm),
+        "no credentials must call no lifecycle hook"
+    );
+}
+
+#[tokio::test]
 async fn standalone_swaps_to_mnesis_without_an_override() {
     let section = MemorySection {
         provider: Some(MNESIS_MEMORY_EXTENSION_ID.to_string()),

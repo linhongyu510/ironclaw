@@ -127,7 +127,9 @@ pub use ironclaw_turns::TurnStatus;
 // consumer: `ironclaw_cli` serve wiring · pinned by: `ironclaw_cli` build
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // consumer: `ironclaw_cli` runtime · pinned by: `composition/tests/memory_mem0_swap.rs`
-pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+pub use memory_binding::{
+    default_memory_provider_id, memory_binding_diagnostics, resolve_memory_binding_policy,
+};
 // consumer: `ironclaw_cli` runtime, `tests/integration/group_memory` · pinned by: `composition/tests/memory_mem0_swap.rs` (`MemoryLifecycleConsumers` is the fn's return type)
 pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, MnesisConnectionConfig,

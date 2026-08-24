@@ -105,14 +105,8 @@ fn check_memory_binding(path: &std::path::Path) -> DoctorCheck {
         .flatten()
         .and_then(|file| file.memory)
         .and_then(|memory| memory.provider);
-    let Some(provider) = provider else {
-        return DoctorCheck {
-            name: "memory_binding".to_string(),
-            category: CheckCategory::Core,
-            outcome: CheckOutcome::Pass,
-            detail: "ironclaw.memory (default native binding)".to_string(),
-        };
-    };
+    let provider =
+        provider.unwrap_or_else(|| ironclaw_composition::default_memory_provider_id().to_string());
     if provider != MNESIS_MEMORY_PROVIDER_ID {
         return DoctorCheck {
             name: "memory_binding".to_string(),
@@ -298,11 +292,18 @@ mod tests {
         assert_eq!(check.outcome, CheckOutcome::Skip);
     }
 
+    /// Doctor reports the binding composition actually applies, never its own
+    /// restatement of the default.
     #[test]
-    fn doctor_memory_binding_defaults_to_native() {
+    fn doctor_memory_binding_reports_the_composition_default() {
         let check = check_memory_binding(std::path::Path::new("/nonexistent/config.toml"));
-        assert_eq!(check.outcome, CheckOutcome::Pass);
-        assert!(check.detail.contains("ironclaw.memory"));
+        assert!(
+            check
+                .detail
+                .contains(ironclaw_composition::default_memory_provider_id()),
+            "doctor reported {:?}, which is not the default composition binds",
+            check.detail
+        );
     }
 
     #[test]

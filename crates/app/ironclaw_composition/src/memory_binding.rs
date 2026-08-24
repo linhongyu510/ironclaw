@@ -45,7 +45,7 @@ pub fn resolve_memory_binding_policy(
     profile: RebornCompositionProfile,
 ) -> Result<MemoryBindingPolicy, RebornBuildError> {
     let Some(memory) = memory else {
-        return Ok(MemoryBindingPolicy::native_default());
+        return default_binding_policy(profile);
     };
 
     let mut overrides = Vec::with_capacity(memory.admin_overrides.len());
@@ -63,6 +63,44 @@ pub fn resolve_memory_binding_policy(
         overrides,
     };
     MemoryBindingPolicy::resolve(input).map_err(map_binding_error)
+}
+
+/// The provider id an unconfigured deployment binds. Native upstream; Mnesis
+/// here. Diagnostics read this rather than restating the default.
+pub fn default_memory_provider_id() -> &'static str {
+    #[cfg(feature = "memory-mnesis")]
+    {
+        ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID
+    }
+    #[cfg(not(feature = "memory-mnesis"))]
+    {
+        ironclaw_host_runtime::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID
+    }
+}
+
+/// The binding an unconfigured deployment gets. Native upstream; Mnesis here.
+#[cfg(feature = "memory-mnesis")]
+fn default_binding_policy(
+    profile: RebornCompositionProfile,
+) -> Result<MemoryBindingPolicy, RebornBuildError> {
+    let deployment = deployment_profile(profile);
+    MemoryBindingPolicy::resolve(MemoryBindingInput {
+        deployment,
+        native_available: true,
+        provider: Some(ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID.to_string()),
+        overrides: vec![MemoryAdminOverrideEntry {
+            extension_id: ironclaw_memory_mnesis::MNESIS_MEMORY_EXTENSION_ID.to_string(),
+            deployment_profile: deployment.as_str().to_string(),
+        }],
+    })
+    .map_err(map_binding_error)
+}
+
+#[cfg(not(feature = "memory-mnesis"))]
+fn default_binding_policy(
+    _profile: RebornCompositionProfile,
+) -> Result<MemoryBindingPolicy, RebornBuildError> {
+    Ok(MemoryBindingPolicy::native_default())
 }
 
 fn map_binding_error(

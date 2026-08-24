@@ -32,6 +32,9 @@ eula = false
 memory-mem0 = [
     "ironclaw_composition/memory-mem0",
 ]
+# Mnesis is this branch's subject, so the shipped binary carries it without a
+# flag; see the matching note on `ironclaw_composition`.
+default = ["memory-mnesis"]
 memory-mnesis = [
     "ironclaw_composition/memory-mnesis",
 ]

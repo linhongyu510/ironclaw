@@ -20,6 +20,13 @@ layer = "app"
 # to mem0 builds with `--features memory-mem0`. mem0 stays runtime-off too
 # (the binding policy defaults to native).
 memory-mem0 = ["dep:ironclaw_memory_mem0"]
+# Bar 2, read the way this rule intends it: on this branch every build enables
+# Mnesis, which by the rule's own test makes it the product rather than a build
+# shape. The name survives only so the upstream series can restore
+# `default = []` in one line instead of re-plumbing the dependency. Runtime
+# binding stays config-driven — the lanes need endpoints and credentials no
+# default can supply, and composition still fails closed without them.
+default = ["memory-mnesis"]
 memory-mnesis = ["dep:ironclaw_memory_mnesis"]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
