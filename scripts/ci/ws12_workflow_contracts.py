@@ -1167,7 +1167,11 @@ ANCHOR_DEF = re.compile(r"^\s*-\s*&(?P<name>[\w-]+)\s*$", re.MULTILINE)
 # way. They need separate patterns, not one merged indentation class: the
 # workflow-level form sits in the file's preamble, before any job heading, so
 # it is checked once per file rather than by slicing per-job blocks.
-JOB_ENV_RUSTFLAGS = re.compile(r"^ {6}RUSTFLAGS:", re.MULTILINE)
+# Any RUSTFLAGS key inside a job, at job-env depth (6 spaces) or
+# step-env depth (10) — a step-level env shadows the composite's
+# $GITHUB_ENV write for that step exactly like a job-level one, so
+# pinning the exact job depth left a third of the shapes unguarded.
+JOB_ENV_RUSTFLAGS = re.compile(r"^ {6,}RUSTFLAGS:", re.MULTILINE)
 WORKFLOW_ENV_RUSTFLAGS = re.compile(r"^ {2}RUSTFLAGS:", re.MULTILINE)
 
 
@@ -1236,8 +1240,8 @@ def validate_no_job_env_rustflags_with_setup_rust(
                 continue
             if JOB_ENV_RUSTFLAGS.search(block):
                 errors.append(
-                    f"{path}: job {heading.group('name')!r} sets a job-level "
-                    "RUSTFLAGS env key while installing Rust through "
+                    f"{path}: job {heading.group('name')!r} sets a job- or "
+                    "step-level RUSTFLAGS env key while installing Rust through "
                     ".github/actions/setup-rust — job env shadows the "
                     "composite's $GITHUB_ENV write and drops the mold linker "
                     "flags; pass them as the composite's extra_rustflags "

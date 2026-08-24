@@ -303,6 +303,31 @@ class JobEnvRustflagsShadowingTests(unittest.TestCase):
             f"alias-reached job must be checked: {errors}",
         )
 
+    def test_step_level_rustflags_is_also_caught(self):
+        """A step's own `env:` shadows the composite just like a job's.
+
+        The pattern pinned the exact 6-space job-env depth, so a step-level
+        key (10 spaces in this repo's workflows) slipped through — the same
+        silent mold-drop the guard exists to prevent.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "      - uses: ./.github/actions/setup-rust\n"
+                "      - name: Compile\n"
+                "        env:\n"
+                '          RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "        run: cargo build\n"
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("'build'" in e for e in errors),
+            f"step-level RUSTFLAGS must be caught: {errors}",
+        )
+
     def test_live_workflows_are_clean(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)
         self.assertEqual(
