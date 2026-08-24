@@ -60,6 +60,98 @@ SCCACHE_SETUP_ACTION = (
 )
 
 
+class GuardBypassRegressionTests(unittest.TestCase):
+    """Three bypasses a reviewer reproduced against these guards.
+
+    Each let a workflow satisfy a contract while installing no Rust, or hid a
+    RUSTFLAGS key that shadows the composite. All three are the same species:
+    a check reading text that merely *looks* like an executable step, or
+    reading too narrow a slice of the file.
+    """
+
+    def test_release_check_ignores_a_decoy_in_an_unrelated_job(self) -> None:
+        """A commented mention elsewhere must not stand in for the real step."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                "- uses: ./.github/actions/setup-rust\n", encoding="utf-8"
+            )
+            decoyed = (
+                "jobs:\n"
+                "  build-local-artifacts:\n    steps:\n      - run: dist build\n"
+                "  docker-image:\n    steps:\n"
+                "      # uses: ./.github/actions/setup-rust\n"
+                "      - run: docker build .\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": decoyed}, root
+            )
+            self.assertTrue(
+                any("build-local-artifacts" in e for e in errors),
+                f"a decoy comment in another job must not satisfy the contract: {errors}",
+            )
+
+    def test_root_env_rustflags_after_jobs_is_caught(self) -> None:
+        """A top-level `env:` need not precede `jobs:` to apply to every job."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "jobs:\n"
+            "  build:\n    steps:\n"
+            "      - uses: ./.github/actions/setup-rust\n"
+            "      - run: cargo test\n"
+            "env:\n"
+            "  RUSTFLAGS: -Dwarnings\n"
+        )
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/demo.yml": text}
+        )
+        self.assertTrue(
+            any("workflow-level env" in e for e in errors),
+            f"a root env: after jobs: shadows every job identically: {errors}",
+        )
+
+    def test_an_anchor_is_not_marked_by_a_comment_in_a_sibling_node(self) -> None:
+        """Anchor scope ends at its own node, not at the next anchor or job."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "jobs:\n"
+            "  first:\n    steps:\n"
+            "      - &decoy\n"
+            "        run: echo hi\n"
+            "      - name: unrelated\n"
+            "        # uses: ./.github/actions/setup-rust\n"
+            "        run: echo bye\n"
+            "  second:\n    steps:\n"
+            "      - *decoy\n"
+            "      - run: cargo build\n"
+        )
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/demo.yml": text}
+        )
+        self.assertTrue(
+            any("'second'" in e for e in errors),
+            f"aliasing a decoy anchor must not count as installing Rust: {errors}",
+        )
+
+    def test_a_real_alias_still_passes(self) -> None:
+        """The legitimate release-plz shape must keep working."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "x-steps:\n"
+            "  - &install-rust\n"
+            "    uses: ./.github/actions/setup-rust\n"
+            "jobs:\n"
+            "  build:\n    steps:\n"
+            "      - *install-rust\n"
+            "      - run: cargo build\n"
+        )
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite({".github/workflows/d.yml": text}),
+        )
+
+
 class SingleDebugPolicyOwnerTests(unittest.TestCase):
     """Cargo.toml's [profile.dev] is the only writer of the debug-info value."""
 
@@ -615,6 +707,18 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
 
     STEP = "uses: ./.github/actions/setup-rust"
 
+    def release(self, step: str | None) -> str:
+        """A release workflow shaped like the real one.
+
+        Job-scoped now, so the fixture has to name the job cargo-dist emits;
+        a bare `jobs:\n  build:` no longer exercises the contract.
+        """
+        body = "jobs:\n  plan:\n    steps:\n      - run: dist plan\n"
+        body += "  build-local-artifacts:\n    steps:\n"
+        body += f"      - {step}\n" if step else "      - run: dist build\n"
+        return body
+
+
     def test_missing_step_in_the_generated_workflow_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -638,7 +742,7 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
                 "- name: Something else\n", encoding="utf-8"
             )
             errors = validate_release_workflow_installs_rust(
-                {".github/workflows/ironclaw-release.yml": f"      - {self.STEP}\n"},
+                {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
                 root,
             )
             self.assertTrue(
@@ -655,7 +759,7 @@ class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
             self.assertEqual(
                 [],
                 validate_release_workflow_installs_rust(
-                    {".github/workflows/ironclaw-release.yml": f"      - {self.STEP}\n"},
+                    {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
                     root,
                 ),
             )

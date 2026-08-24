@@ -19,17 +19,20 @@ The workspace-root `integration` feature is empty with zero consumers — a bare
 
 **Cargo features are a last resort.** A feature is a second build of the workspace, compiled and tested forever. Add one only for a heavy optional dependency, a build shape that ships with it OFF, a CI lane selector, a dev-only seam (always named `test-support`), or a privilege boundary — and say which in the manifest comment. Deployment shape belongs in `DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar: `.claude/rules/cargo-features.md`.
 
-**Toolchain pin.** `rust-toolchain.toml` at the repo root is the single source
-of truth for the Rust toolchain, local and CI. Never install Rust in a workflow
-directly — every job goes through `.github/actions/setup-rust`, and
-`scripts/ci/lib/rust_toolchain_contracts.py` fails the build on a direct
-`dtolnay/rust-toolchain` call, any other bootstrap, a release lane that installs
-no Rust at all, or a job-level `RUSTFLAGS` key that would shadow the composite's
-export. To bump Rust, edit `rust-toolchain.toml`'s `channel` and
-`.github/actions/setup-rust/action.yml`'s `toolchain` input default in the same
-PR; the gate fails on any mismatch. The precedence rules, the nightly-lane
-carve-out, and why Docker builds are unaffected are documented where they are
-enforced, in `rust-toolchain.toml`'s own header.
+**Toolchain pin.** The Rust version lives in two synchronized places:
+`rust-toolchain.toml`'s `channel` (what local `cargo`/`clippy` resolve) and
+`.github/actions/setup-rust`'s `toolchain` input default (what CI installs).
+`scripts/ci/lib/rust_toolchain_contracts.py` enforces that they are equal — it
+does not make either one derive from the other, so a bump edits both in the
+same PR or the gate fails. Every Rust-installing CI job goes through the
+composite; the two `nightly-2025-11-01` coverage lanes pass an explicit
+`toolchain:` input, and Docker builds are the one path outside this contract
+(the build context excludes `rust-toolchain.toml`, so images stay on their
+base-image toolchain). The same module also fails the build on a direct
+`dtolnay/rust-toolchain` call, any other bootstrap, a release lane whose
+`build-local-artifacts` job installs no Rust, and a `RUSTFLAGS` env key that
+would shadow the composite's export. Precedence rules and the bump checklist
+are in `rust-toolchain.toml`'s own header.
 
 ## Discover code before changing it
 

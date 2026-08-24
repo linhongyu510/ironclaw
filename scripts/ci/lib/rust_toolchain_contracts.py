@@ -118,7 +118,9 @@ def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
 
 SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
 JOBS_KEY = re.compile(r"^jobs:[ \t]*$", re.MULTILINE)
-ANCHOR_DEF = re.compile(r"^\s*-\s*&(?P<name>[\w-]+)\s*$", re.MULTILINE)
+# One list item that is nothing but an anchor definition (`- &install-rust`).
+# Matched per line so the node it opens can be bounded by indentation.
+ANCHOR_DEF_LINE = re.compile(r"^\s*-\s*&(?P<name>[\w-]+)\s*$")
 # Job-level `env:` (jobs.<job>.env, two-space job + four-space `env:` + this
 # key at six spaces) and workflow-level top `env:` (two-space key straight
 # under the file's own `env:`) are both re-applied to every step of a job on
@@ -155,9 +157,12 @@ def validate_no_job_env_rustflags_with_setup_rust(
         if SETUP_RUST_USES not in text:
             continue
         anchors = _composite_anchors(text)
-        jobs_key = JOBS_KEY.search(text)
-        preamble = text[: jobs_key.start()] if jobs_key else text
-        if WORKFLOW_ENV_RUSTFLAGS.search(preamble):
+        # Whole file, not just the preamble. A top-level mapping key need not
+        # precede `jobs:` — a root `env:` block placed after it is valid YAML,
+        # applies to every job the same way, and slicing at `jobs:` made it
+        # invisible to this check while its two-space indent also dodged the
+        # six-space per-job pattern. It fell through both.
+        if WORKFLOW_ENV_RUSTFLAGS.search(text):
             errors.append(
                 f"{path}: workflow-level env sets a RUSTFLAGS key while a "
                 "job in this file installs Rust through "
@@ -234,21 +239,39 @@ def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]
 
 
 def _composite_anchors(text: str) -> set[str]:
-    """Anchor names whose YAML block reaches the composite.
+    """Anchor names whose OWN YAML node reaches the composite.
 
     A job can pick the composite up through an alias (`- *install-rust`)
     rather than a literal `uses:` line, as release-plz.yml does, so both
     contracts below have to resolve aliases before deciding a job misses it.
+
+    Bounded by indentation, and comment-stripped, because the previous span
+    ("from this anchor to the next anchor or job heading") was wide enough to
+    swallow unrelated siblings: a *comment* elsewhere in that span mentioning
+    the composite marked the anchor as installing Rust, and a job that only
+    aliased it then passed `validate_rust_jobs_reach_the_composite` while
+    installing nothing. That is the same alias-fooled bypass this module's
+    docstring warns about, so it gets the same treatment as everything else
+    here — the check reads executable steps, never text that merely looks
+    like one.
     """
     anchors: set[str] = set()
-    for anchor in ANCHOR_DEF.finditer(text):
-        following = ANCHOR_DEF.search(text, anchor.end())
-        stop = following.start() if following else len(text)
-        next_job = JOB_HEADING.search(text, anchor.end())
-        if next_job and next_job.start() < stop:
-            stop = next_job.start()
-        if SETUP_RUST_USES in text[anchor.start():stop]:
-            anchors.add(anchor.group("name"))
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = ANCHOR_DEF_LINE.match(line)
+        if not match:
+            continue
+        indent = len(line) - len(line.rstrip("\n").lstrip())
+        for follower in lines[index + 1 :]:
+            if not follower.strip():
+                continue
+            # First non-blank line at or left of the anchor's own marker ends
+            # its node — that is a sibling or a parent, not its content.
+            if len(follower) - len(follower.lstrip()) <= indent:
+                break
+            if SETUP_RUST_USES in follower.split("#")[0]:
+                anchors.add(match.group("name"))
+                break
     return anchors
 
 
@@ -312,6 +335,18 @@ def validate_rust_jobs_reach_the_composite(workflows: dict[str, str]) -> list[st
 
 RELEASE_WORKFLOW = ".github/workflows/ironclaw-release.yml"
 DIST_BUILD_SETUP = ".github/dist-build-setup.yml"
+# cargo-dist's container build job — the only job in the release workflow
+# that installs Rust, and the one the contract below actually guards.
+RELEASE_BUILD_JOB = "build-local-artifacts"
+
+
+def _has_composite_step(text: str) -> bool:
+    """True when some EXECUTABLE line invokes the composite.
+
+    Comment-stripped per line: a substring search over raw text counted a
+    commented-out or merely-mentioned `uses:` as an install.
+    """
+    return any(SETUP_RUST_USES in line.split("#")[0] for line in text.splitlines())
 
 
 def validate_release_workflow_installs_rust(
@@ -319,33 +354,50 @@ def validate_release_workflow_installs_rust(
 ) -> list[str]:
     """The release lane must actually REACH the composite, not merely lack a bootstrap.
 
-    Every other check here asserts an absence — no dtolnay, no raw bootstrap,
-    no shadowing RUSTFLAGS. Absence-only checks called a release workflow with
-    NO Rust install whatsoever "clean": removing the old `curl | sh` step
-    without adding anything passed the whole suite, and a container build
-    would have died on `cargo: command not found`.
+    Most checks here assert an absence — no dtolnay, no raw bootstrap, no
+    shadowing RUSTFLAGS. Absence-only checks called a release workflow with NO
+    Rust install whatsoever "clean": removing the old `curl | sh` step without
+    adding anything passed the whole suite, and a container build would have
+    died on `cargo: command not found`.
+
+    Scoped to `build-local-artifacts` rather than the file, because the file is
+    the wrong unit: nothing in ironclaw-release.yml matches a literal `cargo`
+    (cargo-dist shells out to `dist build`), so
+    `validate_rust_jobs_reach_the_composite` never covers this workflow and
+    this is its only guard. A file-wide substring let that job lose its own
+    install while an unrelated job — or a comment — kept the contract green.
 
     ironclaw-release.yml is generated by cargo-dist from the fragment at
     .github/dist-build-setup.yml, so the step has to exist in BOTH: the
-    fragment so `dist generate` keeps emitting it, and the checked-in
-    workflow because that is the file GitHub actually runs.
+    fragment so `dist generate` keeps emitting it, and the checked-in workflow
+    because that is the file GitHub actually runs.
     """
 
     errors: list[str] = []
     release = workflows.get(RELEASE_WORKFLOW)
-    if release is not None and SETUP_RUST_USES not in release:
-        errors.append(
-            f"{RELEASE_WORKFLOW}: no `{SETUP_RUST_USES}` step. The container "
-            "build jobs have no other Rust install path, so this lane would "
-            "fail with 'cargo: command not found'. Re-run `dist generate` or "
-            f"re-inline the step from {DIST_BUILD_SETUP}."
-        )
+    if release is not None:
+        jobs = dict(_job_blocks(release))
+        block = jobs.get(RELEASE_BUILD_JOB)
+        if block is None:
+            errors.append(
+                f"{RELEASE_WORKFLOW}: no {RELEASE_BUILD_JOB!r} job. cargo-dist "
+                "names the container build job; if it was renamed, update "
+                "RELEASE_BUILD_JOB so this contract keeps guarding it."
+            )
+        elif not _has_composite_step(block):
+            errors.append(
+                f"{RELEASE_WORKFLOW}: job {RELEASE_BUILD_JOB!r} has no "
+                f"`{SETUP_RUST_USES}` step. The container build jobs have no "
+                "other Rust install path, so this lane would fail with "
+                "'cargo: command not found'. Re-run `dist generate` or "
+                f"re-inline the step from {DIST_BUILD_SETUP}."
+            )
     try:
         fragment = (root / DIST_BUILD_SETUP).read_text(encoding="utf-8")
     except OSError as error:
         errors.append(f"{DIST_BUILD_SETUP}: could not read fragment: {error}")
     else:
-        if SETUP_RUST_USES not in fragment:
+        if not _has_composite_step(fragment):
             errors.append(
                 f"{DIST_BUILD_SETUP}: no `{SETUP_RUST_USES}` step. cargo-dist "
                 "re-inlines this fragment on regeneration, so dropping it here "
