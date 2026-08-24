@@ -248,6 +248,61 @@ class JobEnvRustflagsShadowingTests(unittest.TestCase):
         )
         self.assertTrue(any("workflow-level" in e for e in errors), errors)
 
+    def test_workflow_level_rustflags_is_caught_when_an_on_block_exists(self):
+        """The fixture must carry an `on:` block or the check looks fine.
+
+        JOB_HEADING matches any two-space `key:` line, so `on:`'s children
+        (`push:`, `workflow_call:`) matched too. Taking headings[0] blindly
+        truncated the preamble at the first TRIGGER, making this check dead
+        code on every real workflow — and the original fixture passed only
+        because it happened to omit `on:`.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "name: X\n"
+                "on:\n"
+                "  push:\n"
+                "    branches: [main]\n"
+                "  workflow_call:\n"
+                "env:\n"
+                '  RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "jobs:\n" + self.SETUP_RUST_JOB
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("workflow-level" in e for e in errors),
+            f"workflow-level RUSTFLAGS must be caught behind an on: block: {errors}",
+        )
+
+    def test_a_job_reaching_the_composite_by_yaml_alias_is_still_checked(self):
+        """`- *install-rust` carries no literal `uses:` line of its own.
+
+        release-plz.yml reuses the composite step through a YAML anchor, so a
+        text-only per-job scan skipped that job entirely and its job-level
+        RUSTFLAGS would have shadowed mold silently.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "jobs:\n"
+                "  first:\n"
+                "    steps:\n"
+                "      - &install-rust\n"
+                "        name: Install Rust\n"
+                "        uses: ./.github/actions/setup-rust\n"
+                "  second:\n"
+                "    env:\n"
+                '      RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "    steps:\n"
+                "      - *install-rust\n"
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("'second'" in e for e in errors),
+            f"alias-reached job must be checked: {errors}",
+        )
+
     def test_live_workflows_are_clean(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)
         self.assertEqual(
@@ -282,23 +337,41 @@ class UnmanagedRustBootstrapTests(unittest.TestCase):
                 )
                 self.assertTrue(errors, f"{snippet} should be caught")
 
-    def test_the_accepted_release_bootstrap_passes(self):
-        workflows = {
-            ".github/workflows/ironclaw-release.yml": (
-                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
-            )
-        }
-        self.assertEqual([], validate_no_unmanaged_rust_bootstrap(workflows))
+    def test_the_release_workflow_has_no_carve_out(self):
+        """The release lane is migrated, not exempted.
 
-    def test_a_second_bootstrap_in_the_accepted_file_fails(self):
+        cargo-dist re-includes .github/dist-build-setup.yml on every
+        regeneration, so the release build jobs reach the composite there;
+        a bootstrap reappearing in the generated workflow is a regression.
+        """
         workflows = {
             ".github/workflows/ironclaw-release.yml": (
-                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
                 "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
             )
         }
         errors = validate_no_unmanaged_rust_bootstrap(workflows)
-        self.assertTrue(any("2 raw Rust bootstrap" in e for e in errors), errors)
+        self.assertTrue(any("ironclaw-release" in e for e in errors), errors)
+
+    def test_no_accepted_bootstraps_remain(self):
+        self.assertEqual({}, ws12_workflow_contracts.ACCEPTED_RUST_BOOTSTRAPS)
+
+    def test_alternate_vendor_toolchain_actions_are_caught(self):
+        """The composite is the only sanctioned installer.
+
+        Enumerating rustup bootstraps alone left an obvious hole: a workflow
+        could reach for a different vendor action and pass every gate while
+        running an unpinned toolchain with no mold.
+        """
+        for action in (
+            "actions-rs/toolchain@v1",
+            "actions-rust-lang/setup-rust-toolchain@v1",
+            "hecrj/setup-rust-action@v1",
+        ):
+            with self.subTest(action=action):
+                errors = validate_no_unmanaged_rust_bootstrap(
+                    {".github/workflows/x.yml": f"      - uses: {action}\n"}
+                )
+                self.assertTrue(errors, f"{action} should be caught")
 
     def test_live_workflows_hold_the_contract(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)

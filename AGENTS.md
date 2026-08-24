@@ -20,8 +20,8 @@ The workspace-root `integration` feature is empty with zero consumers — a bare
 **Cargo features are a last resort.** A feature is a second build of the workspace, compiled and tested forever. Add one only for a heavy optional dependency, a build shape that ships with it OFF, a CI lane selector, a dev-only seam (always named `test-support`), or a privilege boundary — and say which in the manifest comment. Deployment shape belongs in `DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar: `.claude/rules/cargo-features.md`.
 
 **Toolchain pin.** `rust-toolchain.toml` at the repo root pins the stable
-toolchain (channel + clippy/rustfmt) for local and CI builds. Every
-hand-written CI job installs Rust through `.github/actions/setup-rust`, whose `toolchain` input
+toolchain (channel + clippy/rustfmt) for local and CI builds. Every CI job
+installs Rust through `.github/actions/setup-rust`, whose `toolchain` input
 defaults to the same version; a lane that intentionally runs a different
 toolchain (the two `nightly-2025-11-01` coverage lanes) passes an explicit
 `toolchain:` input to that same composite, which exports `RUSTUP_TOOLCHAIN`
@@ -30,11 +30,10 @@ silently override a job's chosen toolchain. `scripts/ci/ws12_workflow_contracts.
 fails the build if any workflow calls `dtolnay/rust-toolchain` directly
 instead of through the composite, if any workflow bootstraps Rust another way
 (`sh.rustup.rs`, `rustup-init`, `rustup toolchain install`), and if the
-composite's default toolchain ever drifts from this file's `channel`. One
-accepted exception is pinned in that checker: `ironclaw-release.yml` is
-regenerated wholesale by cargo-dist and bootstraps Rust itself inside
-container builds, so exactly one such bootstrap is allowed there and a second
-one — or any in a hand-written workflow — fails the gate. To bump Rust: edit both
+composite's default toolchain ever drifts from this file's `channel`. The
+cargo-dist-generated release workflow is covered too: its build jobs pick the
+composite up from `.github/dist-build-setup.yml`, which cargo-dist re-includes
+on every regeneration, so there is no lane outside this contract. To bump Rust: edit both
 `rust-toolchain.toml`'s `channel` and `.github/actions/setup-rust/action.yml`'s
 `toolchain` input default, in the same PR.
 

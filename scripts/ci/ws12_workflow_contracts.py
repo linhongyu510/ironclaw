@@ -1158,6 +1158,8 @@ def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
 
 
 SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
+JOBS_KEY = re.compile(r"^jobs:[ \t]*$", re.MULTILINE)
+ANCHOR_DEF = re.compile(r"^\s*-\s*&(?P<name>[\w-]+)\s*$", re.MULTILINE)
 # Job-level `env:` (jobs.<job>.env, two-space job + four-space `env:` + this
 # key at six spaces) and workflow-level top `env:` (two-space key straight
 # under the file's own `env:`) are both re-applied to every step of a job on
@@ -1189,8 +1191,27 @@ def validate_no_job_env_rustflags_with_setup_rust(
     for path, text in workflows.items():
         if SETUP_RUST_USES not in text:
             continue
-        headings = list(JOB_HEADING.finditer(text))
-        preamble = text[: headings[0].start()] if headings else text
+        # Bound job headings to the `jobs:` block. JOB_HEADING matches ANY
+        # two-space `key:` line, so the `on:` trigger's children (`push:`,
+        # `workflow_call:`, ...) match too — taking headings[0] blindly
+        # truncated the preamble at the first trigger and made the
+        # workflow-level check dead code on every real workflow.
+        jobs_key = JOBS_KEY.search(text)
+        jobs_start = jobs_key.start() if jobs_key else 0
+        headings = [h for h in JOB_HEADING.finditer(text) if h.start() >= jobs_start]
+        # A job can reach the composite through a YAML alias (`- *install-rust`)
+        # instead of the literal `uses:` line, as release-plz.yml does. Resolve
+        # which anchors carry the composite so an aliased job is still checked.
+        rust_anchors = set()
+        for anchor in ANCHOR_DEF.finditer(text):
+            following = ANCHOR_DEF.search(text, anchor.end())
+            stop = following.start() if following else len(text)
+            next_job = JOB_HEADING.search(text, anchor.end())
+            if next_job and next_job.start() < stop:
+                stop = next_job.start()
+            if SETUP_RUST_USES in text[anchor.start():stop]:
+                rust_anchors.add(anchor.group("name"))
+        preamble = text[:jobs_start] if jobs_key else text
         if WORKFLOW_ENV_RUSTFLAGS.search(preamble):
             errors.append(
                 f"{path}: workflow-level env sets a RUSTFLAGS key while a "
@@ -1208,7 +1229,10 @@ def validate_no_job_env_rustflags_with_setup_rust(
                 else len(text)
             )
             block = text[start:end]
-            if SETUP_RUST_USES not in block:
+            uses_composite = SETUP_RUST_USES in block or any(
+                f"*{anchor}" in block for anchor in rust_anchors
+            )
+            if not uses_composite:
                 continue
             if JOB_ENV_RUSTFLAGS.search(block):
                 errors.append(
@@ -1222,23 +1246,32 @@ def validate_no_job_env_rustflags_with_setup_rust(
     return errors
 
 
-# One `<name>:` entry under an action's `inputs:` block — the same two-space,
-# name-then-colon-then-nothing-else shape JOB_HEADING matches for workflow
-# jobs, but kept as its own pattern: action.yml has no `jobs:` section, and
-# reusing JOB_HEADING here would conflate the two headings the moment either
-# one's shape changes for its own reason.
 RUST_BOOTSTRAP_PATTERNS = (
+    # Raw rustup bootstraps.
     "sh.rustup.rs",
     "rustup-init",
     "rustup toolchain install",
+    # Third-party toolchain actions. The composite is the only sanctioned
+    # installer, so a workflow reaching for a different vendor action is the
+    # same drift as a curl bootstrap: unpinned toolchain, no mold, no
+    # rust-toolchain.toml sync. (`dtolnay/rust-toolchain` has its own check
+    # with a more specific message; it is deliberately not repeated here.)
+    "actions-rs/toolchain",
+    "actions-rust-lang/setup-rust-toolchain",
+    "hecrj/setup-rust-action",
+    "raftario/setup-rust-action",
 )
-# cargo-dist regenerates .github/workflows/ironclaw-release.yml wholesale
-# (see [workspace.metadata.dist], cargo-dist-version 0.31.0), so its
-# container-only bootstrap cannot be migrated onto the composite without
-# being clobbered on the next regeneration. It is therefore an ACCEPTED
-# exception, pinned to one occurrence: a second bootstrap appearing there,
-# or any bootstrap in a hand-written workflow, fails this gate.
-ACCEPTED_RUST_BOOTSTRAPS = {".github/workflows/ironclaw-release.yml": 1}
+# Residual risk, named rather than papered over: a job whose `container:`
+# image ships Rust preinstalled installs nothing, so no text pattern can see
+# it. Such a job would silently build on the image's toolchain instead of the
+# pin. Nothing in .github/workflows does this today; if one appears it needs a
+# structural check (assert every Rust-building job calls the composite), not a
+# wider substring list.
+# No workflow may bootstrap Rust outside the composite. cargo-dist
+# re-includes .github/dist-build-setup.yml on every regeneration, so the
+# release build jobs install Rust through the composite from there — there
+# is no lane this contract cannot cover.
+ACCEPTED_RUST_BOOTSTRAPS: dict[str, int] = {}
 
 
 def validate_no_unmanaged_rust_bootstrap(workflows: dict[str, str]) -> list[str]:
