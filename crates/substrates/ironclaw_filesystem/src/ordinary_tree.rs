@@ -60,9 +60,10 @@ fn open_directory_no_follow(path: &std::path::Path) -> io::Result<Dir> {
 /// Reads a regular host file through a no-follow descriptor open.
 ///
 /// The parent is retained as a directory capability, the final component is
-/// opened without following symlinks, and file type is verified from the open
-/// handle before any bytes are read.
-pub fn read_ordinary_host_file(path: &HostPath) -> io::Result<Vec<u8>> {
+/// opened without following symlinks, and file type and caller-supplied byte
+/// limit are verified from the open handle before any bytes are read. The
+/// limit is enforced again while reading so concurrent growth stays bounded.
+pub fn read_ordinary_host_file(path: &HostPath, max_bytes: usize) -> io::Result<Vec<u8>> {
     let path = path.as_path();
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
@@ -93,7 +94,7 @@ pub fn read_ordinary_host_file(path: &HostPath) -> io::Result<Vec<u8>> {
     }
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
-    let mut file = parent
+    let file = parent
         .directory()
         .open_with(file_name, &options)
         .map_err(|error| with_context("open ordinary host file without following links", error))?;
@@ -105,9 +106,31 @@ pub fn read_ordinary_host_file(path: &HostPath) -> io::Result<Vec<u8>> {
             "ordinary host file is a symlink or non-regular entry",
         ));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if metadata.len() > max_bytes_u64 {
+        return Err(invalid_tree("ordinary host file exceeds byte limit"));
+    }
+    read_to_end_bounded(
+        file,
+        max_bytes,
+        usize::try_from(metadata.len()).unwrap_or(max_bytes),
+    )
+}
+
+fn read_to_end_bounded(
+    reader: impl std::io::Read,
+    max_bytes: usize,
+    initial_capacity: usize,
+) -> io::Result<Vec<u8>> {
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let mut bytes = Vec::with_capacity(initial_capacity.min(max_bytes));
+    reader
+        .take(max_bytes_u64.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| with_context("read opened ordinary host file", error))?;
+    if bytes.len() > max_bytes {
+        return Err(invalid_tree("ordinary host file exceeds byte limit"));
+    }
     Ok(bytes)
 }
 
@@ -210,7 +233,18 @@ mod tests {
 
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::{ensure_same_directory, inspect_directory_with_hook};
+    use super::{ensure_same_directory, inspect_directory_with_hook, read_to_end_bounded};
+
+    #[test]
+    fn bounded_read_rejects_bytes_added_after_the_metadata_check() {
+        let reader = std::io::Cursor::new(b"12345");
+
+        let error = read_to_end_bounded(reader, 4, 4)
+            .expect_err("post-metadata growth must stay within the caller's byte limit");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("byte limit"), "{error}");
+    }
 
     #[test]
     fn directory_identity_check_rejects_different_handles() {

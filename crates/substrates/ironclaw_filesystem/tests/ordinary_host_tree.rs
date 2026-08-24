@@ -103,8 +103,21 @@ fn ordinary_host_file_read_rejects_a_symlink_instead_of_following_it() {
     let selected = temp.path().join("selected.txt");
     symlink(&outside, &selected).expect("selected symlink");
 
-    let error = read_ordinary_host_file(&HostPath::from_path_buf(selected))
+    let error = read_ordinary_host_file(&HostPath::from_path_buf(selected), 1024)
         .expect_err("verified read must not follow a replacement symlink");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("symlink"), "{error}");
+}
+
+#[test]
+fn ordinary_host_file_read_rejects_bytes_beyond_the_caller_limit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let selected = temp.path().join("selected.txt");
+    std::fs::write(&selected, b"12345").expect("oversized selected file");
+
+    let error = read_ordinary_host_file(&HostPath::from_path_buf(selected), 4)
+        .expect_err("verified read must stay within the caller's byte limit");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("byte limit"), "{error}");
 }

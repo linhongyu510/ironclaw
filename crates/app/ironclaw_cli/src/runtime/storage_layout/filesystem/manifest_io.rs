@@ -7,23 +7,68 @@ pub(in super::super) fn write_manifest_last(
 ) -> anyhow::Result<()> {
     let manifest_path = home.join(LAYOUT_MANIFEST_FILE);
     if manifest_path.exists() {
-        let existing = read_manifest(&manifest_path)?;
-        if existing == *manifest {
-            return Ok(());
-        }
-        bail!(
-            "refusing to replace existing layout manifest at {}",
-            manifest_path.display()
-        );
+        return converge_concurrent_manifest(&manifest_path, manifest);
     }
     let contents = toml::to_string(manifest).context("serialize durable layout manifest")?;
     match write_atomic_synced(&manifest_path, &contents, false) {
         Ok(()) => Ok(()),
-        Err(create_error) => match read_manifest(&manifest_path) {
-            Ok(existing) if existing == *manifest => Ok(()),
-            _ => Err(create_error),
-        },
+        Err(create_error) => {
+            converge_concurrent_manifest(&manifest_path, manifest).map_err(|_| create_error)
+        }
     }
+}
+
+fn converge_concurrent_manifest(path: &Path, target: &LayoutManifest) -> anyhow::Result<()> {
+    let existing = read_manifest(path)?;
+    if existing == *target {
+        return Ok(());
+    }
+    admit_manifest(&existing, target.requirement())?;
+    let strengthened = existing
+        .clone()
+        .with_stronger_workspace_access_floor(target.requirement().security.workspace_access_floor);
+    if strengthened != *target {
+        bail!(
+            "refusing to replace existing layout manifest at {}",
+            path.display()
+        );
+    }
+    replace_manifest(path, &strengthened)?;
+    let persisted = read_manifest(path)?;
+    if persisted != strengthened {
+        bail!(
+            "concurrent layout manifest update at {} did not preserve the strongest admitted workspace floor",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(in super::super) fn admit_and_upgrade_manifest(
+    path: &Path,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<LayoutManifest> {
+    let existing = read_manifest(path)?;
+    admit_manifest(&existing, requirement)?;
+    let strengthened = existing
+        .clone()
+        .with_stronger_workspace_access_floor(requirement.security.workspace_access_floor);
+    if strengthened == existing {
+        return Ok(existing);
+    }
+    // WorkspaceAccessFloor has one strengthening edge. Every writer reaching
+    // this branch therefore publishes the same stronger value, so atomic
+    // replacement cannot lose a concurrent update or reintroduce the weak
+    // floor; a racing weak admission never writes.
+    replace_manifest(path, &strengthened)?;
+    let persisted = read_manifest(path)?;
+    admit_manifest(&persisted, requirement)?;
+    Ok(persisted)
+}
+
+fn replace_manifest(path: &Path, manifest: &LayoutManifest) -> anyhow::Result<()> {
+    let contents = toml::to_string(manifest).context("serialize durable layout manifest")?;
+    write_atomic_synced(path, &contents, true)
 }
 
 pub(in super::super) fn read_manifest(path: &Path) -> anyhow::Result<LayoutManifest> {

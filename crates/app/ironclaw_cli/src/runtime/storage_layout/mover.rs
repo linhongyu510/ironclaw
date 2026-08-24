@@ -39,6 +39,10 @@ pub(crate) fn migrate_legacy_layout(
     admit_manifest(&LayoutManifest::new(winner.kind.requirement()), requirement)?;
 
     let _lock = acquire_named_lock(home_path, MIGRATION_LOCK_FILE, "storage layout migration")?;
+    if home_path.join(LAYOUT_MANIFEST_FILE).exists() || migration_record_path(&paths).exists() {
+        ensure_ready_layout(home, requirement)?;
+        return Ok(());
+    }
     // Classification happened before the lock; re-read every source invariant
     // under it so a competing replica cannot race the selection.
     let relisted = inspect_legacy_candidates(home_path)?;

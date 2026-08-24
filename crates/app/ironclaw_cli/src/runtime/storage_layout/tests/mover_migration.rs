@@ -61,6 +61,92 @@ fn local_dev_home_migrates_into_canonical_layout_and_reopens() {
 }
 
 #[test]
+fn stale_prelock_candidates_readmit_a_layout_completed_by_another_migrator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let stale_candidates = classify(&home, requirement);
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        stale_candidates.clone(),
+    )
+    .expect("first migrator completes");
+
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        stale_candidates,
+    )
+    .expect("second migrator re-admits the ready layout under the lock");
+    ensure_ready_layout(&home, requirement).expect("completed layout remains ready");
+}
+
+#[test]
+fn stale_prelock_candidates_recover_a_complete_record_without_a_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let requirement = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let stale_candidates = classify(&home, requirement);
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        stale_candidates.clone(),
+    )
+    .expect("first migrator completes");
+    fs::remove_file(temp.path().join(LAYOUT_MANIFEST_FILE))
+        .expect("simulate complete-record crash window");
+
+    migrate_legacy_layout(
+        &home,
+        requirement,
+        StorageMigrationPolicy::Automatic,
+        stale_candidates,
+    )
+    .expect("second migrator recovers the completed record under the lock");
+    ensure_ready_layout(&home, requirement).expect("recovered layout remains ready");
+}
+
+#[test]
+fn migrated_layout_provenance_allows_only_a_monotonic_workspace_floor_upgrade() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let weak = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let candidates = classify(&home, weak);
+    migrate_legacy_layout(&home, weak, StorageMigrationPolicy::Automatic, candidates)
+        .expect("migration");
+    let strong = LayoutRequirement {
+        security: DeploymentSecurityEnvelope {
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            ..weak.security
+        },
+        ..weak
+    };
+
+    ensure_ready_layout(&home, strong).expect("migrated manifest floor strengthens");
+    let error = ensure_ready_layout(&home, weak)
+        .expect_err("migration provenance must not make the floor weakenable again");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace access floor cannot weaken"),
+        "unexpected admission error: {error:#}"
+    );
+}
+
+#[test]
 fn completed_migration_record_republishes_its_exact_manifest_after_crash_window() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
@@ -87,6 +173,45 @@ fn completed_migration_record_republishes_its_exact_manifest_after_crash_window(
     assert_eq!(
         read_manifest(&manifest_path).expect("republished manifest"),
         expected
+    );
+}
+
+#[test]
+fn completed_record_recovery_strengthens_only_the_workspace_floor() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let weak = embedded_single_user_requirement();
+    let legacy = temp.path().join("local-dev");
+    seed_legacy_embedded_store(&legacy);
+
+    let candidates = classify(&home, weak);
+    migrate_legacy_layout(&home, weak, StorageMigrationPolicy::Automatic, candidates)
+        .expect("migration");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    let recorded = read_manifest(&manifest_path).expect("recorded manifest");
+    fs::remove_file(&manifest_path).expect("simulate crash before manifest publication");
+    let strong = LayoutRequirement {
+        security: DeploymentSecurityEnvelope {
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            ..weak.security
+        },
+        ..weak
+    };
+
+    admit_startup_layout(&home, strong).expect("recover with the stronger floor");
+
+    assert_eq!(
+        read_manifest(&manifest_path).expect("strengthened recovered manifest"),
+        recorded.with_stronger_workspace_access_floor(WorkspaceAccessFloor::PerCallerIsolated),
+        "recovery must preserve every recorded provenance field except the allowed floor edge"
+    );
+    let error = admit_startup_layout(&home, weak)
+        .expect_err("a later weak reopen must not lower the recovered floor");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace access floor cannot weaken"),
+        "{error:#}"
     );
 }
 
@@ -518,29 +643,33 @@ fn migration_refuses_while_another_process_holds_the_legacy_database() {
     while !ready.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        ready.is_file(),
-        "db lock holder reached its critical section"
-    );
+    if !ready.is_file() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("db lock holder reached its critical section");
+    }
 
     let candidates = classify(&home, requirement);
-    let error = migrate_legacy_layout(
+    let migration_result = migrate_legacy_layout(
         &home,
         requirement,
         StorageMigrationPolicy::Automatic,
         candidates,
-    )
-    .expect_err("a live database holder must block migration");
+    );
+    let legacy_database_remains = legacy.join(DB_FILE).is_file();
+    let manifest_was_published = temp.path().join(LAYOUT_MANIFEST_FILE).exists();
+
+    fs::write(&release, b"release").expect("release db lock holder");
+    let status = child.wait().expect("wait for released db lock holder");
+
+    let error = migration_result.expect_err("a live database holder must block migration");
 
     assert!(
         error.to_string().contains("another ironclaw process"),
         "{error:#}"
     );
-    assert!(legacy.join(DB_FILE).is_file());
-    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
-
-    fs::write(&release, b"release").expect("release db lock holder");
-    let status = child.wait().expect("wait for released db lock holder");
+    assert!(legacy_database_remains);
+    assert!(!manifest_was_published);
     assert!(status.success(), "db lock holder exits cleanly");
 
     let candidates = classify(&home, requirement);

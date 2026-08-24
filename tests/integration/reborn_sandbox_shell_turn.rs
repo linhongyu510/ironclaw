@@ -15,6 +15,7 @@ mod user_sandbox_live;
 
 use ironclaw_host_api::ids::{InvocationId, TenantId, TenantUserWorkspaceKey, UserId};
 use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::group::GroupCapability;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 use user_sandbox_live::{
@@ -26,6 +27,21 @@ const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const LEAF_ONLY_MARKER: &str = "SANDBOX_CANONICAL_LEAF_ONLY";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
+
+#[tokio::test]
+async fn sandbox_shell_backend_uses_canonical_binding_actor() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_sandbox_shell_tools()
+        .build()
+        .await
+        .expect("sandbox shell harness builds without starting a container");
+    let capability = match &harness._shared.capability {
+        GroupCapability::HostRuntime(capability) => capability,
+        _ => panic!("sandbox shell selected unexpected capability backend"),
+    };
+
+    assert_eq!(capability.user_id(), &harness.binding.actor_user_id);
+}
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {

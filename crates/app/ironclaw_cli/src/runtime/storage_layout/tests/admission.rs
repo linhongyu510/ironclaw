@@ -148,6 +148,56 @@ fn concurrent_fresh_initializers_admit_the_identical_manifest() {
 }
 
 #[test]
+fn concurrent_workspace_floor_admissions_never_overwrite_a_stronger_floor() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let weak = embedded_single_user_requirement();
+    let strong = LayoutRequirement {
+        security: DeploymentSecurityEnvelope {
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            ..weak.security
+        },
+        ..weak
+    };
+    ensure_ready_layout(&home, weak).expect("initialize weak workspace floor");
+    let root = Arc::new(temp.path().to_path_buf());
+    let barrier = Arc::new(Barrier::new(16));
+    let mut workers = Vec::new();
+    for worker in 0..16 {
+        let root = Arc::clone(&root);
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let home = reborn_home(root.as_ref());
+            barrier.wait();
+            ensure_ready_layout(&home, if worker % 2 == 0 { strong } else { weak })
+        }));
+    }
+    for (worker, result) in workers.into_iter().enumerate() {
+        let result = result.join().expect("admission thread");
+        if worker % 2 == 0 {
+            result.expect("every stronger admission succeeds");
+        } else if let Err(error) = result {
+            assert!(
+                error
+                    .to_string()
+                    .contains("workspace access floor cannot weaken"),
+                "a racing weak admission may only lose to the stronger floor: {error:#}"
+            );
+        }
+    }
+
+    let manifest = read_manifest(&root.join(LAYOUT_MANIFEST_FILE)).expect("upgraded manifest");
+    assert_eq!(
+        manifest.requirement().security.workspace_access_floor,
+        WorkspaceAccessFloor::PerCallerIsolated,
+        "the final durable floor must be the strongest admitted requirement"
+    );
+    ensure_ready_layout(&home, weak).expect_err("the stronger floor remains monotonic");
+}
+
+#[test]
 fn fresh_home_initialization_resumes_after_partial_empty_namespace_creation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
@@ -195,6 +245,31 @@ fn dry_run_layout_admission_refuses_a_fresh_home_without_creating_namespaces() {
 }
 
 #[test]
+fn dry_run_stronger_requirement_leaves_a_ready_manifest_byte_unchanged() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let weak = embedded_single_user_requirement();
+    ensure_ready_layout(&home, weak).expect("initialize weak layout");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    let before = fs::read(&manifest_path).expect("manifest bytes before inspection");
+    let strong = LayoutRequirement {
+        security: DeploymentSecurityEnvelope {
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            ..weak.security
+        },
+        ..weak
+    };
+
+    inspect_ready_layout(&home, strong).expect("stronger requirement is safe to inspect");
+
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest bytes after inspection"),
+        before,
+        "dry-run inspection must never persist an otherwise valid upgrade"
+    );
+}
+
+#[test]
 fn ready_manifest_requires_every_canonical_namespace_to_remain_an_ordinary_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = reborn_home(temp.path());
@@ -206,6 +281,33 @@ fn ready_manifest_requires_every_canonical_namespace_to_remain_an_ordinary_direc
         .expect_err("a ready manifest without state must fail closed");
 
     assert!(error.to_string().contains("state"), "{error:#}");
+}
+
+#[test]
+fn invalid_namespace_blocks_workspace_floor_upgrade_without_mutating_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = reborn_home(temp.path());
+    let weak = embedded_single_user_requirement();
+    ensure_ready_layout(&home, weak).expect("initialize weak layout");
+    let manifest_path = temp.path().join(LAYOUT_MANIFEST_FILE);
+    let before = fs::read(&manifest_path).expect("weak manifest bytes");
+    fs::remove_dir_all(temp.path().join("state")).expect("remove state namespace");
+    let strong = LayoutRequirement {
+        security: DeploymentSecurityEnvelope {
+            workspace_access_floor: WorkspaceAccessFloor::PerCallerIsolated,
+            ..weak.security
+        },
+        ..weak
+    };
+
+    let error = ensure_ready_layout(&home, strong)
+        .expect_err("unsafe namespaces must fail before a manifest upgrade");
+
+    assert!(error.to_string().contains("state"), "{error:#}");
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest after rejected admission"),
+        before
+    );
 }
 
 #[test]

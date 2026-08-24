@@ -2861,21 +2861,6 @@ mod tests {
                 .contains("sandbox shell harness executes real containers")
         );
     }
-
-    #[tokio::test]
-    async fn sandbox_shell_backend_uses_canonical_binding_actor() {
-        let harness = RebornIntegrationHarness::test_default()
-            .with_sandbox_shell_tools()
-            .build()
-            .await
-            .expect("sandbox shell harness builds without starting a container");
-        let capability = match &harness._shared.capability {
-            GroupCapability::HostRuntime(capability) => capability,
-            _ => panic!("sandbox shell selected unexpected capability backend"),
-        };
-
-        assert_eq!(capability.user_id(), &harness.binding.actor_user_id);
-    }
 }
 
 // The shared planned-runtime assembly (`RebornIntegrationGroupBuilder::into_group`)

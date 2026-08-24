@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::path::{HostPath, VirtualPath};
+use ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES;
 
 use crate::RebornBuildError;
 use crate::root::default_system_prompt::seed_default_system_prompt;
@@ -319,8 +320,11 @@ fn snapshot_io_error(context: &str, path: &Path, error: std::io::Error) -> Rebor
 }
 
 fn read_legacy_skill_snapshot_file(path: &Path) -> Result<Vec<u8>, RebornBuildError> {
-    ironclaw_filesystem::read_ordinary_host_file(&HostPath::from_path_buf(path.to_path_buf()))
-        .map_err(|error| snapshot_io_error("read legacy skill snapshot file", path, error))
+    ironclaw_filesystem::read_ordinary_host_file(
+        &HostPath::from_path_buf(path.to_path_buf()),
+        MAX_INSTALL_BUNDLE_FILE_BYTES,
+    )
+    .map_err(|error| snapshot_io_error("read legacy skill snapshot file", path, error))
 }
 
 /// Initializes standalone host content after storage roots are prepared.

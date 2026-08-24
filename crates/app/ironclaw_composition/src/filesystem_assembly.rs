@@ -154,44 +154,37 @@ fn host_disk_filesystem(
     admitted: Option<&HostDiskMountCapabilities>,
 ) -> Result<DiskFilesystem, RebornBuildError> {
     let mut filesystem = DiskFilesystem::new();
-    if let Some(admitted) = admitted {
-        filesystem.mount_local_capability(
-            VirtualPath::new("/projects/workspace")?,
-            HostPath::from_path_buf(workspace_root.to_path_buf()),
-            admitted.workspace.clone(),
-        )?;
-        filesystem.mount_local_capability(
-            VirtualPath::new("/system/extensions")?,
-            HostPath::from_path_buf(system_root.join("extensions")),
-            admitted.system_extensions.clone(),
-        )?;
-        filesystem.mount_local_capability(
-            VirtualPath::new("/system/prompts")?,
-            HostPath::from_path_buf(system_root.join("prompts")),
-            admitted.system_prompts.clone(),
-        )?;
-        filesystem.mount_local_capability(
-            VirtualPath::new("/system/skills")?,
-            HostPath::from_path_buf(system_root.join("skills")),
-            admitted.system_skills.clone(),
-        )?;
-    } else {
-        filesystem.mount_local(
-            VirtualPath::new("/projects/workspace")?,
-            HostPath::from_path_buf(workspace_root.to_path_buf()),
-        )?;
-        filesystem.mount_local(
-            VirtualPath::new("/system/extensions")?,
-            HostPath::from_path_buf(system_root.join("extensions")),
-        )?;
-        filesystem.mount_local(
-            VirtualPath::new("/system/prompts")?,
-            HostPath::from_path_buf(system_root.join("prompts")),
-        )?;
-        filesystem.mount_local(
-            VirtualPath::new("/system/skills")?,
-            HostPath::from_path_buf(system_root.join("skills")),
-        )?;
+    let roots = [
+        (
+            "/projects/workspace",
+            workspace_root.to_path_buf(),
+            admitted.map(|mounts| mounts.workspace.clone()),
+        ),
+        (
+            "/system/extensions",
+            system_root.join("extensions"),
+            admitted.map(|mounts| mounts.system_extensions.clone()),
+        ),
+        (
+            "/system/prompts",
+            system_root.join("prompts"),
+            admitted.map(|mounts| mounts.system_prompts.clone()),
+        ),
+        (
+            "/system/skills",
+            system_root.join("skills"),
+            admitted.map(|mounts| mounts.system_skills.clone()),
+        ),
+    ];
+    for (virtual_root, host_root, capability) in roots {
+        let virtual_root = VirtualPath::new(virtual_root)?;
+        let host_root = HostPath::from_path_buf(host_root);
+        match capability {
+            Some(capability) => {
+                filesystem.mount_local_capability(virtual_root, host_root, capability)?;
+            }
+            None => filesystem.mount_local(virtual_root, host_root)?,
+        }
     }
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(

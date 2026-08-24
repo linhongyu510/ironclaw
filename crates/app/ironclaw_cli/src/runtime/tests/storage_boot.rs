@@ -188,6 +188,26 @@ fn command_admission_uses_the_config_file_sandboxed_profile_requirement() {
 }
 
 #[test]
+fn run_first_then_serve_durably_upgrades_the_workspace_floor_and_rejects_later_run() {
+    let _lock = lock_runtime_env();
+    let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+    super::ensure_startup_layout(&config, RebornProfile::Standalone, false)
+        .expect("run-first admission initializes the standalone layout");
+    super::ensure_startup_layout(&config, RebornProfile::Standalone, true)
+        .expect("serve admission strengthens the established layout");
+
+    let error = super::ensure_startup_layout(&config, RebornProfile::Standalone, false)
+        .expect_err("a later run must not weaken the served layout's durable floor");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace access floor cannot weaken"),
+        "unexpected admission error: {error:#}"
+    );
+}
+
+#[test]
 fn automatic_startup_rejects_unsafe_legacy_shapes_without_mutation() {
     let _lock = lock_runtime_env();
     let _policy = EnvGuard::clear(super::storage_layout::StorageMigrationPolicy::ENV);

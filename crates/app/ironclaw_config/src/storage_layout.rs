@@ -327,6 +327,18 @@ impl LayoutManifest {
         }
     }
 
+    /// Return this manifest with its workspace-access floor raised to the
+    /// requested value. The transition is deliberately monotonic: asking for
+    /// the weaker floor can never lower an already isolated manifest.
+    pub fn with_stronger_workspace_access_floor(mut self, requested: WorkspaceAccessFloor) -> Self {
+        if self.security.workspace_access_floor == WorkspaceAccessFloor::SingleTrustedOperator
+            && requested == WorkspaceAccessFloor::PerCallerIsolated
+        {
+            self.security.workspace_access_floor = requested;
+        }
+        self
+    }
+
     /// Admit only deployments that preserve the layout's durable assumptions.
     pub fn admit(&self, requested: LayoutRequirement) -> ProfileTransitionAdmission {
         let stored = self.requirement();

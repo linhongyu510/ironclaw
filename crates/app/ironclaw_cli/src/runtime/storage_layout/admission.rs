@@ -31,7 +31,10 @@ pub(crate) fn admit_startup_layout(
         }
         admit_manifest(&record.target_manifest, requirement)?;
         validate_ready_namespace_roots(&paths)?;
-        write_manifest_last(home_path, &record.target_manifest)?;
+        let recovered_manifest = record
+            .target_manifest
+            .with_stronger_workspace_access_floor(requirement.security.workspace_access_floor);
+        write_manifest_last(home_path, &recovered_manifest)?;
         return Ok(StartupLayoutAdmission::Ready(paths));
     }
 
@@ -80,7 +83,7 @@ pub(crate) fn inspect_ready_layout(
             home.path().display()
         );
     }
-    admit_existing_manifest(&manifest_path, &paths, requirement)?;
+    validate_existing_manifest(&manifest_path, &paths, requirement)?;
     Ok(paths)
 }
 
@@ -91,19 +94,57 @@ fn admit_existing_manifest(
     paths: &RebornStoragePaths,
     requirement: LayoutRequirement,
 ) -> anyhow::Result<()> {
-    let manifest = read_manifest(manifest_path)?;
+    validate_existing_manifest(manifest_path, paths, requirement)?;
+    let manifest = admit_and_upgrade_manifest(manifest_path, requirement)?;
     let record_path = migration_record_path(paths);
     if record_path.exists() {
         let record = read_migration_record(&record_path)?;
-        if record.phase != MigrationPhase::Complete || record.target_manifest != manifest {
+        if !completed_record_admits_manifest_upgrade(&record, &manifest) {
             bail!(
                 "ready layout manifest and migration record disagree at {}; refusing to open durable state",
                 record_path.display()
             );
         }
     }
+    Ok(())
+}
+
+fn validate_existing_manifest(
+    manifest_path: &Path,
+    paths: &RebornStoragePaths,
+    requirement: LayoutRequirement,
+) -> anyhow::Result<LayoutManifest> {
+    let manifest = read_manifest(manifest_path)?;
+    let record_path = migration_record_path(paths);
+    let record = record_path
+        .exists()
+        .then(|| read_migration_record(&record_path))
+        .transpose()?;
+    if let Some(record) = &record
+        && !completed_record_admits_manifest_upgrade(record, &manifest)
+    {
+        bail!(
+            "ready layout manifest and migration record disagree at {}; refusing to open durable state",
+            record_path.display()
+        );
+    }
     admit_manifest(&manifest, requirement)?;
-    validate_ready_namespace_roots(paths)
+    validate_ready_namespace_roots(paths)?;
+    Ok(manifest)
+}
+
+fn completed_record_admits_manifest_upgrade(
+    record: &MigrationRecord,
+    manifest: &LayoutManifest,
+) -> bool {
+    record.phase == MigrationPhase::Complete
+        && record
+            .target_manifest
+            .clone()
+            .with_stronger_workspace_access_floor(
+                manifest.requirement().security.workspace_access_floor,
+            )
+            == *manifest
 }
 
 fn validate_ready_namespace_roots(paths: &RebornStoragePaths) -> anyhow::Result<()> {

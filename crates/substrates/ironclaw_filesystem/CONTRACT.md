@@ -80,7 +80,9 @@ boundary. The current rule is codified in
   grammar remains in the app/domain that owns it.
   `read_ordinary_host_file` performs the paired descriptor-relative no-follow
   open, verifies regular-file metadata from the opened handle, and reads only
-  through that handle so later path replacement cannot redirect the bytes.
+  through that handle so later path replacement cannot redirect the bytes. Its
+  caller supplies a byte limit that is checked against opened-file metadata
+  and enforced again during the read to bound concurrent file growth.
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
   wrap the real backend in it (`SecretStore::ephemeral_over`,

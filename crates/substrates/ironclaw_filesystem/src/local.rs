@@ -446,7 +446,7 @@ impl RootFilesystem for DiskFilesystem {
                 })?;
         let mut entries = Vec::new();
         for entry in raw_entries {
-            let name = entry.name.to_string_lossy().to_string();
+            let name = directory_entry_name(path, &entry.name)?;
             let entry_path =
                 VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
             entries.push(DirEntry {
@@ -614,6 +614,19 @@ fn file_type_from_capability(file_type: CapabilityFileType) -> FileType {
     }
 }
 
+fn directory_entry_name(
+    path: &VirtualPath,
+    name: &std::ffi::OsStr,
+) -> Result<String, FilesystemError> {
+    name.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ListDir,
+            reason: "directory entry name is not valid UTF-8".to_string(),
+        })
+}
+
 fn validate_local_atomic_subtree(
     prefix: &VirtualPath,
     entries: &[AtomicSubtreeEntry],
@@ -659,6 +672,25 @@ fn io_reason(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unpaged_listing_name_conversion_rejects_non_utf8() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = VirtualPath::new("/projects").unwrap();
+        let invalid_name = std::ffi::OsString::from_vec(b"invalid-\xff".to_vec());
+        let error = directory_entry_name(&path, &invalid_name)
+            .expect_err("unpaged listing names must round-trip through String");
+
+        assert!(matches!(
+            error,
+            FilesystemError::Backend {
+                operation: FilesystemOperation::ListDir,
+                ..
+            }
+        ));
+    }
     use tempfile::tempdir;
 
     #[cfg(unix)]
@@ -939,7 +971,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn paginated_listing_rejects_non_utf8_child_names() {
+    async fn directory_listings_reject_non_utf8_child_names() {
         use std::os::unix::ffi::OsStringExt as _;
 
         let storage = tempdir().unwrap();
@@ -957,6 +989,22 @@ mod tests {
             .list_dir_page(&VirtualPath::new("/projects").unwrap(), None, 10)
             .await
             .expect_err("pagination must reject names that cannot round-trip through String");
+
+        assert!(
+            matches!(
+                error,
+                FilesystemError::Backend {
+                    operation: FilesystemOperation::ListDir,
+                    ..
+                }
+            ),
+            "expected invalid directory data, got: {error:?}"
+        );
+
+        let error = root
+            .list_dir(&VirtualPath::new("/projects").unwrap())
+            .await
+            .expect_err("unpaged listing must reject names that cannot round-trip through String");
 
         assert!(
             matches!(
