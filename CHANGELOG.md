@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-24
+
+### Fixed
+
+- Telegram workspace-bot pairing is independent from personal-device linking,
+  so installing or activating the bot channel no longer requires a personal
+  Telegram credential.
+- Paired Telegram channels remain ready across activation checks, and streaming
+  reply drafts collapse into the final delivered reply instead of appearing as
+  duplicate messages.
+- `IRONCLAW_REBORN_WORKSPACE_ROOT` is honored by both CLI boot paths. The Docker
+  runtime defaults it beneath `IRONCLAW_REBORN_HOME` and rejects Railway roots
+  that resolve outside the mounted volume, keeping workspace artifacts durable
+  across redeploys.
+- The 1.3 maintenance branch builds cleanly with the Clippy lints promoted in
+  Rust 1.98 while remaining compatible with the release image's pinned Rust
+  toolchain.
+
 ## [1.3.0] - 2026-08-19
 
 Stable promotion of `1.3.0-rc.2`, including the upgrade and container fixes
