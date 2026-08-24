@@ -11,6 +11,7 @@ from pathlib import Path
 
 import ws12_workflow_contracts
 from ws12_workflow_contracts import (
+    validate_release_workflow_installs_rust,
     validate_no_unmanaged_rust_bootstrap,
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
@@ -401,6 +402,69 @@ class UnmanagedRustBootstrapTests(unittest.TestCase):
     def test_live_workflows_hold_the_contract(self):
         workflows = ws12_workflow_contracts.load_workflows(ROOT)
         self.assertEqual([], validate_no_unmanaged_rust_bootstrap(workflows))
+
+
+
+class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
+    """The release lane must REACH the composite, not merely lack a bootstrap.
+
+    Every sibling check asserts an absence. That let a release workflow with
+    no Rust install at all pass the entire suite: the old `curl | sh` step was
+    deleted and its replacement went only into the cargo-dist fragment, which
+    reaches the generated file solely via `dist generate`. Container builds
+    would have died on `cargo: command not found`.
+    """
+
+    STEP = "uses: ./.github/actions/setup-rust"
+
+    def test_missing_step_in_the_generated_workflow_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- {self.STEP}\n", encoding="utf-8"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": "jobs:\n  build:\n"},
+                root,
+            )
+            self.assertTrue(
+                any("ironclaw-release.yml" in e for e in errors), errors
+            )
+
+    def test_missing_step_in_the_fragment_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                "- name: Something else\n", encoding="utf-8"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": f"      - {self.STEP}\n"},
+                root,
+            )
+            self.assertTrue(
+                any("dist-build-setup.yml" in e for e in errors), errors
+            )
+
+    def test_both_present_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- {self.STEP}\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                [],
+                validate_release_workflow_installs_rust(
+                    {".github/workflows/ironclaw-release.yml": f"      - {self.STEP}\n"},
+                    root,
+                ),
+            )
+
+    def test_the_live_release_lane_reaches_the_composite(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual([], validate_release_workflow_installs_rust(workflows, ROOT))
 
 
 class ToolchainPinSyncTests(unittest.TestCase):
