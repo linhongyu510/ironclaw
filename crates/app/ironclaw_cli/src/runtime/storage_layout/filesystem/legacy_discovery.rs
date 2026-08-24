@@ -29,9 +29,9 @@ pub(in super::super) fn inspect_legacy_candidates(
 
     let mut candidates = Vec::new();
     for kind in [
-        LegacySourceKind::LocalDev,
-        LegacySourceKind::HostedSingleTenant,
-        LegacySourceKind::HostedSingleTenantVolume,
+        LegacyStorageSource::LocalDev,
+        LegacyStorageSource::HostedSingleTenant,
+        LegacyStorageSource::HostedSingleTenantVolume,
     ] {
         let candidate = inspect_profile_root(home, kind)?;
         if let Some(candidate) = candidate {
@@ -97,7 +97,7 @@ fn validate_unmanifested_home_shape(home: &Path) -> anyhow::Result<()> {
 
 pub(in super::super) fn inspect_profile_root(
     home: &Path,
-    kind: LegacySourceKind,
+    kind: LegacyStorageSource,
 ) -> anyhow::Result<Option<LegacyCandidate>> {
     let directory = kind
         .profile_directory()
@@ -127,12 +127,10 @@ pub(in super::super) fn inspect_profile_root(
             has_master_key = true;
         } else if name == "system" {
             require_ordinary_directory(&path)?;
-            has_system_content = system_tree_has_content(&path)?;
-            validate_system_tree(&path)?;
+            has_system_content = validate_system_tree(&path)?;
         } else if name == "skills" {
             require_ordinary_directory(&path)?;
-            validate_ordinary_tree(&path)?;
-            has_legacy_skills |= directory_has_content(&path)?;
+            has_legacy_skills |= validate_ordinary_tree(&path)?;
         } else if name == "tenants" {
             require_ordinary_directory(&path)?;
             has_legacy_skills |= validate_legacy_tenant_skill_tree(&path)?;
@@ -159,7 +157,7 @@ pub(in super::super) fn inspect_profile_root(
     if !populated {
         return Ok(None);
     }
-    if kind == LegacySourceKind::HostedSingleTenant {
+    if kind == LegacyStorageSource::HostedSingleTenant {
         if !db_files.is_empty() || has_master_key {
             bail!(
                 "{} is a PostgreSQL/system-content legacy source but contains embedded DB/key files; inspect it manually",
@@ -214,7 +212,7 @@ pub(in super::super) fn inspect_bare_home(home: &Path) -> anyhow::Result<Option<
         );
     }
     Ok(Some(LegacyCandidate {
-        kind: LegacySourceKind::BareHome,
+        kind: LegacyStorageSource::BareHome,
         source_root: home.to_path_buf(),
         db_files,
         has_master_key,
@@ -228,7 +226,7 @@ pub(in super::super) fn unreleased_sandbox_is_populated(path: &Path) -> anyhow::
         return Ok(false);
     }
     require_ordinary_directory(path)?;
-    directory_has_content(path)
+    validate_ordinary_tree(path)
 }
 
 pub(in super::super) fn candidate_paths(candidates: &[LegacyCandidate]) -> String {
@@ -239,8 +237,9 @@ pub(in super::super) fn candidate_paths(candidates: &[LegacyCandidate]) -> Strin
         .join(", ")
 }
 
-pub(in super::super) fn validate_system_tree(root: &Path) -> anyhow::Result<()> {
+pub(in super::super) fn validate_system_tree(root: &Path) -> anyhow::Result<bool> {
     require_ordinary_directory(root)?;
+    let mut has_content = false;
     for entry in
         fs::read_dir(root).with_context(|| format!("read system content {}", root.display()))?
     {
@@ -253,9 +252,9 @@ pub(in super::super) fn validate_system_tree(root: &Path) -> anyhow::Result<()> 
                 root.display()
             );
         }
-        validate_ordinary_tree(&entry.path())?;
+        has_content |= validate_ordinary_tree(&entry.path())?;
     }
-    Ok(())
+    Ok(has_content)
 }
 
 /// Validate the one released host-disk user-skill grammar without accepting
@@ -332,22 +331,9 @@ pub(in super::super) fn validate_legacy_tenant_skill_tree(
                 require_ordinary_directory(&entry.path())?;
             }
             if skills_root.exists() {
-                validate_ordinary_tree(&skills_root)?;
-                has_content |= directory_has_content(&skills_root)?;
+                has_content |= validate_ordinary_tree(&skills_root)?;
             }
         }
     }
     Ok(has_content)
-}
-
-pub(in super::super) fn system_tree_has_content(root: &Path) -> anyhow::Result<bool> {
-    for entry in
-        fs::read_dir(root).with_context(|| format!("read system content {}", root.display()))?
-    {
-        let entry = entry.with_context(|| format!("read system entry under {}", root.display()))?;
-        if directory_has_content(&entry.path())? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

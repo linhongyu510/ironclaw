@@ -58,6 +58,14 @@ pub(in super::super) fn open_directory_no_follow(path: &Path) -> anyhow::Result<
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     options.open(path).with_context(|| {
         format!(
             "open ordinary directory without following links {}",
@@ -75,8 +83,11 @@ pub(in super::super) fn read_utf8_file_no_follow(path: &Path) -> anyhow::Result<
     Ok(contents)
 }
 
-pub(in super::super) fn validate_ordinary_tree(path: &Path) -> anyhow::Result<()> {
-    inspect_ordinary_tree(path).map(|_| ())
+pub(in super::super) fn validate_ordinary_tree(path: &Path) -> anyhow::Result<bool> {
+    ironclaw_filesystem::inspect_ordinary_host_tree(
+        &ironclaw_host_api::path::HostPath::from_path_buf(path.to_path_buf()),
+    )
+    .with_context(|| format!("validate ordinary adoption source tree {}", path.display()))
 }
 
 pub(in super::super) fn require_ordinary_file(path: &Path) -> anyhow::Result<()> {
@@ -120,17 +131,6 @@ pub(in super::super) fn directory_is_empty(path: &Path) -> anyhow::Result<bool> 
         .with_context(|| format!("read directory {}", path.display()))?
         .next()
         .is_none())
-}
-
-pub(in super::super) fn directory_has_content(path: &Path) -> anyhow::Result<bool> {
-    inspect_ordinary_tree(path)
-}
-
-fn inspect_ordinary_tree(path: &Path) -> anyhow::Result<bool> {
-    ironclaw_filesystem::inspect_ordinary_host_tree(
-        &ironclaw_host_api::path::HostPath::from_path_buf(path.to_path_buf()),
-    )
-    .with_context(|| format!("validate ordinary adoption source tree {}", path.display()))
 }
 
 pub(in super::super) fn sync_directory(path: &Path) -> anyhow::Result<()> {

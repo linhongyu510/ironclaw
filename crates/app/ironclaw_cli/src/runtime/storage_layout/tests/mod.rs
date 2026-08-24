@@ -100,18 +100,25 @@ fn advisory_lock_recovers_after_a_terminated_process() {
     while !ready.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(ready.is_file(), "lock holder reached its critical section");
+    if !ready.is_file() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("lock holder reached its critical section");
+    }
     let contention =
-        match acquire_named_lock(&lock_root, MIGRATION_LOCK_FILE, "storage layout migration") {
-            Ok(_) => panic!("live lock holder prevents concurrent migration"),
-            Err(error) => error,
-        };
+        acquire_named_lock(&lock_root, MIGRATION_LOCK_FILE, "storage layout migration");
+    let kill_result = child.kill();
+    let wait_result = child.wait();
+    kill_result.expect("terminate lock holder");
+    let _status = wait_result.expect("reap terminated lock holder");
+    let contention = match contention {
+        Ok(_) => panic!("live lock holder prevents concurrent migration"),
+        Err(error) => error,
+    };
     assert!(
         format!("{contention:#}").contains("storage layout migration"),
         "{contention:#}"
     );
-    child.kill().expect("terminate lock holder");
-    let _status = child.wait().expect("reap terminated lock holder");
 
     let _lock = acquire_named_lock(&lock_root, MIGRATION_LOCK_FILE, "storage layout migration")
         .expect("OS advisory lock is released after a holder process is terminated");

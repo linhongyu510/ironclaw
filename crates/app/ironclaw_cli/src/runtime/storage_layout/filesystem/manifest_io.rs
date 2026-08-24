@@ -1,4 +1,5 @@
 use super::*;
+use ironclaw_filesystem::{CasExpectation, DiskDirectoryCapability};
 
 pub(in super::super) fn write_manifest_last(
     home: &Path,
@@ -51,32 +52,27 @@ pub(in super::super) fn write_atomic_synced(
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
-    require_ordinary_directory(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary file beside {}", path.display()))?;
-    temp.write_all(contents.as_bytes())
-        .with_context(|| format!("write temporary file for {}", path.display()))?;
-    temp.as_file()
-        .sync_all()
-        .with_context(|| format!("sync temporary file for {}", path.display()))?;
-    if replace {
-        temp.persist(path).map_err(|error| {
-            anyhow!(
-                "atomically replace {} with {}: {}",
-                path.display(),
-                error.file.path().display(),
-                error.error
-            )
-        })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path has no file name: {}", path.display()))?;
+    let capability = DiskDirectoryCapability::admit_existing(parent)
+        .with_context(|| format!("admit parent directory for {}", path.display()))?;
+    write_atomic_synced_at(&capability, Path::new(file_name), path, contents, replace)
+}
+
+pub(in super::super) fn write_atomic_synced_at(
+    parent: &DiskDirectoryCapability,
+    relative: &Path,
+    display_path: &Path,
+    contents: &str,
+    replace: bool,
+) -> anyhow::Result<()> {
+    let cas = if replace {
+        CasExpectation::Any
     } else {
-        temp.persist_noclobber(path).map_err(|error| {
-            anyhow!(
-                "atomically create {} from {}: {}",
-                path.display(),
-                error.file.path().display(),
-                error.error
-            )
-        })?;
-    }
-    sync_directory(parent)
+        CasExpectation::Absent
+    };
+    parent
+        .write_file_atomic_synced(relative, contents.as_bytes(), cas)
+        .with_context(|| format!("atomically publish {}", display_path.display()))
 }

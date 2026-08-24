@@ -20,6 +20,21 @@ fn ordinary_host_tree_reports_whether_any_regular_file_exists() {
 }
 
 #[test]
+fn ordinary_host_tree_accepts_a_file_exactly_at_the_fixed_depth_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("tree");
+    std::fs::create_dir(&root).expect("tree root");
+    let mut parent = root.clone();
+    for level in 1..MAX_ORDINARY_HOST_TREE_DEPTH {
+        parent = parent.join(format!("level-{level}"));
+        std::fs::create_dir(&parent).expect("nested directory");
+    }
+    std::fs::write(parent.join("payload.txt"), b"payload").expect("depth-bound file");
+
+    assert!(inspect(&root).expect("the inclusive maximum depth is accepted"));
+}
+
+#[test]
 fn ordinary_host_tree_rejects_input_beyond_the_fixed_depth_bound() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().join("tree");
@@ -90,5 +105,6 @@ fn ordinary_host_file_read_rejects_a_symlink_instead_of_following_it() {
 
     let error = read_ordinary_host_file(&HostPath::from_path_buf(selected))
         .expect_err("verified read must not follow a replacement symlink");
-    assert!(!error.to_string().is_empty());
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("symlink"), "{error}");
 }

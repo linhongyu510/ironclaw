@@ -122,17 +122,17 @@ pub(crate) fn ready_legacy_skill_snapshot_source(
     let paths = RebornStoragePaths::from_home(home);
     let mut found = None;
     for kind in [
-        LegacySourceKind::LocalDev,
-        LegacySourceKind::HostedSingleTenant,
-        LegacySourceKind::HostedSingleTenantVolume,
-        LegacySourceKind::BareHome,
+        LegacyStorageSource::LocalDev,
+        LegacyStorageSource::HostedSingleTenant,
+        LegacyStorageSource::HostedSingleTenantVolume,
+        LegacyStorageSource::BareHome,
     ] {
         let staging_root = kind.snapshot_root(&paths);
         if !staging_root.exists() {
             continue;
         }
         require_ordinary_directory(&staging_root)?;
-        if !directory_has_content(&staging_root)? {
+        if !validate_ordinary_tree(&staging_root)? {
             continue;
         }
         if found.is_some() {

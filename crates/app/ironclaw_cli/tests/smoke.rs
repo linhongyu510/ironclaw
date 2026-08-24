@@ -1621,6 +1621,8 @@ fn skills_list_fails_loudly_without_repairing_a_corrupt_existing_state_database(
     let database = state_root.join(ironclaw_composition::test_support::STANDALONE_DB_FILENAME);
     let corrupt_database = b"not a sqlite database";
     std::fs::write(&database, corrupt_database).expect("corrupt state database fixture");
+    std::fs::create_dir(state_root.join("runtime-metadata"))
+        .expect("create unrelated state directory");
     let state_before = state_file_snapshot(&state_root);
 
     let output = reborn_command()
@@ -1987,15 +1989,18 @@ fn write_reborn_skill_contents(reborn_home: &std::path::Path, name: &str, conten
 fn state_file_snapshot(state_root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut snapshot = std::fs::read_dir(state_root)
         .expect("read state root")
-        .map(|entry| {
+        .filter_map(|entry| {
             let entry = entry.expect("state root entry");
             let path = entry.path();
-            (
+            if !entry.file_type().expect("state entry type").is_file() {
+                return None;
+            }
+            Some((
                 path.strip_prefix(state_root)
                     .expect("state entry stays below state root")
                     .to_path_buf(),
                 std::fs::read(&path).expect("read state file"),
-            )
+            ))
         })
         .collect::<Vec<_>>();
     snapshot.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));

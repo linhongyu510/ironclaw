@@ -1,5 +1,47 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn atomic_layout_write_stays_with_admitted_parent_after_path_replacement() {
+    use ironclaw_filesystem::DiskDirectoryCapability;
+
+    #[cfg(target_os = "macos")]
+    let temp = tempfile::Builder::new()
+        .tempdir_in("/private/tmp")
+        .expect("tempdir");
+    #[cfg(not(target_os = "macos"))]
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("runtime");
+    let admitted_parent = temp.path().join("admitted-runtime");
+    let replacement_parent = temp.path().join("replacement-runtime");
+    fs::create_dir(&parent).expect("runtime parent");
+    fs::create_dir(&replacement_parent).expect("replacement parent");
+    let capability =
+        DiskDirectoryCapability::admit_or_create(&parent).expect("admit runtime parent");
+
+    fs::rename(&parent, &admitted_parent).expect("move admitted parent");
+    std::os::unix::fs::symlink(&replacement_parent, &parent).expect("replace ambient parent");
+
+    write_atomic_synced_at(
+        &capability,
+        Path::new(MIGRATION_RECORD_FILE),
+        &parent.join(MIGRATION_RECORD_FILE),
+        "phase = \"complete\"\n",
+        false,
+    )
+    .expect("publish through retained parent capability");
+
+    assert_eq!(
+        fs::read_to_string(admitted_parent.join(MIGRATION_RECORD_FILE))
+            .expect("record in admitted parent"),
+        "phase = \"complete\"\n"
+    );
+    assert!(
+        !replacement_parent.join(MIGRATION_RECORD_FILE).exists(),
+        "ambient replacement must not receive migration records"
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn migration_lock_rejects_an_existing_non_file_path() {
@@ -21,24 +63,22 @@ fn migration_lock_rejects_an_existing_non_file_path() {
 }
 
 #[test]
-fn ordinary_tree_operations_reject_input_deeper_than_the_adoption_bound() {
+fn startup_admission_rejects_legacy_skills_deeper_than_the_adoption_bound() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let source = temp.path().join("source");
-    fs::create_dir(&source).expect("source root");
-    let mut deepest = source.clone();
+    let home = reborn_home(temp.path());
+    let skills_root = temp.path().join("local-dev/skills");
+    fs::create_dir_all(&skills_root).expect("legacy skills root");
+    let mut deepest = skills_root;
     for level in 0..=ironclaw_filesystem::MAX_ORDINARY_HOST_TREE_DEPTH {
         deepest = deepest.join(format!("level-{level}"));
         fs::create_dir(&deepest).expect("nested source directory");
     }
     fs::write(deepest.join("payload.txt"), b"payload").expect("nested source file");
 
-    let validation_error = validate_ordinary_tree(&source)
-        .expect_err("validation must fail closed instead of traversing unbounded input");
-    assert!(format!("{validation_error:#}").contains("depth"));
-
-    let content_error = directory_has_content(&source)
-        .expect_err("content detection must share the traversal depth bound");
-    assert!(format!("{content_error:#}").contains("depth"));
+    let error = admit_startup_layout(&home, embedded_single_user_requirement())
+        .expect_err("startup admission must fail closed on an over-depth legacy tree");
+    assert!(format!("{error:#}").contains("depth"), "{error:#}");
+    assert!(!temp.path().join(LAYOUT_MANIFEST_FILE).exists());
 }
 
 #[cfg(unix)]

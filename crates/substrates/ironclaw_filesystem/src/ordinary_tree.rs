@@ -81,6 +81,16 @@ pub fn read_ordinary_host_file(path: &HostPath) -> io::Result<Vec<u8>> {
         .map_err(|error| with_context("resolve ordinary host file ancestors", error))?;
     let parent = DiskDirectoryCapability::open_existing_no_follow(&canonical_parent)
         .map_err(|error| with_context("open ordinary host file parent", error))?;
+    // Give a symlink selected at inspection time a stable InvalidData error.
+    // The no-follow open below remains necessary to reject a replacement
+    // symlink installed after this descriptor-relative metadata check.
+    let selected_metadata = parent
+        .directory()
+        .symlink_metadata(file_name)
+        .map_err(|error| with_context("inspect ordinary host file entry", error))?;
+    if selected_metadata.file_type().is_symlink() {
+        return Err(invalid_tree("ordinary host file is a symlink"));
+    }
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = parent

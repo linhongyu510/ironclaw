@@ -14,10 +14,6 @@ pub(super) const LIBSQL_DB_UNIT: &[&str] = &[
 ];
 pub(super) const SYSTEM_CONTENT_DIRS: &[&str] = &["extensions", "prompts", "skills"];
 
-// Keep the discovery module's in-flight split mechanically isolated while
-// migration code uses the neutral config-owned source directly.
-pub(super) use ironclaw_config::LegacyStorageSource as LegacySourceKind;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LegacyCandidate {
     pub(super) kind: LegacyStorageSource,

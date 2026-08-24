@@ -39,7 +39,9 @@ boundary. The current rule is codified in
   It creates descendants descriptor-relatively, binds mount metadata to the
   same directory identity, and keeps reads, writes, listing, metadata, and
   deletion rooted in that retained authority instead of re-opening a raceable
-  ambient pathname.
+  ambient pathname. `write_file_atomic_synced` publishes a file through that
+  same retained authority: temporary creation, file sync, rename, and parent
+  directory sync never re-resolve the ambient parent path.
 - `PostgresConnectionPool` (`src/postgres.rs`) — the workspace's own carrier for
   an opened `deadpool_postgres::Pool`. This crate is the Postgres substrate, so
   the driver is a chartered dependency *here*; crates above that only pass a
@@ -72,8 +74,10 @@ boundary. The current rule is codified in
   host-only migration primitive accepts a non-serializable `HostPath`, rejects
   root or nested symlinks and special entries, traverses relative to retained
   directory handles, verifies directory identity after traversal, and reports
-  whether any regular file exists. Its fixed depth bound is shared by callers;
-  migration-specific directory grammar remains in the app/domain that owns it.
+  whether any regular file exists. Its fixed depth bound is inclusive: the
+  root is depth zero and entries through `MAX_ORDINARY_HOST_TREE_DEPTH` are
+  accepted. The bound is shared by callers; migration-specific directory
+  grammar remains in the app/domain that owns it.
   `read_ordinary_host_file` performs the paired descriptor-relative no-follow
   open, verifies regular-file metadata from the opened handle, and reads only
   through that handle so later path replacement cannot redirect the bytes.

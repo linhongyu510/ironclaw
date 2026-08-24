@@ -16,12 +16,9 @@ pub async fn list_reborn_local_skills_from_state(
 > {
     let state_root = state_root.as_ref();
     let database_path = crate::filesystem_assembly::standalone_db_path(state_root);
-    if !database_path.try_exists().map_err(|error| {
+    if !database_path.try_exists().map_err(|_inspection_error| {
         ironclaw_extension_host::skill_listing::RebornSkillListError::Unavailable {
-            reason: format!(
-                "standalone skill database could not be inspected: {}",
-                error.kind()
-            ),
+            reason: "standalone skill database could not be inspected".to_string(),
         }
     })? {
         return ironclaw_extension_host::skill_listing::list_reborn_skills_from_management(None)

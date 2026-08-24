@@ -9605,6 +9605,55 @@ async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection
 }
 
 #[tokio::test]
+async fn workspace_browse_routes_reject_windows_parent_traversal_before_dispatch() {
+    for uri in [
+        "/api/webchat/v2/fs/list?mount=workspace&path=..%5Ctenant-b%5Cusers%5Cbob%5Csecret",
+        "/api/webchat/v2/fs/stat?mount=workspace&path=..%5Ctenant-b%5Cusers%5Cbob%5Csecret",
+        "/api/webchat/v2/fs/content?mount=workspace&path=..%5Ctenant-b%5Cusers%5Cbob%5Csecret",
+    ] {
+        let services = Arc::new(StubServices::default());
+        let caller = caller_for_user("user-alpha");
+        let router = webui_v2_router(
+            WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(true),
+        )
+        .layer(axum::Extension(caller))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: false,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "Windows parent traversal must be rejected on {uri}"
+        );
+        assert!(
+            services.surface_calls.lock().expect("lock").is_empty(),
+            "Windows traversal on {uri} must not reach the product layer"
+        );
+        assert!(
+            services.browse_fs_calls.lock().expect("lock").is_empty(),
+            "Windows traversal on {uri} must not reach the filesystem list view"
+        );
+        assert!(
+            services.stat_fs_calls.lock().expect("lock").is_empty(),
+            "Windows traversal on {uri} must not reach the filesystem stat view"
+        );
+    }
+}
+
+#[tokio::test]
 async fn browse_fs_dir_returns_mount_relative_entry_paths() {
     let services = Arc::new(StubServices::default());
     let caller = caller_for_user("user-alpha");

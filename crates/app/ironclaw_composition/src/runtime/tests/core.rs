@@ -2162,9 +2162,11 @@ async fn seed_db_skill(
     virtual_dir: &str,
     files: &[(&str, String)],
 ) {
-    let state_root = installation_root.join("state");
-    std::fs::create_dir_all(&state_root).expect("state root");
-    let db_path = crate::filesystem_assembly::standalone_db_path(&state_root);
+    let storage_paths =
+        ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
+    let state_root = storage_paths.state_root();
+    std::fs::create_dir_all(state_root).expect("state root");
+    let db_path = crate::filesystem_assembly::standalone_db_path(state_root);
     let db = std::sync::Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()

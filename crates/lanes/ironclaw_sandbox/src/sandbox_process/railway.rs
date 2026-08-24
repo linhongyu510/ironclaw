@@ -25,7 +25,9 @@ use ironclaw_host_api::{
     },
 };
 
-use super::{sandbox_user_container_name, worker_spec::DOCKER_WORKER_USER as WORKER_USER};
+use crate::sandbox_process::{
+    sandbox_user_container_name, worker_spec::DOCKER_WORKER_USER as WORKER_USER,
+};
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 5;
 // Pin the exact multi-platform manifest exercised by the Railway preview

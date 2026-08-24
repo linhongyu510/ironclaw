@@ -185,8 +185,8 @@ impl DiskFilesystem {
                 reason: "host root is not a directory".to_string(),
             });
         }
-        let capability =
-            DiskDirectoryCapability::from_existing(&canonical_root).map_err(|error| {
+        let capability = DiskDirectoryCapability::open_existing_no_follow(&canonical_root)
+            .map_err(|error| {
                 local_capability_error(virtual_root.clone(), FilesystemOperation::MountLocal, error)
             })?;
 
@@ -609,6 +609,7 @@ fn file_type_from_capability(file_type: CapabilityFileType) -> FileType {
     match file_type {
         CapabilityFileType::File => FileType::File,
         CapabilityFileType::Directory => FileType::Directory,
+        CapabilityFileType::Symlink => FileType::Symlink,
         CapabilityFileType::Other => FileType::Other,
     }
 }
@@ -764,7 +765,49 @@ mod tests {
             )
             .expect_err("path and retained capability must name the same directory");
 
-        assert!(error.to_string().contains("does not match"), "{error}");
+        assert!(
+            matches!(
+                error,
+                FilesystemError::Backend {
+                    ref path,
+                    operation: FilesystemOperation::MountLocal,
+                    ..
+                } if path.as_str() == "/projects/workspace"
+            ),
+            "expected typed mount-local mismatch, got: {error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mount_local_uses_the_admitted_directory_after_ambient_replacement() {
+        let temp = tempdir().expect("temporary root");
+        let admitted_path = temp.path().join("workspace");
+        let moved_path = temp.path().join("original-workspace");
+        let replacement_path = temp.path().join("replacement-workspace");
+        std::fs::create_dir(&admitted_path).expect("workspace root");
+        std::fs::write(admitted_path.join("state.txt"), b"trusted").expect("trusted file");
+
+        let mut filesystem = DiskFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects/workspace").expect("virtual root"),
+                HostPath::from_path_buf(admitted_path.clone()),
+            )
+            .expect("mount local root");
+
+        std::fs::rename(&admitted_path, &moved_path).expect("move admitted root");
+        std::fs::create_dir(&replacement_path).expect("replacement root");
+        std::fs::write(replacement_path.join("state.txt"), b"replacement")
+            .expect("replacement file");
+        std::os::unix::fs::symlink(&replacement_path, &admitted_path)
+            .expect("replace ambient path");
+
+        let bytes = filesystem
+            .read_file(&VirtualPath::new("/projects/workspace/state.txt").expect("virtual file"))
+            .await
+            .expect("read through retained capability");
+        assert_eq!(bytes, b"trusted");
     }
 
     #[tokio::test]
@@ -871,6 +914,59 @@ mod tests {
         assert!(
             matches!(error, FilesystemError::SymlinkEscape { .. }),
             "expected SymlinkEscape, got: {error:?}"
+        );
+
+        let stat_error = root
+            .stat(&VirtualPath::new("/tmp/leaf-a/escape.txt").unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(stat_error, FilesystemError::SymlinkEscape { .. }),
+            "expected stat SymlinkEscape, got: {stat_error:?}"
+        );
+
+        let leaf_path = VirtualPath::new("/tmp/leaf-a").unwrap();
+        let entries = root.list_dir(&leaf_path).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "escape.txt");
+        assert_eq!(entries[0].file_type, FileType::Symlink);
+
+        let page = root.list_dir_page(&leaf_path, None, 1).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].name, "escape.txt");
+        assert_eq!(page[0].file_type, FileType::Symlink);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn paginated_listing_rejects_non_utf8_child_names() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let storage = tempdir().unwrap();
+        let invalid_name = std::ffi::OsString::from_vec(b"invalid-\xff".to_vec());
+        std::fs::write(storage.path().join(invalid_name), b"contents").unwrap();
+
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let error = root
+            .list_dir_page(&VirtualPath::new("/projects").unwrap(), None, 10)
+            .await
+            .expect_err("pagination must reject names that cannot round-trip through String");
+
+        assert!(
+            matches!(
+                error,
+                FilesystemError::Backend {
+                    operation: FilesystemOperation::ListDir,
+                    ..
+                }
+            ),
+            "expected invalid directory data, got: {error:?}"
         );
     }
 

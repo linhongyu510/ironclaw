@@ -2605,6 +2605,25 @@ mod postgres_tests {
         std::env::var_os(REQUIRE_POSTGRES_TESTS_ENV).is_some()
     }
 
+    fn should_skip_postgres_setup(required: bool, skip_requested: bool) -> bool {
+        skip_requested && !required
+    }
+
+    fn postgres_setup_is_skipped() -> bool {
+        should_skip_postgres_setup(
+            postgres_required(),
+            std::env::var_os("IRONCLAW_SKIP_POSTGRES_TESTS").is_some(),
+        )
+    }
+
+    #[test]
+    fn required_postgres_overrides_the_skip_request() {
+        assert!(!should_skip_postgres_setup(false, false));
+        assert!(should_skip_postgres_setup(false, true));
+        assert!(!should_skip_postgres_setup(true, false));
+        assert!(!should_skip_postgres_setup(true, true));
+    }
+
     fn report_postgres_unavailable(stage: &'static str) {
         if postgres_required() {
             panic!("required Postgres filesystem test setup failed at stage={stage}");
@@ -2680,7 +2699,7 @@ mod postgres_tests {
     }
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
-        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        if postgres_setup_is_skipped() {
             return None;
         }
         let url = postgres_url().await?;
@@ -2812,7 +2831,7 @@ mod postgres_tests {
         // Same opt-out every other PostgreSQL case honours through
         // `postgres_pool`, checked before anything provisions a container or
         // issues DDL.
-        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        if postgres_setup_is_skipped() {
             return None;
         }
         // Past the skip flag and a resolvable URL, every failure below is a

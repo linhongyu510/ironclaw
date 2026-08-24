@@ -334,18 +334,11 @@ impl<'ast> Visit<'ast> for ProfileControlVisitor {
         visit::visit_expr_match(self, node);
     }
 
-    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
-        if node
-            .mac
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "matches")
-            && token_stream_contains_reborn_profile_variant(node.mac.tokens.clone(), &self.imports)
-        {
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if token_stream_contains_reborn_profile_variant(node.tokens.clone(), &self.imports) {
             self.record(ProfileControlKind::MatchesMacro);
         }
-        visit::visit_expr_macro(self, node);
+        visit::visit_macro(self, node);
     }
 
     fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
@@ -868,6 +861,14 @@ fn syntax_aware_profile_control_scanner_rejects_realistic_duplicate_forms() {
             r#"
                 fn bypass(selected_profile: RebornCompositionProfile) {
                     if matches!(selected_profile, RebornCompositionProfile::Production) {}
+                }
+            "#,
+        ),
+        (
+            "matches wrapped in assert",
+            r#"
+                fn bypass(selected_profile: RebornCompositionProfile) {
+                    assert!(matches!(selected_profile, RebornCompositionProfile::Production));
                 }
             "#,
         ),

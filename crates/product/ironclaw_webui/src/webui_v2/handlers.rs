@@ -933,7 +933,7 @@ fn workspace_scoped_projection_required(
 fn workspace_served_path(mount: &FsMount, requested: &str) -> Result<String, WebUiV2HttpError> {
     if *mount == FsMount::Workspace {
         let trimmed = requested.trim_matches('/');
-        if trimmed.split('/').any(|segment| segment == "..") {
+        if requested.contains('\\') || trimmed.split('/').any(|segment| segment == "..") {
             return Err(ProductSurfaceError::validation(
                 "path",
                 ProductSurfaceValidationCode::InvalidValue,

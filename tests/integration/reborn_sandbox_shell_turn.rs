@@ -71,7 +71,8 @@ forbidden_env = [
     'NEARAI_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN', 'RAILWAY_TOKEN',
     'RAILWAY_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
 ]
-assert all(name not in os.environ for name in forbidden_env)
+leaked = [name for name in forbidden_env if name in os.environ]
+assert not leaked, leaked
 Path('/workspace/container-write.txt').write_text('container-owned-leaf')
 Path('/workspace/persistence-marker.txt').write_text('{PERSISTENCE_MARKER}')
 Path('/tmp/container-marker.txt').write_text('{EPHEMERAL_MARKER}')

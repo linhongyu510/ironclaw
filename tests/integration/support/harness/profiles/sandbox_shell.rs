@@ -17,16 +17,14 @@ pub(crate) async fn sandbox_shell_tools(
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
         ironclaw_composition::hosted_single_tenant_volume_sandboxed_runtime_policy()?;
-    let options = HostRuntimeHarnessOptions::new(
-        caller_workspace_mounts(&tenant_id, &user_id)?,
-        Some(runtime_policy),
-    )
-    .with_local_runtime_identity(tenant_id, agent_id)
-    .with_sandboxed_shell()
-    .with_workspace_scoped_per_caller()
-    .with_durable_capability_io();
+    let mounts = caller_workspace_mounts(&tenant_id, &user_id)?;
+    let options = HostRuntimeHarnessOptions::new(mounts.clone(), Some(runtime_policy))
+        .with_local_runtime_identity(tenant_id, agent_id)
+        .with_sandboxed_shell()
+        .with_workspace_scoped_per_caller()
+        .with_durable_capability_io();
 
-    ToolsProfile {
+    let mut harness = ToolsProfile {
         capability_ids: vec![CapabilityId::new(SHELL_CAPABILITY_ID)?],
         effect_kinds: vec![
             EffectKind::DispatchCapability,
@@ -39,7 +37,15 @@ pub(crate) async fn sandbox_shell_tools(
         ..ToolsProfile::new("reborn-e2e-sandbox-shell-tools", user_id.as_str())?
     }
     .build()
-    .await
+    .await?;
+    // The generic capability-port test seam starts from the local-host builtin
+    // policy. Mirror the user-sandbox policy's shell projection explicitly so
+    // both the grant obligation and the execution context carry the caller's
+    // mandatory workspace leaf.
+    harness
+        .capability_mount_overrides
+        .push((CapabilityId::new(SHELL_CAPABILITY_ID)?, mounts));
+    Ok(harness)
 }
 
 fn caller_workspace_mounts(tenant_id: &TenantId, user_id: &UserId) -> HarnessResult<MountView> {

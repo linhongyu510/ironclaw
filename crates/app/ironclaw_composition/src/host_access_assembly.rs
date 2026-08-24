@@ -121,6 +121,8 @@ pub(crate) fn build_host_access(
 
     let installation =
         initialize_directory_capability(paths.installation_root(), "installation root")?;
+    // Validate and initialize the state namespace here; filesystem assembly
+    // subsequently reopens this same canonical path for the durable backend.
     let _state = initialize_descendant_capability(
         &installation,
         paths.installation_root(),

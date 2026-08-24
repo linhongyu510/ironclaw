@@ -436,13 +436,10 @@ pub(crate) fn mount_descriptor(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use super::{
-        DurableStorageInput, STANDALONE_DB_FILENAME, build_filesystem, mount_host_disk_roots,
-    };
-    use ironclaw_filesystem::{CompositeRootFilesystem, DiskFilesystem, RootFilesystem};
-    use ironclaw_host_api::path::{HostPath, VirtualPath};
+    use super::{DurableStorageInput, STANDALONE_DB_FILENAME, build_filesystem};
+    use crate::host_access_assembly::build_host_access;
+    use ironclaw_filesystem::RootFilesystem;
+    use ironclaw_host_api::path::VirtualPath;
 
     #[tokio::test]
     async fn filesystem_assembly_keeps_state_system_and_workspace_content_in_separate_roots() {
@@ -544,23 +541,35 @@ mod tests {
     #[tokio::test]
     async fn host_disk_catalog_routes_confirmed_host_home_files() {
         let temp = tempfile::tempdir().expect("temporary Reborn home");
+        let home = temp.path().join("reborn-home");
         let host_home = temp.path().join("host-home");
         std::fs::create_dir_all(&host_home).expect("create confirmed host home");
-
-        let mut disk = DiskFilesystem::new();
-        disk.mount_local(
-            VirtualPath::new("/projects/host").expect("host home virtual path"),
-            HostPath::from_path_buf(host_home.clone()),
+        let host_access = build_host_access(
+            ironclaw_config::RebornStoragePaths::from_installation_root(&home),
+            None,
+            Some(host_home.clone()),
+            Some(
+                crate::standalone_unrestricted_runtime_policy(true)
+                    .expect("standalone unrestricted runtime policy"),
+            ),
+            false,
         )
-        .expect("mount confirmed host home on disk filesystem");
-        let disk = Arc::new(disk);
-        let mut catalog = CompositeRootFilesystem::new();
-        mount_host_disk_roots(&mut catalog, Arc::clone(&disk), true)
-            .expect("mount host disk roots in composite catalog");
+        .expect("host access with confirmed host home");
+
+        let assembly = build_filesystem(
+            &host_access.state_root,
+            &host_access.system_root,
+            &host_access.workspace_root,
+            host_access.host_home_root.as_ref(),
+            None,
+            DurableStorageInput::EmbeddedLibsql,
+        )
+        .await
+        .expect("filesystem assembly with confirmed host home");
 
         let host_file =
             VirtualPath::new("/projects/host/safe.txt").expect("host file virtual path");
-        RootFilesystem::write_file(&catalog, &host_file, b"host file")
+        RootFilesystem::write_file(assembly.filesystem.as_ref(), &host_file, b"host file")
             .await
             .expect("composite catalog routes confirmed host home writes");
 

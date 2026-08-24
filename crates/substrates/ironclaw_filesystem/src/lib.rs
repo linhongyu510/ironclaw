@@ -10,8 +10,9 @@
 //! `write_file`, `append_file`, `create_dir_all`, and `create_subtree_atomic`
 //! create child directories and temporary material relative to that retained
 //! handle, so replacing the ambient mount path or an ancestor after admission
-//! cannot redirect those writes. Existing-path reads keep their canonical
-//! containment checks and virtual-path-only error boundary.
+//! cannot redirect those writes. Reads resolve through the same retained handle
+//! and reject symlink components, and every error keeps the virtual-path-only
+//! boundary.
 #![warn(unreachable_pub)]
 
 mod backend;

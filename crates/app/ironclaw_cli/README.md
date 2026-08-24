@@ -46,7 +46,8 @@ None consumed in the workspace — it is a binary. Its own structure:
   the workspace — the concrete extension packages and hosting crates the
   binary links directly: `ironclaw_extension_host`,
   `ironclaw_extension_manager`, `ironclaw_extension_support`,
-  `ironclaw_slack_extension`, `ironclaw_telegram_extension`. Re-derive with
+  `ironclaw_slack_extension`, `ironclaw_telegram_extension`,
+  `ironclaw_web_app_extension`, `ironclaw_web_app`. Re-derive with
   `grep -n '^ironclaw' crates/app/ironclaw_cli/Cargo.toml`.
 - **Consumed by:** nothing (asserted — the dependency set is pinned
   *exactly* by `assert_workspace_deps_exactly` for package `ironclaw` in

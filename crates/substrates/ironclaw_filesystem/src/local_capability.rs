@@ -17,6 +17,9 @@ use same_file::Handle;
 
 use crate::CasExpectation;
 
+static DIRECT_ATOMIC_TEMP_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) async fn run_capability_blocking<T, F>(work: F) -> io::Result<T>
 where
     T: Send + 'static,
@@ -52,6 +55,7 @@ pub(crate) struct CapabilityDirectoryEntry {
 pub(crate) enum CapabilityFileType {
     File,
     Directory,
+    Symlink,
     Other,
 }
 
@@ -92,10 +96,31 @@ impl DiskDirectoryCapability {
         })
     }
 
-    pub(crate) fn from_existing(path: &Path) -> io::Result<Self> {
-        let directory = Dir::open_ambient_dir(path, ambient_authority())?;
+    /// Admits an existing ordinary directory without following the directory
+    /// entry itself, retaining the opened directory as the authority for later
+    /// descriptor-relative operations. Platform-managed symlink ancestors
+    /// (for example macOS `/var`) remain compatible.
+    pub fn admit_existing(path: &Path) -> io::Result<Self> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local capability root must be absolute",
+            ));
+        }
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .maybe_dir(true);
+        let file = cap_std::fs::File::open_ambient_with(path, &options, ambient_authority())?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local capability root is not a directory",
+            ));
+        }
         Ok(Self {
-            directory: Arc::new(directory),
+            directory: Arc::new(Dir::from_std_file(file.into_std())),
         })
     }
 
@@ -198,11 +223,16 @@ impl DiskDirectoryCapability {
         let mut page = std::collections::BTreeMap::<String, CapabilityDirectoryEntry>::new();
         for entry in directory.read_dir(".")? {
             let entry = capability_directory_entry(entry?)?;
-            let name = entry.name.to_string_lossy().to_string();
-            if after.is_some_and(|cursor| name.as_str() <= cursor) {
+            let name = entry.name.to_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory entry name is not valid UTF-8",
+                )
+            })?;
+            if after.is_some_and(|cursor| name <= cursor) {
                 continue;
             }
-            page.insert(name, entry);
+            page.insert(name.to_owned(), entry);
             if page.len() > max_entries {
                 page.pop_last();
             }
@@ -264,6 +294,22 @@ impl DiskDirectoryCapability {
         })
     }
 
+    /// Atomically publishes a synced file relative to this retained directory.
+    ///
+    /// Temporary creation, content sync, publication, and parent-directory
+    /// sync all use directory-relative operations rooted in this capability.
+    /// No ambient pathname is reopened after admission.
+    pub fn write_file_atomic_synced(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        cas: CasExpectation,
+    ) -> io::Result<()> {
+        let counter = DIRECT_ATOMIC_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.atomic_write(relative, bytes, cas, counter)
+            .map_err(capability_write_io_error)
+    }
+
     pub(crate) fn append(&self, relative: &Path, bytes: &[u8]) -> Result<(), CapabilityWriteError> {
         self.reject_symlink_components(relative)?;
         let (parent, file_name) = split_parent(relative)?;
@@ -309,12 +355,8 @@ impl DiskDirectoryCapability {
                     return Err(error.into());
                 }
             }
-            CasExpectation::Absent => match parent.hard_link(&temp_name, &parent, file_name) {
-                Ok(()) => {
-                    if let Err(error) = parent.remove_file(&temp_name) {
-                        tracing::debug!(reason = %error, "best-effort cleanup of published local write temp failed");
-                    }
-                }
+            CasExpectation::Absent => match rename_entry_absent(&parent, &temp_name, file_name) {
+                Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let _ = parent.remove_file(&temp_name);
                     return Err(CapabilityWriteError::VersionMismatch);
@@ -368,7 +410,7 @@ impl DiskDirectoryCapability {
             return Err(error.into());
         }
 
-        if let Err(error) = rename_subtree_absent(&parent, &staging_name, target_name) {
+        if let Err(error) = rename_entry_absent(&parent, &staging_name, target_name) {
             let _ = parent.remove_dir_all(&staging_name);
             if error.kind() == io::ErrorKind::AlreadyExists {
                 return Err(CapabilityWriteError::VersionMismatch);
@@ -450,19 +492,36 @@ fn capability_directory_entry(
     entry: cap_std::fs::DirEntry,
 ) -> Result<CapabilityDirectoryEntry, CapabilityWriteError> {
     let file_type = entry.file_type()?;
-    if file_type.is_symlink() {
-        return Err(CapabilityWriteError::SymlinkEscape);
-    }
     Ok(CapabilityDirectoryEntry {
         name: entry.file_name(),
         file_type: if file_type.is_file() {
             CapabilityFileType::File
         } else if file_type.is_dir() {
             CapabilityFileType::Directory
+        } else if file_type.is_symlink() {
+            CapabilityFileType::Symlink
         } else {
             CapabilityFileType::Other
         },
     })
+}
+
+fn capability_write_io_error(error: CapabilityWriteError) -> io::Error {
+    match error {
+        CapabilityWriteError::Io(error) => error,
+        CapabilityWriteError::SymlinkEscape => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "capability-relative path contains a symlink",
+        ),
+        CapabilityWriteError::VersionMismatch => io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "atomic destination already exists",
+        ),
+        CapabilityWriteError::UnsupportedVersion => io::Error::new(
+            io::ErrorKind::Unsupported,
+            "versioned atomic write is unsupported",
+        ),
+    }
 }
 
 #[derive(Debug)]
@@ -608,7 +667,7 @@ fn sync_directory(directory: &Dir) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn rename_subtree_absent(
+fn rename_entry_absent(
     parent: &Dir,
     from: &std::ffi::OsStr,
     to: &std::ffi::OsStr,
@@ -627,7 +686,7 @@ fn rename_subtree_absent(
     target_os = "visionos",
     target_os = "watchos"
 ))]
-fn rename_subtree_absent(
+fn rename_entry_absent(
     parent: &Dir,
     from: &std::ffi::OsStr,
     to: &std::ffi::OsStr,
@@ -652,7 +711,7 @@ fn rename_subtree_absent(
     target_os = "visionos",
     target_os = "watchos"
 )))]
-fn rename_subtree_absent(
+fn rename_entry_absent(
     _parent: &Dir,
     _from: &std::ffi::OsStr,
     _to: &std::ffi::OsStr,

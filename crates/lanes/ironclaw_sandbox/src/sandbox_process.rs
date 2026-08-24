@@ -50,10 +50,10 @@ mod attribution;
 mod registry;
 mod user_key;
 
-use mounts::RebornSandboxMountSources;
-use workspace_admission::{
+use crate::sandbox_process::workspace_admission::{
     WorkspaceLeafAdmission, admit_workspace_leaf, revalidate_workspace_host_boundary,
 };
+use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};

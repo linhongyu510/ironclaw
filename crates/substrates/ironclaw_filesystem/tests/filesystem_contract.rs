@@ -6,7 +6,13 @@ use ironclaw_host_api::{
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
+#[cfg(not(target_os = "macos"))]
 use tempfile::tempdir;
+
+#[cfg(target_os = "macos")]
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().tempdir_in("/private/tmp")
+}
 
 #[tokio::test]
 async fn local_create_subtree_atomic_publishes_the_complete_batch() {
@@ -902,7 +908,7 @@ async fn nonexistent_backend_mount_root_fails_without_leaking_host_path() {
 #[cfg(unix)]
 #[tokio::test]
 async fn admitted_mount_root_substitution_cannot_redirect_writes() {
-    let storage = tempfile::tempdir().unwrap();
+    let storage = tempdir().unwrap();
     let base = storage.path().canonicalize().unwrap();
     let admitted = base.join("admitted");
     let retained = base.join("retained");
@@ -937,7 +943,7 @@ async fn admitted_mount_root_substitution_cannot_redirect_writes() {
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn admitted_mount_rejects_a_symlink_component() {
-    let storage = tempfile::tempdir().unwrap();
+    let storage = tempdir().unwrap();
     let base = storage.path().canonicalize().unwrap();
     let outside = base.join("outside");
     let alias = base.join("alias");
@@ -957,18 +963,14 @@ async fn admitted_mount_rejects_a_symlink_component() {
         .unwrap_err();
 
     assert!(matches!(error, FilesystemError::LocalCapability { .. }));
-    assert!(
-        !error
-            .to_string()
-            .contains(storage.path().to_string_lossy().as_ref())
-    );
+    assert!(!error.to_string().contains(base.to_string_lossy().as_ref()));
     assert!(std::error::Error::source(&error).is_some());
 }
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn admitted_mount_rejects_a_nonfinal_symlink_ancestor() {
-    let storage = tempfile::tempdir().unwrap();
+    let storage = tempdir().unwrap();
     let base = storage.path().canonicalize().unwrap();
     let outside = base.join("outside");
     let existing = outside.join("existing");
@@ -995,7 +997,7 @@ async fn admitted_mount_rejects_a_nonfinal_symlink_ancestor() {
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn admitted_mount_root_substitution_cannot_redirect_atomic_subtree_publication() {
-    let storage = tempfile::tempdir().unwrap();
+    let storage = tempdir().unwrap();
     let base = storage.path().canonicalize().unwrap();
     let admitted = base.join("admitted-subtree");
     let retained = base.join("retained-subtree");

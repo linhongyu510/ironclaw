@@ -124,15 +124,15 @@ pub(super) fn select_migration_source(
     // first within each class.
     ranked.sort_by_key(|(candidate, last_used)| {
         (
-            candidate.kind == LegacySourceKind::BareHome,
+            candidate.kind == LegacyStorageSource::BareHome,
             std::cmp::Reverse(*last_used),
         )
     });
     // The winner competes only with the next candidate of its own class, so a
     // bare-home artifact never suppresses a tie between two profile roots.
     let competing_neighbours = ranked.len() > 1
-        && (ranked[0].0.kind == LegacySourceKind::BareHome)
-            == (ranked[1].0.kind == LegacySourceKind::BareHome);
+        && (ranked[0].0.kind == LegacyStorageSource::BareHome)
+            == (ranked[1].0.kind == LegacyStorageSource::BareHome);
     if competing_neighbours {
         let gap = ranked[0].1.duration_since(ranked[1].1).unwrap_or_default();
         if gap.as_secs() < TIE_WINDOW_SECS {
@@ -246,6 +246,8 @@ fn legacy_db_probe(path: &Path, start: i64, len: i64) -> anyhow::Result<bool> {
     probe.l_whence = libc::SEEK_SET as libc::c_short;
     probe.l_start = start;
     probe.l_len = len;
+    // SAFETY: `file` stays alive for the call, so its descriptor is valid, and
+    // `probe` is a live, exclusively borrowed `flock` the kernel may write.
     let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut probe) };
     if rc == -1 {
         return Err(std::io::Error::last_os_error())

@@ -40,18 +40,6 @@ use secrecy::ExposeSecret;
 use serde_json::json;
 
 #[test]
-fn sandbox_harness_supplies_the_canonical_workspaces_root() {
-    let installation_root = tempfile::tempdir().expect("temporary installation root");
-    let paths = RebornStoragePaths::from_installation_root(installation_root.path());
-
-    assert_eq!(
-        reborn_support::harness::sandbox_workspace_root(&paths),
-        paths.workspace_root(),
-        "the sandbox transport appends users/<tenant-user-digest> itself"
-    );
-}
-
-#[test]
 fn durable_extension_reopen_rejects_tenant_wide_owner_and_requires_one_member() {
     let expected_member = UserId::new("durable-owner").expect("valid expected user");
     let rejected_member = UserId::new("durable-other-user").expect("valid rejected user");

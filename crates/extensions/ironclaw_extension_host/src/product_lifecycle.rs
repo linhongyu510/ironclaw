@@ -510,10 +510,21 @@ impl ExtensionLifecycleManager {
             owner,
         )
         .map_err(map_extension_installation_error)?;
-        self.installation_store
+        if let Err(error) = self
+            .installation_store
             .upsert_manifest_and_installation(definition, installation)
             .await
-            .map_err(map_extension_installation_error)?;
+            .map_err(map_extension_installation_error)
+        {
+            if let Err(rollback_error) = self.rollback_lifecycle_install(&package.id).await {
+                return Err(compensation_failure(
+                    "bundled extension publication persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
             return Ok(());
@@ -3924,6 +3935,102 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn bundled_test_publication_rolls_back_lifecycle_registration_when_upsert_fails() {
+        let available = fixture_extension_package();
+        let package = available.package.clone();
+        let resolved = Arc::clone(&available.resolved_manifest);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let inner = ExtensionInstallationStore::load_at(
+            filesystem.clone(),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+            crate::product_extension_host_api_contract_registry().expect("host contracts"),
+        )
+        .await
+        .expect("installation store");
+        let installation_store: Arc<
+            dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
+        > = Arc::new(PauseOnAdmitStore {
+            inner,
+            holding: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            fail_next_upsert: std::sync::atomic::AtomicBool::new(true),
+        });
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog: AvailableExtensionCatalog::from_packages(vec![available]),
+            installation_store,
+            lifecycle_service: Arc::clone(&lifecycle_service),
+            active_extensions: ActiveExtensionPublisher::new(
+                active_registry,
+                Arc::new(
+                    HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                        .expect("trust policy"),
+                ),
+                Arc::new(InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: owner,
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+
+        let error = manager
+            .publish_bundled_package_for_test(
+                &package,
+                Some(resolved.as_ref()),
+                InstallationOwner::Tenant,
+            )
+            .await
+            .expect_err("the first durable aggregate write is forced to fail");
+        assert!(
+            matches!(
+                &error,
+                ProductOperationFailure::Transient { reason }
+                    if reason.contains("forced durable upsert failure")
+            ),
+            "the original persistence failure must be preserved: {error:?}"
+        );
+        assert!(
+            lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&package.id)
+                .is_none(),
+            "a failed durable upsert must not leave the lifecycle registry occupied"
+        );
+
+        manager
+            .publish_bundled_package_for_test(
+                &package,
+                Some(resolved.as_ref()),
+                InstallationOwner::Tenant,
+            )
+            .await
+            .expect("retry succeeds after rollback releases the lifecycle id");
+        assert!(
+            lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&package.id)
+                .is_some(),
+            "the successful retry registers the package"
+        );
+    }
+
     /// Joining and leaving an existing installation must route through the
     /// store's membership operations, never an aggregate rewrite — the pin
     /// for the lost-update fix: a join leaves the installation record
@@ -4077,6 +4184,7 @@ mod tests {
         inner: ExtensionInstallationStore,
         holding: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
+        fail_next_upsert: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
@@ -4118,6 +4226,14 @@ mod tests {
             manifest: ExtensionManifestRecord,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            if self
+                .fail_next_upsert
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::StoreUnavailable {
+                    reason: "forced durable upsert failure".to_string(),
+                });
+            }
             self.inner
                 .upsert_manifest_and_installation(manifest, installation)
                 .await
@@ -4277,6 +4393,7 @@ output_schema_ref = "schemas/run.output.json"
             inner: inner_store,
             holding: Arc::clone(&holding),
             release: Arc::clone(&release),
+            fail_next_upsert: std::sync::atomic::AtomicBool::new(false),
         });
         let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
         let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
