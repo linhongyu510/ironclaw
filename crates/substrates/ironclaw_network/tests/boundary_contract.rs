@@ -26,3 +26,6 @@ fn network_crate_does_not_depend_on_workflow_runtime_secret_or_observability_cra
         );
     }
 }
+
+// CI exercise (temporary): forces the planner to emit exact_targets so the
+// nextest exact-target arm actually runs. Delete with this branch.
