@@ -38,3 +38,6 @@ pub use url_target::{
     NetworkTargetUrlError, is_path_segment_credential_material, is_rfc3986_unreserved_segment,
     network_target_for_url, percent_decode_url_component_lossy,
 };
+
+// CI exercise (temporary): forces a multi-bucket affected closure so the
+// nextest bulk arm runs on a real load. Delete with this branch.
