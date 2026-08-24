@@ -24,9 +24,13 @@ The workspace-root `integration` feature is empty with zero consumers — a bare
 `.github/actions/setup-rust`'s `toolchain` input default (what CI installs).
 `scripts/ci/lib/rust_toolchain_contracts.py` enforces that they are equal — it
 does not make either one derive from the other, so a bump edits both in the
-same PR or the gate fails. Every Rust-installing CI job goes through the
-composite; the two `nightly-2025-11-01` coverage lanes pass an explicit
-`toolchain:` input, and Docker builds are the one path outside this contract
+same PR or the gate fails. 35 CI jobs across 11 workflow files need a toolchain
+and all 35 reach the composite today, with no allowlist — re-check with
+`python3 scripts/ci/ws12_workflow_contracts.py`, whose
+`validate_rust_jobs_reach_the_composite` fails the build on a job that runs
+cargo, or a hermetic runner, without it. The two `nightly-2025-11-01` coverage
+lanes pass an explicit `toolchain:` input, and Docker builds are the one path
+outside this contract
 (the build context excludes `rust-toolchain.toml`, so images stay on their
 base-image toolchain). The same module also fails the build on a direct
 `dtolnay/rust-toolchain` call, any other bootstrap, a release lane whose
