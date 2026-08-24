@@ -1,16 +1,78 @@
 use std::{path::Path, sync::Arc};
 
+#[cfg(unix)]
+use std::{path::PathBuf, sync::Mutex};
+
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{ids::UserId, path::VirtualPath};
 
 use super::{
-    MAX_INSTALL_BUNDLE_FILE_BYTES, SKILL_DISK_IMPORT_MARKER_ROOT, disk_skill_files,
+    MAX_INSTALL_BUNDLE_FILE_BYTES, SKILL_DISK_IMPORT_MARKER_ROOT,
     import_host_disk_skills_into_database, import_host_disk_skills_into_database_with_collector,
-    validate_legacy_skill_snapshot_tree,
 };
 
 const TENANT: &str = "import-tenant";
 const USER: &str = "import-user";
+
+#[cfg(unix)]
+struct BeforeSnapshotReadHook {
+    path: PathBuf,
+    action: Box<dyn FnOnce(&Path) + Send + 'static>,
+}
+
+#[cfg(unix)]
+static SWAP_TEST_SERIALIZER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[cfg(unix)]
+static BEFORE_SNAPSHOT_READ_HOOK: Mutex<Option<BeforeSnapshotReadHook>> = Mutex::new(None);
+
+#[cfg(unix)]
+struct BeforeSnapshotReadHookGuard;
+
+#[cfg(unix)]
+impl Drop for BeforeSnapshotReadHookGuard {
+    fn drop(&mut self) {
+        *BEFORE_SNAPSHOT_READ_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(unix)]
+fn install_before_snapshot_read_hook(
+    path: PathBuf,
+    hook: impl FnOnce(&Path) + Send + 'static,
+) -> BeforeSnapshotReadHookGuard {
+    let mut selected = BEFORE_SNAPSHOT_READ_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        selected.is_none(),
+        "snapshot read hook is already installed"
+    );
+    *selected = Some(BeforeSnapshotReadHook {
+        path,
+        action: Box::new(hook),
+    });
+    BeforeSnapshotReadHookGuard
+}
+
+#[cfg(unix)]
+pub(super) fn run_before_snapshot_read_hook(path: &Path) {
+    let mut selected = BEFORE_SNAPSHOT_READ_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if selected
+        .as_ref()
+        .is_none_or(|hook| hook.path.as_path() != path)
+    {
+        return;
+    }
+    let hook = selected.take();
+    drop(selected);
+    if let Some(hook) = hook {
+        (hook.action)(path);
+    }
+}
 
 fn owner() -> UserId {
     UserId::new(USER).expect("owner user id")
@@ -152,58 +214,57 @@ async fn marked_snapshot_file_is_skipped_before_an_oversized_read() {
 }
 
 #[cfg(unix)]
-#[test]
-fn collected_skill_file_replaced_by_symlink_is_rejected_at_verified_read() {
+#[tokio::test]
+async fn collected_skill_file_replaced_by_symlink_is_rejected_at_verified_read() {
     use std::os::unix::fs::symlink;
 
+    let _serial = SWAP_TEST_SERIALIZER.lock().await;
     let storage = tempfile::tempdir().expect("temp storage root");
+    let filesystem = database_filesystem();
     seed_skill_on_disk(storage.path(), "replace-before-read");
-    let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
-        .expect("skill snapshot validation retains its root");
-    let (selected, _) = disk_skill_files(&storage.path().join("tenants"))
-        .expect("skill snapshot collection succeeds")
-        .into_iter()
-        .next()
-        .expect("seeded skill file is collected");
+    let selected = storage
+        .path()
+        .join("tenants")
+        .join(TENANT)
+        .join("users")
+        .join(USER)
+        .join("skills/replace-before-read/SKILL.md");
     let outside = storage.path().join("outside.txt");
     std::fs::write(&outside, b"outside bytes").expect("outside file");
-    std::fs::remove_file(&selected).expect("remove collected file");
-    symlink(&outside, &selected).expect("replace collected file with symlink");
+    let _hook = install_before_snapshot_read_hook(selected.clone(), move |path| {
+        assert_eq!(path, selected);
+        std::fs::remove_file(path).expect("remove collected file");
+        symlink(&outside, path).expect("replace collected file with symlink");
+    });
 
-    let relative = selected
-        .strip_prefix(storage.path())
-        .expect("relative path");
-    let error = ironclaw_filesystem::read_ordinary_host_file(
-        &snapshot_root,
-        relative,
-        MAX_INSTALL_BUNDLE_FILE_BYTES,
-    )
-    .expect_err("verified read must reject the replacement symlink");
+    let error = import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+        .await
+        .expect_err("verified import must reject the replacement symlink");
     assert!(error.to_string().contains("symlink"), "{error}");
+    assert_rejected_import_left_no_state(&filesystem, "replace-before-read").await;
 }
 
 #[cfg(unix)]
-#[test]
-fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() {
+#[tokio::test]
+async fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() {
     use std::os::unix::fs::symlink;
 
+    let _serial = SWAP_TEST_SERIALIZER.lock().await;
     let storage = tempfile::tempdir().expect("temp storage root");
     let outside = tempfile::tempdir().expect("outside snapshot root");
+    let filesystem = database_filesystem();
     seed_skill_on_disk(storage.path(), "replace-directory-before-read");
     seed_skill_on_disk(outside.path(), "replace-directory-before-read");
-    let snapshot_root = validate_legacy_skill_snapshot_tree(storage.path())
-        .expect("skill snapshot validation retains its root");
-    let (selected, _) = disk_skill_files(&storage.path().join("tenants"))
-        .expect("skill snapshot collection succeeds")
-        .into_iter()
-        .next()
-        .expect("seeded skill file is collected");
+    let selected = storage
+        .path()
+        .join("tenants")
+        .join(TENANT)
+        .join("users")
+        .join(USER)
+        .join("skills/replace-directory-before-read/SKILL.md");
     let selected_directory = selected.parent().expect("selected skill directory");
-    std::fs::rename(
-        selected_directory,
-        storage.path().join("retired-skill-directory"),
-    )
-    .expect("retire validated skill directory");
+    let selected_directory = selected_directory.to_path_buf();
+    let retired_directory = storage.path().join("retired-skill-directory");
     let outside_directory = outside
         .path()
         .join("tenants")
@@ -211,20 +272,46 @@ fn collected_skill_directory_replaced_by_symlink_is_rejected_at_verified_read() 
         .join("users")
         .join(USER)
         .join("skills/replace-directory-before-read");
-    symlink(&outside_directory, selected_directory)
-        .expect("replace validated skill directory with outside symlink");
+    let _hook = install_before_snapshot_read_hook(selected.clone(), move |path| {
+        assert_eq!(path, selected);
+        std::fs::rename(&selected_directory, &retired_directory)
+            .expect("retire validated skill directory");
+        symlink(&outside_directory, &selected_directory)
+            .expect("replace validated skill directory with outside symlink");
+    });
 
-    let relative = selected
-        .strip_prefix(storage.path())
-        .expect("relative path");
-    let error = ironclaw_filesystem::read_ordinary_host_file(
-        &snapshot_root,
-        relative,
-        MAX_INSTALL_BUNDLE_FILE_BYTES,
-    )
-    .expect_err("verified read must reject a replaced ancestor directory");
+    let error = import_host_disk_skills_into_database(storage.path(), &owner(), &filesystem)
+        .await
+        .expect_err("verified import must reject a replaced ancestor directory");
     assert!(
         error.to_string().contains("without following links"),
         "{error}"
+    );
+    assert_rejected_import_left_no_state(&filesystem, "replace-directory-before-read").await;
+}
+
+async fn assert_rejected_import_left_no_state(
+    filesystem: &ironclaw_filesystem::CompositeRootFilesystem,
+    skill_name: &str,
+) {
+    let target = virtual_skill_path(skill_name);
+    let marker = VirtualPath::new(format!(
+        "{SKILL_DISK_IMPORT_MARKER_ROOT}{}",
+        target.as_str()
+    ))
+    .expect("per-skill marker path");
+    assert!(
+        matches!(
+            RootFilesystem::stat(filesystem, &target).await,
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. })
+        ),
+        "rejected snapshot must not create its target"
+    );
+    assert!(
+        matches!(
+            RootFilesystem::stat(filesystem, &marker).await,
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. })
+        ),
+        "rejected snapshot must not create its import marker"
     );
 }

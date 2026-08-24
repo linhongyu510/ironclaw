@@ -177,6 +177,8 @@ fn stream_legacy_skill_snapshot(
                         host_path.display()
                     ),
                 })?;
+        #[cfg(all(test, unix))]
+        legacy_skill_snapshot_async_tests::run_before_snapshot_read_hook(&host_path);
         let bytes = ironclaw_filesystem::read_ordinary_host_file(
             &snapshot_root,
             relative_path,
