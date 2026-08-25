@@ -185,7 +185,16 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// on the merged tree with `bash scripts/ci/check-composition-budget.sh
 /// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_412;
+/// ✎ Re-seeded 42_198 -> 42_371 on 2026-08-24 for #7833 (unattended-safe
+/// suggestion tools). The manifest's `loc_ceiling`/`loc_observed` moved to
+/// 42_371 in the same PR to absorb `unattended_denied_capability_ids()`'s
+/// assembly wiring; this record moves with them to the same figure in this
+/// commit, per the pairing this file's own history keeps. Measured with
+/// `bash scripts/ci/check-composition-budget.sh --print`, not padded.
+/// ✎ Re-seeded 42_371 -> 42_495 on 2026-08-25 for #7516: the IronHub
+/// agent-link boot resolution and register-route mount, assembly only. The
+/// manifest's `loc_ceiling`/`loc_observed` moved to 42_495 in the same commit.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_495;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
