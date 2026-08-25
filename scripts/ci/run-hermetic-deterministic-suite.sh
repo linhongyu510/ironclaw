@@ -94,15 +94,15 @@ run_crate_tests() {
 
 run_integration_tier() {
   local test_name runner
-  local has_group_tests=0
   local -a test_args=()
+  local -a group_test_names=()
   prepare_postgres_test_image
   source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
   runner="$(select_test_runner require-in-ci)"
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
     if [[ "${test_name}" == reborn_group_* ]]; then
-      has_group_tests=1
+      group_test_names+=("${test_name}")
       continue
     fi
     test_args+=(--test "${test_name}")
@@ -111,10 +111,10 @@ run_integration_tier() {
   # The group binaries share a libsql-backed store and must remain sequential.
   # Delegate them to the same canonical runner used by the dedicated groups
   # stage instead of admitting them to nextest's parallel process pool.
-  if [[ "${has_group_tests}" == "1" ]]; then
+  if [[ "${#group_test_names[@]}" -gt 0 ]]; then
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
       RUST_MIN_STACK=67108864 \
-      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
+      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh" "${group_test_names[@]}"
   fi
 
   if [[ "${runner}" == "nextest" && "${#test_args[@]}" -gt 0 ]]; then

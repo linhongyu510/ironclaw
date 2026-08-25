@@ -10,11 +10,13 @@ mkdir -p \
   "${sandbox}/bin" \
   "${sandbox}/repo/scripts/ci/lib" \
   "${sandbox}/repo/tests/integration/group_fixture" \
+  "${sandbox}/repo/tests/integration/group_unselected" \
   "${sandbox}/repo/frontend"
 cp "${under_test}" "${sandbox}/repo/scripts/ci/run-hermetic-deterministic-suite.sh"
 cp "${repo_root}/scripts/ci/lib/select-test-runner.sh" "${sandbox}/repo/scripts/ci/lib/select-test-runner.sh"
 cp "${repo_root}/scripts/ci/run-reborn-group-tests.sh" "${sandbox}/repo/scripts/ci/run-reborn-group-tests.sh"
 touch "${sandbox}/repo/tests/integration/group_fixture/main.rs"
+touch "${sandbox}/repo/tests/integration/group_unselected/main.rs"
 printf '{"packageManager":"pnpm@9.0.0"}\n' >"${sandbox}/repo/frontend/package.json"
 
 cat >"${sandbox}/repo/scripts/ci/run-hermetic-test-process.sh" <<'STUB'
@@ -124,6 +126,10 @@ else
   fi
   if ! grep -Fq 'cargo test -p ironclaw_integration_tests --test reborn_group_fixture' "${sandbox}/commands.log"; then
     echo "FAIL: integration did not preserve canonical cargo execution for group suites" >&2
+    failures=$((failures + 1))
+  fi
+  if grep -Fq 'reborn_group_unselected' "${sandbox}/commands.log"; then
+    echo "FAIL: integration broadened the selected group suites" >&2
     failures=$((failures + 1))
   fi
   if ! grep -F 'nextest ' "${sandbox}/commands.log" | grep -Fq 'reborn_integration_fixture'; then

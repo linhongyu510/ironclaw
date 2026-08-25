@@ -27,6 +27,10 @@ mapfile -t test_names < <(
     | LC_ALL=C sort
 )
 
+if [[ "$#" -gt 0 ]]; then
+  test_names=("$@")
+fi
+
 if [ "${#test_names[@]}" -eq 0 ]; then
   echo "No Reborn group tests discovered" >&2
   exit 1
