@@ -1755,7 +1755,11 @@ def validate_crate_name_residue(
     return errors
 
 
-WORKFLOW_EVAL = re.compile(r"^[ \t]*eval[ \t]", re.MULTILINE)
+WORKFLOW_EVAL = re.compile(
+    r"(?:^[ \t]*|(?:;|&&|\|\||\|)[ \t]*|(?:\bthen|\bdo)[ \t]+)"
+    r"eval(?=[ \t;&|]|$)",
+    re.MULTILINE,
+)
 
 
 def validate_no_eval_in_workflow_run_blocks(
@@ -1763,15 +1767,9 @@ def validate_no_eval_in_workflow_run_blocks(
 ) -> list[str]:
     """No workflow may `eval` a command it just built as a string.
 
-    Commands are assembled as argv arrays and run directly; the REPRO hint
-    is derived FROM the argv with printf '%q '. `eval` re-parses whatever
-    was interpolated, and the crate-bucket lane interpolates
-    planner-derived target names that come from changed FILENAMES -- so a
-    contributor adding `tests/$(cmd).rs` would execute `cmd` on a runner
-    that holds sccache credentials. A newline in the same value can also
-    forge extra $GITHUB_ENV entries. Both become unrepresentable once the
-    argv is never re-parsed, so this stays a hard contract rather than a
-    review habit.
+    Commands are argv arrays; REPRO is derived from them with printf '%q '.
+    The crate-bucket target names come from changed filenames, so reparsing
+    them would permit command execution or forged GITHUB_ENV entries.
     """
 
     errors: list[str] = []
@@ -1796,24 +1794,16 @@ BLOCK_SCALAR = re.compile(r"^[|>][+-]?[0-9]*[ ]*(#.*)?$")
 def validate_no_duplicate_yaml_keys(root: Path = ROOT) -> list[str]:
     """No workflow may declare the same mapping key twice in one block.
 
-    Deliberately stdlib-only: every checker in scripts/ci is, and adding
-    PyYAML here would make the gate depend on a package the fast-checks job
-    does not install (learned the hard way -- an earlier PyYAML version of
-    this function errored 70 self-tests in CI while passing locally).
-
-    It is also the wrong tool: PyYAML's safe_load silently keeps the LAST
-    duplicate, so a local `yaml.safe_load` sanity check passes while the
-    value the author wrote is discarded -- which is how a duplicated
-    `if-no-files-found` pinned a JUnit upload to `error` and would have
-    hard-failed every coverage lane.
-
-    The scan tracks one key set per mapping block, keyed by indent. A `- `
-    item opens a fresh block, and block scalars (`|`, `>`) are skipped so
-    their free text is never parsed as YAML.
+    Stdlib-only: fast-checks has no PyYAML and safe_load keeps the last duplicate.
+    Track indentation, reset list items, skip block scalars, and reject unsupported flow mappings.
     """
 
     errors: list[str] = []
-    for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
+    workflows_dir = root / ".github" / "workflows"
+    paths = sorted(
+        (*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml"))
+    )
+    for path in paths:
         rel = path.relative_to(root).as_posix()
         scopes: list[tuple[int, set[str]]] = []
         skip_until_indent: int | None = None
@@ -1840,6 +1830,13 @@ def validate_no_duplicate_yaml_keys(root: Path = ROOT) -> list[str]:
             if match is None:
                 continue
             key = match.group("key").strip("\"'")
+            if match.group("rest").strip().startswith("{"):
+                errors.append(
+                    f"{rel}:{number}: inline YAML flow mapping is unsupported. "
+                    "Use an indented block mapping so duplicate keys remain visible "
+                    "to the stdlib-only validator."
+                )
+                continue
             dash = match.group("dash")
             effective = indent + (len(dash) if dash else 0)
             while scopes and scopes[-1][0] > effective:
@@ -1910,7 +1907,7 @@ def validate_workflow_texts(
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    """Every `.github/workflows/*.yml` file, repo-relative path -> text.
+    """Every `.github/workflows/*.yml`/`*.yaml` file, repo-relative path -> text.
 
     A handful of contracts key off one specific known path (REQUIRED_MARKERS,
     CRATE_SCOPE_FILTERS, CRATE_NAME_RESIDUE); `validate_webui_frontend_sites`
@@ -1922,9 +1919,12 @@ def load_workflows(root: Path) -> dict[str, str]:
     """
 
     workflows_dir = root / ".github" / "workflows"
+    paths = sorted(
+        (*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml"))
+    )
     return {
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted(workflows_dir.glob("*.yml"))
+        for path in paths
     }
 
 

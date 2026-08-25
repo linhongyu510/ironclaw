@@ -6,9 +6,9 @@
 //! `cargo`/`cargo nextest`, so they prove nothing about whether nextest's
 //! test-process spawn path inherits the same env. This test does: run it
 //! once under `cargo nextest` inside the hermetic wrapper with the guard
-//! ACTIVE (must PASS -- connection refused), and once with
+//! ACTIVE (must PASS -- the interposer returns `PermissionDenied`), and once with
 //! `IRONCLAW_HERMETIC_SABOTAGE=network` (guard DISABLED, must FAIL --
-//! connection not refused within the timeout). Only the differential
+//! any non-`PermissionDenied` outcome). Only the differential
 //! between those two runs is the actual proof; see
 //! scripts/ci/test-hermetic-test-process.sh for the orchestration.
 //!

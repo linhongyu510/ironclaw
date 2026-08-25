@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import dataclasses
 import tempfile
@@ -47,6 +48,22 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+def _yaml_import_nodes(source: str) -> list[ast.Import | ast.ImportFrom]:
+    tree = ast.parse(source)
+    return [
+        node
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name.split(".", 1)[0] == "yaml" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".", 1)[0] == "yaml"
+        )
+    ]
 
 
 class SccacheSetupActionContractTests(unittest.TestCase):
@@ -2157,8 +2174,30 @@ class NoDuplicateYamlKeysTests(unittest.TestCase):
                 encoding="utf-8",
             )
             errors = validate_no_duplicate_yaml_keys(root)
+            self.assertEqual(
+                1,
+                sum(
+                    ".github/workflows/dupe.yml:5: duplicate key "
+                    "'if-no-files-found'" in error
+                    for error in errors
+                ),
+                errors,
+            )
+
+    def test_flow_mapping_is_rejected_before_duplicate_keys_can_hide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._workflows_dir(root)
+            (directory / "flow.yml").write_text(
+                "jobs:\n"
+                "  build:\n"
+                "    with: { if-no-files-found: ignore, "
+                "if-no-files-found: error }\n",
+                encoding="utf-8",
+            )
+            errors = validate_no_duplicate_yaml_keys(root)
             self.assertTrue(
-                any("if-no-files-found" in e and "dupe.yml" in e for e in errors),
+                any("flow.yml:3" in error and "flow mapping" in error for error in errors),
                 errors,
             )
 
@@ -2220,7 +2259,12 @@ class NoDuplicateYamlKeysTests(unittest.TestCase):
         source = (
             Path(ws12_workflow_contracts.__file__).read_text(encoding="utf-8")
         )
-        self.assertNotIn("import yaml", source)
+        self.assertEqual([], _yaml_import_nodes(source))
+
+    def test_yaml_import_guard_rejects_both_import_forms(self):
+        for source in ("import yaml\n", "from yaml import safe_load\n"):
+            with self.subTest(source=source.strip()):
+                self.assertEqual(1, len(_yaml_import_nodes(source)))
 
     def test_live_workflows_have_no_duplicate_keys(self):
         self.assertEqual([], validate_no_duplicate_yaml_keys(ROOT))
@@ -2244,6 +2288,30 @@ class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):
         }
         errors = validate_no_eval_in_workflow_run_blocks(workflows)
         self.assertTrue(any("x.yml:3" in e for e in errors), errors)
+
+    def test_eval_after_shell_command_separators_fails(self):
+        separators = (
+            "prepare; eval",
+            "prepare && eval",
+            "prepare || eval",
+            "prepare | eval",
+        )
+        for command in separators:
+            with self.subTest(command=command):
+                workflows = {
+                    ".github/workflows/x.yml": f'        {command} "$REPRO"\n'
+                }
+                errors = validate_no_eval_in_workflow_run_blocks(workflows)
+                self.assertTrue(any("x.yml:1" in error for error in errors), errors)
+
+    def test_eval_after_shell_control_words_fails(self):
+        for command in (
+            'if ready; then eval "$REPRO"; fi',
+            'while ready; do eval "$REPRO"; done',
+        ):
+            with self.subTest(command=command):
+                workflows = {".github/workflows/x.yml": f"        {command}\n"}
+                self.assertTrue(validate_no_eval_in_workflow_run_blocks(workflows))
 
     def test_argv_array_invocation_passes(self):
         workflows = {
@@ -2271,6 +2339,21 @@ class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):
         self.assertEqual(
             [], validate_no_eval_in_workflow_run_blocks(workflows)
         )
+
+    def test_loader_includes_yaml_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / ".github" / "workflows"
+            directory.mkdir(parents=True)
+            (directory / "long.yaml").write_text("name: long\n", encoding="utf-8")
+            (directory / "short.yml").write_text("name: short\n", encoding="utf-8")
+            self.assertEqual(
+                {
+                    ".github/workflows/long.yaml",
+                    ".github/workflows/short.yml",
+                },
+                set(load_workflows(root)),
+            )
 
 
 

@@ -79,7 +79,7 @@ run_crate_tests() {
   local package feature_flags runner
   prepare_postgres_test_image
   source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
-  runner="$(select_test_runner optional)"
+  runner="$(select_test_runner require-in-ci)"
   while IFS= read -r package; do
     feature_flags="$("${repo_root}/scripts/ci/package-feature-flags.sh" "${package}")"
     if [[ "${runner}" == "nextest" ]]; then
@@ -94,15 +94,30 @@ run_crate_tests() {
 
 run_integration_tier() {
   local test_name runner
+  local has_group_tests=0
   local -a test_args=()
   prepare_postgres_test_image
   source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
-  runner="$(select_test_runner optional)"
+  runner="$(select_test_runner require-in-ci)"
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
+    if [[ "${test_name}" == reborn_group_* ]]; then
+      has_group_tests=1
+      continue
+    fi
     test_args+=(--test "${test_name}")
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
-  if [[ "${runner}" == "nextest" ]]; then
+
+  # The group binaries share a libsql-backed store and must remain sequential.
+  # Delegate them to the same canonical runner used by the dedicated groups
+  # stage instead of admitting them to nextest's parallel process pool.
+  if [[ "${has_group_tests}" == "1" ]]; then
+    REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
+      RUST_MIN_STACK=67108864 \
+      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
+  fi
+
+  if [[ "${runner}" == "nextest" && "${#test_args[@]}" -gt 0 ]]; then
     run cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" --ignore-rust-version
   else
     for test_name in "${test_args[@]}"; do

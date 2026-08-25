@@ -2184,6 +2184,66 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '                  -p "${package}" "--${kind}" "${name}"',
             workflow,
         )
+        # Every selected exact target must run even when an earlier target
+        # fails, and every target's nextest report must survive under a unique
+        # name before the aggregate status fails the step.
+        self.assertIn("overall_status=0", workflow)
+        self.assertIn(
+            '"junit-reports/${BUCKET_NAME}-exact-${target_index}.xml"',
+            workflow,
+        )
+        self.assertIn("rm -f target/nextest/ci/junit.xml", workflow)
+        self.assertIn(
+            '[ "${overall_status}" -eq 0 ] || exit "${overall_status}"',
+            workflow,
+        )
+
+        # Repro commands describe the command CI actually ran, including the
+        # timeout/stack controls and coverage mode/output path.
+        self.assertIn(
+            '"REBORN_ROOT_TEST_TIMEOUT=${REBORN_ROOT_TEST_TIMEOUT}"', workflow
+        )
+        self.assertIn(
+            '"REBORN_GROUP_TEST_TIMEOUT=${REBORN_GROUP_TEST_TIMEOUT}"', workflow
+        )
+        self.assertGreaterEqual(workflow.count('"RUST_MIN_STACK=${RUST_MIN_STACK}"'), 2)
+        self.assertIn('"REBORN_COV_COLLECT=${REBORN_COV_COLLECT}"', workflow)
+        self.assertIn(
+            'scripts/ci/reborn-coverage-lane-run.sh "part-${REBORN_COV_LANE_INDEX}.lcov"',
+            workflow,
+        )
+
+        # The opted-in nextest network control runs only after Cargo's locked
+        # dependencies have been prepared for hermetic offline execution.
+        control_start = workflow.index(
+            "      - name: Hermetic nextest network-guard control"
+        )
+        control_end = workflow.index("      - name: Run Reborn root tests", control_start)
+        control_step = workflow[control_start:control_end]
+        self.assertIn(
+            "scripts/ci/run-hermetic-deterministic-suite.sh prepare-command",
+            control_step,
+        )
+        self.assertLess(
+            control_step.index("run-hermetic-deterministic-suite.sh prepare-command"),
+            control_step.index("test-hermetic-test-process.sh"),
+        )
+
+        # Keep the fallback prose out of shell parameter expansion: its
+        # apostrophe made the generated workflow command syntactically invalid.
+        self.assertNotIn("${REPRO:-<no REPRO recorded", workflow)
+        self.assertEqual(
+            workflow.count("run: scripts/ci/write-local-repro-summary.sh"), 4
+        )
+
+        self.assertIn("python3 scripts/ci/test_junit_summary.py", code_style)
+        self.assertIn(
+            "scripts/ci/test-hermetic-deterministic-suite-runner.sh", code_style
+        )
+        self.assertIn("scripts/ci/test-run-reborn-group-tests.sh", code_style)
+        self.assertIn("scripts/ci/test-write-local-repro-summary.sh", code_style)
+        self.assertNotIn("Install cargo-nextest", code_style)
+        self.assertNotIn("tool: cargo-nextest@", code_style)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

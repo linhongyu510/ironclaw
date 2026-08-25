@@ -19,6 +19,9 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 
+MAX_REPORT_BYTES = 64 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class FailedTest:
     classname: str
@@ -37,18 +40,21 @@ def _first_line(text: str | None) -> str:
 
 
 def parse_junit(path: str) -> list[FailedTest]:
-    # Refuse a DTD outright instead of parsing it. JUnit XML has no
-    # legitimate use for one, and expat expands INTERNAL entities, so a
-    # billion-laughs payload would hang this step. The file is CI-produced
-    # but its content (test names, failure messages) comes from the branch
-    # under test, so it is not trusted input. Dependency-free on purpose:
-    # defusedxml is not a dependency of this repo.
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        head = handle.read(4096)
-    if "<!DOCTYPE" in head or "<!ENTITY" in head:
-        raise SystemExit(f"{path}: refusing JUnit XML containing a DTD")
-    tree = ET.parse(path)
-    root = tree.getroot()
+    # Read once so validation and parsing operate on the same bounded input.
+    # JUnit reports have no legitimate use for DTDs, and expat expands
+    # internal entities. Test-controlled names and messages make these
+    # CI-produced files untrusted input. Keep this dependency-free: defusedxml
+    # is not a repository dependency.
+    with open(path, "rb") as handle:
+        report = handle.read(MAX_REPORT_BYTES + 1)
+    if len(report) > MAX_REPORT_BYTES:
+        raise ET.ParseError(
+            f"JUnit report exceeds the {MAX_REPORT_BYTES}-byte limit"
+        )
+    if b"<!DOCTYPE" in report or b"<!ENTITY" in report:
+        raise ET.ParseError("refusing JUnit XML containing a DTD or entity")
+
+    root = ET.fromstring(report)
     testsuites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     failed: list[FailedTest] = []
     for suite in testsuites:

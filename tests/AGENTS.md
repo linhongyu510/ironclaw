@@ -388,7 +388,7 @@ manual-run and scheduled-run denial evidence),
 **Policy & format**: `e2e_trace_runtime_policy_org_ceiling_yolo.rs` (org policy
 ceiling × yolo narrowing), `e2e_trace_runtime_policy_serde.rs` (wire-stable policy
 enums), `trace_format.rs`, `trace_llm_tests.rs`,
-`reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom), `hermetic_network_guard_probe.rs` (the hermetic wrapper's network guard must survive nextest's own process spawning, not just a directly-launched binary; `#[ignore]`d — driven by scripts/ci/test-hermetic-test-process.sh under IRONCLAW_HERMETIC_NEXTEST_CONTROL=1).
+`reborn_coverage_lane_stack_headroom.rs` (CI job must declare stack headroom), `hermetic_network_guard_probe.rs` (hermetic nextest runs cannot make non-loopback connections; `#[ignore]`d — driven by scripts/ci/test-hermetic-test-process.sh under IRONCLAW_HERMETIC_NEXTEST_CONTROL=1).
 
 ---
 

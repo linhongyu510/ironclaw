@@ -412,7 +412,10 @@ jobs:
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
             mkdir -p junit-reports
             if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              overall_status=0
+              target_index=0
               while IFS=$'\t' read -r package kind name; do
+                target_index=$((target_index + 1))
                 target_feature_args=()
                 feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
                 if [[ -n "${feature_flags}" ]]; then
@@ -434,14 +437,21 @@ jobs:
                 # Capture the status so the report of a FAILING run still gets
                 # staged: under `bash -e` the step would otherwise abort here
                 # and lose exactly the JUnit file worth reading.
+                rm -f target/nextest/ci/junit.xml
                 status=0
                 "${cmd[@]}" || status=$?
-                cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
-                [ "${status}" -eq 0 ] || exit "${status}"
+                if [[ -f target/nextest/ci/junit.xml ]]; then
+                  cp target/nextest/ci/junit.xml \
+                    "junit-reports/${BUCKET_NAME}-exact-${target_index}.xml"
+                fi
+                if [[ "${status}" -ne 0 && "${overall_status}" -eq 0 ]]; then
+                  overall_status="${status}"
+                fi
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
               )
+              [ "${overall_status}" -eq 0 ] || exit "${overall_status}"
             else
               cmd=(scripts/ci/run-hermetic-deterministic-suite.sh command
                 timeout --signal=INT --kill-after=30s 28m
@@ -460,13 +470,7 @@ jobs:
 
       - name: Local repro for this job
         if: failure()
-        run: |
-          {
-            echo "### Local repro for this job"
-            echo '```bash'
-            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+        run: scripts/ci/write-local-repro-summary.sh
 
       - name: Upload bucket lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
@@ -586,13 +590,16 @@ jobs:
       - name: Hermetic nextest network-guard control
         env:
           IRONCLAW_HERMETIC_NEXTEST_CONTROL: "1"
-        run: bash scripts/ci/test-hermetic-test-process.sh
+        run: |
+          scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
+          bash scripts/ci/test-hermetic-test-process.sh
 
       - name: Run Reborn root tests
         run: |
           cmd=(env REBORN_ROOT_TEST_PARTITIONS=4
             "REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }}"
-            RUST_MIN_STACK=67108864
+            "REBORN_ROOT_TEST_TIMEOUT=${REBORN_ROOT_TEST_TIMEOUT}"
+            "RUST_MIN_STACK=${RUST_MIN_STACK}"
             scripts/ci/run-hermetic-deterministic-suite.sh command
             scripts/ci/run-reborn-root-partition.sh)
           printf -v REPRO '%q ' "${cmd[@]}"
@@ -601,13 +608,7 @@ jobs:
 
       - name: Local repro for this job
         if: failure()
-        run: |
-          {
-            echo "### Local repro for this job"
-            echo '```bash'
-            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+        run: scripts/ci/write-local-repro-summary.sh
 
       # Every lane's nextest writes the same `target/nextest/ci/junit.xml`.
       # The roll-up downloads `reborn-junit-*` with `merge-multiple: true`,
@@ -721,20 +722,17 @@ jobs:
 
       - name: Run Reborn group tests
         run: |
-          cmd=(scripts/ci/run-hermetic-deterministic-suite.sh groups)
+          cmd=(env
+            "REBORN_GROUP_TEST_TIMEOUT=${REBORN_GROUP_TEST_TIMEOUT}"
+            "RUST_MIN_STACK=${RUST_MIN_STACK}"
+            scripts/ci/run-hermetic-deterministic-suite.sh groups)
           printf -v REPRO '%q ' "${cmd[@]}"
           echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
           "${cmd[@]}"
 
       - name: Local repro for this job
         if: failure()
-        run: |
-          {
-            echo "### Local repro for this job"
-            echo '```bash'
-            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+        run: scripts/ci/write-local-repro-summary.sh
 
   sandbox-docker-tests:
     name: Reborn user-sandbox Docker tests
@@ -931,22 +929,22 @@ jobs:
             # matrix leg. Clear only profiling data, not compiled binaries.
             cargo llvm-cov clean --profraw-only
           fi
-          REPRO="REBORN_COV_COLLECT=false REBORN_COV_LANE_MODE=${REBORN_COV_LANE_MODE} REBORN_COV_LANE_PARTITIONS=4 REBORN_COV_LANE_INDEX=${REBORN_COV_LANE_INDEX} scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/reborn-coverage-lane-run.sh /tmp/repro.lcov"
-          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
-          IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
-            scripts/ci/run-hermetic-deterministic-suite.sh command \
-            scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+          cmd=(env
+            "REBORN_COV_COLLECT=${REBORN_COV_COLLECT}"
+            "REBORN_COV_LANE_MODE=${REBORN_COV_LANE_MODE}"
+            "REBORN_COV_LANE_PARTITIONS=${REBORN_COV_LANE_PARTITIONS}"
+            "REBORN_COV_LANE_INDEX=${REBORN_COV_LANE_INDEX}"
+            IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
+            scripts/ci/run-hermetic-deterministic-suite.sh command
+            scripts/ci/reborn-coverage-lane-run.sh "part-${REBORN_COV_LANE_INDEX}.lcov")
+          printf -v REPRO '%q ' "${cmd[@]}"
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+          "${cmd[@]}"
 
       - name: Local repro for this job
         if: failure()
-        run: |
-          {
-            echo "### Local repro for this job"
-            echo '```bash'
-            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+        run: scripts/ci/write-local-repro-summary.sh
 
       - name: Upload lane lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'

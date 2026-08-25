@@ -11,7 +11,7 @@
 # The control is therefore opt-in. This test pins BOTH halves of that
 # contract, using a PATH sandbox (same shape as test-quality-gate-runner.sh):
 # a stub `cargo`/`cargo-nextest` that records any invocation and fails.
-set -uo pipefail
+set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 under_test="${repo_root}/scripts/ci/test-hermetic-test-process.sh"
@@ -57,9 +57,13 @@ done
 
 # 1. Default (the fast-checks shape): control skipped, script green, and
 #    cargo never invoked even though it is on PATH.
-PATH="${sandbox}:${PATH}" env -u IRONCLAW_HERMETIC_NEXTEST_CONTROL \
-  bash "${under_test}" >"${sandbox}/default.log" 2>&1
-assert_success "default run (fast-checks shape)" "$?"
+if PATH="${sandbox}:${PATH}" env -u IRONCLAW_HERMETIC_NEXTEST_CONTROL \
+  bash "${under_test}" >"${sandbox}/default.log" 2>&1; then
+  default_status=0
+else
+  default_status=$?
+fi
+assert_success "default run (fast-checks shape)" "${default_status}"
 assert_no_cargo_invocation "default run (fast-checks shape)"
 if ! grep -q "control not requested" "${sandbox}/default.log"; then
   echo "FAIL: default run did not report that the control was skipped" >&2
@@ -72,9 +76,13 @@ rm -f "${marker}"
 missing="${sandbox}/no-nextest"
 mkdir -p "${missing}"
 cp "${sandbox}/cargo" "${missing}/cargo"
-PATH="${missing}:/usr/bin:/bin" CI=true IRONCLAW_HERMETIC_NEXTEST_CONTROL=1 \
-  bash "${under_test}" >"${sandbox}/optin.log" 2>&1
-assert_failure "opted-in run with cargo-nextest missing under CI" "$?"
+if PATH="${missing}:/usr/bin:/bin" CI=true IRONCLAW_HERMETIC_NEXTEST_CONTROL=1 \
+  bash "${under_test}" >"${sandbox}/optin.log" 2>&1; then
+  optin_status=0
+else
+  optin_status=$?
+fi
+assert_failure "opted-in run with cargo-nextest missing under CI" "${optin_status}"
 
 if [[ "${failures}" -ne 0 ]]; then
   echo "hermetic nextest-control gating: ${failures} failure(s)" >&2
