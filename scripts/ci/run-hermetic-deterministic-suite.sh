@@ -231,7 +231,7 @@ case "${stage}" in
     run_python_e2e
     ;;
   prepare-command)
-    prepare_command_dependencies
+    prepare_rust_dependencies
     ;;
   all)
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"

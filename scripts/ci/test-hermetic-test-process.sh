@@ -433,8 +433,9 @@ fi
 # failed: ... left: TimedOut, right: PermissionDenied".
 # The control below is the only part of this self-test that invokes cargo.
 # It therefore needs a prepared Rust dependency graph: nextest shells out to
-# `cargo metadata`, which cannot resolve offline inside the hermetic wrapper
-# unless the registry cache is already warm. `fast-checks` is deliberately a
+# `cargo metadata`, and compiling the root package can invoke the WebUI build
+# script. Neither Cargo nor pnpm can resolve dependencies inside the hermetic
+# wrapper. `fast-checks` is deliberately a
 # cache-less, toolchain-light lane, so this stays OFF by default and the
 # stub-based checks above run everywhere unchanged. Jobs that already have a
 # toolchain, a restored cargo registry and cargo-nextest opt in by setting

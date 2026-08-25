@@ -58,6 +58,7 @@ exit 0
 STUB
 cat >"${sandbox}/bin/corepack" <<'STUB'
 #!/usr/bin/env bash
+printf 'corepack %s\n' "$*" >>"${HERMETIC_TEST_LOG}"
 exit 0
 STUB
 cat >"${sandbox}/bin/timeout" <<'STUB'
@@ -91,6 +92,18 @@ run_suite() {
 }
 
 failures=0
+
+: >"${sandbox}/commands.log"
+if ! run_suite prepare-command unset no >"${sandbox}/prepare-command.log" 2>&1; then
+  echo "FAIL: prepare-command stage failed" >&2
+  cat "${sandbox}/prepare-command.log" >&2
+  failures=$((failures + 1))
+elif ! grep -Fq 'corepack pnpm install --frozen-lockfile' "${sandbox}/commands.log"; then
+  echo "FAIL: prepare-command did not provision frontend dependencies for Rust build scripts" >&2
+  cat "${sandbox}/commands.log" >&2
+  failures=$((failures + 1))
+fi
+
 for stage in crates integration; do
   : >"${sandbox}/commands.log"
   if run_suite "${stage}" set no >"${sandbox}/${stage}-ci.log" 2>&1; then

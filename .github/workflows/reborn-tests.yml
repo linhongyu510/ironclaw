@@ -563,8 +563,9 @@ jobs:
       # The hermetic wrapper's network guard must survive nextest's own
       # process spawning, not just a directly-launched test binary. This is
       # the only place that control can run: it shells out to cargo, so it
-      # needs the toolchain, a warm registry and cargo-nextest -- all of
-      # which this job already has and fast-checks deliberately does not.
+      # needs the toolchain, prepared Cargo/WebUI dependencies and
+      # cargo-nextest -- all of which this job already has and fast-checks
+      # deliberately does not.
       - name: Hermetic nextest network-guard control
         env:
           IRONCLAW_HERMETIC_NEXTEST_CONTROL: "1"
