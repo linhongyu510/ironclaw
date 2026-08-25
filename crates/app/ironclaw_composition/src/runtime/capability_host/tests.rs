@@ -541,6 +541,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_trigger_poller_hides_only_manual_run_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input_with_profile(
+                crate::RebornCompositionProfile::StandaloneUnrestricted,
+                "disabled-trigger-run-capability",
+                dir.path().join("standalone"),
+            )
+            .with_runtime_policy(local_host_minimal_approval_policy()),
+        )
+        .await
+        .expect("standalone services build");
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            UserId::new("disabled-trigger-run-user").expect("user id"),
+            Arc::new(
+                crate::builtin_capability_policy::builtin_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("standalone capability wiring");
+
+        let definitions = wiring
+            .capability_factory
+            .create_capability_port(&run_context("disabled-trigger-run-capability").await)
+            .await
+            .expect("capability port")
+            .tool_definitions()
+            .expect("tool definitions");
+
+        assert!(definitions.iter().any(|definition| {
+            definition.capability_id.as_str() == ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID
+        }));
+        assert!(!definitions.iter().any(|definition| {
+            definition.capability_id.as_str() == ironclaw_host_runtime::TRIGGER_RUN_CAPABILITY_ID
+        }));
+    }
+
+    #[tokio::test]
     async fn extension_remove_tool_discloses_generic_unpair_disconnect_semantics() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
@@ -569,6 +616,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
 
@@ -701,6 +749,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
 
@@ -1644,6 +1693,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1962,6 +2012,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -2600,6 +2651,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -2786,6 +2838,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("capability wiring");
         let port = wiring
@@ -2879,6 +2932,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             external_tool_catalog: catalog,
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -2965,6 +3019,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
 
         let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
@@ -3167,6 +3222,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -3511,6 +3567,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -3941,6 +3998,7 @@ mod tests {
                 crate::wrap_scoped(Arc::clone(runtime_surfaces.extension_filesystem_for_test())),
             )),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+            unavailable_capability_ids: HashSet::new(),
         };
         // Build the port scoped to thread B's run context: the reference
         // above was only finalized under thread A.
@@ -4097,6 +4155,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
 
         // owner == actor since the ephemeral-per-ping remodel: one run user.
@@ -4309,6 +4368,7 @@ mod tests {
             Some(outbound_preferences_service),
             None,
             None,
+            true,
         )
         .expect("capability wiring");
         let port = wiring
@@ -4553,6 +4613,7 @@ mod tests {
             Some(outbound_preferences_service),
             None,
             None,
+            true,
         )
         .expect("capability wiring");
         let port = wiring
@@ -4797,6 +4858,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let run_context = run_context("outbound-delivery-hidden")
             .await
@@ -4911,6 +4973,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let run_context = run_context("host-mount-read").await;
         enable_global_auto_approve_for_run(
@@ -5160,6 +5223,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let run_context = run_context("skill-install-write").await;
         enable_global_auto_approve_for_run(
@@ -5295,6 +5359,7 @@ mod tests {
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
+            unavailable_capability_ids: HashSet::new(),
         };
         let run_context = run_context("no-host-disclosure").await;
         enable_global_auto_approve_for_run(
@@ -5450,6 +5515,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -5482,6 +5548,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
         let port = wiring
@@ -5613,6 +5680,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
         let port = wiring
@@ -5764,6 +5832,7 @@ mod tests {
             None,
             None,
             None,
+            true,
         )
         .expect("standalone capability wiring");
         let port = wiring

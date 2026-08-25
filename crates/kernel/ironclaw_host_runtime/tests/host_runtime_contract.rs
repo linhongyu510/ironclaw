@@ -37,7 +37,9 @@ use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
     },
     decision::{Decision, DenyReason, Obligations},
-    dispatch::{CapabilityDispatchResult, DispatchError},
+    dispatch::{
+        CapabilityDispatchResult, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     host_port::HostPortCatalog,
     ids::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
@@ -59,9 +61,9 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
     ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
-    ProcessInvocationStore, ProcessJournalStore, ProcessResultStore, ProcessResultStorePort,
-    ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
-    submit_capability_process,
+    ProcessInvocationStore, ProcessJournalKind, ProcessJournalStore, ProcessKind,
+    ProcessResultStore, ProcessResultStorePort, ProcessServices, ProcessStart, ProcessStatus,
+    capability_process_record, submit_capability_process,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -133,6 +135,77 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         other => panic!("expected Completed outcome, got {:?}", other),
     }
     assert!(dispatcher.call_count() > 0);
+}
+
+#[tokio::test]
+async fn default_runtime_persists_failed_invocation_when_dispatch_fails() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Wasm),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            diagnostic: None,
+            detail: None,
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_runtime = ProcessServices::in_memory().process_runtime();
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::clone(&process_runtime)));
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone())
+    .with_approval_requests(approval_requests);
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let outcome = runtime
+        .invoke_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "dispatch fails"}),
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(_)
+    ));
+    let run = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("dispatch failure must persist terminal invocation evidence");
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
+    let entries = process_runtime
+        .read_process_journal_after(&scope, None, None, 16)
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.process_kind == ProcessKind::CapabilityInvocationState)
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, ProcessJournalKind::Failed);
+
+    let reloaded = ProcessInvocationStore::new(process_runtime)
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("terminal invocation evidence must survive store reconstruction");
+    assert_eq!(reloaded.status, ProcessInvocationStatus::Failed);
+    assert_eq!(reloaded.error_kind.as_deref(), Some("Dispatch"));
 }
 
 /// A capability bound to a standard messaging op (`standard_op:
@@ -555,6 +628,64 @@ async fn default_runtime_fresh_dispatch_error_becomes_failed_and_fails_run_state
 }
 
 #[tokio::test]
+async fn default_runtime_fresh_dispatch_error_preserves_failure_when_fail_transition_fails() {
+    // A fresh invocation's dispatch failure is model-visible even when the
+    // best-effort durable transition cannot find or update its run record. The
+    // transition failure must not replace the actionable provider failure with
+    // HostRuntimeError::Unavailable.
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state = Arc::new(FailingDispatchTransitionRunStateStore::new(
+        inner_run_state.clone(),
+    ));
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state);
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let outcome = runtime
+        .invoke_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+        ))
+        .await
+        .expect("fresh dispatch failure must remain model-visible");
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::UnknownProvider);
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = inner_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("fresh invocation remains recorded when its transition fails");
+    assert_eq!(record.status, ProcessInvocationStatus::Running);
+}
+
+#[tokio::test]
 async fn default_runtime_fresh_auth_required_gate_is_stable_across_calls() {
     // Fresh-invocation pin for the processor's `AuthorizationRequiresAuth` arm:
     // two independent fresh invocations that hit the same auth requirement must
@@ -925,6 +1056,344 @@ async fn default_runtime_auth_resume_repeated_auth_requirement_reuses_stable_gat
             other
         ),
     }
+}
+
+#[tokio::test]
+async fn default_runtime_approval_resume_dispatch_error_fails_and_terminalizes_run_state() {
+    // Pins the processor's `CapabilityInvocationError::Dispatch` arm under
+    // `InlineInvocationMode::ApprovalResume`: a dispatcher failure on a resumed
+    // approval must surface `Failed` *and* terminalize the durable run-state
+    // record, not leave it parked in a blocked/dispatching status forever
+    // (deferred defect from #7686 CodeRabbit thread).
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ApprovalThenGrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone())
+    .with_approval_requests(approval_requests.clone())
+    .with_capability_leases(leases.clone());
+
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "hello"});
+
+    let gate = match runtime
+        .invoke_capability((
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap()
+    {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    };
+
+    ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
+        .approve_dispatch(
+            &scope,
+            gate.approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .expect("approve dispatch");
+
+    let outcome = runtime
+        .resume_capability((
+            context,
+            gate.approval_request_id,
+            capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::UnknownProvider);
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("run record persisted before dispatch");
+    assert_eq!(
+        record.status,
+        ProcessInvocationStatus::Failed,
+        "a Dispatch error on approval resume must terminalize the run-state record"
+    );
+}
+
+#[tokio::test]
+async fn default_runtime_auth_resume_dispatch_error_fails_and_terminalizes_run_state() {
+    // Pins the processor's `CapabilityInvocationError::Dispatch` arm under
+    // `InlineInvocationMode::AuthResume`: a dispatcher failure on a resumed
+    // auth run must surface `Failed` *and* terminalize the durable run-state
+    // record instead of leaving it parked in `BlockedAuth` forever (deferred
+    // defect from #7686 CodeRabbit thread).
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    run_state
+        .start(ProcessInvocationStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+            authenticated_actor_user_id: None,
+        })
+        .await
+        .expect("seed running invocation");
+    run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .expect("park invocation in BlockedAuth");
+
+    let outcome = runtime
+        .auth_resume_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.capability_id, capability_id());
+            assert_eq!(failure.kind, FailureKind::UnknownProvider);
+        }
+        other => panic!("expected Failed outcome, got {:?}", other),
+    }
+    assert_eq!(dispatcher.call_count(), 1);
+    let record = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(
+        record.status,
+        ProcessInvocationStatus::Failed,
+        "a Dispatch error on auth resume must terminalize the run-state record"
+    );
+}
+
+#[tokio::test]
+async fn default_runtime_approval_resume_surfaces_unavailable_when_fail_transition_fails() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ApprovalThenGrantAuthorizer);
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state = Arc::new(FailingDispatchTransitionRunStateStore::new(
+        inner_run_state.clone(),
+    ));
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state)
+    .with_approval_requests(approval_requests.clone())
+    .with_capability_leases(leases.clone());
+
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "hello"});
+    let gate = match runtime
+        .invoke_capability((
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        ))
+        .await
+        .unwrap()
+    {
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate,
+        other => panic!("expected ApprovalRequired outcome, got {:?}", other),
+    };
+
+    ApprovalResolver::new(approval_requests.as_ref(), leases.as_ref())
+        .approve_dispatch(
+            &scope,
+            gate.approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .expect("approve dispatch");
+
+    let error = runtime
+        .resume_capability((
+            context,
+            gate.approval_request_id,
+            capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .expect_err("durable fail-transition failure must be unavailable");
+    assert_eq!(
+        error,
+        HostRuntimeError::Unavailable {
+            reason: "process invocation backend unavailable".to_string(),
+        }
+    );
+
+    let record = inner_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("blocked approval run remains durably recorded");
+    assert_eq!(record.status, ProcessInvocationStatus::BlockedApproval);
+    assert_eq!(record.approval_request_id, Some(gate.approval_request_id));
+}
+
+#[tokio::test]
+async fn default_runtime_auth_resume_surfaces_unavailable_when_fail_transition_fails() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        Err(DispatchError::UnknownProvider {
+            capability: capability_id(),
+            provider: extension_id(),
+        })
+    }));
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state = Arc::new(FailingDispatchTransitionRunStateStore::new(
+        inner_run_state.clone(),
+    ));
+
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()))
+    .with_invocation_state(run_state.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    inner_run_state
+        .start(ProcessInvocationStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+            authenticated_actor_user_id: None,
+        })
+        .await
+        .expect("seed running invocation");
+    inner_run_state
+        .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+        .await
+        .expect("park invocation in BlockedAuth");
+
+    let error = runtime
+        .auth_resume_capability((
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "hello"}),
+            None,
+        ))
+        .await
+        .expect_err("durable fail-transition failure must be unavailable");
+    assert_eq!(
+        error,
+        HostRuntimeError::Unavailable {
+            reason: "process invocation backend unavailable".to_string(),
+        }
+    );
+
+    let record = inner_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .expect("blocked auth run remains durably recorded");
+    assert_eq!(record.status, ProcessInvocationStatus::BlockedAuth);
 }
 
 struct ApprovalThenGrantAuthorizer;
@@ -1732,6 +2201,91 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
         resource_reservation_id: None,
         authorized_continuation: None,
         input: json!({"message": "background"}),
+    }
+}
+
+/// Wraps an invocation store but fails every terminal dispatch transition.
+///
+/// The underlying record remains in its blocked state so callers can retry
+/// after the durable backend recovers.
+struct FailingDispatchTransitionRunStateStore {
+    inner:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+impl FailingDispatchTransitionRunStateStore {
+    fn new(
+        inner: Arc<
+            ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
+        >,
+    ) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ProcessInvocationStatePort for FailingDispatchTransitionRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner.start(start).await
+    }
+
+    async fn block_approval(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        approval: ironclaw_host_api::approval::ApprovalRequest,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner
+            .block_approval(scope, invocation_id, approval)
+            .await
+    }
+
+    async fn block_auth(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        error_kind: String,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner
+            .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        self.inner.complete(scope, invocation_id).await
+    }
+
+    async fn fail(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+        _error_kind: String,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        Err(ProcessInvocationError::Backend(
+            "simulated dispatch transition failure: /private/users/secret/runstate.db".to_string(),
+        ))
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
+        self.inner.get(scope, invocation_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
+        self.inner.records_for_scope(scope).await
     }
 }
 

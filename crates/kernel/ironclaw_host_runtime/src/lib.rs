@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail, ProviderDiagnostic},
     ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
     result_meta::{FailureFate, FailureKind},
@@ -103,11 +103,13 @@ pub use first_party_tools::{
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
+    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services,
+    builtin_first_party_handlers_with_trigger_services_for_process_backend,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
     ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
@@ -411,13 +413,95 @@ pub struct RuntimeApprovalGate {
 }
 
 /// Auth/credential suspension state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RuntimeAuthGate {
     pub gate_id: RuntimeGateId,
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    provider_diagnostic: Option<Box<ProviderDiagnostic>>,
+}
+
+impl RuntimeAuthGate {
+    pub fn new(
+        gate_id: RuntimeGateId,
+        capability_id: CapabilityId,
+        reason: RuntimeBlockedReason,
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Self {
+        Self {
+            gate_id,
+            capability_id,
+            reason,
+            required_secrets,
+            credential_requirements,
+            provider_diagnostic: None,
+        }
+    }
+
+    pub fn with_provider_diagnostic(mut self, diagnostic: Option<Box<ProviderDiagnostic>>) -> Self {
+        self.provider_diagnostic = diagnostic;
+        self
+    }
+
+    pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
+        self.provider_diagnostic.as_deref()
+    }
+}
+
+impl fmt::Debug for RuntimeAuthGate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `required_secrets` handle names are omitted in full and reduced to a
+        // count, matching `DispatchError::AuthRequired`'s Debug convention
+        // (`ironclaw_host_api::dispatch`) so secret-handle identifiers never
+        // reach logs from this gate either.
+        formatter
+            .debug_struct("RuntimeAuthGate")
+            .field("gate_id", &self.gate_id)
+            .field("capability_id", &self.capability_id)
+            .field("reason", &self.reason)
+            .field(
+                "required_secrets",
+                &format!("[{} handle(s) redacted]", self.required_secrets.len()),
+            )
+            .field("credential_requirements", &self.credential_requirements)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeAuthGate {
+    fn eq(&self, other: &Self) -> bool {
+        self.gate_id == other.gate_id
+            && self.capability_id == other.capability_id
+            && self.reason == other.reason
+            && self.required_secrets == other.required_secrets
+            && self.credential_requirements == other.credential_requirements
+    }
+}
+
+impl Eq for RuntimeAuthGate {}
+
+#[cfg(test)]
+mod runtime_auth_gate_debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_required_secret_handle_names() {
+        let gate = RuntimeAuthGate::new(
+            RuntimeGateId::new(),
+            CapabilityId::new("notion.search").unwrap(),
+            RuntimeBlockedReason::AuthRequired,
+            vec![SecretHandle::new("notion-oauth-token").unwrap()],
+            Vec::new(),
+        );
+
+        let rendered = format!("{gate:?}");
+
+        assert!(!rendered.contains("notion-oauth-token"), "{rendered}");
+        assert!(rendered.contains("1 handle(s) redacted"), "{rendered}");
+    }
 }
 
 /// Resource suspension state.

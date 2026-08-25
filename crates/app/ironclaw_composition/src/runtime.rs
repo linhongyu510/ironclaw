@@ -37,7 +37,8 @@ use ironclaw_assistant::{
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
+    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
+    SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -591,6 +592,9 @@ pub struct RebornRuntime {
         Arc<dyn ironclaw_product_contracts::project_service::ProjectService>,
     pub(crate) diagnostic_store: Arc<dyn ironclaw_assistant::inspector_store::DiagnosticStorePort>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    /// Late-bound manual-fire runner shared by product automation actions and
+    /// the scheduler so both surfaces execute through the same worker graph.
+    pub(crate) trigger_manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(
         dead_code,
@@ -632,6 +636,7 @@ pub struct RebornRuntime {
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    pub(crate) notification_inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
@@ -1179,6 +1184,7 @@ impl RebornRuntime {
             outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
+            notification_inbox: Arc::clone(&self.notification_inbox),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
             outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
                 as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
@@ -2328,6 +2334,7 @@ impl RebornRuntime {
         let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                subagent_activation_provenance: None,
                 requested_model: accepted.replay_metadata.resolved_model.clone(),
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
@@ -3235,6 +3242,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("suggestion generation observer wiring failed: {error}"),
         })?;
+    processes
+        .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&services.notification_inbox),
+            Arc::clone(&thread_service),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("run outcome notification observer wiring failed: {error}"),
+        })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (
         configured_skill_context_source,
@@ -3524,8 +3539,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
             outbound_preferences_facade.clone(),
             trajectory_observer,
             Some(tool_diagnostic_sink),
-        )
-        .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+            trigger_poller.enabled,
+        )?;
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
@@ -3896,6 +3911,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             lease_recovery_interval: default_runtime_config.lease_recovery_interval,
             worker_count: runner.worker_count,
             disabled_capability_ids: default_runtime_config.disabled_capability_ids,
+            unattended_denied_capability_ids: unattended_denied_capability_ids()?,
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
@@ -4340,6 +4356,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
+                manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -4533,6 +4550,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         project_service,
         diagnostic_store,
         trigger_repository: trigger_repository.clone(),
+        trigger_manual_fire_runner: services.trigger_manual_fire_runner.clone(),
         #[cfg(any(test, feature = "test-support"))]
         trigger_process_lifecycle_source: Arc::clone(&services.trigger_process_lifecycle_source),
         broadcast_budget_event_sink,
@@ -4556,6 +4574,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
+        notification_inbox: services.notification_inbox.clone(),
         #[cfg(any(test, feature = "test-support"))]
         outbound_state: OutboundTestStores {
             state: services.outbound_state.clone(),
@@ -5102,6 +5121,32 @@ fn validate_runtime_identity(
         source_binding_ref,
         reply_target_binding_ref,
     })
+}
+
+/// The mutating synthetic capabilities denied to an unattended run.
+///
+/// Why the list has to exist, and why it lives here rather than in the loop
+/// layer that enforces it: see
+/// `DefaultPlannedRuntimeConfig::unattended_denied_capability_ids`.
+///
+/// Derived by measurement, not inspection — with global auto-approve off these
+/// are the capabilities that survive because they bypass the surface policy.
+/// `tests/integration/suggestions.rs` pins the resulting set.
+fn unattended_denied_capability_ids() -> Result<Vec<CapabilityId>, RebornRuntimeError> {
+    [
+        ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID,
+        ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+        ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID,
+        ironclaw_memory::PROFILE_SET_CAPABILITY_ID,
+        ironclaw_host_runtime::TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    ]
+    .into_iter()
+    .map(|id| {
+        CapabilityId::new(id).map_err(|reason| RebornRuntimeError::InvalidArgument {
+            reason: format!("unattended-denied capability id: {reason}"),
+        })
+    })
+    .collect()
 }
 
 struct AllowAllCapabilitySurfaceResolver;

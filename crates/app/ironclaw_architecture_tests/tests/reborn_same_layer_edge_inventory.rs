@@ -567,6 +567,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS2",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_notifications",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "#7688 (durable notification inbox grammar over ScopedFilesystem)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_outbound",
         dependency_name: "ironclaw_attachments",
         layer: "substrates",
@@ -748,7 +755,12 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 73;
+// 72 -> 73 (#7688): the dedicated notification-record domain is introduced
+// directly at the substrates layer and stores its grammar through the shared
+// filesystem substrate rather than coupling notification state to outbound.
+// 73 -> 74: the Mnesis memory provider stores its records through the shared
+// memory domain, the same inventoried edge memory-native and mem0 already carry.
+const SAME_LAYER_EDGE_BASELINE: usize = 74;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -818,6 +830,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_memory_mnesis", "substrates"),
     ("ironclaw_memory_native", "substrates"),
     ("ironclaw_network", "substrates"),
+    ("ironclaw_notifications", "substrates"),
     ("ironclaw_observability", "substrates"),
     ("ironclaw_operator", "products"),
     ("ironclaw_outbound", "substrates"),
