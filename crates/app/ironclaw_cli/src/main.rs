@@ -24,5 +24,21 @@ fn main() -> anyhow::Result<()> {
     {
         eprintln!("warning: failed to load .env: {error}");
     }
+    load_home_env();
     cli::run()
+}
+
+/// Loads `$IRONCLAW_REBORN_HOME/.env` after the working-directory one, so a
+/// workstation configures endpoints and credentials once instead of per shell.
+/// Never overwrites an already-set variable: shell exports win, then the
+/// project file, then this one.
+fn load_home_env() {
+    let Ok(home) = ironclaw_config::RebornHome::resolve_from_env() else {
+        return;
+    };
+    if let Err(error) = dotenvy::from_path(home.path().join(".env"))
+        && !error.not_found()
+    {
+        eprintln!("warning: failed to load home .env: {error}");
+    }
 }

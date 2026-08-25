@@ -123,6 +123,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "mnesis.hosted.memory.health",
     "mnesis.hosted.memory.list_related",
     "mnesis.hosted.memory.metrics",
+    "mnesis.hosted.memory.publish_status",
     "mnesis.hosted.memory.reflexes",
     "mnesis.hosted.memory.routing",
     "mnesis.hosted.memory.search",
@@ -241,8 +242,8 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
     }
     assert_eq!(
         EXPECTED_UNGATED_SEED.len(),
-        40,
-        "the reviewed S5 seed is 40 ids; a size change is a reviewed diff"
+        41,
+        "the reviewed S5 seed is 41 ids; a size change is a reviewed diff"
     );
 }
 

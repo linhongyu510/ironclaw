@@ -186,6 +186,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
     "google-sheets",
     "google-drive",
     "google-slides",
+    "mnesis-rar",
     "nearai-mcp",
     "notion-mcp",
 ];

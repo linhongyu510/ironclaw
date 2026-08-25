@@ -138,7 +138,11 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// `reborn_dependency_boundaries.rs::only_the_sanctioned_residue_names_a_memory_provider`
 /// with its own shrink-only residue. Folding it in here would flag the
 /// package's own source for naming itself.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "mnesis", "web-app"];
+/// `mnesis-rar` is the same engine's retrieval half. Its directory name
+/// contains `mnesis`, so deriving vocabulary from it would make the bare term
+/// forbidden and flag every file the `mnesis` exclusion above permits.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] =
+    &["memory-native", "mem0", "mnesis", "mnesis-rar", "web-app"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.

@@ -182,6 +182,7 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "mnesis.hosted.memory.health",
     "mnesis.hosted.memory.list_related",
     "mnesis.hosted.memory.metrics",
+    "mnesis.hosted.memory.publish_status",
     "mnesis.hosted.memory.reflexes",
     "mnesis.hosted.memory.routing",
     "mnesis.hosted.memory.search",

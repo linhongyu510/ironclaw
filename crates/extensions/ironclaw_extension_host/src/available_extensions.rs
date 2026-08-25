@@ -7,6 +7,9 @@ use ironclaw_extension_registry::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
 };
+use ironclaw_extension_support::packages::mnesis_rar::{
+    MNESIS_RAR_MANIFEST_ASSET_PATH, mnesis_rar_bundle,
+};
 use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, nearai_bundle};
 use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
@@ -415,6 +418,9 @@ impl AvailableExtensionCatalog {
         first_party_bundles: &[crate::FirstPartyPackageBundle],
     ) -> Result<Self, ProductOperationFailure> {
         let mut packages = vec![nearai_mcp_package(nearai_mcp_config)?];
+        if let Some(package) = mnesis_rar_package()? {
+            packages.push(package);
+        }
         for bundle in first_party_bundles {
             packages.push(package_from_bundle(bundle)?);
         }
@@ -739,6 +745,90 @@ fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
     if !term.is_empty() {
         terms.push(term);
     }
+}
+
+const MNESIS_RAR_ENDPOINT_ENV: &str = "MEMORY_MNESIS_KNOWLEDGE_ENDPOINT";
+
+fn mnesis_rar_endpoint_from_env() -> Result<Option<String>, String> {
+    let Ok(raw) = std::env::var(MNESIS_RAR_ENDPOINT_ENV) else {
+        return Ok(None);
+    };
+    mnesis_rar_endpoint_from_raw(&raw)
+}
+
+fn mnesis_rar_endpoint_from_raw(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let url = url::Url::parse(raw)
+        .map_err(|error| format!("{MNESIS_RAR_ENDPOINT_ENV} must be an absolute URL: {error}"))?;
+    if url.scheme() != "https" {
+        return Err(format!("{MNESIS_RAR_ENDPOINT_ENV} must use https"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!(
+            "{MNESIS_RAR_ENDPOINT_ENV} must not include userinfo"
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(format!(
+            "{MNESIS_RAR_ENDPOINT_ENV} must not include query or fragment components"
+        ));
+    }
+    Ok(Some(url.to_string()))
+}
+
+fn mnesis_rar_package() -> Result<Option<AvailableExtensionPackage>, ProductOperationFailure> {
+    let Some(endpoint) = mnesis_rar_endpoint_from_env().map_err(map_binding_error)? else {
+        return Ok(None);
+    };
+    let manifest = mnesis_rar_manifest_toml_for_endpoint(&endpoint)?;
+    let bundle = mnesis_rar_bundle();
+    let package = bundled_extension_package(
+        bundle.id,
+        bundle.display_name,
+        &manifest,
+        mnesis_rar_assets(bundle, &manifest),
+    )?;
+    Ok(Some(package))
+}
+
+fn mnesis_rar_manifest_toml_for_endpoint(
+    endpoint: &str,
+) -> Result<String, ProductOperationFailure> {
+    let mut manifest = toml::from_str::<Value>(mnesis_rar_bundle().manifest_toml.as_ref())
+        .map_err(|error| {
+            map_binding_error(format!("bundled Mnesis manifest TOML is invalid: {error}"))
+        })?;
+    let mcp = manifest
+        .get_mut("mcp")
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled Mnesis manifest lacks [mcp] declaration"))?;
+    mcp.insert("server".to_string(), Value::String(endpoint.to_string()));
+
+    toml::to_string(&manifest).map_err(|error| {
+        map_binding_error(format!(
+            "bundled Mnesis manifest TOML render failed: {error}"
+        ))
+    })
+}
+
+fn mnesis_rar_assets(bundle: PackageBundle, manifest: &str) -> Vec<AvailableExtensionAsset> {
+    bundle
+        .assets
+        .into_iter()
+        .map(|asset| {
+            if asset.path == MNESIS_RAR_MANIFEST_ASSET_PATH {
+                return bytes_asset(&asset.path, manifest.as_bytes());
+            }
+            let PackageAssetContent::Bytes(bytes) = asset.content;
+            AvailableExtensionAsset {
+                path: asset.path,
+                content: AvailableExtensionAssetContent::Bytes(bytes),
+            }
+        })
+        .collect()
 }
 
 fn nearai_mcp_package(
@@ -2945,5 +3035,55 @@ output_schema_ref = "schemas/write.output.json"
             oauth_setup_override: None,
             search_aliases: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mnesis_rar_endpoint_treats_blank_as_unconfigured() {
+        assert_eq!(mnesis_rar_endpoint_from_raw("").expect("blank is ok"), None);
+        assert_eq!(
+            mnesis_rar_endpoint_from_raw("   ").expect("whitespace is ok"),
+            None
+        );
+    }
+
+    #[test]
+    fn mnesis_rar_endpoint_accepts_an_https_url() {
+        let resolved = mnesis_rar_endpoint_from_raw("  https://example.test/rar/mcp  ")
+            .expect("https is accepted");
+        assert_eq!(resolved.as_deref(), Some("https://example.test/rar/mcp"));
+    }
+
+    #[test]
+    fn mnesis_rar_endpoint_rejects_plaintext_and_credentialed_and_decorated_urls() {
+        for raw in [
+            "http://example.test/rar/mcp",
+            "https://user:pass@example.test/rar/mcp",
+            "https://example.test/rar/mcp?token=leaked",
+            "https://example.test/rar/mcp#frag",
+            "not-a-url",
+        ] {
+            assert!(
+                mnesis_rar_endpoint_from_raw(raw).is_err(),
+                "{raw} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mnesis_rar_manifest_patch_replaces_the_placeholder_server() {
+        let shipped = mnesis_rar_bundle();
+        assert!(shipped.manifest_toml.contains("mnesis.invalid"));
+
+        let patched = mnesis_rar_manifest_toml_for_endpoint("https://example.test/rar/mcp")
+            .expect("patch renders");
+        assert!(!patched.contains("mnesis.invalid"));
+        assert!(patched.contains("https://example.test/rar/mcp"));
+
+        let parsed = toml::from_str::<Value>(&patched).expect("patched manifest parses");
+        assert_eq!(
+            parsed["mcp"]["server"].as_str(),
+            Some("https://example.test/rar/mcp")
+        );
+        assert_eq!(parsed["mcp"]["namespace"].as_str(), Some("mnesis-rar"));
     }
 }

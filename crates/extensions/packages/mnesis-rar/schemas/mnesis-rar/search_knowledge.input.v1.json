@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mnesis retrieval search input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "What evidence to retrieve from the indexed corpus. This is not personal memory."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 10
+    },
+    "hybrid": {
+      "type": "boolean",
+      "default": true,
+      "description": "Combine dense and lexical retrieval inside the engine."
+    },
+    "source": {
+      "type": ["string", "null"],
+      "description": "Restrict to one indexed source. Null searches every source the caller is authorized for."
+    }
+  }
+}

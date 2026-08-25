@@ -97,6 +97,8 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `google-slides/` | `google-slides` | 14 tools | `google` | wasm | data-only |
 | `mem0/` | `mem0.local.memory` | 5 memory tools + `[memory]` provider | — | first_party | crate `ironclaw_memory_mem0` |
 | `memory-native/` | `ironclaw.memory` | 5 memory tools + `[memory]` provider | — | first_party | crate `ironclaw_memory_native` |
+| `mnesis/` | `mnesis.hosted.memory` | memory tools + `[memory]` provider (ambient `read_long_term` / `record_interaction`) | — | first_party | crate `ironclaw_memory_mnesis` |
+| `mnesis-rar/` | `mnesis-rar` | `[mcp]` hosted server + 1 pinned tool (retrieval lane; tools discovered) | `mnesis` (api_key) | mcp | data-only |
 | `nearai-mcp/` | `nearai` | `[mcp]` hosted server + 1 pinned tool | `nearai` (api_key) | mcp | data-only |
 | `notion-mcp/` | `notion` | `[mcp]` hosted server (tools discovered) | `notion` | mcp | data-only |
 | `slack/` | `slack` | 16 tools (all 16 core standard messaging ops) + channel (`[channel.ingress]` webhook, message `[channel.reply]`, message `[channel.delivery]`) | `slack` | wasm (tools) + first-party channel capabilities | crate `ironclaw_slack_extension` + `wasm/` |
@@ -106,12 +108,20 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 
 Data-only packages ship through the `PACKAGES` inventory in
 `crates/extensions/ironclaw_extension_support/src/packages/mod.rs` (a module per
-package embeds the directory via `include_str!`/`include_bytes!`). One embed
-module is deliberately *not* in `PACKAGES`: `nearai`, whose `[mcp].server` is
-patched by the host from operator LLM-admin configuration — read that module's
-header before "fixing" the omission. The two memory providers are crates the
-binary links; exactly one `[memory]` provider is active per deployment, and
-`memory-native` ships installed by default.
+package embeds the directory via `include_str!`/`include_bytes!`). Two embed
+modules are deliberately *not* in `PACKAGES`: `nearai` and `mnesis_rar`, whose
+`[mcp].server` values are patched by the host — from operator LLM-admin
+configuration and from the deployment's Mnesis retrieval endpoint respectively —
+read those modules' headers before "fixing" the omission. The three memory
+providers are crates the binary links; exactly one `[memory]` provider is active
+per deployment, and `memory-native` ships installed by default upstream while
+this branch defaults to `mnesis`.
+
+`mnesis/` and `mnesis-rar/` are two halves of one integration, split because a
+v3 manifest declares `[runtime]` or `[mcp]` and never both. `mnesis/` owns the
+ambient memory lifecycle the kernel drives; `mnesis-rar/` owns the model-visible
+retrieval surface, resolved by live discovery so the tool set tracks the
+tenant's own grants rather than a catalog captured at build time.
 
 ## What never belongs here
 

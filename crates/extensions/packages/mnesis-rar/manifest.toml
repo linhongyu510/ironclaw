@@ -1,0 +1,43 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "mnesis-rar"
+name = "Mnesis Retrieval"
+version = "0.1.0"
+description = "Mnesis retrieval lane over a published hosted-MCP boundary. Searches an indexed corpus and administers its ingestion; returns document evidence with source provenance and an index generation, never personal memory. Scores are not comparable with memory scores. The tool surface is whatever the tenant's credential is authorized for, resolved by live discovery. Off by default; fails closed until a deployment supplies the endpoint and a bearer credential handle."
+trust = "first_party_requested"
+
+[mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+server = "https://mnesis.invalid/rar/mcp"
+namespace = "mnesis-rar"
+max_tools = 64
+default_permission = "ask"
+effects = ["network", "use_secret"]
+
+# The connection credential is the deployment's Mnesis retrieval-lane bearer
+# token. Separate from the memory lane: Mnesis authorizes the two lanes
+# independently and issues a distinct token per engine.
+[[mcp.credentials]]
+handle = "mnesis_rar_token"
+vendor = "mnesis"
+scopes = []
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+# Statically pinned tool: guaranteed model-visible from first boot and on the
+# bundled-manifest fallback, without live MCP discovery. A successful
+# tools/list discovery replaces the static set with the server's live catalog,
+# which is what makes the surface track the tenant's own permissions instead of
+# a catalog captured at build time. Credentials/effects inherit the [mcp]
+# connection template.
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "mnesis-rar.search_knowledge"
+description = "Search the Mnesis indexed corpus for evidence relevant to the current question. Returns document evidence with source provenance and an index generation, not personal memory, and its scores are not comparable with memory scores."
+default_permission = "ask"
+input_schema_ref = "schemas/mnesis-rar/search_knowledge.input.v1.json"
+
+[auth.mnesis]
+method = "api_key"
+display_name = "Mnesis retrieval token"
+fields = [
+  { handle = "mnesis_rar_token", label = "Mnesis retrieval-lane bearer token", secret = true },
+]
