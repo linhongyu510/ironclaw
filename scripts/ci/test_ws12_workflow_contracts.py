@@ -3456,6 +3456,24 @@ class NoPlannerDerivedMatrixInShellTests(unittest.TestCase):
         )
         self.assertTrue(any("matrix" in error for error in errors), errors)
 
+    def test_root_test_command_rejects_quoted_matrix_index_interpolation(self):
+        for expression in ("${{ matrix['partition'] }}", '${{ matrix["partition"] }}'):
+            with self.subTest(expression=expression):
+                workflows = {
+                    ".github/workflows/reborn-tests.yml": (
+                        "  root-reborn-parity-tests:\n"
+                        "    steps:\n"
+                        "      - name: Run Reborn root tests\n"
+                        "        run: |\n"
+                        '          cmd=(env "IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1"\n'
+                        f'            "REBORN_ROOT_TEST_PARTITION={expression}")\n'
+                    )
+                }
+                errors = ws12_workflow_contracts.validate_no_matrix_interpolation_in_root_test_command(
+                    workflows
+                )
+                self.assertTrue(any("matrix" in error for error in errors), errors)
+
     def test_root_test_command_uses_the_job_environment(self):
         workflows = {
             ".github/workflows/reborn-tests.yml": (

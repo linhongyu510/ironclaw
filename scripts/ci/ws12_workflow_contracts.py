@@ -1782,7 +1782,11 @@ ROOT_TEST_COREPACK_SETUP = (
     'run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"'
 )
 MATRIX_EXPRESSION = re.compile(
-    r"\$\{\{\s*matrix(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)+\s*\}\}"
+    r"\$\{\{\s*matrix"
+    r"(?:"
+    r"\s*\.\s*[A-Za-z_][A-Za-z0-9_]*"
+    r"|\s*\[\s*(?:'[^'\r\n]+'|\"[^\"\r\n]+\")\s*\]"
+    r")+\s*\}\}"
 )
 
 
