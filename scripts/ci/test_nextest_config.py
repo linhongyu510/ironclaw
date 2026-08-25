@@ -23,27 +23,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / ".config" / "nextest.toml"
 GROUP = "cli-serve-listener"
-# The test that failed in CI, plus one representative of each other shape the
-# filter must keep covering.
-MUST_COVER = (
-    "onboard_login_link_then_bearer_authorizes_a_protected_request",
-    "serve_boots_without_user_id_env_var",
-    "stored_key_reaches_real_turn_via_product_surface",
+LISTENER_FILTER = (
+    "package(ironclaw) & binary(smoke) & "
+    "(test(~serve) | test(~onboard_) | test(~stored_key_reaches) | "
+    "test(a_real_env_var_beats_the_config_default_end_to_end))"
 )
-GLOB_FRAGMENTS = ("serve", "onboard_", "stored_key_reaches")
 
 
 def _config() -> dict:
     return tomllib.loads(CONFIG.read_text(encoding="utf-8"))
 
 
-def _bound_filters(config: dict, profile: str) -> str:
+def _listener_override(config: dict, profile: str) -> dict | None:
     overrides = config.get("profile", {}).get(profile, {}).get("overrides", [])
-    return " ".join(
-        override.get("filter", "")
-        for override in overrides
-        if override.get("test-group") == GROUP
-    )
+    if not overrides or overrides[0].get("filter") != LISTENER_FILTER:
+        return None
+    return overrides[0]
 
 
 class NextestSerialisationTests(unittest.TestCase):
@@ -63,30 +58,45 @@ class NextestSerialisationTests(unittest.TestCase):
             "more than one thread reopens the port race this group closed",
         )
 
-    def test_both_profiles_bind_the_group(self) -> None:
+    def test_both_profiles_make_listener_tests_globally_exclusive(self) -> None:
         config = _config()
         for profile in ("default", "ci"):
             with self.subTest(profile=profile):
-                self.assertNotEqual(
-                    "",
-                    _bound_filters(config, profile).strip(),
-                    f"profile {profile!r} would run the listener tests in parallel",
+                override = _listener_override(config, profile)
+                self.assertIsNotNone(
+                    override,
+                    f"profile {profile!r} must keep the canonical listener "
+                    "override first so its semantics cannot be shadowed",
+                )
+                self.assertEqual(GROUP, override.get("test-group"))
+                self.assertEqual(
+                    "num-test-threads",
+                    override.get("threads-required"),
+                    "a one-thread group serialises only its own members; the "
+                    "bind-close-rebind window must exclude every other test",
                 )
 
-    def test_the_filter_still_covers_the_test_that_failed(self) -> None:
-        config = _config()
-        for profile in ("default", "ci"):
-            expression = _bound_filters(config, profile)
-            for name in MUST_COVER:
-                with self.subTest(profile=profile, test=name):
-                    covered = name in expression or any(
-                        fragment in name
-                        for fragment in GLOB_FRAGMENTS
-                        if f"test(~{fragment})" in expression
-                    )
-                    self.assertTrue(
-                        covered, f"{name} is no longer serialised in {profile!r}"
-                    )
+    def test_filter_guard_rejects_heuristic_false_positives_and_shadowing(self) -> None:
+        for expression in (
+            "!test(~serve)",
+            "package(other) & test(~serve)",
+            "binary(other) & test(~serve)",
+        ):
+            with self.subTest(expression=expression):
+                config = {"profile": {"ci": {"overrides": [{"filter": expression}]}}}
+                self.assertIsNone(_listener_override(config, "ci"))
+
+        shadowed = {
+            "profile": {
+                "ci": {
+                    "overrides": [
+                        {"filter": "test(~serve)", "test-group": "other"},
+                        {"filter": LISTENER_FILTER, "test-group": GROUP},
+                    ]
+                }
+            }
+        }
+        self.assertIsNone(_listener_override(shadowed, "ci"))
 
 
 if __name__ == "__main__":

@@ -59,18 +59,23 @@ path = "junit.xml"
 # protected_request, 1 of 1417 tests, in the reborn-core bucket.
 #
 # The rule this follows is the plan's own: a nextest-only failure gets
-# serialised here, never "fixed" by editing the test. Only the listener
-# tests join the group -- the other ~128 smoke tests stay parallel.
+# serialised here, never "fixed" by editing the test. `max-threads = 1`
+# orders the listener tests relative to each other; `threads-required =
+# "num-test-threads"` also excludes unrelated tests during each listener's
+# bind-close-rebind window. Without that global exclusion, the first fix still
+# failed while ungrouped tests ran concurrently.
 [test-groups]
 cli-serve-listener = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(ironclaw) & binary(smoke) & (test(~serve) | test(~onboard_) | test(~stored_key_reaches) | test(a_real_env_var_beats_the_config_default_end_to_end))'
 test-group = "cli-serve-listener"
+threads-required = "num-test-threads"
 
 [[profile.ci.overrides]]
 filter = 'package(ironclaw) & binary(smoke) & (test(~serve) | test(~onboard_) | test(~stored_key_reaches) | test(a_real_env_var_beats_the_config_default_end_to_end))'
 test-group = "cli-serve-listener"
+threads-required = "num-test-threads"
 
 # Per-test windows for the handful of scenarios that genuinely need more
 # than 60s (live-recorded fixtures + heavy integration).
