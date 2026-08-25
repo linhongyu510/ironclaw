@@ -1568,7 +1568,7 @@ def validate_crate_scope_filters(
 # path it replaced.
 #
 # Two contracts, one per site shape:
-#   `validate_webui_frontend_sites` scans every `.github/workflows/*.yml` for
+#   `validate_webui_frontend_sites` scans every `.github/workflows/*.{yml,yaml}` for
 #   the flat WebUI frontend literal. The ONLY sanctioned shape is the
 #   cache-dependency-path pairing (flat line immediately followed by its
 #   nested sibling); anything else is the dynamic-site regression.
@@ -1669,7 +1669,9 @@ def validate_webui_frontend_sites(
 
     cache_sites = 0
     for path in sorted(workflows):
-        if not path.startswith(".github/workflows/") or not path.endswith(".yml"):
+        if not path.startswith(".github/workflows/") or not path.endswith(
+            (".yml", ".yaml")
+        ):
             continue
         lines = workflows[path].splitlines()
         for index, raw_line in enumerate(lines):
@@ -1742,7 +1744,7 @@ def validate_crate_name_residue(
 
 
 WORKFLOW_EVAL = re.compile(
-    r"(?:^[ \t]*|(?:;|&&|\|\||\|)[ \t]*|[({][ \t]+|(?:\bthen|\bdo|\))[ \t]+)"
+    r"(?:^[ \t]*|(?:;|&&|\|\||\|)[ \t]*|![ \t]+|[({][ \t]+|(?:\bthen|\bdo|\))[ \t]+)"
     r"eval(?=[ \t;&|]|$)",
     re.MULTILINE,
 )
@@ -1767,6 +1769,60 @@ def validate_no_eval_in_workflow_run_blocks(
                 "command as an array and run it directly; derive any REPRO "
                 "hint from the argv with printf '%q '."
             )
+    return errors
+
+
+ROOT_TEST_WORKFLOW = ".github/workflows/reborn-tests.yml"
+ROOT_TEST_JOB = "root-reborn-parity-tests"
+ROOT_TEST_STEP = "Run Reborn root tests"
+ROOT_TEST_SKIP_PREPARE_ENV = "IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1"
+MATRIX_EXPRESSION = re.compile(
+    r"\$\{\{\s*matrix(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)+\s*\}\}"
+)
+
+
+def validate_no_matrix_interpolation_in_root_test_command(
+    workflows: dict[str, str],
+) -> list[str]:
+    """Keep planner-derived matrix values out of the root test shell source.
+
+    The job-level environment already receives the selected partition. The
+    command must consume that environment value rather than embedding a
+    planner-derived GitHub expression into the shell script that runs it.
+    The preceding nextest-control step also prepares Cargo and WebUI
+    dependencies, so this command must opt out of repeating that work. This
+    stays scoped to the one command step; matrix expressions used for display
+    names and artifact paths remain valid workflow metadata.
+    """
+
+    text = workflows.get(ROOT_TEST_WORKFLOW)
+    if text is None:
+        return []
+    job = job_body(text, ROOT_TEST_JOB)
+    if job is None:
+        return [
+            f"{ROOT_TEST_WORKFLOW}: missing {ROOT_TEST_JOB!r} job, so the root "
+            "test command cannot be checked for direct matrix interpolation"
+        ]
+    step = step_body(job, ROOT_TEST_STEP)
+    if step is None:
+        return [
+            f"{ROOT_TEST_WORKFLOW}: missing {ROOT_TEST_STEP!r} step in "
+            f"{ROOT_TEST_JOB!r}, so its shell command cannot be checked"
+        ]
+
+    errors = [
+        f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_STEP!r} embeds planner-derived "
+        f"{match.group(0)!r} in shell source; consume "
+        "REBORN_ROOT_TEST_PARTITION from the job environment instead"
+        for match in MATRIX_EXPRESSION.finditer(step)
+    ]
+    if ROOT_TEST_SKIP_PREPARE_ENV not in step:
+        errors.append(
+            f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_STEP!r} must pass "
+            f"{ROOT_TEST_SKIP_PREPARE_ENV} after the hermetic nextest-control "
+            "step prepares Cargo and WebUI dependencies"
+        )
     return errors
 
 
@@ -1886,6 +1942,7 @@ def validate_workflow_texts(
     errors.extend(validate_webui_frontend_sites(workflows, root))
     errors.extend(validate_no_duplicate_yaml_keys(root))
     errors.extend(validate_no_eval_in_workflow_run_blocks(workflows))
+    errors.extend(validate_no_matrix_interpolation_in_root_test_command(workflows))
     try:
         sccache_action = (root / SCCACHE_SETUP_ACTION).read_text(encoding="utf-8")
     except OSError as error:

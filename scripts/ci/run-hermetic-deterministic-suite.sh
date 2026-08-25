@@ -9,11 +9,12 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 frontend_corepack_home=""
+frontend_corepack_home_owned=0
 postgres_image_prepared=0
 webui_frontend_dir=""
 
 cleanup() {
-  if [[ -n "${frontend_corepack_home}" && -d "${frontend_corepack_home}" ]]; then
+  if [[ "${frontend_corepack_home_owned}" == "1" && -n "${frontend_corepack_home}" && -d "${frontend_corepack_home}" ]]; then
     rm -rf -- "${frontend_corepack_home}"
   fi
 }
@@ -38,10 +39,8 @@ resolve_webui_frontend_dir() {
 
 prepare_rust_dependencies() {
   # Dependency acquisition is setup, not test behavior. Fetch once before the
-  # hermetic process switches Cargo into offline mode. Rust builds can invoke
-  # the WebUI build script, so prepare its pinned package manager too.
+  # hermetic process switches Cargo into offline mode.
   prepare_command_dependencies
-  prepare_frontend_dependencies
 }
 
 prepare_command_dependencies() {
@@ -93,7 +92,8 @@ run_crate_tests() {
 }
 
 run_integration_tier() {
-  local test_name runner
+  local test_name runner status overall_status=0
+  local group_status
   local -a test_args=()
   local -a group_test_names=()
   prepare_postgres_test_image
@@ -112,19 +112,33 @@ run_integration_tier() {
   # Delegate them to the same canonical runner used by the dedicated groups
   # stage instead of admitting them to nextest's parallel process pool.
   if [[ "${#group_test_names[@]}" -gt 0 ]]; then
+    group_status=0
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
       RUST_MIN_STACK=67108864 \
-      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh" "${group_test_names[@]}"
+      run "${repo_root}/scripts/ci/run-reborn-group-tests.sh" "${group_test_names[@]}" || group_status=$?
+    if [[ "${group_status}" -ne 0 ]]; then
+      overall_status="${group_status}"
+    fi
   fi
 
   if [[ "${runner}" == "nextest" && "${#test_args[@]}" -gt 0 ]]; then
-    run cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" --ignore-rust-version
+    status=0
+    run cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" --ignore-rust-version || status=$?
+    if [[ "${status}" -ne 0 && "${overall_status}" -eq 0 ]]; then
+      overall_status="${status}"
+    fi
   else
     for test_name in "${test_args[@]}"; do
       [[ "${test_name}" == --test ]] && continue
-      run cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+      status=0
+      run cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture || status=$?
+      if [[ "${status}" -ne 0 && "${overall_status}" -eq 0 ]]; then
+        overall_status="${status}"
+      fi
     done
   fi
+
+  return "${overall_status}"
 }
 
 run_python_e2e() {
@@ -168,9 +182,15 @@ prepare_frontend_dependencies() {
     return 2
   fi
 
-  frontend_corepack_home="$(
-    mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ironclaw-corepack.XXXXXX"
-  )"
+  if [[ -n "${COREPACK_HOME:-}" ]]; then
+    frontend_corepack_home="${COREPACK_HOME}"
+    mkdir -p "${frontend_corepack_home}"
+  else
+    frontend_corepack_home="$(
+      mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ironclaw-corepack.XXXXXX"
+    )"
+    frontend_corepack_home_owned=1
+  fi
   COREPACK_HOME="${frontend_corepack_home}" \
     corepack install --global "${package_manager}"
   export COREPACK_HOME="${frontend_corepack_home}"
@@ -196,6 +216,7 @@ case "${stage}" in
     ;;
   root)
     prepare_rust_dependencies
+    prepare_frontend_dependencies
     run_root_partitions
     ;;
   crates)
@@ -204,6 +225,7 @@ case "${stage}" in
     ;;
   groups)
     prepare_rust_dependencies
+    prepare_frontend_dependencies
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
       RUST_MIN_STACK=67108864 \
       run "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
@@ -232,10 +254,14 @@ case "${stage}" in
     ;;
   prepare-command)
     prepare_rust_dependencies
+    if [[ "${IRONCLAW_HERMETIC_NEXTEST_CONTROL:-0}" == "1" ]]; then
+      prepare_frontend_dependencies
+    fi
     ;;
   all)
     "${repo_root}/scripts/ci/test-hermetic-test-process.sh"
     prepare_rust_dependencies
+    prepare_frontend_dependencies
     run_crate_tests
     run_root_partitions
     REBORN_GROUP_TEST_TIMEOUT="${REBORN_GROUP_TEST_TIMEOUT:-28m}" \
@@ -256,7 +282,10 @@ case "${stage}" in
       exit 2
     fi
     case "${IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE:-0}" in
-      0) prepare_rust_dependencies ;;
+      0)
+        prepare_rust_dependencies
+        prepare_frontend_dependencies
+        ;;
       1) ;;
       *)
         echo "IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE must be 0 or 1" >&2

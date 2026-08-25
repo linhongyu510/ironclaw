@@ -575,8 +575,9 @@ jobs:
 
       - name: Run Reborn root tests
         run: |
-          cmd=(env REBORN_ROOT_TEST_PARTITIONS=4
-            "REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }}"
+          cmd=(env IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
+            REBORN_ROOT_TEST_PARTITIONS=4
+            "REBORN_ROOT_TEST_PARTITION=${REBORN_ROOT_TEST_PARTITION}"
             "REBORN_ROOT_TEST_TIMEOUT=${REBORN_ROOT_TEST_TIMEOUT}"
             "RUST_MIN_STACK=${RUST_MIN_STACK}"
             scripts/ci/run-hermetic-deterministic-suite.sh command

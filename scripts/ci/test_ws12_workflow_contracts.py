@@ -1891,6 +1891,26 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
             errors,
         )
 
+    def test_a_yaml_workflow_hardcoding_the_flat_site_fails_loudly(self) -> None:
+        """The same flat-path guard applies to GitHub's `.yaml` extension."""
+        sabotaged = copy.deepcopy(self.workflows)
+        sabotaged[".github/workflows/sneaky.yaml"] = (
+            "jobs:\n"
+            "  frontend:\n"
+            "    steps:\n"
+            f"      - run: cd {self.webui_dir}/frontend\n"
+        )
+
+        errors = validate_webui_frontend_sites(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(
+                "sneaky.yaml" in error and "hardcodes" in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_reintroducing_a_bare_working_directory_site_fails_loudly(self) -> None:
         sabotaged = self.sabotage(
             CODE_STYLE_WORKFLOW,
@@ -3347,6 +3367,13 @@ class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):
                 errors = validate_no_eval_in_workflow_run_blocks(workflows)
                 self.assertTrue(any("x.yml:1" in error for error in errors), errors)
 
+    def test_eval_after_shell_negation_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": '        ! eval "$REPRO"\n'
+        }
+        errors = validate_no_eval_in_workflow_run_blocks(workflows)
+        self.assertTrue(any("x.yml:1" in error for error in errors), errors)
+
     def test_eval_after_shell_control_words_fails(self):
         for command in (
             'if ready; then eval "$REPRO"; fi',
@@ -3409,6 +3436,61 @@ class NoEvalInWorkflowRunBlocksTests(unittest.TestCase):
                 },
                 set(load_workflows(root)),
             )
+
+
+class NoPlannerDerivedMatrixInShellTests(unittest.TestCase):
+    """Planner-derived matrix values do not become shell source."""
+
+    def test_root_test_command_rejects_direct_matrix_interpolation(self):
+        workflows = {
+            ".github/workflows/reborn-tests.yml": (
+                "  root-reborn-parity-tests:\n"
+                "    steps:\n"
+                "      - name: Run Reborn root tests\n"
+                "        run: |\n"
+                '          cmd=(env "REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }}")\n'
+            )
+        }
+        errors = ws12_workflow_contracts.validate_no_matrix_interpolation_in_root_test_command(
+            workflows
+        )
+        self.assertTrue(any("matrix" in error for error in errors), errors)
+
+    def test_root_test_command_uses_the_job_environment(self):
+        workflows = {
+            ".github/workflows/reborn-tests.yml": (
+                "  root-reborn-parity-tests:\n"
+                "    steps:\n"
+                "      - name: Run Reborn root tests\n"
+                "        run: |\n"
+                '          cmd=(env IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1\n'
+                '            "REBORN_ROOT_TEST_PARTITION=${REBORN_ROOT_TEST_PARTITION}")\n'
+            )
+        }
+        self.assertEqual(
+            [],
+            ws12_workflow_contracts.validate_no_matrix_interpolation_in_root_test_command(
+                workflows
+            ),
+        )
+
+    def test_root_test_command_requires_skip_prepare_after_control(self):
+        workflows = {
+            ".github/workflows/reborn-tests.yml": (
+                "  root-reborn-parity-tests:\n"
+                "    steps:\n"
+                "      - name: Run Reborn root tests\n"
+                "        run: |\n"
+                '          cmd=(env "REBORN_ROOT_TEST_PARTITION=${REBORN_ROOT_TEST_PARTITION}")\n'
+            )
+        }
+        errors = ws12_workflow_contracts.validate_no_matrix_interpolation_in_root_test_command(
+            workflows
+        )
+        self.assertTrue(
+            any("IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE" in error for error in errors),
+            errors,
+        )
 
 
 
