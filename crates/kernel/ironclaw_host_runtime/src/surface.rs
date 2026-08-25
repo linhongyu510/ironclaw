@@ -66,6 +66,7 @@ pub(crate) struct CapabilityCatalog<'a> {
     base_version: &'a CapabilitySurfaceVersion,
     runtime_policy: &'a EffectiveRuntimePolicy,
     filesystem: Option<&'a dyn RootFilesystem>,
+    memory_schema_assets: &'a [(&'static str, &'static str)],
 }
 
 impl<'a> CapabilityCatalog<'a> {
@@ -81,11 +82,22 @@ impl<'a> CapabilityCatalog<'a> {
             base_version,
             runtime_policy,
             filesystem: None,
+            memory_schema_assets: &[],
         }
     }
 
     pub(crate) fn with_filesystem(mut self, filesystem: &'a dyn RootFilesystem) -> Self {
         self.filesystem = Some(filesystem);
+        self
+    }
+
+    /// The bound memory provider's own input schemas, consulted for refs the
+    /// host does not compile in.
+    pub(crate) fn with_memory_schema_assets(
+        mut self,
+        assets: &'a [(&'static str, &'static str)],
+    ) -> Self {
+        self.memory_schema_assets = assets;
         self
     }
 
@@ -105,14 +117,7 @@ impl<'a> CapabilityCatalog<'a> {
             if capabilities.len() >= max_capabilities {
                 break;
             }
-            if !self.is_model_visible(descriptor)
-                || !request.policy.permits_capability_id(&descriptor.id)
-                || !request.policy.allows_runtime(descriptor.runtime)
-                || !request.policy.allows_effects(&descriptor.effects)
-            {
-                continue;
-            }
-            if plan_capability(descriptor, self.runtime_policy).is_err() {
+            if !self.model_surface_admits(descriptor, &request) {
                 continue;
             }
             let Some(trust_decision) = request.provider_trust.get(&descriptor.provider) else {
@@ -145,14 +150,7 @@ impl<'a> CapabilityCatalog<'a> {
         let candidates = self
             .registry
             .capabilities()
-            .filter(|descriptor| {
-                self.is_model_visible(descriptor)
-                    && request.policy.permits_capability_id(&descriptor.id)
-                    && request.policy.allows_runtime(descriptor.runtime)
-                    && request.policy.allows_effects(&descriptor.effects)
-                    && plan_capability(descriptor, self.runtime_policy).is_ok()
-                    && request.provider_trust.contains_key(&descriptor.provider)
-            })
+            .filter(|descriptor| self.model_surface_admits(descriptor, &request))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -211,7 +209,22 @@ impl<'a> CapabilityCatalog<'a> {
             Decision::RequireApproval { .. } if request.policy.include_requires_approval => {
                 VisibleCapabilityAccess::RequiresApproval
             }
-            Decision::RequireApproval { .. } | Decision::Deny { .. } => return Ok(None),
+            Decision::RequireApproval { .. } => {
+                tracing::debug!(
+                    target: "ironclaw_memory_mnesis",
+                    "capability {} withheld from the model surface: requires approval",
+                    descriptor.id
+                );
+                return Ok(None);
+            }
+            Decision::Deny { .. } => {
+                tracing::debug!(
+                    target: "ironclaw_memory_mnesis",
+                    "capability {} withheld from the model surface: authorization denied",
+                    descriptor.id
+                );
+                return Ok(None);
+            }
         };
 
         let surfaced_descriptor = match self.surface_descriptor(descriptor).await {
@@ -274,6 +287,50 @@ impl<'a> CapabilityCatalog<'a> {
             == CapabilityVisibility::Model
     }
 
+    fn provider_declared_schema(&self, reference: &str) -> Option<Value> {
+        let (_, raw) = self
+            .memory_schema_assets
+            .iter()
+            .find(|(path, _)| *path == reference)?;
+        serde_json::from_str(raw).ok()
+    }
+
+    /// Admission for the model-visible surface, shared by the bounded and
+    /// unbounded paths. A drop names its condition instead of vanishing.
+    fn model_surface_admits(
+        &self,
+        descriptor: &CapabilityDescriptor,
+        request: &VisibleCapabilityRequest,
+    ) -> bool {
+        let reason = if !self.is_model_visible(descriptor) {
+            "not_model_visible"
+        } else if !request.policy.permits_capability_id(&descriptor.id) {
+            "policy_denies_capability_id"
+        } else if !request.policy.allows_runtime(descriptor.runtime) {
+            "policy_denies_runtime"
+        } else if !request.policy.allows_effects(&descriptor.effects) {
+            "policy_denies_effects"
+        } else if plan_capability(descriptor, self.runtime_policy).is_err() {
+            "runtime_policy_rejected_plan"
+        } else if !request.provider_trust.contains_key(&descriptor.provider) {
+            "missing_provider_trust"
+        } else {
+            return true;
+        };
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "capability {} (provider {}) dropped from the model surface: {reason}; trusted providers: {:?}",
+            descriptor.id,
+            descriptor.provider,
+            request
+                .provider_trust
+                .keys()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+        );
+        false
+    }
+
     async fn surface_descriptor(
         &self,
         descriptor: &CapabilityDescriptor,
@@ -318,6 +375,7 @@ impl<'a> CapabilityCatalog<'a> {
                 )));
             };
             descriptor.parameters_schema = resolve_native_memory_input_schema_ref(&reference)
+                .or_else(|| self.provider_declared_schema(&reference))
                 .ok_or_else(|| {
                     HostRuntimeError::invalid_request(format!(
                         "memory capability {} references unknown input schema {}",

@@ -323,6 +323,8 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) memory_mounts: MountView,
+    pub(crate) memory_provider_capabilities:
+        std::sync::Arc<Vec<ironclaw_host_api::capability::CapabilityDescriptor>>,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,

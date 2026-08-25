@@ -353,6 +353,26 @@ input_schema_ref = "schemas/mnesis/promote.input.v1.json"
 output_schema_ref = "schemas/mnesis/tool-result.v1.json"
 
 [[tools]]
+id = "mnesis.hosted.memory.publish_corpus"
+description = "Request a new index generation for this tenant, making everything staged by submit_corpus retrievable. Requires the corpus_admin permission. Rebuilding swaps the index underneath live readers, so the build starts only once this tenant has no open sessions: close this session after calling, then reconnect and poll publish_status. Retrieval keeps serving the current generation until the new one activates, and activation proceeds only if the evaluation golden set still passes."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/publish_corpus.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.publish_status"
+description = "Report the state of this tenant's corpus publication: pending while it waits for the tenant to have no open sessions, running during the build, then succeeded with a generation id or failed with a reason. Requires the corpus_admin permission."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/publish_status.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
 id = "mnesis.hosted.memory.rar_export_obsidian_vault"
 description = "Generate the rar/ subtree of the synthetic Obsidian vault. Writes RAPTOR clusters (L1+L2+L3) and top entities as markdown notes with wikilinks. Skips raw chunks (L0) to keep node count tractable. Idempotent."
 effects = ["read_filesystem", "write_filesystem"]
@@ -420,6 +440,16 @@ default_permission = "allow"
 visibility = "model"
 origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/mnesis/stale.input.v1.json"
+output_schema_ref = "schemas/mnesis/tool-result.v1.json"
+
+[[tools]]
+id = "mnesis.hosted.memory.submit_corpus"
+description = "Submit corpus documents for this tenant. Requires the corpus_admin permission; the tenant comes from the trusted invocation and cannot be supplied by the model. Send documents alone: the corpus metadata, the shared vocabulary, and the evaluation golden set are all generated from the documents, and paths are placed into the corpus layout for you. Supply sidecard, bridgeConcepts, or goldenSet only to override what would be generated. Submitting stages the corpus; it becomes retrievable when publish_corpus builds, evaluates, and activates a generation."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/mnesis/submit_corpus.input.v1.json"
 output_schema_ref = "schemas/mnesis/tool-result.v1.json"
 
 [[tools]]

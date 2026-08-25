@@ -213,6 +213,18 @@ pub const CATALOG_TOOLS: &[CatalogTool] = &[
         idempotent: false,
     },
     CatalogTool {
+        capability_id: "mnesis.hosted.memory.publish_corpus",
+        wire_name: "publish_corpus",
+        lane: MnesisLane::Knowledge,
+        idempotent: false,
+    },
+    CatalogTool {
+        capability_id: "mnesis.hosted.memory.publish_status",
+        wire_name: "publish_status",
+        lane: MnesisLane::Knowledge,
+        idempotent: true,
+    },
+    CatalogTool {
         capability_id: "mnesis.hosted.memory.rar_export_obsidian_vault",
         wire_name: "rar_export_obsidian_vault",
         lane: MnesisLane::Knowledge,
@@ -253,6 +265,12 @@ pub const CATALOG_TOOLS: &[CatalogTool] = &[
         wire_name: "stale",
         lane: MnesisLane::Knowledge,
         idempotent: true,
+    },
+    CatalogTool {
+        capability_id: "mnesis.hosted.memory.submit_corpus",
+        wire_name: "submit_corpus",
+        lane: MnesisLane::Knowledge,
+        idempotent: false,
     },
     CatalogTool {
         capability_id: "mnesis.hosted.memory.training",

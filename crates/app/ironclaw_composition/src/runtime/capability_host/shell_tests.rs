@@ -94,6 +94,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         policy,
         workspace_mounts,
         memory_mounts,
+        memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
         system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts_for_test()
             .clone(),

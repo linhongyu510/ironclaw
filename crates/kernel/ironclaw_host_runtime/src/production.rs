@@ -130,6 +130,7 @@ pub struct DefaultHostRuntime {
     process_manager: Option<Arc<dyn ProcessManager>>,
     process_services: Option<ProcessServices>,
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
+    memory_schema_assets: &'static [(&'static str, &'static str)],
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     /// Optional secret store used for pre-flight credential presence checks.
@@ -203,6 +204,7 @@ impl DefaultHostRuntime {
             process_manager: None,
             process_services: None,
             surface_filesystem: None,
+            memory_schema_assets: &[],
             runtime_health: None,
             obligation_handler: None,
             credential_preflight_store: None,
@@ -236,6 +238,16 @@ impl DefaultHostRuntime {
 
     pub fn with_surface_filesystem(mut self, filesystem: Arc<dyn RootFilesystem>) -> Self {
         self.surface_filesystem = Some(filesystem);
+        self
+    }
+
+    /// The bound memory provider's own input schemas, for refs the host does
+    /// not compile in.
+    pub fn with_memory_schema_assets(
+        mut self,
+        assets: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        self.memory_schema_assets = assets;
         self
     }
 
@@ -778,6 +790,7 @@ impl HostRuntime for DefaultHostRuntime {
             &self.surface_version,
             &self.runtime_policy,
         );
+        let catalog = catalog.with_memory_schema_assets(self.memory_schema_assets);
         let catalog = match self.surface_filesystem.as_deref() {
             Some(filesystem) => catalog.with_filesystem(filesystem),
             None => catalog,

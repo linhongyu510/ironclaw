@@ -318,6 +318,7 @@ mod tests {
                 workspace_mounts: &empty_mounts,
                 skill_mounts: &empty_mounts,
                 memory_mounts: &empty_mounts,
+                memory_provider_capabilities: &[],
                 system_extensions_lifecycle_mounts: &empty_mounts,
                 policy: &policy,
                 surface_policy: &CapabilitySurfacePolicy::allow_all(),
@@ -1619,6 +1620,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -1936,6 +1938,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -2571,6 +2574,7 @@ mod tests {
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -2851,6 +2855,7 @@ mod tests {
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -2934,6 +2939,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -3137,6 +3143,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -3478,6 +3485,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -3909,6 +3917,7 @@ mod tests {
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -4064,6 +4073,7 @@ mod tests {
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -4761,6 +4771,7 @@ mod tests {
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -4874,6 +4885,7 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -5122,6 +5134,7 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),
@@ -5256,6 +5269,7 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+            memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
                 .clone(),

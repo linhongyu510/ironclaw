@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mnesis submit_corpus arguments",
+  "description": "Published by the Mnesis MCP lane at runtime and captured verbatim; the engine remains authoritative for validation.",
+  "type": "object",
+  "properties": {
+    "documents": {
+      "minItems": 1,
+      "maxItems": 64,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1048576
+          },
+          "relativePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "content",
+          "relativePath"
+        ]
+      }
+    },
+    "sidecard": {
+      "description": "_default.json describes the corpus as a whole and applies to every document. Fields: layer (integer, use 2 for reference material), sourceType (e.g. \"reference\"), domain (array of short subject tags), description (one sentence), keywords (array of terms a reader would search), authoritative (boolean), accessScope (\"tenant\" so every principal in this tenant can retrieve it). Derive all of it from the documents being submitted.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "bridgeConcepts": {
+      "description": "bridge-concepts.json is {\"concepts\": [...]}. Each concept has id (kebab-case), terms (the phrases a reader would actually search for, including synonyms the documents do not literally use), and description (one sentence). Concepts bridge vocabulary across documents so a query phrased differently still retrieves them, so name the ideas that recur across the corpus rather than one per file. Three to ten concepts suits most corpora.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "goldenSet": {
+      "description": "goldenSet is how the engine proves the rebuilt index still answers this corpus. Provide one entry per skill directory: query (a question the documents there answer, phrased as a reader would ask it), expect_any (array of phrases, at least one of which must appear in a correct answer), and source. A source is \"skill:<name>\", where <name> is the directory the document sits in under skills/: a document at skills/retrieval/lanes.md has source \"skill:retrieval\". The engine matches a retrieved chunk by that directory, so every document needs a path of the form skills/<name>/<file>, and one entry covers one directory rather than one file. Source values must be unique across entries.",
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "expect_any": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "expect_any",
+          "query",
+          "source"
+        ]
+      }
+    },
+    "overwrite": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "documents"
+  ]
+}

@@ -64,6 +64,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            memory_schema_assets,
             process_sandbox_executor,
             script_runtime,
             mcp_runtime,
@@ -108,6 +109,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            memory_schema_assets,
             process_sandbox_executor,
             script_runtime,
             mcp_runtime,
@@ -171,6 +173,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            memory_schema_assets,
             process_sandbox_executor,
             script_runtime,
             mcp_runtime,
@@ -217,6 +220,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            memory_schema_assets,
             process_sandbox_executor,
             script_runtime,
             mcp_runtime,
@@ -711,6 +715,16 @@ where
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
         self.apply_local_process_policy(&policy);
         self.runtime_policy = Some(policy);
+        self
+    }
+
+    /// The bound memory provider's own input schemas, for refs the host does
+    /// not compile in.
+    pub fn with_memory_schema_assets(
+        mut self,
+        assets: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        self.memory_schema_assets = assets;
         self
     }
 

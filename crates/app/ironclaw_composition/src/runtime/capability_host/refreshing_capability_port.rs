@@ -51,6 +51,8 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) workspace_mounts: MountView,
     pub(super) skill_mounts: MountView,
     pub(super) memory_mounts: MountView,
+    pub(super) memory_provider_capabilities:
+        Arc<Vec<ironclaw_host_api::capability::CapabilityDescriptor>>,
     pub(super) system_extensions_lifecycle_mounts: MountView,
     pub(super) extension_surface_source: ExtensionCapabilitySurfaceSource,
     pub(super) input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -109,6 +111,7 @@ pub(crate) async fn create_refreshing_capability_port(
         workspace_mounts: config.workspace_mounts,
         skill_mounts: config.skill_mounts,
         memory_mounts: config.memory_mounts,
+        memory_provider_capabilities: config.memory_provider_capabilities,
         system_extensions_lifecycle_mounts: config.system_extensions_lifecycle_mounts,
         extension_surface_source: config.extension_surface_source,
         input_resolver: config.input_resolver,
@@ -150,6 +153,7 @@ struct RefreshingCapabilityPort {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    memory_provider_capabilities: Arc<Vec<ironclaw_host_api::capability::CapabilityDescriptor>>,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: ExtensionCapabilitySurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -189,6 +193,7 @@ impl RefreshingCapabilityPort {
                 workspace_mounts: &self.workspace_mounts,
                 skill_mounts: &self.skill_mounts,
                 memory_mounts: &self.memory_mounts,
+                memory_provider_capabilities: &self.memory_provider_capabilities,
                 system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
                 policy: &self.policy,
                 surface_policy: &self.surface_policy,
@@ -291,6 +296,13 @@ impl RefreshingCapabilityPort {
         for capability_id in self.policy.memory_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
+        }
+        // The bound provider declares its own tool surface, so the static
+        // policy cannot enumerate it; those capabilities execute against the
+        // same memory mount as the reserved ones.
+        for descriptor in self.memory_provider_capabilities.iter() {
+            factory = factory
+                .with_capability_execution_mount(descriptor.id.clone(), self.memory_mounts.clone());
         }
         for capability_id in self.policy.system_extensions_lifecycle_capability_ids() {
             factory = factory.with_capability_execution_mount(
@@ -571,6 +583,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         workspace_mounts,
         skill_mounts,
         memory_mounts,
+        memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
         system_extensions_lifecycle_mounts,
         // Harness-port-seam P1 Change 3: same constructor production's
         // `capability_wiring` calls (`runtime/capability_host.rs:132-133`), fed the

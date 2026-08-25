@@ -86,6 +86,7 @@ async fn invoke_workspace_tool_as(
         ),
         workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
         memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
+        memory_provider_capabilities: std::sync::Arc::new(Vec::new()),
         system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts_for_test()
             .clone(),

@@ -157,3 +157,42 @@ async fn a_model_authored_write_is_sent_once() {
         "a write the model authored must not be marked retryable"
     );
 }
+
+/// A JSON-RPC protocol error is transported at HTTP 200 with an `error` member
+/// and no `result`. Reading the status alone hands that error body to the model
+/// as though it were the tool's output.
+#[tokio::test]
+async fn a_json_rpc_protocol_error_is_a_failure_not_a_returned_result() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": { "code": -32601, "message": "Method not found" }
+    })));
+
+    let error = service
+        .call_tool(invocation(), add_fact(), fact_arguments())
+        .await
+        .expect_err("a JSON-RPC error must not be returned as a tool result");
+    assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+}
+
+/// Arguments are model authored and reach the lane verbatim, so the passthrough
+/// bounds them rather than forwarding an unbounded body to the engine.
+#[tokio::test]
+async fn oversized_arguments_are_refused_before_the_transport() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(text_result()));
+
+    let error = service
+        .call_tool(
+            invocation(),
+            add_fact(),
+            json!({ "fact": "x".repeat(2 * 1024 * 1024) }),
+        )
+        .await
+        .expect_err("an oversized argument body must be refused");
+    assert_eq!(error.kind(), MemoryServiceErrorKind::Input);
+    assert!(
+        service.transport().recorded().is_empty(),
+        "an oversized body must not reach the lane at all"
+    );
+}

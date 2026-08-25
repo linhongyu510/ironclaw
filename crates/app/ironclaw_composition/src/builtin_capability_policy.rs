@@ -495,6 +495,38 @@ fn constraint_terms(
     }
 }
 
+/// Grants for the bound memory provider's own declared capabilities.
+///
+/// A provider declares its tool surface in its manifest, so the static builtin
+/// grant table cannot enumerate it. Authority comes from each descriptor's own
+/// declared effects and the memory mount: this widens nothing beyond what the
+/// manifest already asked for, and leaves `origin_gate_matrix` to gate
+/// invocation exactly as it does for the reserved memory tools.
+pub(crate) fn memory_provider_grants(
+    grantee: &ExtensionId,
+    capabilities: &[ironclaw_host_api::capability::CapabilityDescriptor],
+    memory_mounts: &MountView,
+) -> Vec<CapabilityGrant> {
+    capabilities
+        .iter()
+        .map(|descriptor| CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: descriptor.id.clone(),
+            grantee: Principal::Extension(grantee.clone()),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: descriptor.effects.clone(),
+                mounts: memory_mounts.clone(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+        })
+        .collect()
+}
+
 pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {

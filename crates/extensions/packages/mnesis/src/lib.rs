@@ -3,6 +3,7 @@ mod catalog;
 mod config;
 mod error;
 mod idempotency;
+mod schema_assets;
 mod service;
 mod transport;
 mod url_check;
@@ -10,6 +11,8 @@ mod url_check;
 pub const MNESIS_MEMORY_EXTENSION_ID: &str = "mnesis.hosted.memory";
 
 pub const MEMORY_GUIDANCE_ASSETS: &[(&str, &str)] = &[];
+
+pub use schema_assets::MEMORY_SCHEMA_ASSETS;
 
 pub const MEMORY_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 

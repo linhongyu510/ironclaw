@@ -124,6 +124,7 @@ pub(super) fn capability_wiring(
     let runtime = services.host_runtime.clone();
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
+    let memory_provider_capabilities = services.memory_provider_capabilities.clone();
     let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         services.approval_requests.clone();
@@ -194,6 +195,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             memory_mounts,
+            memory_provider_capabilities,
             system_extensions_lifecycle_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
@@ -230,6 +232,8 @@ struct RefreshingLoopCapabilityPortFactory {
     /// `mounts = "workspace"` grants must point at the caller's own subtree.
     workspace_mounts: WorkspaceMountPolicy,
     memory_mounts: MountView,
+    memory_provider_capabilities:
+        std::sync::Arc<Vec<ironclaw_host_api::capability::CapabilityDescriptor>>,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: ExtensionCapabilitySurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -330,6 +334,7 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             workspace_mounts,
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
+            memory_provider_capabilities: self.memory_provider_capabilities.clone(),
             system_extensions_lifecycle_mounts: self.system_extensions_lifecycle_mounts.clone(),
             extension_surface_source: self.extension_surface_source.clone(),
             input_resolver: Arc::clone(&self.input_resolver),
@@ -1218,6 +1223,7 @@ struct VisibleCapabilityInputs<'a> {
     workspace_mounts: &'a MountView,
     skill_mounts: &'a MountView,
     memory_mounts: &'a MountView,
+    memory_provider_capabilities: &'a [ironclaw_host_api::capability::CapabilityDescriptor],
     system_extensions_lifecycle_mounts: &'a MountView,
     policy: &'a BuiltinCapabilityPolicy,
     surface_policy: &'a CapabilitySurfacePolicy,
@@ -1245,6 +1251,13 @@ fn visible_capability_request(
     grants
         .grants
         .extend(inputs.extension_surface.grants(&extension_id, &user_id));
+    grants
+        .grants
+        .extend(crate::builtin_capability_policy::memory_provider_grants(
+            &extension_id,
+            inputs.memory_provider_capabilities,
+            inputs.memory_mounts,
+        ));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,

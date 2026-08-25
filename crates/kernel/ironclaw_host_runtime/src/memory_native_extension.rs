@@ -43,8 +43,11 @@ pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory";
 /// identity checks that must hold for "the bound memory provider" (registry
 /// provider allowlist, inline schema serving, first-party trust entries) key
 /// off this list instead of hardwiring the native id.
-pub const MEMORY_PROVIDER_PACKAGE_IDS: &[&str] =
-    &[NATIVE_MEMORY_EXTENSION_ID, MEM0_MEMORY_EXTENSION_ID];
+pub const MEMORY_PROVIDER_PACKAGE_IDS: &[&str] = &[
+    NATIVE_MEMORY_EXTENSION_ID,
+    MEM0_MEMORY_EXTENSION_ID,
+    MNESIS_MEMORY_EXTENSION_ID,
+];
 
 /// Host service identity declared by the manifest's `first_party` runtime. The
 /// host must register a matching service for the bundled manifest to be
@@ -184,6 +187,10 @@ pub struct BundledMemoryProvider {
     /// [`resolve_guidance_doc`]. `None` when the provider declares no
     /// `guidance_doc`.
     pub guidance: Option<String>,
+    /// The provider's own input schemas, keyed by the manifest ref that names
+    /// them. A bundled provider has no materialized package root, so this is
+    /// the only source for schemas the host does not compile in itself.
+    pub schema_assets: &'static [(&'static str, &'static str)],
 }
 
 /// Build the registrable provider bundle for the bundled native memory
@@ -196,6 +203,7 @@ pub fn native_memory_provider_bundle() -> Result<BundledMemoryProvider, Extensio
         NATIVE_MEMORY_PACKAGE_ROOT,
         "native memory",
         ironclaw_memory_native::MEMORY_GUIDANCE_ASSETS,
+        &[],
     )
 }
 
@@ -216,6 +224,7 @@ pub fn mem0_memory_provider_bundle(
         MEM0_MEMORY_PACKAGE_ROOT,
         "mem0",
         guidance_assets,
+        &[],
     )
 }
 
@@ -226,12 +235,14 @@ pub fn mem0_memory_provider_bundle(
 pub fn mnesis_memory_provider_bundle(
     manifest_toml: &str,
     guidance_assets: &'static [(&'static str, &'static str)],
+    schema_assets: &'static [(&'static str, &'static str)],
 ) -> Result<BundledMemoryProvider, ExtensionError> {
     memory_provider_bundle(
         manifest_toml,
         MNESIS_MEMORY_PACKAGE_ROOT,
         "mnesis",
         guidance_assets,
+        schema_assets,
     )
 }
 
@@ -245,6 +256,7 @@ fn memory_provider_bundle(
     package_root: &str,
     label: &str,
     guidance_assets: &'static [(&'static str, &'static str)],
+    schema_assets: &'static [(&'static str, &'static str)],
 ) -> Result<BundledMemoryProvider, ExtensionError> {
     let invalid = |error: &dyn std::fmt::Display| ExtensionError::InvalidManifest {
         reason: format!("{label} memory provider package is invalid: {error}"),
@@ -273,6 +285,7 @@ fn memory_provider_bundle(
         package,
         lifecycle,
         guidance,
+        schema_assets,
     })
 }
 

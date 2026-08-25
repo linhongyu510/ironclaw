@@ -329,6 +329,9 @@ pub struct ResolvedMemoryProvider {
     /// the capability ids `package` declares. `None` ⇒ no memory tools are
     /// dispatchable (matching their absence from the surface).
     pub tool_handler: Option<Arc<dyn FirstPartyCapabilityHandler>>,
+    /// The bound provider's own input schemas, forwarded to the capability
+    /// surface for refs the host does not compile in.
+    pub schema_assets: &'static [(&'static str, &'static str)],
     /// The bound provider's own memory guidance for the model (#7185),
     /// resolved from its bundle. `None` when unbound or the provider
     /// declares no `guidance_doc`.
@@ -343,6 +346,7 @@ impl ResolvedMemoryProvider {
             lifecycle: MemoryDescriptor::default(),
             tool_handler: None,
             guidance: None,
+            schema_assets: &[],
         }
     }
 }
@@ -387,6 +391,7 @@ pub fn resolve_memory_provider(
                 lifecycle: bundle.lifecycle,
                 tool_handler: Some(tool_handler),
                 guidance: bundle.guidance,
+                schema_assets: bundle.schema_assets,
             })
         }
         MemoryProviderBinding::Disabled => Ok(ResolvedMemoryProvider::unbound(resolver)),
@@ -426,6 +431,7 @@ pub fn resolve_memory_provider(
                         let bundle = memory_extension::mnesis_memory_provider_bundle(
                             ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
                             ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
+                            ironclaw_memory_mnesis::MEMORY_SCHEMA_ASSETS,
                         )
                         .map_err(|error| {
                             crate::RebornBuildError::InvalidConfig {
@@ -476,6 +482,7 @@ fn bind_third_party(
         lifecycle: bundle.lifecycle,
         tool_handler: Some(tool_handler),
         guidance: bundle.guidance,
+        schema_assets: bundle.schema_assets,
     }
 }
 
@@ -507,7 +514,6 @@ impl FirstPartyCapabilityHandler for MnesisMemoryToolHandler {
 
         let start = std::time::Instant::now();
         let invocation = memory_invocation_for_request(&request);
-
         if let Some(tool) = ironclaw_memory_mnesis::catalog_tool(request.capability_id.as_str()) {
             let output = self
                 .provider
@@ -844,6 +850,7 @@ mod tests {
         let bundle = memory_extension::mnesis_memory_provider_bundle(
             ironclaw_memory_mnesis::MEMORY_MANIFEST_TOML,
             ironclaw_memory_mnesis::MEMORY_GUIDANCE_ASSETS,
+            ironclaw_memory_mnesis::MEMORY_SCHEMA_ASSETS,
         )
         .expect("the mnesis bundle loads");
         match &bundle.package.manifest.runtime {

@@ -134,11 +134,29 @@ mod tests {
         }
     }
 
+    /// No `[memory]` stanza binds the default provider. On this branch that is
+    /// Mnesis, which the deployment profile reaches through an admin override
+    /// rather than a config entry, so the presence of an override is the
+    /// first-class binding working, not operator configuration leaking in.
     #[test]
-    fn none_config_resolves_to_native_default() {
+    fn none_config_resolves_to_the_default_provider() {
         let policy = resolve_memory_binding_policy(None, RebornCompositionProfile::Production)
-            .expect("default native resolves in production");
-        assert!(!policy.has_active_overrides());
+            .expect("the default provider resolves in production");
+        match policy.binding() {
+            ironclaw_host_runtime::memory_binding::MemoryProviderBinding::ThirdParty {
+                extension_id,
+                ..
+            } => {
+                assert_eq!(extension_id.as_str(), default_memory_provider_id());
+            }
+            ironclaw_host_runtime::memory_binding::MemoryProviderBinding::Native => {
+                assert_eq!(
+                    default_memory_provider_id(),
+                    ironclaw_host_runtime::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID
+                );
+            }
+            binding => panic!("unexpected default binding: {binding:?}"),
+        }
     }
 
     #[test]

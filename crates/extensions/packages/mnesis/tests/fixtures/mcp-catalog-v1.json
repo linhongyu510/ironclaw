@@ -1,6 +1,6 @@
 {
-  "description": "Tool names the Mnesis lanes registered on a live tools/list, captured 2026-08-24 under the ironclaw-admin credential. The catalog table is pinned against this so a server-side rename cannot ship silently. A lane exposes fewer tools when the credential holds fewer permissions; this is the ironclaw-admin set.",
-  "captured": "2026-08-24",
+  "description": "Tool names the Mnesis lanes registered on a live tools/list, captured 2026-08-25 under the ironclaw-admin credential after corpus_admin was granted. The catalog table is pinned against this so a server-side rename cannot ship silently. A lane exposes fewer tools when the credential holds fewer permissions; this is the ironclaw-admin set.",
+  "captured": "2026-08-25",
   "credential": "ironclaw-admin",
   "lanes": {
     "memory": [
@@ -40,6 +40,8 @@
       "list_related",
       "metrics",
       "promote",
+      "publish_corpus",
+      "publish_status",
       "rar_export_obsidian_vault",
       "reflex_add",
       "reflexes",
@@ -48,6 +50,7 @@
       "search_knowledge",
       "speculative",
       "stale",
+      "submit_corpus",
       "training",
       "verify_grounding"
     ]

@@ -614,10 +614,23 @@ pub(super) async fn build_backend_production(
         resolved_memory.package.as_ref(),
         resolved_memory.tool_handler.as_ref(),
     ) {
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "registering memory tools: package={} capabilities={}",
+            package.id,
+            package.capabilities.len()
+        );
         ironclaw_host_runtime::register_memory_tool_handler(
             &mut first_party_registry,
             package,
             Arc::clone(handler),
+        );
+    } else {
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "memory tools NOT registered: package_present={} handler_present={}",
+            resolved_memory.package.is_some(),
+            resolved_memory.tool_handler.is_some()
         );
     }
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
@@ -644,6 +657,7 @@ pub(super) async fn build_backend_production(
     )
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_resource_governor(Arc::clone(&resource_governor))
+    .with_memory_schema_assets(resolved_memory.schema_assets)
     .with_production_reborn_event_stores_and_sink(event_stores, host_runtime_event_sink)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
@@ -1429,6 +1443,13 @@ pub(super) async fn build_backend_production(
         skill_filesystem,
         workspace_filesystem,
         extension_filesystem: Arc::clone(&stores.filesystem),
+        memory_provider_capabilities: std::sync::Arc::new(
+            resolved_memory
+                .package
+                .as_ref()
+                .map(|package| package.capabilities.clone())
+                .unwrap_or_default(),
+        ),
         memory_service_resolver: resolved_memory.resolver.clone(),
         memory_lifecycle: resolved_memory.lifecycle.clone(),
         memory_guidance: resolved_memory.guidance.clone(),

@@ -379,6 +379,15 @@ fn discovery_namespace(capability_id: &CapabilityId) -> DiscoveryNamespace {
     if raw.starts_with("ironclaw.memory.") {
         return DiscoveryNamespace::Memory;
     }
+    // A bound memory provider may declare tools under its own package id, which
+    // would otherwise land in an extension namespace no installed extension
+    // backs. Keyed off the provider list so no provider is named here.
+    if ironclaw_host_runtime::memory_native_extension::MEMORY_PROVIDER_PACKAGE_IDS
+        .iter()
+        .any(|provider| raw.starts_with(&format!("{provider}.")))
+    {
+        return DiscoveryNamespace::Memory;
+    }
     if raw.starts_with("ironclaw.") {
         return DiscoveryNamespace::System;
     }

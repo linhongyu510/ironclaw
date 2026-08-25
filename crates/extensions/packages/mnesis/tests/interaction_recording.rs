@@ -207,3 +207,19 @@ async fn scope_is_never_taken_from_the_recorded_payload() {
     }
     assert_eq!(sent.get("metadata"), None::<&Value>);
 }
+
+/// The write path is the dangerous one: a JSON-RPC error at HTTP 200 carries no
+/// `isError`, so a status-only check reports a failed write as a completed one.
+#[tokio::test]
+async fn a_json_rpc_protocol_error_fails_the_write_rather_than_reporting_success() {
+    let service = MnesisMemoryService::new(MockMnesisTransport::always_ok(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": { "code": -32601, "message": "Method not found" }
+    })));
+
+    service
+        .record_interaction(invocation(), record(exchange()))
+        .await
+        .expect_err("a protocol error must not read as a recorded interaction");
+}

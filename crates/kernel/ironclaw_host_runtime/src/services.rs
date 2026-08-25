@@ -161,6 +161,7 @@ where
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
+    memory_schema_assets: &'static [(&'static str, &'static str)],
     process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
@@ -473,6 +474,7 @@ where
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
+            memory_schema_assets: &[],
             process_sandbox_executor: None,
             script_runtime: None,
             mcp_runtime: None,
@@ -775,6 +777,7 @@ where
             runtime_policy,
         )
         .with_surface_filesystem(surface_filesystem)
+        .with_memory_schema_assets(self.memory_schema_assets)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_services(self.process_services.clone())

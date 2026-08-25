@@ -16,6 +16,9 @@ use crate::transport::{
 };
 
 const MAX_QUERY_BYTES: usize = 4_096;
+/// Mirrors the host's `MAX_FIRST_PARTY_INPUT_BYTES`, which bounds every other
+/// model-authored tool input but is not applied on the memory tool path.
+const MAX_TOOL_ARGUMENT_BYTES: usize = 1_048_576;
 const UNNAMED_SOURCE: &str = "mnesis";
 const ATTRIBUTION_DEADLINE_MS: u64 = 30_000;
 
@@ -186,12 +189,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
 
-        if !response.is_success() {
-            return Err(lane_failure(&response));
-        }
-        if tool_call_failed(&response.body) {
-            return Err(MemoryServiceError::operation());
-        }
+        ensure_lane_succeeded(&response)?;
 
         Ok(decode_results(&response.body, limit))
     }
@@ -218,10 +216,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
 
-        if response.is_success() && !tool_call_failed(&response.body) {
-            return Ok(());
-        }
-        Err(lane_failure(&response))
+        ensure_lane_succeeded(&response)
     }
 
     /// Forwards one catalog tool to its lane and returns the MCP result intact.
@@ -235,6 +230,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             attribution,
             session_key,
         } = self.attribution_for(&invocation)?;
+        bound_tool_arguments(&arguments)?;
         let operation = tool.wire_name;
         let response = self
             .transport
@@ -249,12 +245,7 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
 
-        if !response.is_success() {
-            return Err(lane_failure(&response));
-        }
-        if tool_call_failed(&response.body) {
-            return Err(MemoryServiceError::operation());
-        }
+        ensure_lane_succeeded(&response)?;
         Ok(response
             .body
             .get("result")
@@ -266,11 +257,49 @@ impl<T: MnesisTransport> MnesisMemoryService<T> {
 /// An owner scope that will not encode is a call that cannot be attributed, and
 /// an unattributed call is answered under a scope that is not the caller's.
 fn refuse_unscoped(error: &dyn std::fmt::Display) -> MemoryServiceError {
-    tracing::warn!(
+    tracing::debug!(
         target: "ironclaw_memory_mnesis",
         "refusing an unattributable Mnesis call: {error}"
     );
     MemoryServiceError::input()
+}
+
+/// Model-authored arguments reach the lane verbatim, so they are bounded here.
+/// The typed lanes bound only their `query`, and the host's generic
+/// `bounded_input_size` covers the builtin tools rather than the memory path.
+fn bound_tool_arguments(arguments: &Value) -> Result<(), MemoryServiceError> {
+    let bytes = serde_json::to_vec(arguments).map_err(|_| MemoryServiceError::input())?;
+    if bytes.len() > MAX_TOOL_ARGUMENT_BYTES {
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "refusing Mnesis tool arguments of {} bytes (limit {MAX_TOOL_ARGUMENT_BYTES})",
+            bytes.len()
+        );
+        return Err(MemoryServiceError::input());
+    }
+    Ok(())
+}
+
+/// Three shapes mean failure and only one of them shows in the status line: a
+/// transport-level HTTP error, a JSON-RPC protocol error (HTTP 200 carrying
+/// `error` and no `result`), and a refused tool call (HTTP 200 carrying
+/// `isError`). Reading the status alone hands a protocol error to the model as
+/// a successful result, and reports a failed write as a completed one.
+fn ensure_lane_succeeded(response: &MnesisResponse) -> Result<(), MemoryServiceError> {
+    if !response.is_success() {
+        return Err(lane_failure(response));
+    }
+    if let Some(error) = protocol_error(&response.body) {
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "Mnesis lane answered with a JSON-RPC error: {error}"
+        );
+        return Err(MemoryServiceError::operation());
+    }
+    if tool_call_failed(&response.body) {
+        return Err(MemoryServiceError::operation());
+    }
+    Ok(())
 }
 
 fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
@@ -279,6 +308,11 @@ fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
     } else {
         MemoryServiceError::operation()
     }
+}
+
+/// A JSON-RPC error is transported at HTTP 200 with no `result` member.
+fn protocol_error(body: &Value) -> Option<&Value> {
+    body.get("error").filter(|error| !error.is_null())
 }
 
 /// A refused tool call is an HTTP 200 carrying `isError`, so status alone
@@ -331,9 +365,20 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "read_long_term entered: context_profile={} query_bytes={} max_snippets={}",
+            request.context_profile_id.as_str(),
+            request.query.len(),
+            request.max_snippets
+        );
         if memory_context_disabled(request.context_profile_id.as_str())
             || request.query.trim().is_empty()
         {
+            tracing::debug!(
+                target: "ironclaw_memory_mnesis",
+                "read_long_term skipped the lane: profile disabled or query empty"
+            );
             return Ok(Vec::new());
         }
         if request.query.len() > MAX_QUERY_BYTES {
@@ -361,6 +406,11 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
             .filter_map(|result| result.into_snippet())
             .collect();
         snippets.truncate(budget);
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "read_long_term recalled {} snippet(s) from the memory lane",
+            snippets.len()
+        );
         Ok(snippets)
     }
 
@@ -420,6 +470,11 @@ impl<T: MnesisTransport> MemoryService for MnesisMemoryService<T> {
         );
         self.record_lane(body, self.attribution_for(&invocation)?)
             .await?;
+        tracing::debug!(
+            target: "ironclaw_memory_mnesis",
+            "record_interaction wrote {} message(s) to the memory lane",
+            request.messages.len()
+        );
         Ok(MemoryServiceRecordResponse { recorded: true })
     }
 
