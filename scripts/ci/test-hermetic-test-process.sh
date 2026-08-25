@@ -357,8 +357,8 @@ corepack_path_count="$(
     'COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack' \
     "${repo_root}/.github/workflows/reborn-tests.yml"
 )"
-if [[ "${corepack_path_count}" != "3" ]]; then
-  echo "expected three guarded Rust lanes to pin COREPACK_HOME, found ${corepack_path_count}" >&2
+if [[ "${corepack_path_count}" != "4" ]]; then
+  echo "expected four guarded Rust lanes to pin COREPACK_HOME, found ${corepack_path_count}" >&2
   exit 1
 fi
 

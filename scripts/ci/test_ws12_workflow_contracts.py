@@ -3493,6 +3493,55 @@ class NoPlannerDerivedMatrixInShellTests(unittest.TestCase):
         )
 
 
+class RootTestJobSetupContractTests(unittest.TestCase):
+    """The root job shares one prepared Cargo/Corepack environment."""
+
+    def workflow(self, corepack_step: str) -> dict[str, str]:
+        return {
+            ".github/workflows/reborn-tests.yml": (
+                "  root-reborn-parity-tests:\n"
+                "    steps:\n"
+                f"{corepack_step}"
+                "      - name: Hermetic nextest network-guard control\n"
+                "        env:\n"
+                '          IRONCLAW_HERMETIC_NEXTEST_CONTROL: "1"\n'
+                "        run: scripts/ci/run-hermetic-deterministic-suite.sh prepare-command\n"
+            )
+        }
+
+    def test_exact_corepack_setup_before_control_passes(self):
+        workflows = self.workflow(
+            "      - name: Configure isolated Corepack path\n"
+            '        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"\n'
+        )
+        self.assertEqual(
+            [],
+            ws12_workflow_contracts.validate_root_test_job_setup(workflows),
+        )
+
+    def test_corepack_setup_sabotage_fails_loudly(self):
+        workflows = self.workflow(
+            "      - name: Configure isolated Corepack path\n"
+            '        run: echo "COREPACK_HOME=${RUNNER_TEMP}/wrong-corepack" >> "$GITHUB_ENV"\n'
+        )
+        errors = ws12_workflow_contracts.validate_root_test_job_setup(workflows)
+        self.assertTrue(any("COREPACK_HOME" in error for error in errors), errors)
+
+    def test_corepack_setup_after_control_fails_loudly(self):
+        workflows = {
+            ".github/workflows/reborn-tests.yml": (
+                "  root-reborn-parity-tests:\n"
+                "    steps:\n"
+                "      - name: Hermetic nextest network-guard control\n"
+                "        run: scripts/ci/run-hermetic-deterministic-suite.sh prepare-command\n"
+                "      - name: Configure isolated Corepack path\n"
+                '        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"\n'
+            )
+        }
+        errors = ws12_workflow_contracts.validate_root_test_job_setup(workflows)
+        self.assertTrue(any("must precede" in error for error in errors), errors)
+
+
 
 if __name__ == "__main__":
     unittest.main()

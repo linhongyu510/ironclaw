@@ -1776,6 +1776,11 @@ ROOT_TEST_WORKFLOW = ".github/workflows/reborn-tests.yml"
 ROOT_TEST_JOB = "root-reborn-parity-tests"
 ROOT_TEST_STEP = "Run Reborn root tests"
 ROOT_TEST_SKIP_PREPARE_ENV = "IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1"
+ROOT_TEST_COREPACK_STEP = "Configure isolated Corepack path"
+ROOT_TEST_CONTROL_STEP = "Hermetic nextest network-guard control"
+ROOT_TEST_COREPACK_SETUP = (
+    'run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"'
+)
 MATRIX_EXPRESSION = re.compile(
     r"\$\{\{\s*matrix(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)+\s*\}\}"
 )
@@ -1823,6 +1828,64 @@ def validate_no_matrix_interpolation_in_root_test_command(
             f"{ROOT_TEST_SKIP_PREPARE_ENV} after the hermetic nextest-control "
             "step prepares Cargo and WebUI dependencies"
         )
+    return errors
+
+
+def validate_root_test_job_setup(workflows: dict[str, str]) -> list[str]:
+    """Require the root job's exact shared Corepack setup before its control."""
+
+    text = workflows.get(ROOT_TEST_WORKFLOW)
+    if text is None:
+        return []
+    job = job_body(text, ROOT_TEST_JOB)
+    if job is None:
+        return [
+            f"{ROOT_TEST_WORKFLOW}: missing {ROOT_TEST_JOB!r} job, so its "
+            "Corepack setup cannot be checked"
+        ]
+
+    corepack = step_body(job, ROOT_TEST_COREPACK_STEP)
+    if corepack is None:
+        return [
+            f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_JOB!r} must contain the "
+            f"{ROOT_TEST_COREPACK_STEP!r} step"
+        ]
+    errors: list[str] = []
+    corepack_lines = [line.strip() for line in corepack.splitlines() if line.strip()]
+    if not corepack_lines or corepack_lines[0] != ROOT_TEST_COREPACK_SETUP:
+        errors.append(
+            f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_COREPACK_STEP!r} must run "
+            f"{ROOT_TEST_COREPACK_SETUP!r}"
+        )
+
+    control = step_body(job, ROOT_TEST_CONTROL_STEP)
+    if control is None:
+        return errors + [
+            f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_JOB!r} must contain the "
+            f"{ROOT_TEST_CONTROL_STEP!r} step after Corepack setup"
+        ]
+    corepack_heading = next(
+        (
+            heading
+            for heading in STEP_HEADING.finditer(job)
+            if heading.group("name").strip() == ROOT_TEST_COREPACK_STEP
+        ),
+        None,
+    )
+    control_heading = next(
+        (
+            heading
+            for heading in STEP_HEADING.finditer(job)
+            if heading.group("name").strip() == ROOT_TEST_CONTROL_STEP
+        ),
+        None,
+    )
+    if corepack_heading is not None and control_heading is not None:
+        if corepack_heading.start() > control_heading.start():
+            errors.append(
+                f"{ROOT_TEST_WORKFLOW}: {ROOT_TEST_COREPACK_STEP!r} must "
+                f"precede {ROOT_TEST_CONTROL_STEP!r}"
+            )
     return errors
 
 
@@ -1943,6 +2006,7 @@ def validate_workflow_texts(
     errors.extend(validate_no_duplicate_yaml_keys(root))
     errors.extend(validate_no_eval_in_workflow_run_blocks(workflows))
     errors.extend(validate_no_matrix_interpolation_in_root_test_command(workflows))
+    errors.extend(validate_root_test_job_setup(workflows))
     try:
         sccache_action = (root / SCCACHE_SETUP_ACTION).read_text(encoding="utf-8")
     except OSError as error:

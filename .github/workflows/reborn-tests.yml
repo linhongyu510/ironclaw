@@ -560,6 +560,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
+      - name: Configure isolated Corepack path
+        run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
+
       # The hermetic wrapper's network guard must survive nextest's own
       # process spawning, not just a directly-launched test binary. This is
       # the only place that control can run: it shells out to cargo, so it
