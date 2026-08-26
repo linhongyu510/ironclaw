@@ -3103,6 +3103,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         admin_api_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
+        sandbox_loop_worker_transport,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -3936,6 +3937,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )),
         subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence,
+        sandbox_loop_worker_transport,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,

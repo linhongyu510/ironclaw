@@ -903,18 +903,22 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
         // behavior that reads them lives in `ironclaw_turn_runner`, so there is
         // no lower crate to move this to.
-        // 20_632 -> 21_098 (2026-08-26, #7810 merged with main plus final
-        // review fixes): the provider-neutral credentialed-process boundary
-        // adds authorized binding DTOs, invocation bundle keys, the exact
-        // capability descriptor carried through sealed authorization and
-        // durable process continuation, a release-build witness mismatch
-        // error, and the shared sandbox credential-environment validator.
-        // These are neutral contract and authorization-evidence declarations.
-        // Credential selection, staging, execution, bundle I/O, and proxy
-        // substitution remain in their owning kernel, host-runtime, and
-        // sandbox crates. Count re-captured from this test; the stored ceiling
-        // excludes the standing 150-line working tolerance.
-        ("ironclaw_host_api", 20_948),
+        // 20_632 -> 21_035 (2026-08-26, #7810 merged with main): the
+        // provider-neutral credentialed-process boundary adds authorized
+        // binding DTOs, manifest-declared direct-exec fields, the shared
+        // quote-aware `single_direct_argv` parser, invocation bundle keys, and
+        // the exact capability descriptor carried through sealed authorization
+        // and durable process continuation. These are neutral contract and
+        // authorization-evidence declarations. Credential selection, staging,
+        // execution, bundle I/O, and proxy substitution remain in their owning
+        // kernel, host-runtime, and sandbox crates.
+        // 21_035 -> 21_152 (2026-08-26, #7903 spike): the neutral process
+        // boundary gains a bounded full-duplex loop-worker session port and its
+        // host-authored start request. Docker/Bollard and loop protocol shapes
+        // remain outside this crate; host_api owns only the placement-neutral
+        // kernel-to-lane contract. Count re-captured from this test; the stored
+        // ceiling excludes the standing 150-line working tolerance.
+        ("ironclaw_host_api", 21_002),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

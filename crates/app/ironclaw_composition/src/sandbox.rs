@@ -24,14 +24,23 @@ pub async fn build_local_docker_user_sandbox_binding(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("user-sandbox managed egress configuration is invalid: {error}"),
         })?;
-    let transport = RebornScopedSandboxCommandTransport::connect(config)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!(
-                "user-sandbox process backend requires Docker and pinned worker/proxy images: {error}"
-            ),
-        })?;
-    Ok(binding(Arc::new(transport)))
+    let transport = Arc::new(
+        RebornScopedSandboxCommandTransport::connect(config)
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "user-sandbox process backend requires Docker and pinned worker/proxy images: {error}"
+                ),
+            })?,
+    );
+    let command_transport: Arc<dyn ironclaw_host_api::process::SandboxCommandTransport> =
+        transport.clone();
+    let loop_worker_transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport> =
+        transport;
+    Ok(RebornRuntimeProcessBinding::user_sandbox_with_loop_worker(
+        Arc::new(UserSandboxProcessPort::new(command_transport)),
+        loop_worker_transport,
+    ))
 }
 
 /// Build the complete lazy Railway runtime process binding without exposing

@@ -320,6 +320,8 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
+    sandbox_loop_worker_transport:
+        Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
     /// Raw local-dev memory filesystem backing the user-profile source
     /// (E-PROFILE seam). `Some` only for `new_with_options`-built harnesses (which
     /// flow through `RebornServices`); `None` for the lower-level constructors and
@@ -840,6 +842,7 @@ impl HostRuntimeCapabilityHarness {
                 &storage_root.join("system/extensions").join(extension_id),
             )?;
         }
+        let mut sandbox_loop_worker_transport = None;
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -859,6 +862,7 @@ impl HostRuntimeCapabilityHarness {
                 storage_root.join("sandbox-workspaces"),
             )
             .await?;
+            sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();
             ironclaw_composition::local_filesystem_build_input_with_profile(
                 ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
                 service_label,
@@ -916,6 +920,9 @@ impl HostRuntimeCapabilityHarness {
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if let Some(transport) = sandbox_loop_worker_transport.clone() {
+            runtime_input = runtime_input.with_sandbox_loop_worker_transport(transport);
+        }
         if workspace_scoped_per_caller {
             // The same raise `serve` applies unconditionally: agent tool
             // grants, approval leases, and attachment handles resolve the
@@ -1087,6 +1094,7 @@ impl HostRuntimeCapabilityHarness {
             network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
+            sandbox_loop_worker_transport,
             profile_filesystem,
             project_service,
             skill_activation_source,
@@ -1312,6 +1320,11 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|port| port.commands())
             .unwrap_or_default()
+    }
+    pub(crate) fn sandbox_loop_worker_transport(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>> {
+        self.sandbox_loop_worker_transport.clone()
     }
 
     /// Install URL/method/capability-keyed scripted responses into the recording

@@ -418,6 +418,7 @@ fn core_builtin_tools_from_runtime(
         network_egress: None,
         real_egress_transport: None,
         process_port: None,
+        sandbox_loop_worker_transport: None,
         profile_filesystem: None,
         project_service: None,
         skill_activation_source: None,

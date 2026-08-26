@@ -17,12 +17,13 @@
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 19 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 20 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultPlannedRuntimePartsShape {
+    pub sandbox_loop_worker_transport: bool,
     pub model_route_resolver: bool,
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
@@ -46,7 +47,7 @@ pub struct DefaultPlannedRuntimePartsShape {
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 38 fields is named explicitly here (the 19 required
+/// Every one of the 39 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -74,6 +75,7 @@ where
         subagent_spawn_input_codec: _,
         subagent_spawn_limits: _,
         loop_exit_evidence: _,
+        sandbox_loop_worker_transport,
         config: _,
         model_route_resolver,
         cancellation_factory,
@@ -98,6 +100,7 @@ where
         scheduler_wake_wiring,
     } = parts;
     DefaultPlannedRuntimePartsShape {
+        sandbox_loop_worker_transport: sandbox_loop_worker_transport.is_some(),
         model_route_resolver: model_route_resolver.is_some(),
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),

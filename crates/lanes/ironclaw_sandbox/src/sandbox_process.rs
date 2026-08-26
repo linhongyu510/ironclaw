@@ -34,6 +34,7 @@ mod connect;
 mod container_identity;
 mod credential_firewall;
 mod key_codec;
+mod loop_worker;
 mod managed_egress;
 mod mounts;
 mod network_allowlist;

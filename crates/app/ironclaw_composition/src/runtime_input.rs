@@ -383,6 +383,10 @@ pub struct RebornRuntimeInput {
         Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
+    /// Optional placement of the canonical planned loop in the user sandbox.
+    /// The default remains in-process; explicit sandbox bindings opt in.
+    pub(crate) sandbox_loop_worker_transport:
+        Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
     /// Cost table to pair with the model-gateway override. Without this,
     /// tests that use `with_test_model_gateway` would lose the accountant
     /// entirely (the LLM-resolved cost table comes from
@@ -430,6 +434,7 @@ impl RebornRuntimeInput {
             admin_api_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
+            sandbox_loop_worker_transport: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -678,6 +683,15 @@ impl RebornRuntimeInput {
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {
         self.model_gateway_override = Some(gateway);
+        self
+    }
+    /// Execute the canonical planned loop in the supplied user sandbox while
+    /// preserving the normal host ports and finalization path.
+    pub fn with_sandbox_loop_worker_transport(
+        mut self,
+        transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>,
+    ) -> Self {
+        self.sandbox_loop_worker_transport = Some(transport);
         self
     }
 

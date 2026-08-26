@@ -25,6 +25,7 @@ use user_sandbox_live::{
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
+const LOOP_WORKER_MARKER: &str = "CANONICAL_LOOP_WORKER_ACTIVE";
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -50,7 +51,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                 "builtin.shell",
                 json!({
                     "command": format!(
-                        "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK && echo {CONTAINER_MARKER}"
+                        "test -f /.dockerenv && found=0; for exe in /proc/[0-9]*/exe; do target=$(readlink \"$exe\" 2>/dev/null || true); if [ \"$target\" = '/usr/local/bin/ironclaw-loop-worker' ]; then found=1; break; fi; done; test \"$found\" -eq 1 && echo {LOOP_WORKER_MARKER} && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK && echo {CONTAINER_MARKER}"
                     ),
                     "credential_contexts": [],
                 }),
@@ -102,6 +103,10 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_tool_result_contains(CONTAINER_MARKER)
             .await
             .expect("command ran in Docker");
+        harness
+            .assert_tool_result_contains(LOOP_WORKER_MARKER)
+            .await
+            .expect("canonical loop worker was active in the same user container");
         harness
             .assert_tool_result_contains("NON_ROOT_UID_OK")
             .await

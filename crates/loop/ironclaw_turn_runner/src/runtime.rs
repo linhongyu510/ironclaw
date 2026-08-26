@@ -48,6 +48,7 @@ use crate::{
         register_subagent_planned_driver, register_unbound_planned_driver,
         register_unbound_structured_planned_driver,
     },
+    sandboxed_planned_driver::register_sandboxed_default_planned_driver,
     subagent::{
         capability_surface::SubagentCapabilitySurfaceResolver, flavors,
         prompt_material::GateBackedSubagentPromptMaterialSource,
@@ -359,6 +360,10 @@ where
     pub subagent_spawn_limits: SubagentSpawnLimits,
     pub loop_exit_evidence: Arc<dyn LoopExitEvidencePort>,
     pub config: DefaultPlannedRuntimeConfig,
+    /// Optional canonical-loop placement in the persistent user sandbox.
+    /// `None` preserves the in-process planned driver.
+    pub sandbox_loop_worker_transport:
+        Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
@@ -685,7 +690,11 @@ where
             ),
         )
     })?;
-    register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    if let Some(transport) = parts.sandbox_loop_worker_transport.clone() {
+        register_sandboxed_default_planned_driver(&mut registry, transport)?;
+    } else {
+        register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
+    }
     register_subagent_planned_driver(&mut registry, Arc::clone(&family_registry))?;
     register_unbound_planned_driver(&mut registry, Arc::clone(&family_registry))?;
     register_unbound_structured_planned_driver(&mut registry, family_registry)?;
