@@ -78,23 +78,51 @@ const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_
     .remove(b'.')
     .remove(b'~');
 
-/// The channel's `connect_required` copy, with a one-click connect link
-/// appended when three things hold: the strategy is OAuth, the deployment
-/// configured a public web origin, and the channel's own reply adapter
-/// declares that it delivers an ephemeral reply privately (#7681).
-/// `/chat?connect=<extension>` is an authenticated route, so the link rides
-/// the WebUI's existing login round-trip unchanged. The other strategies
-/// carry their own `connection.deep_link_template`.
+/// The deployment's public web origin with any trailing slash removed, or
+/// `None` when none is configured.
 ///
-/// The privacy condition is the fail-closed half. This notice is the one a
-/// shared conversation shows an unlinked sender, and it is kept out of the
-/// room only by an `OutboundVisibility::EphemeralTo` request, which
+/// `None` and blank are the same answer — a notice must never advertise a
+/// relative path into a customer conversation, and an origin configured as
+/// `""` or whitespace would otherwise render `/chat?connect=…` as if it were
+/// a destination. Mirrors the normalization in
+/// `ironclaw_extension_manager::install_guidance::personal_setup_link`.
+fn configured_origin(base_url: Option<&str>) -> Option<&str> {
+    let base = base_url?.trim().trim_end_matches('/');
+    (!base.is_empty()).then_some(base)
+}
+
+/// The channel's `connect_required` copy, with a destination appended when the
+/// deployment configured a public web origin. Which destination — and whether
+/// it is safe to render at all — depends on the strategy.
+///
+/// **OAuth: `/chat?connect=<extension>`, gated on private delivery (#7681).**
+/// That route auto-installs and auto-starts a flow, so it is meant for one
+/// sender. This notice is the one a shared conversation shows an unlinked
+/// sender, and it is kept out of the room only by an
+/// `OutboundVisibility::EphemeralTo` request, which
 /// [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply)
 /// documents as a hint: an adapter that cannot honor it posts publicly
-/// instead. Appending a setup link on strategy alone would therefore broadcast
-/// it to every member of the conversation the first time an OAuth-strategy
-/// channel without ephemeral support ships. Adapters that have not declared
-/// the capability keep the static, link-free manifest copy.
+/// instead. Appending on strategy alone would broadcast a one-sender link the
+/// first time an OAuth channel without ephemeral support ships, so adapters
+/// that have not declared the capability keep the link-free manifest copy.
+///
+/// **`WebGeneratedCode` / `DeviceLink`: `/extensions?configure=<extension>`,
+/// no privacy condition (#7887).** These ceremonies cannot be completed from
+/// the chat surface at all, and — unlike the OAuth route — this link *starts
+/// nothing*: it opens the Extensions page, where a bystander who clicks it
+/// authenticates as themselves and lands on their own page. Safe in a shared
+/// room, so it is not gated on ephemeral delivery.
+///
+/// An earlier revision withheld a link from every non-OAuth strategy on the
+/// grounds that they "carry their own `connection.deep_link_template`". That
+/// does not serve this case: the template interpolates a `{code}`
+/// ([`channel_pairing`]) the sender has not been issued yet, so a stranger who
+/// has just messaged the bot was told to go find the extension with nothing to
+/// click — the CX cell #7887 reports.
+///
+/// `AdminManagedChannels` still renders verbatim: that channel is provisioned
+/// by an operator, and sending an end user to a configure page they have no
+/// permission to act on is worse than saying nothing.
 fn connect_required_notice(
     connection: &ChannelConnectionDescriptor,
     extension_id: &str,
@@ -102,17 +130,20 @@ fn connect_required_notice(
     supports_private_delivery: bool,
 ) -> String {
     let text = &connection.notices.connect_required;
-    match base_url {
-        Some(base)
-            if supports_private_delivery
-                && connection.strategy == ChannelConnectionStrategy::OAuth =>
-        {
-            let base = base.trim_end_matches('/');
-            let extension_id =
-                percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
+    let Some(base) = configured_origin(base_url) else {
+        return text.clone();
+    };
+    let extension_id = percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
+    match connection.strategy {
+        ChannelConnectionStrategy::OAuth if supports_private_delivery => {
             format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
         }
-        _ => text.clone(),
+        ChannelConnectionStrategy::WebGeneratedCode | ChannelConnectionStrategy::DeviceLink => {
+            format!("{text} Finish setup here: {base}/extensions?configure={extension_id}")
+        }
+        ChannelConnectionStrategy::OAuth | ChannelConnectionStrategy::AdminManagedChannels => {
+            text.clone()
+        }
     }
 }
 
@@ -1348,6 +1379,67 @@ mod tests {
         }
     }
 
+    /// #7887, CX cell "Not paired yet × Telegram": a strategy whose connect
+    /// ceremony cannot be completed from the chat surface must still hand the
+    /// user a destination.
+    ///
+    /// `deep_link_template` does not serve this case, which is what the
+    /// `connect_notice_appends_the_link_only_for_oauth_with_a_base_url` copy
+    /// below used to assume. That template interpolates a `{code}`
+    /// (`channel_pairing.rs`) the sender has not been issued yet — a stranger
+    /// who has just DM'd the bot has no code — so Telegram's copy ("Connect
+    /// this Telegram account … from the Telegram extension in IronClaw, then
+    /// message me again") left the user with nowhere to click.
+    ///
+    /// The appended link is deliberately NOT `/chat?connect=`. That route
+    /// auto-installs and auto-starts a flow, which is exactly why it stays
+    /// gated on private delivery below. `/extensions?configure=` starts
+    /// nothing: a bystander who clicks it authenticates as themselves and
+    /// lands on their own page, so it is safe in a shared room and carries no
+    /// privacy condition — asserted here by rendering both
+    /// `supports_private_delivery` values and requiring the same copy.
+    #[test]
+    fn connect_notice_hands_a_web_app_link_to_strategies_that_cannot_self_serve() {
+        for strategy in [
+            ChannelConnectionStrategy::WebGeneratedCode,
+            ChannelConnectionStrategy::DeviceLink,
+        ] {
+            let descriptor = connection_descriptor(strategy);
+            for supports_private_delivery in [true, false] {
+                assert_eq!(
+                    connect_required_notice(
+                        &descriptor,
+                        "telegram",
+                        Some("https://app.example.com"),
+                        supports_private_delivery
+                    ),
+                    "Connect your account. Finish setup here: \
+                     https://app.example.com/extensions?configure=telegram",
+                    "{strategy:?} must hand over a destination \
+                     (supports_private_delivery={supports_private_delivery})"
+                );
+            }
+            // A trailing slash on the configured origin must not produce
+            // `//extensions`.
+            assert_eq!(
+                connect_required_notice(
+                    &descriptor,
+                    "telegram",
+                    Some("https://app.example.com/"),
+                    true
+                ),
+                "Connect your account. Finish setup here: \
+                 https://app.example.com/extensions?configure=telegram"
+            );
+            // Unset origin still ships dark rather than advertising a
+            // relative path into a customer conversation.
+            assert_eq!(
+                connect_required_notice(&descriptor, "telegram", None, true),
+                descriptor.notices.connect_required
+            );
+        }
+    }
+
     /// #7681: the one-click link is appended only for an OAuth-strategy channel
     /// on a deployment that configured a public web origin, and only when the
     /// channel's reply adapter delivers ephemeral replies privately. Every
@@ -1373,19 +1465,45 @@ mod tests {
             connect_required_notice(&oauth, "slack", None, true),
             oauth.notices.connect_required
         );
-        // A non-OAuth strategy carries its own deep link, so no link leaks
-        // into its copy even when an origin IS configured.
+        // An operator-provisioned channel returns the manifest copy verbatim
+        // even when an origin IS configured: the end user reading this notice
+        // cannot act on a configure page, so a link would be noise.
+        //
+        // `WebGeneratedCode`/`DeviceLink` were in this loop until #7887 on the
+        // assumption that they "carry their own deep link". They do not for
+        // this notice — see
+        // `connect_notice_hands_a_web_app_link_to_strategies_that_cannot_self_serve`,
+        // which now owns those two strategies. The invariant this test exists
+        // to protect is unchanged and asserted below: the *auto-starting*
+        // `/chat?connect=` route never ships to a room that cannot deliver
+        // privately.
+        let admin_managed = connection_descriptor(ChannelConnectionStrategy::AdminManagedChannels);
+        assert_eq!(
+            connect_required_notice(
+                &admin_managed,
+                "slack",
+                Some("https://app.example.com"),
+                true
+            ),
+            admin_managed.notices.connect_required,
+            "AdminManagedChannels must return the manifest copy verbatim"
+        );
+        // A blank origin is the same answer as an unset one for every
+        // strategy: a relative path is not a destination.
         for strategy in [
-            ChannelConnectionStrategy::DeviceLink,
+            ChannelConnectionStrategy::OAuth,
             ChannelConnectionStrategy::WebGeneratedCode,
+            ChannelConnectionStrategy::DeviceLink,
             ChannelConnectionStrategy::AdminManagedChannels,
         ] {
-            let other = connection_descriptor(strategy);
-            assert_eq!(
-                connect_required_notice(&other, "slack", Some("https://app.example.com"), true),
-                other.notices.connect_required,
-                "{strategy:?} must return the manifest copy verbatim"
-            );
+            let descriptor = connection_descriptor(strategy);
+            for blank in ["", "   "] {
+                assert_eq!(
+                    connect_required_notice(&descriptor, "slack", Some(blank), true),
+                    descriptor.notices.connect_required,
+                    "{strategy:?} must ship dark for a blank origin ({blank:?})"
+                );
+            }
         }
     }
 
