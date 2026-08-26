@@ -365,6 +365,7 @@ fn delivery_run_services(
         Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
+        setup_link_base_url: None,
         binding_service: harness
             .binding_service_for_test()
             .expect("group binding service"),
