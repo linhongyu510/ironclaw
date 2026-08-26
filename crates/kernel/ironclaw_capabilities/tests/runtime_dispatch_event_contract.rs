@@ -508,6 +508,7 @@ impl BoundCapabilityAdapter for EchoBinding {
             })?;
         Ok(RuntimeAdapterResult {
             output,
+            model_preview: None,
             display_preview: None,
             output_bytes,
             usage,

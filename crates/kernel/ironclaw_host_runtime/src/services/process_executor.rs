@@ -327,6 +327,7 @@ mod tests {
             provider: ExtensionId::new("demo").unwrap(),
             runtime: RuntimeKind::Script,
             output: json!({"ok": true}),
+            model_preview: None,
             display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {

@@ -426,6 +426,7 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
             })?;
         Ok(RuntimeAdapterResult {
             output,
+            model_preview: None,
             display_preview: None,
             usage,
             receipt,

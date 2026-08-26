@@ -644,6 +644,7 @@ impl BoundCapabilityAdapter for RecordingAdapter {
 
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            model_preview: None,
             display_preview: None,
             usage,
             receipt,

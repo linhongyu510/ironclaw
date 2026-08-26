@@ -20,6 +20,7 @@ use ironclaw_host_api::{
         ProviderToolName,
     },
     invocation::InvocationOrigin,
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resolution::{Resolution, ResolutionBatch},
     resource::{ResourceEstimate, ResourceScope},
@@ -501,6 +502,7 @@ pub struct CapabilityResultWrite<'a> {
     pub invocation_id: InvocationId,
     pub capability_id: &'a CapabilityId,
     pub output: serde_json::Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub durable_persistence: DurablePersistence,
 }
@@ -1692,6 +1694,7 @@ impl HostRuntimeLoopCapabilityPort {
                 invocation_id: InvocationId::from_uuid(request.activity_id.as_uuid()),
                 capability_id: &request.capability_id,
                 output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -3628,6 +3631,7 @@ async fn runtime_outcome_to_loop(
                     invocation_id: conversion.invocation_id,
                     capability_id: &completed.capability_id,
                     output: completed.output.clone(),
+                    model_preview: completed.model_preview.clone(),
                     display_preview: completed.display_preview.clone(),
                     durable_persistence: DurablePersistence::Persist,
                 })
@@ -5088,6 +5092,7 @@ mod tests {
                 RuntimeCapabilityCompleted {
                     capability_id: request.1,
                     output: serde_json::json!({"ok": true}),
+                    model_preview: None,
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
@@ -5240,6 +5245,7 @@ mod tests {
                 RuntimeCapabilityCompleted {
                     capability_id: request.2,
                     output: serde_json::json!({"resumed": true}),
+                    model_preview: None,
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
                 },
@@ -5508,6 +5514,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+        model_previews: Mutex<Vec<Option<ModelResultPreview>>>,
         display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
         failure_previews: Mutex<Vec<(InvocationId, CapabilityId, String)>>,
     }
@@ -5521,6 +5528,13 @@ mod tests {
             self.display_previews
                 .lock()
                 .expect("display previews lock")
+                .clone()
+        }
+
+        fn model_previews(&self) -> Vec<Option<ModelResultPreview>> {
+            self.model_previews
+                .lock()
+                .expect("model previews lock")
                 .clone()
         }
 
@@ -5548,6 +5562,10 @@ mod tests {
                 .lock()
                 .expect("records lock")
                 .push((write.capability_id.clone(), write.output));
+            self.model_previews
+                .lock()
+                .expect("model previews lock")
+                .push(write.model_preview);
             self.display_previews
                 .lock()
                 .expect("display previews lock")

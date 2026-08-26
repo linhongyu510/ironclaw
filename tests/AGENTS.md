@@ -133,7 +133,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 |---|---|
 | Install an integration in one chat and see it active in another | `scenario_install_then_visible_cross_thread.rs`, `scenario_install_then_active_cross_thread.rs` |
 | Remove an integration and have it gone everywhere | `scenario_remove_then_absent_cross_thread.rs` |
-| Not call an integration's tools until it is actually installed | `scenario_uninstalled_tool_call_denied_until_active.rs` |
+| Not call an integration's tools until it is actually installed; after activation, exercise Gmail's production multipart/base64url semantic preview (bounded parsed headers/body) while proving the complete result survives durable record-store paging byte-for-byte | `scenario_uninstalled_tool_call_denied_until_active.rs` |
 | Ask for an integration that doesn't exist and get a clear error rather than a crash | `scenario_install_unknown_extension_id_fails_safely.rs` |
 | Get field-level repair guidance when the agent sends malformed install arguments | `scenario_malformed_lifecycle_arguments_are_structured.rs` |
 | Be sent to a normal per-account sign-in when installing GitHub (no false "operator must configure this" wall) | `scenario_extension_install_github_normal_gate.rs` |

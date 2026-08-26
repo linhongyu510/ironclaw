@@ -47,6 +47,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                     )
                     .unwrap(),
                 output_schema_ref: None,
+                model_view: None,
                 prompt_doc_ref: None,
                 required_host_ports: Vec::new(),
                 runtime_credentials: Vec::new(),

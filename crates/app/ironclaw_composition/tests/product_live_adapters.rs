@@ -104,6 +104,7 @@ async fn write_capability_result_for_test(
             invocation_id: InvocationId::new(),
             capability_id: &capability_id,
             output,
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })
@@ -189,6 +190,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
             invocation_id: InvocationId::new(),
             capability_id: &capability_id,
             output: output.clone(),
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })

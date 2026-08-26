@@ -182,6 +182,7 @@ pub(crate) fn tool_result(output: Value) -> ToolResult {
         .unwrap_or_default();
     ToolResult {
         output,
+        model_preview: None,
         display_preview: None,
         output_bytes,
     }

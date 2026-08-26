@@ -87,6 +87,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         output_schema_ref: Some(CapabilityProfileSchemaRef::new(
             "schemas/builtin/operator_config_set_auto_approve.output.v1.json",
         )?),
+        model_view: None,
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
@@ -116,6 +117,7 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
         output_schema_ref: Some(CapabilityProfileSchemaRef::new(
             "schemas/builtin/operator_config_set_tool_permission.output.v1.json",
         )?),
+        model_view: None,
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),

@@ -739,6 +739,19 @@ impl RebornIntegrationGroup {
         self.shared.planned_runtime_parts_shape
     }
 
+    /// Queue an exact provider response on this group's production network
+    /// egress lane. Extension scenarios use this after earlier calls have
+    /// completed so the next provider request receives the intended fixture.
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        self.shared
+            .capability_recorder
+            .install_network_response_script(status, body)
+    }
+
     /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
     /// owner's `(tenant, user)` scope over the shared CAS-persisted
     /// `AutoApproveSettingStorePort`. In a `multiuser_approvals` group (built with

@@ -8,8 +8,8 @@
 //! (the #6129 substring-`secret` bug), forcing the model into a re-read amnesia
 //! loop. `ModelResultPreview` is the content vehicle instead:
 //!
-//! - **24 KiB** bound — mirrors `ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES`
-//!   (the largest raw first-look chunk the model reads at once).
+//! - **bounded by use** — automatic completion previews are capped at 4 KiB;
+//!   explicit `result_read` pages remain capped at 24 KiB.
 //! - **tolerates delimiters and newlines** — it is the tool's own raw-ish output,
 //!   so `{ } [ ] / < >` and multi-line structure are legitimate content, not a
 //!   redaction signal. (Rejects only NUL and other disallowed control chars.)
@@ -26,11 +26,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HostApiError;
 
-/// Maximum size of a model-visible result preview, in bytes. Mirrors
-/// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB) — the
-/// largest raw first-look chunk a `result_read` returns — so the inline preview
-/// and a follow-up read share one cap.
+/// Maximum size of any model-visible result preview, in bytes. This remains the
+/// page limit for explicit `result_read` calls.
 pub const MODEL_RESULT_PREVIEW_MAX_BYTES: usize = 24 * 1024;
+
+/// Maximum size of the automatic first-look preview attached to a completed
+/// capability result. Producers and the canonical result writer share this
+/// smaller budget so tool completion cannot spend an entire result-read page.
+pub const AUTOMATIC_MODEL_RESULT_PREVIEW_MAX_BYTES: usize = 4 * 1024;
 
 /// A bounded, credential-redacted, model-visible preview of a tool result's
 /// content. Tolerates delimiters/newlines (it is the tool's own output); refuses
@@ -57,20 +60,14 @@ impl ModelResultPreview {
     /// alternative is showing nothing.
     pub fn redacted(value: impl Into<String>) -> Result<Self, HostApiError> {
         let mut value = value.into();
-        match validate_model_result_preview(&value) {
-            Ok(()) => Ok(Self(value)),
-            Err(_) => {
-                if let Ok(mut structured) = serde_json::from_str(&value)
-                    && redact_structured_credential_values(&mut structured, 0)
-                {
-                    value = serde_json::to_string(&structured)
-                        .unwrap_or_else(|_| "[redacted]".to_string());
-                }
-                let redacted = crate::credential_redaction::redact_credential_text(&value);
-                validate_model_result_preview(&redacted)?;
-                Ok(Self(redacted))
-            }
+        if let Ok(mut structured) = serde_json::from_str(&value)
+            && redact_structured_credential_values(&mut structured, 0)
+        {
+            value = serde_json::to_string(&structured).unwrap_or_else(|_| "[redacted]".to_string());
         }
+        let redacted = crate::credential_redaction::redact_credential_text(&value);
+        validate_model_result_preview(&redacted)?;
+        Ok(Self(redacted))
     }
 
     pub fn as_str(&self) -> &str {
@@ -273,6 +270,27 @@ mod tests {
             preview.as_str().contains("deploy finished"),
             "surrounding content survives"
         );
+    }
+
+    #[test]
+    fn redacted_masks_bearer_value_with_its_marker() {
+        let preview = ModelResultPreview::redacted("Bearer live-secret-value")
+            .expect("bearer credential can be redacted");
+
+        assert_eq!(preview.as_str(), "[redacted]");
+        assert!(!preview.as_str().contains("live-secret-value"));
+    }
+
+    #[test]
+    fn redacted_inspects_nested_structured_text_even_when_outer_text_validates() {
+        let preview = ModelResultPreview::redacted(
+            r#"{"body":"{\"access_token\":\"opaque-live-value\",\"message\":\"safe\"}"}"#,
+        )
+        .expect("nested structured credential can be redacted");
+
+        assert!(!preview.as_str().contains("opaque-live-value"));
+        assert!(preview.as_str().contains("[redacted]"));
+        assert!(preview.as_str().contains("safe"));
     }
 
     #[test]

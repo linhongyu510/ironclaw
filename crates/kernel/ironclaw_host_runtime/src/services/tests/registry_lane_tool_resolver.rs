@@ -96,6 +96,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
             })?;
         Ok(RuntimeAdapterResult {
             output,
+            model_preview: None,
             display_preview: None,
             output_bytes: usage.output_bytes,
             usage,

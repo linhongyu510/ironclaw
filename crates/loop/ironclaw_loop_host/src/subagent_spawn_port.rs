@@ -949,6 +949,7 @@ impl SubagentSpawnCapabilityPort {
                 invocation_id: InvocationId::new(),
                 capability_id: &self.spawn_id,
                 output: payload,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })

@@ -554,8 +554,23 @@ Rules:
   and optional `required` flag. The field is only
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
-- every capability must provide `input_schema_ref` and `output_schema_ref`;
-  `prompt_doc_ref` is optional lazy help metadata.
+- every capability must provide `input_schema_ref`; v2 capabilities provide
+  `output_schema_ref`, while v3 tools may omit it for runtime-owned or
+  dynamically discovered output shapes. `prompt_doc_ref` is optional lazy help
+  metadata.
+- `model_view` is optional registry adoption metadata for the model-facing
+  result view. Its only values are `structural` (the producer relies on the
+  universal host fallback) and `producer` (the producer supplies an optional
+  typed semantic preview, with the same structural fallback). This declaration
+  is checked against package schemas at registration/architecture-test time; it
+  is not runtime authorization and is not threaded into execution. Runtime
+  safety comes from the typed, bounded preview contract and the canonical
+  writer. `model_view` does not name a runtime or alter execution taxonomy.
+  When a network tool explicitly declares `output_schema_ref`, registry-owned
+  architecture checks load that package-local JSON Schema fail-closed; an
+  open-object schema (boolean `true` or nested `additionalProperties = true`)
+  must declare one of these policies. Dynamic MCP tools and tools without an
+  explicit output schema are outside this gate.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.

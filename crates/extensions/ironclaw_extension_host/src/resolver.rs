@@ -116,6 +116,7 @@ impl BoundCapabilityAdapter for SnapshotBoundCapability {
         };
         Ok(RuntimeAdapterResult {
             output: result.output,
+            model_preview: result.model_preview,
             display_preview: result.display_preview,
             output_bytes,
             usage: usage.clone(),

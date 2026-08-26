@@ -334,6 +334,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            model_preview: None,
             display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
@@ -371,6 +372,7 @@ pub fn dispatch_result_with_output(
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
         output,
+        model_preview: None,
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {

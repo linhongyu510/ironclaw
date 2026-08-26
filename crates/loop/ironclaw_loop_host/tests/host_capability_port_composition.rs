@@ -350,6 +350,7 @@ impl HostRuntime for SingleToolHostRuntime {
             RuntimeCapabilityCompleted {
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ResourceUsage::default(),
             },

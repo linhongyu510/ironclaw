@@ -43,6 +43,7 @@ mod model_gateway_error_mapping;
 mod model_routes;
 mod model_visible_scrub;
 mod prompt_context_budget;
+mod result_preview;
 mod result_read;
 mod skill_activation;
 mod skill_bundle_context_source;
@@ -127,6 +128,7 @@ pub use model_routes::{
     ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };
 pub use model_visible_scrub::scrub_model_visible_detail;
+pub use result_preview::result_reference_observation;
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};

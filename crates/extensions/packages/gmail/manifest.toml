@@ -51,6 +51,8 @@ effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/gmail/get_message.input.v1.json"
+output_schema_ref = "schemas/gmail/get_message.output.v1.json"
+model_view = "producer"
 prompt_doc_ref = "prompts/gmail/get_message.md"
 
 network_targets = [

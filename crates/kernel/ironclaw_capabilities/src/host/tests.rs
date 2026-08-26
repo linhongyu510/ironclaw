@@ -814,6 +814,7 @@ async fn resumed_pending_claim_dispatch_seals_witness_deadline_from_lease_expiry
                 provider: ExtensionId::new("echo").unwrap(),
                 runtime: RuntimeKind::Wasm,
                 output: serde_json::json!({"ok": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ironclaw_host_api::resource::ResourceUsage::default(),
                 receipt: ironclaw_host_api::resource::ResourceReceipt {

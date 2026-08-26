@@ -24,7 +24,7 @@ use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{BatchPolicyKind, LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
-use ironclaw_threads::SessionThreadService as _;
+use ironclaw_threads::{ReadToolResultRecordRequest, SessionThreadService as _};
 use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
 use rust_decimal::Decimal;
 
@@ -1175,6 +1175,68 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Read one durable tool-result record through the production thread store,
+    /// walking the store's continuation offsets until the complete byte stream
+    /// is returned. This deliberately does not use the in-process capability
+    /// recorder: callers can prove durable persistence and paging equality.
+    pub async fn read_durable_tool_result_record_pages(
+        &self,
+        result_ref: &str,
+        max_bytes: usize,
+    ) -> HarnessResult<Vec<u8>> {
+        let service = self.thread_harness.service_instance()?;
+        let mut offset = 0_u64;
+        let mut total_bytes = None;
+        let mut content = Vec::new();
+        loop {
+            let chunk = service
+                .read_tool_result_record(ReadToolResultRecordRequest {
+                    scope: self.thread_harness.scope.clone(),
+                    thread_id: self.binding.thread_id.clone(),
+                    result_ref: result_ref.to_string(),
+                    offset,
+                    max_bytes,
+                })
+                .await?
+                .ok_or_else(|| format!("durable tool result record {result_ref:?} is missing"))?;
+            if let Some(expected) = total_bytes {
+                if expected != chunk.total_bytes {
+                    return Err(format!(
+                        "durable tool result record {result_ref:?} changed size while paging: \
+                         expected {expected}, saw {}",
+                        chunk.total_bytes
+                    )
+                    .into());
+                }
+            } else {
+                total_bytes = Some(chunk.total_bytes);
+            }
+            content.extend_from_slice(&chunk.content);
+            match chunk.next_offset {
+                Some(next_offset) if next_offset > offset => offset = next_offset,
+                Some(next_offset) => {
+                    return Err(format!(
+                        "durable tool result record {result_ref:?} did not advance paging offset \
+                         {offset} -> {next_offset}"
+                    )
+                    .into());
+                }
+                None => {
+                    let expected = total_bytes.unwrap_or_default();
+                    if content.len() as u64 != expected {
+                        return Err(format!(
+                            "durable tool result record {result_ref:?} ended at {} bytes, \
+                             expected {expected}",
+                            content.len()
+                        )
+                        .into());
+                    }
+                    return Ok(content);
+                }
+            }
+        }
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history. Shared collector for
     /// [`assert_tool_error`], [`assert_no_tool_error`], and
@@ -2075,6 +2137,23 @@ impl RebornIntegrationHarness {
                  the whole payload)"
                     .into()
             })
+    }
+
+    /// The inline preview from the most recent persisted `ToolResultReference`
+    /// observation. Used by result paging scenarios that must distinguish the
+    /// explicit 24 KiB page contract from the smaller automatic-preview budget.
+    pub async fn latest_tool_result_preview(&self) -> HarnessResult<String> {
+        let message = self.latest_tool_result_reference_message().await?;
+        let content = message
+            .content
+            .ok_or("latest ToolResultReference message has no content")?;
+        let envelope: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            format!("latest ToolResultReference content is not valid JSON: {error}")
+        })?;
+        envelope["model_observation"]["detail"]["preview"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "latest ToolResultReference observation has no preview".into())
     }
 
     /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —

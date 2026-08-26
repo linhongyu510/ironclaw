@@ -18,6 +18,7 @@ use ironclaw_host_api::{
     host_remediation::HostRemediation,
     ids::{CapabilityId, RunId, SecretHandle, UserId},
     invocation::InvocationOrigin,
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resource::{ResourceEstimate, ResourceScope, ResourceUsage},
 };
@@ -123,6 +124,7 @@ impl FirstPartyCapabilityRequest {
 #[non_exhaustive]
 pub struct FirstPartyCapabilityResult {
     pub output: Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
@@ -131,9 +133,15 @@ impl FirstPartyCapabilityResult {
     pub fn new(output: Value, usage: ResourceUsage) -> Self {
         Self {
             output,
+            model_preview: None,
             display_preview: None,
             usage,
         }
+    }
+
+    pub fn with_model_preview(mut self, model_preview: Option<ModelResultPreview>) -> Self {
+        self.model_preview = model_preview;
+        self
     }
 
     pub fn with_display_preview(

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
+use ironclaw_extension_registry::v2::ModelViewPolicy;
 use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry, HostApiId,
@@ -105,6 +106,25 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     // A manifest that omits the §5.2.1 origin→gate key parses to `None`
     // (undeclared), preserving compatibility with existing manifests.
     assert!(cap.origin_gate_matrix.is_none());
+}
+
+#[test]
+fn parses_optional_model_view_policy_on_v2_capability() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        "output_schema_ref = \"schemas/example/echo.output.v1.json\"",
+        "output_schema_ref = \"schemas/example/echo.output.v1.json\"\nmodel_view = \"producer\"",
+    );
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .expect("model-view policy is a valid optional v2 declaration");
+    assert_eq!(
+        manifest.capabilities[0].model_view,
+        Some(ModelViewPolicy::Producer)
+    );
 }
 
 /// The `standard:` schema-ref namespace is reserved to host-synthesized

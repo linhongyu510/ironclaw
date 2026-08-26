@@ -39,12 +39,13 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_auth::{
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
 };
 use serde_json::json;
 
-pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run() -> HarnessResult<()> {
     let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
     // One conversation, two turns. Turn 1's rejected tool call consumes script
@@ -57,6 +58,11 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
             RebornScriptedReply::text("gmail unavailable"),
             RebornScriptedReply::tool_call("gmail.list_messages", json!({})),
             RebornScriptedReply::text("gmail dispatched"),
+            RebornScriptedReply::tool_call(
+                "gmail.get_message",
+                json!({"message_id": "msg-semantic-preview"}),
+            ),
+            RebornScriptedReply::text("gmail message read"),
         ])
         .build()
         .await?;
@@ -136,5 +142,161 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "Bearer itest-google-token",
         )
         .await?;
+
+    // Drive the semantic producer through the same installed extension,
+    // first-party runtime adapter, obligations, loop capability port, and
+    // durable staged-I/O writer used in production. The model sees selected
+    // readable content while the canonical stored result retains the complete
+    // provider response.
+    let readable_body = format!(
+        "Production chain semantic preview. 😀\n{}",
+        "plain-body-line ".repeat(900)
+    );
+    let encoded_plain_body = URL_SAFE_NO_PAD.encode(readable_body.as_bytes());
+    let html_marker = "HTML-ONLY-CONTENT";
+    let encoded_html_body =
+        URL_SAFE_NO_PAD.encode(format!("<html><body>{html_marker}</body></html>").as_bytes());
+    let encoded_attachment = URL_SAFE_NO_PAD.encode(b"attachment-transport-bytes");
+    let provider_message = json!({
+        "id": "msg-semantic-preview",
+        "payload": {
+            "mimeType": "multipart/mixed",
+            "headers": [
+                {"name": "From", "value": "Ada <ada@example.com>"},
+                {"name": "To", "value": "Grace <grace@example.com>"},
+                {"name": "Subject", "value": "Production preview"},
+                {"name": "Date", "value": "Tue, 25 Aug 2026 12:34:56 +0000"},
+                {"name": "X-Transport-Debug", "value": "transport-only-metadata"}
+            ],
+            "parts": [
+                {
+                    "mimeType": "text/html",
+                    "body": {"data": encoded_html_body}
+                },
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {
+                            "mimeType": "text/plain",
+                            "body": {"data": encoded_plain_body}
+                        },
+                        {
+                            "mimeType": "text/calendar",
+                            "body": {"data": URL_SAFE_NO_PAD.encode(b"calendar-transport-part")}
+                        }
+                    ]
+                },
+                {
+                    "mimeType": "application/octet-stream",
+                    "filename": "transport.bin",
+                    "body": {"data": encoded_attachment}
+                }
+            ]
+        }
+    });
+    g.install_network_response_script(200, serde_json::to_vec(&provider_message)?)?;
+
+    caller.submit_turn("read the message").await?;
+    caller.assert_tool_invoked("gmail.get_message").await?;
+    let envelopes = caller.persisted_tool_result_envelopes().await?;
+    let observation = envelopes
+        .last()
+        .and_then(|envelope| envelope.model_observation.as_ref())
+        .ok_or("Gmail result did not persist a model observation")?;
+    let preview = observation["detail"]["preview"]
+        .as_str()
+        .ok_or_else(|| format!("Gmail result persisted no preview: {observation}"))?;
+    if preview.len() > 4 * 1024 {
+        return Err(format!(
+            "Gmail semantic preview exceeded the automatic 4KiB budget: {} bytes",
+            preview.len()
+        )
+        .into());
+    }
+    let preview: serde_json::Value = serde_json::from_str(preview)?;
+    let preview_headers = preview
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("Gmail semantic preview omitted parsed headers")?;
+    for (name, expected) in [
+        ("from", "Ada <ada@example.com>"),
+        ("to", "Grace <grace@example.com>"),
+        ("subject", "Production preview"),
+        ("date", "Tue, 25 Aug 2026 12:34:56 +0000"),
+    ] {
+        if preview_headers
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            != Some(expected)
+        {
+            return Err(format!(
+                "Gmail semantic preview header {name:?} was not preserved: {preview}"
+            )
+            .into());
+        }
+    }
+    let preview_body = preview
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Gmail semantic preview omitted the decoded plain-text body")?;
+    if !preview_body.starts_with("Production chain semantic preview. 😀\nplain-body-line ")
+        || preview_body.len() >= readable_body.len()
+        || preview["body_truncated"] != json!(true)
+    {
+        return Err(format!(
+            "Gmail semantic preview did not carry a decoded, truncated body: {preview}"
+        )
+        .into());
+    }
+    let preview_text = preview.to_string();
+    for forbidden in [
+        html_marker,
+        "transport-only-metadata",
+        "calendar-transport-part",
+        "attachment-transport-bytes",
+        encoded_plain_body.as_str(),
+        encoded_html_body.as_str(),
+        encoded_attachment.as_str(),
+    ] {
+        if preview_text.contains(forbidden) {
+            return Err(format!(
+                "Gmail semantic preview leaked forbidden transport content {forbidden:?}"
+            )
+            .into());
+        }
+    }
+    caller
+        .assert_model_message_content_contains("Ada <ada@example.com>")
+        .await?;
+    if caller
+        .assert_model_message_content_contains("transport-only-metadata")
+        .await
+        .is_ok()
+    {
+        return Err("transport-only Gmail fields leaked into the semantic preview".into());
+    }
+    let envelope = envelopes
+        .last()
+        .ok_or("Gmail result did not persist a tool-result envelope")?;
+    let expected_output = caller.tool_result_output("gmail.get_message").await?;
+    if expected_output["body"] != provider_message {
+        return Err("normalized Gmail output did not retain the complete provider response".into());
+    }
+    let expected_bytes = serde_json::to_vec(&expected_output)?;
+    if expected_bytes.len() <= 512 {
+        return Err("Gmail fixture must exceed one durable record page".into());
+    }
+    let durable_bytes = caller
+        .read_durable_tool_result_record_pages(&envelope.result_ref, 512)
+        .await?;
+    if durable_bytes != expected_bytes {
+        return Err(format!(
+            "durable Gmail result bytes differed from the complete provider output: \
+             expected {} bytes, read {} bytes",
+            expected_bytes.len(),
+            durable_bytes.len()
+        )
+        .into());
+    }
     Ok(())
 }

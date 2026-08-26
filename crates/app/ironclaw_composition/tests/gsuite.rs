@@ -95,7 +95,8 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
             })
             .await
             .map_err(|error| gsuite_error(error, &request.capability_id))?;
-        Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
+        Ok(FirstPartyCapabilityResult::new(result.output, result.usage)
+            .with_model_preview(result.model_preview))
     }
 }
 

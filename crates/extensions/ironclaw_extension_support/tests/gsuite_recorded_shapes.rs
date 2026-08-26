@@ -2,6 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_auth::{
     GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
     GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
@@ -18,6 +19,7 @@ use ironclaw_extension_support::{
 };
 use ironclaw_host_api::{
     action::NetworkMethod,
+    dispatch::RuntimeDispatchErrorKind,
     http::{RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
 };
 use serde_json::{Value, json};
@@ -365,4 +367,101 @@ async fn gmail_handlers_use_recorded_google_api_shapes() {
             .url
             .ends_with("/users/me/messages/msg-001/trash")
     );
+}
+
+#[tokio::test]
+async fn gmail_get_message_returns_bounded_readable_preview_and_complete_output() {
+    let readable_body =
+        "The release is approved. Please ship after the final checks. 日\n".repeat(1_000);
+    let encoded_body = URL_SAFE_NO_PAD.encode(readable_body.as_bytes());
+    let provider_message = json!({
+        "id": "msg-large-001",
+        "threadId": "thread-001",
+        "payload": {
+            "mimeType": "multipart/alternative",
+            "headers": [
+                { "name": "From", "value": "Ada <ada@example.com>" },
+                { "name": "To", "value": "Grace <grace@example.com>" },
+                { "name": "Subject", "value": "Release approval" },
+                { "name": "Date", "value": "Tue, 25 Aug 2026 10:30:00 +0000" },
+                { "name": "DKIM-Signature", "value": "transport-signature-chain" }
+            ],
+            "parts": [
+                {
+                    "mimeType": "text/html",
+                    "body": { "data": URL_SAFE_NO_PAD.encode(b"<p>HTML fallback</p>") }
+                },
+                {
+                    "mimeType": "multipart/mixed",
+                    "parts": [{
+                        "mimeType": "text/plain",
+                        "body": { "size": readable_body.len(), "data": encoded_body }
+                    }]
+                }
+            ]
+        }
+    });
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(200, provider_message.clone()),
+    ]));
+
+    let result = dispatch_result(
+        auth,
+        scope,
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-large-001" }),
+        egress,
+    )
+    .await;
+    let preview = result
+        .model_preview
+        .as_ref()
+        .expect("Gmail get_message returns a semantic model preview")
+        .as_str();
+
+    assert!(preview.len() <= 4 * 1024);
+    assert!(preview.contains("Ada <ada@example.com>"));
+    assert!(preview.contains("Grace <grace@example.com>"));
+    assert!(preview.contains("Release approval"));
+    assert!(preview.contains("The release is approved."));
+    assert!(preview.contains("日"));
+    assert!(preview.contains(r#""body_truncated":true"#));
+    assert!(!preview.contains("HTML fallback"));
+    assert!(!preview.contains("transport-signature-chain"));
+    assert!(!preview.contains(&URL_SAFE_NO_PAD.encode(readable_body.as_bytes())));
+    assert_eq!(result.output["body"], provider_message);
+}
+
+#[tokio::test]
+async fn gmail_get_message_rejects_malformed_plain_text_body() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            200,
+            json!({
+                "id": "msg-malformed",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [],
+                    "body": { "data": "%%%not-base64url%%%" }
+                }
+            }),
+        ),
+    ]));
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-malformed" }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
 }

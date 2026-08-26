@@ -697,6 +697,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 output_schema_ref: Some(
                     CapabilityProfileSchemaRef::new("schemas/host/status.output.v1.json").unwrap(),
                 ),
+                model_view: None,
                 prompt_doc_ref: Some(
                     CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
                 ),

@@ -2219,9 +2219,10 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
     let tool_result = &requests[0].messages[1];
     assert_eq!(tool_result.role, Role::Tool);
     assert_eq!(tool_result.tool_call_id.as_deref(), Some("call_1"));
+    let serialized = serde_json::to_string(&observation).expect("observation serializes");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&tool_result.content).unwrap(),
-        observation
+        tool_result.content,
+        ironclaw_safety::wrap_external_content("tool output", &serialized)
     );
     assert!(!tool_result.content.contains("tool failed"));
 }
@@ -2394,13 +2395,16 @@ async fn gateway_replays_model_observation_for_orphan_tool_reference() {
     assert_eq!(requests[0].messages.len(), 1);
     let message = &requests[0].messages[0];
     assert_eq!(message.role, Role::User);
-    let json = message
+    let wrapped = message
         .content
         .strip_prefix("[Tool result summary]: ")
         .expect("tool summary prefix");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(json).unwrap(),
-        observation
+        wrapped,
+        ironclaw_safety::wrap_external_content(
+            "tool output",
+            &serde_json::to_string(&observation).expect("observation serializes")
+        )
     );
     assert!(!message.content.contains("tool failed"));
 }

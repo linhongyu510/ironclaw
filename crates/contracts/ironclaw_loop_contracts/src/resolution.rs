@@ -560,10 +560,13 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
 /// (routing content through `SafeSummary` dropped every delimiter-bearing/JSON
 /// result and scrubbed `Secretary`, forcing a re-read amnesia loop). It is carried
 /// as a [`ModelResultPreview`]: delimiters/newlines retained, credential-redacted
-/// at a word boundary, up to 24 KiB. The paired [`ResultPreviewMeta`] carries the
-/// TRUNCATED-preview continuation info (`result_read` / large results): the
+/// at a word boundary, up to 24 KiB for explicit `result_read` pages. Automatic
+/// completion previews use a smaller producer/writer budget and may be semantic
+/// projections rather than source prefixes. The paired [`ResultPreviewMeta`] carries the
+/// continuation info (`result_read` / large results): the
 /// referenced result ref, full byte size, next offset, and JSON-array element
-/// count, so the model reads the full result. This metadata is preserved even
+/// count; a transformed preview uses offset zero so the model reads the complete
+/// durable source. This metadata is preserved even
 /// when the preview text is rejected: continuation authority belongs to the
 /// durable source result, not to the ephemeral invocation presenting it. Detail
 /// kinds other than `ResultReference` have no inline content.

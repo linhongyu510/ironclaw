@@ -24,6 +24,7 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId},
     invocation::{Actor, InvocationOrigin},
     lane::RuntimeLane,
+    model_result_preview::ModelResultPreview,
     resource::{ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage},
     runtime::RuntimeKind,
 };
@@ -97,6 +98,7 @@ pub trait BoundCapabilityAdapter: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAdapterResult {
     pub output: Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
@@ -316,6 +318,7 @@ where
             provider,
             runtime,
             output: execution.output,
+            model_preview: execution.model_preview,
             display_preview: execution.display_preview,
             usage: execution.usage,
             receipt: execution.receipt,

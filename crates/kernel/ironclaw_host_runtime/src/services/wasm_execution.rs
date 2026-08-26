@@ -277,6 +277,7 @@ where
     let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
     Ok(RuntimeAdapterResult {
         output,
+        model_preview: None,
         display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,

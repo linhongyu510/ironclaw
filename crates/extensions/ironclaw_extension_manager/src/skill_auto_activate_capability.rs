@@ -71,6 +71,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         output_schema_ref: Some(CapabilityProfileSchemaRef::new(
             "schemas/builtin/skill_auto_activate_learned_set.output.v1.json",
         )?),
+        model_view: None,
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),

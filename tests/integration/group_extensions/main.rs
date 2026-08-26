@@ -54,6 +54,20 @@ async fn malformed_lifecycle_arguments_are_structured_inner() {
 }
 
 #[test]
+fn gmail_semantic_preview_production_chain() {
+    run_async_test_with_stack(
+        "gmail_semantic_preview_production_chain",
+        gmail_semantic_preview_production_chain_inner,
+    );
+}
+
+async fn gmail_semantic_preview_production_chain_inner() {
+    scenario_uninstalled_tool_call_denied_until_active::run()
+        .await
+        .expect("installed Gmail preserves its semantic preview through the production chain");
+}
+
+#[test]
 fn extensions_group_e2e() {
     run_async_test_with_stack("extensions_group_e2e", extensions_group_e2e_inner);
 }
@@ -130,11 +144,6 @@ async fn extensions_group_e2e_inner() {
     // publishes it. Uses "gmail" on its own isolated, Google-OAuth-configured
     // group (see that scenario's module doc) — `g` itself is passed but
     // unused, kept for call-site symmetry with every other scenario.
-    report.record(
-        "uninstalled_tool_call_denied_until_active",
-        scenario_uninstalled_tool_call_denied_until_active::run(&g).await,
-    );
-
     // Scenario 6 (issue #6105): the Slack channel lifecycle state machine —
     // install → connect → use → remove (real personal-connection
     // cleanup) → reconnect → reinstall → use again, asserting connection

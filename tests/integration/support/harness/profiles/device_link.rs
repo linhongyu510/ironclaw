@@ -510,6 +510,7 @@ impl ToolAdapter for LinkedAccountFixtureToolAdapter {
             .unwrap_or_default();
         Ok(ToolResult {
             output,
+            model_preview: None,
             display_preview: None,
             output_bytes,
         })

@@ -2555,6 +2555,11 @@ fn tool_result_replay_message(
             Some(HostManagedToolResultContent::Reference { envelope }) => {
                 let safe_summary = envelope.safe_summary.as_str().to_string();
                 let model_content = envelope.model_visible_content_or_safe_summary();
+                let model_content = if model_content != safe_summary {
+                    ironclaw_safety::wrap_external_content("tool output", &model_content)
+                } else {
+                    model_content
+                };
                 (safe_summary, model_content, true)
             }
             Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
@@ -3288,9 +3293,10 @@ mod tests {
         let replay = tool_result_replay_message(&message).expect("replay message");
 
         assert_eq!(replay.safe_summary, "tool failed");
+        let serialized = serde_json::to_string(&observation).expect("observation serializes");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
-            observation
+            replay.model_content,
+            ironclaw_safety::wrap_external_content("tool output", &serialized)
         );
     }
 

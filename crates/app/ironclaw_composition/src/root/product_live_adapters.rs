@@ -257,6 +257,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             invocation_id,
             capability_id,
             output,
+            model_preview: _,
             display_preview,
             // `ProductLiveCapabilityIo` is an ephemeral in-memory test fixture
             // (see crate CONTRACT.md / #5902) that never durably persists a
@@ -964,6 +965,7 @@ mod tests {
             invocation_id,
             capability_id: &capability_id,
             output: serde_json::json!({"content": "fn main() {}"}),
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })
@@ -1037,6 +1039,7 @@ mod tests {
             invocation_id,
             capability_id: &capability_id,
             output: serde_json::json!({"results": []}),
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })
@@ -1080,6 +1083,7 @@ mod tests {
             invocation_id,
             capability_id: &capability_id,
             output: serde_json::json!({"success": true}),
+            model_preview: None,
             display_preview: Some(CapabilityDisplayOutputPreview {
                 output_summary: Some("Edited 1 file: +1/-1".to_string()),
                 output_preview:
@@ -1127,6 +1131,7 @@ mod tests {
             invocation_id,
             capability_id: &capability_id,
             output: serde_json::json!({"reply": "ok"}),
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })

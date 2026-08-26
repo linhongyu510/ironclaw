@@ -62,6 +62,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
             invocation_id,
             capability_id: &capability_id,
             output: serde_json::json!({"success": true}),
+            model_preview: None,
             display_preview: Some(CapabilityDisplayOutputPreview {
                 output_summary: Some("Edited 1 file: +1/-1".to_string()),
                 output_preview:

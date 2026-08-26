@@ -177,6 +177,7 @@ fn completed_or_output_violation_outcome(
     let completed = RuntimeCapabilityCompleted {
         capability_id: capability_id.clone(),
         output: dispatch.output,
+        model_preview: dispatch.model_preview,
         display_preview: dispatch.display_preview,
         usage: dispatch.usage,
     };

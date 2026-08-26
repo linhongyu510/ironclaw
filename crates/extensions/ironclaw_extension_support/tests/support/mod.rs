@@ -12,7 +12,8 @@ use ironclaw_auth::{
 };
 use ironclaw_extension_support::{
     GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
-    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
+    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor,
+    google_provider_id,
 };
 use ironclaw_host_api::{
     http::{
@@ -147,7 +148,13 @@ impl RuntimeHttpEgress for RecordingEgress {
             .pop_front()
             .unwrap_or_else(|| {
                 if self.permissive_success {
-                    Ok(RecordingEgress::json(json!({"id":"sent-message"})))
+                    Ok(RecordingEgress::json(json!({
+                        "id": "sent-message",
+                        "payload": {
+                            "headers": [],
+                            "body": { "data": "" }
+                        }
+                    })))
                 } else {
                     panic!("recording egress response queue exhausted")
                 }
@@ -251,6 +258,18 @@ pub(crate) async fn dispatch_ok(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> serde_json::Value {
+    dispatch_result(auth, scope, capability, input, egress)
+        .await
+        .output
+}
+
+pub(crate) async fn dispatch_result(
+    auth: Arc<InMemoryAuthProductServices>,
+    scope: ResourceScope,
+    capability: &str,
+    input: serde_json::Value,
+    egress: Arc<RecordingEgress>,
+) -> GsuiteDispatchResult {
     let executor = GsuiteExecutor::new(auth.clone(), auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
@@ -262,7 +281,6 @@ pub(crate) async fn dispatch_ok(
         })
         .await
         .unwrap()
-        .output
 }
 
 pub(crate) async fn dispatch_error(

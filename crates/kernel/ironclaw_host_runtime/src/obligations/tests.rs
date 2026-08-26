@@ -22,6 +22,7 @@ use ironclaw_host_api::{
         AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
         ResourceReservationId, SecretHandle, TenantId, UserId,
     },
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resource::{ResourceEstimate, ResourceScope},
     runtime::{RuntimeKind, TrustClass},
@@ -286,7 +287,7 @@ async fn inject_secret_once_falls_back_to_tenant_shared_admin_key() {
 }
 
 #[tokio::test]
-async fn redact_output_clears_display_preview_side_channel() {
+async fn redact_output_clears_previews_when_output_changes() {
     use ironclaw_host_api::{
         resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
         runtime::RuntimeKind,
@@ -308,10 +309,14 @@ async fn redact_output_clears_display_preview_side_channel() {
         capability_id: capability_id.clone(),
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
-        output: serde_json::json!({"secret": "sk-secret", "safe": "ok"}),
+        output: serde_json::json!({
+            "secret": "Bearer abcdef1234567890123456",
+            "safe": "ok"
+        }),
+        model_preview: Some(ModelResultPreview::new(r#"{"message":"preview"}"#).unwrap()),
         display_preview: Some(CapabilityDisplayOutputPreview {
             output_summary: Some("contains secret".to_string()),
-            output_preview: "sk-secret".to_string(),
+            output_preview: "Bearer abcdef1234567890123456".to_string(),
             output_kind: "text".to_string(),
             subtitle: None,
             truncated: false,
@@ -339,7 +344,58 @@ async fn redact_output_clears_display_preview_side_channel() {
         .expect("redacted dispatch completes");
 
     assert!(completed.display_preview.is_none());
+    assert!(completed.model_preview.is_none());
     assert_eq!(completed.output["safe"], serde_json::json!("ok"));
+    assert_ne!(completed.output, dispatch.output);
+}
+
+#[tokio::test]
+async fn redact_output_preserves_model_preview_when_output_is_unchanged() {
+    use ironclaw_host_api::resource::{ReservationStatus, ResourceReceipt, ResourceUsage};
+
+    let services = BuiltinObligationServices::with_handoff_stores(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(NetworkObligationPolicyStore::new()),
+        Arc::new(SecretStore::ephemeral()),
+        Arc::new(RuntimeSecretInjectionStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
+    let context = execution_context();
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let preview = ModelResultPreview::new(r#"{"message":"preview"}"#).unwrap();
+    let dispatch = CapabilityDispatchResult {
+        capability_id: capability_id.clone(),
+        provider: context.extension_id.clone(),
+        runtime: RuntimeKind::Wasm,
+        output: serde_json::json!({"safe": "ok"}),
+        model_preview: Some(preview.clone()),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: context.resource_scope.clone(),
+            status: ReservationStatus::Released,
+            estimate: ResourceEstimate::default(),
+            actual: None,
+        },
+    };
+
+    let completed = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .expect("unchanged dispatch completes");
+
+    assert_eq!(completed.model_preview, Some(preview));
 }
 
 #[tokio::test]
@@ -379,6 +435,7 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
             "mime_type": "text/csv",
             "content_base64": encoded,
         }),
+        model_preview: Some(ModelResultPreview::new(r#"{"message":"encoded"}"#).unwrap()),
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
@@ -410,6 +467,7 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
         completed.output.get("content_base64").is_none(),
         "base64 must be stripped before the result reaches the model"
     );
+    assert!(completed.model_preview.is_none());
 }
 
 #[tokio::test]
@@ -461,6 +519,7 @@ async fn leak_detector_block_records_security_audit_event_through_complete_dispa
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
         output: leaky_payload,
+        model_preview: None,
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
@@ -550,6 +609,7 @@ async fn leak_detector_block_without_security_sink_does_not_panic() {
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
         output: serde_json::Value::String("leak AKIAIOSFODNN7EXAMPLE".to_string()),
+        model_preview: None,
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {

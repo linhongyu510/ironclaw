@@ -9,6 +9,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_host_api::model_result_preview::AUTOMATIC_MODEL_RESULT_PREVIEW_MAX_BYTES;
 use ironclaw_threads::MessageKind;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -887,8 +888,8 @@ fn large_durable_file_content() -> String {
 fn durable_file_content_with_suppressed_continuation_preview() -> String {
     (0..1500)
         .map(|i| {
-            if i == 800 {
-                "line-0800 secret filler filler filler".to_string()
+            if i == 100 {
+                "line-0100 secret filler filler filler".to_string()
             } else {
                 format!("line-{i:04} filler filler filler filler")
             }
@@ -941,13 +942,13 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 
     // Model-visible seam: the persisted ToolResultReference message (what the
     // conversation history — and thus the next model request — actually
-    // carries) contains the host-authored truncation summary...
+    // carries) identifies the host-authored structural projection...
     h.assert_conversation_history_role_contains(
         MessageKind::ToolResultReference,
-        "preview truncated",
+        "preview is a projection",
     )
     .await
-    .expect("model-visible history carries the ResultReference truncation summary");
+    .expect("model-visible history identifies the ResultReference projection");
     // ...and never the raw payload's tail. Scoped to ToolResultReference-kind
     // messages (not ANY role): the model's OWN `write_file` tool-call
     // arguments legitimately echo the full content elsewhere in history —
@@ -958,6 +959,30 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
             .await
             .is_err(),
         "raw payload tail must not reach the model-visible tool-result transcript"
+    );
+
+    let envelopes = h
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("tool-result envelopes persist");
+    let observation = envelopes
+        .last()
+        .and_then(|envelope| envelope.model_observation.as_ref())
+        .expect("read_file result carries a model observation");
+    let detail = &observation["detail"];
+    let preview = detail["preview"]
+        .as_str()
+        .expect("large structured output carries a projected preview");
+    serde_json::from_str::<serde_json::Value>(preview)
+        .expect("projected preview remains structurally valid JSON");
+    assert!(
+        preview.len() <= 4 * 1024,
+        "automatic model preview must stay within its independent 4 KiB budget"
+    );
+    assert_eq!(
+        detail["next_offset"].as_u64(),
+        Some(0),
+        "a projected preview is not a byte prefix, so result_read must start at the durable payload"
     );
 }
 
@@ -1070,6 +1095,10 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         .latest_tool_result_next_offset()
         .await
         .expect("read_file's observation reports a continuation offset");
+    assert_eq!(
+        next_offset, 0,
+        "a structural projection is not a source prefix, so paging starts at byte zero"
+    );
     assert!(
         (next_offset as usize) < serialized.len(),
         "test fixture must exceed the preview cutoff to exercise continuation"
@@ -1231,6 +1260,70 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         page_two_detail["next_offset"].as_u64(),
         page_two["next_offset"].as_u64(),
         "second-page replay metadata must match the second page output"
+    );
+}
+
+#[tokio::test]
+async fn result_read_continuation_keeps_24k_model_preview() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_durable_capability_io_file_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.read_file",
+                json!({"path": "/workspace/clean-large.txt"}),
+            ),
+            RebornScriptedReply::text("read it"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    let workspace_path = h
+        .capability_recorder
+        .workspace_file_path("clean-large.txt")
+        .expect("durable file-tools harness exposes its workspace");
+    std::fs::write(&workspace_path, "x".repeat(40 * 1024))
+        .expect("clean large fixture is seeded outside the model");
+
+    h.submit_turn("read the clean large file")
+        .await
+        .expect("first turn completes");
+    let result_ref = h
+        .latest_tool_result_ref()
+        .await
+        .expect("read_file result ref is persisted");
+    h.push_script([
+        RebornScriptedReply::tool_call(
+            "builtin.result_read",
+            json!({
+                "result_ref": result_ref,
+                "offset": 0,
+                "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+            }),
+        ),
+        RebornScriptedReply::text("continued"),
+    ]);
+
+    h.submit_turn("read the first full result page")
+        .await
+        .expect("second turn completes");
+
+    let chunk = h
+        .tool_result_output("builtin.result_read")
+        .await
+        .expect("result_read result recorded");
+    let chunk_content = chunk["content"].as_str().expect("chunk content is text");
+    let preview = h
+        .latest_tool_result_preview()
+        .await
+        .expect("result_read exposes its page inline");
+    assert_eq!(preview, chunk_content);
+    assert!(
+        preview.len() > AUTOMATIC_MODEL_RESULT_PREVIEW_MAX_BYTES,
+        "explicit result_read pages must not inherit the 4 KiB automatic cap"
+    );
+    assert!(
+        preview.len() <= ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+        "explicit result_read previews remain bounded by the 24 KiB page contract"
     );
 }
 

@@ -549,6 +549,7 @@ impl ToolAdapter for FakeToolAdapter {
     ) -> Result<ToolResult, ToolError> {
         Ok(ToolResult {
             output: serde_json::json!({"ok": true}),
+            model_preview: None,
             display_preview: None,
             output_bytes: 0,
         })

@@ -1014,6 +1014,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1110,6 +1111,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1192,6 +1194,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1253,6 +1256,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "hello"}),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1307,6 +1311,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::Value::String("x".repeat(DURABLE_TOOL_RESULT_MAX_BYTES)),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1387,6 +1392,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: serde_json::json!({"content": "original"}),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1493,6 +1499,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output: output.clone(),
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1523,13 +1530,11 @@ mod tests {
         );
     }
 
-    /// Issue #5838: a result over the preview cap is truncated at a UTF-8 char
-    /// boundary (not mid-character), the reported `next_offset` matches the
-    /// preview's own byte length exactly, and reading a continuation chunk
-    /// from that offset through the production `result_read` capability
-    /// reproduces the full serialized result with no gap or overlap.
+    /// An oversized result gets a structurally valid automatic projection, and
+    /// the surfaced offset starts a byte-exact `result_read` from the complete
+    /// durable source rather than pretending the projection is a source prefix.
     #[tokio::test]
-    async fn standalone_result_read_continues_exactly_where_first_look_preview_truncated() {
+    async fn standalone_result_read_starts_at_zero_for_projected_preview() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
@@ -1573,15 +1578,16 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
 
-        // A multi-byte character straddling the preview boundary: the
-        // serialized JSON string (leading `"` + (cap - 2) ASCII bytes) puts
-        // the 3-byte '日' character at bytes [cap - 1, cap + 2), so byte `cap`
-        // (the raw cap) falls inside it and must round down.
-        let cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
-        let content = format!("{}{}{}", "a".repeat(cap - 2), '日', "a".repeat(100));
+        let preview_cap =
+            ironclaw_host_api::model_result_preview::AUTOMATIC_MODEL_RESULT_PREVIEW_MAX_BYTES;
+        let page_cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let content = format!("{}{}", "a".repeat(preview_cap + 100), '日');
         let output = serde_json::Value::String(content);
         let full_text = serde_json::to_string(&output).expect("serialize reference output");
-        assert!(full_text.len() > cap, "fixture must exceed the preview cap");
+        assert!(
+            full_text.len() > preview_cap && full_text.len() < page_cap,
+            "fixture must exceed the automatic cap but fit one result_read page"
+        );
 
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1599,6 +1605,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1623,18 +1630,12 @@ mod tests {
             "a non-array result must not claim an array item count: {}",
             observation.summary
         );
-        assert!(
-            preview.is_char_boundary(preview.len()),
-            "preview must end on a UTF-8 char boundary"
-        );
-        assert!(
-            next_offset < cap as u64,
-            "the multi-byte char must round the boundary down below the raw cap"
-        );
+        serde_json::from_str::<serde_json::Value>(&preview)
+            .expect("automatic projection remains structurally valid JSON");
+        assert!(preview.len() <= preview_cap);
         assert_eq!(
-            preview.len() as u64,
-            next_offset,
-            "next_offset must match the preview's own byte length exactly"
+            next_offset, 0,
+            "a projection starts paging at source byte zero"
         );
         assert!(observation.summary.contains("result_read"));
         assert!(observation.summary.contains(&next_offset.to_string()));
@@ -1704,7 +1705,7 @@ mod tests {
                     serde_json::json!({
                         "result_ref": write_result.result_ref.as_str(),
                         "offset": next_offset,
-                        "max_bytes": cap,
+                        "max_bytes": page_cap,
                     }),
                 ),
             ))
@@ -1736,18 +1737,14 @@ mod tests {
             "the continuation must reach the end of the payload"
         );
 
-        let mut reassembled = preview;
-        reassembled.push_str(continuation_content);
         assert_eq!(
-            reassembled, full_text,
-            "preview + continuation must reproduce the full serialized result with no gap or overlap"
+            continuation_content, full_text,
+            "offset-zero result_read must reproduce the complete durable result exactly"
         );
     }
 
-    /// Issue: a truncated preview that slices mid-JSON-array leaves the model
-    /// unable to tell how many items the full result contains. When the
-    /// capability output is a top-level JSON array, the truncated-branch
-    /// observation carries `item_count` and mentions it in the summary.
+    /// An oversized top-level array projection carries `item_count`, so the
+    /// model knows the full collection size even though values are elided.
     #[tokio::test]
     async fn write_capability_result_truncated_array_preview_reports_item_count() {
         let run_context = run_context("first-look-preview-array").await;
@@ -1800,6 +1797,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1847,6 +1845,7 @@ mod tests {
                 invocation_id: InvocationId::new(),
                 capability_id: &capability_id,
                 output: singleton_output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -1944,6 +1943,7 @@ mod tests {
                 invocation_id,
                 capability_id: &capability_id,
                 output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::Persist,
             })
@@ -2199,6 +2199,7 @@ mod tests {
                 invocation_id,
                 capability_id: &CapabilityId::new("builtin.echo").expect("capability id"),
                 output,
+                model_preview: None,
                 display_preview: None,
                 durable_persistence: DurablePersistence::InlineOnly,
             })

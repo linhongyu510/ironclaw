@@ -183,6 +183,7 @@ pub(super) async fn write_completed_result(
             invocation_id: InvocationId::new(),
             capability_id: &invocation.request.capability_id,
             output,
+            model_preview: None,
             display_preview: None,
             durable_persistence: DurablePersistence::Persist,
         })

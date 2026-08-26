@@ -212,6 +212,7 @@ fn discovered_capability_manifest(
         standard_op: None,
         input_schema_ref,
         output_schema_ref: Some(output_schema_ref),
+        model_view: None,
         prompt_doc_ref: None,
         required_host_ports: template.required_host_ports.clone(),
         runtime_credentials: template.runtime_credentials.clone(),

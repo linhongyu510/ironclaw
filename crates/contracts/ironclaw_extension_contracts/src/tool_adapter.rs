@@ -25,6 +25,7 @@ use ironclaw_host_api::{
         ProviderDiagnostic, RuntimeDispatchErrorKind,
     },
     ids::{CapabilityId, SecretHandle},
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
 };
@@ -60,6 +61,7 @@ pub struct ToolCallResources {
 #[derive(Debug)]
 pub struct ToolResult {
     pub output: serde_json::Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     /// The adapter's own count of the output payload bytes (the host
     /// re-measures for enforcement; this is advisory).

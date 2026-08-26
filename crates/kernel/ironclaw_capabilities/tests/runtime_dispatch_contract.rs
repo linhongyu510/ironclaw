@@ -32,6 +32,7 @@ use ironclaw_host_api::{
     },
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resource::{
         ReservationStatus, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
@@ -97,6 +98,31 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].mounts, None);
     assert_eq!(requests[0].input, json!({"message": "hello dispatcher"}));
+}
+
+#[tokio::test]
+async fn dispatcher_preserves_model_preview_from_resolved_binding() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let binding = RecordingBinding::new(json!({"message": "complete"}), Arc::clone(&governor))
+        .with_model_preview(ModelResultPreview::new("model-visible semantic preview").unwrap());
+    let resolver = ScriptedResolver::from_entries([(
+        "echo.preview",
+        resolved("echo", RuntimeKind::Wasm, binding),
+    )]);
+
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
+    let result = dispatcher
+        .dispatch_json(sample_request("echo.preview", json!({})))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result
+            .model_preview
+            .as_ref()
+            .map(ModelResultPreview::as_str),
+        Some("model-visible semantic preview")
+    );
 }
 
 #[tokio::test]
@@ -440,6 +466,7 @@ impl ToolResolver for ScriptedResolver {
 #[derive(Clone)]
 struct RecordingBinding {
     output: Value,
+    model_preview: Option<ModelResultPreview>,
     failure: Option<Arc<dyn Fn() -> DispatchError + Send + Sync>>,
     governor: Arc<InMemoryResourceGovernor>,
     requests: Arc<Mutex<Vec<RecordedBindingRequest>>>,
@@ -457,6 +484,7 @@ impl RecordingBinding {
     fn new(output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             output,
+            model_preview: None,
             failure: None,
             governor,
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -469,10 +497,16 @@ impl RecordingBinding {
     ) -> Self {
         Self {
             output: json!(null),
+            model_preview: None,
             failure: Some(Arc::new(error)),
             governor,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_model_preview(mut self, model_preview: ModelResultPreview) -> Self {
+        self.model_preview = Some(model_preview);
+        self
     }
 
     fn requests(&self) -> Vec<RecordedBindingRequest> {
@@ -524,6 +558,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            model_preview: self.model_preview.clone(),
             display_preview: None,
             output_bytes,
             usage,

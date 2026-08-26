@@ -185,6 +185,7 @@ where
             .map_err(tool_error_from_dispatch)?;
         Ok(ToolResult {
             output: execution.output,
+            model_preview: execution.model_preview,
             display_preview: execution.display_preview,
             output_bytes: execution.output_bytes,
         })

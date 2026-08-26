@@ -84,6 +84,7 @@ use ironclaw_host_api::{
     capability::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES},
     ids::CapabilityId,
 };
+use serde_json::Value;
 
 use ratchet_support::{crate_dir, workspace_root};
 
@@ -184,6 +185,194 @@ fn collect_capability_tables<'a>(value: &'a toml::Value, out: &mut Vec<&'a toml:
     }
 }
 
+/// Validate the model-view declaration for one explicitly networked tool.
+///
+/// This is deliberately a helper for the existing package-manifest ratchet,
+/// not a second package scanner. Dynamic MCP declarations and tools without
+/// an explicit output schema are outside this migration and return `Ok(())`.
+fn validate_network_output_schema_policy(
+    manifest_path: &Path,
+    capability: &toml::Table,
+) -> Result<(), String> {
+    let is_networked = match capability.get("effects") {
+        None => false,
+        Some(toml::Value::Array(effects)) => effects
+            .iter()
+            .any(|effect| effect.as_str().is_some_and(|effect| effect == "network")),
+        Some(other) => {
+            return Err(format!(
+                "effects must be an array when checking output schema, got {other:?}"
+            ));
+        }
+    };
+    if !is_networked {
+        return Ok(());
+    }
+
+    let Some(output_schema_ref) = capability.get("output_schema_ref") else {
+        return Ok(());
+    };
+    let Some(output_schema_ref) = output_schema_ref.as_str() else {
+        return Err("output_schema_ref must be a string".to_string());
+    };
+    let model_view = match capability.get("model_view") {
+        None => None,
+        Some(toml::Value::String(policy)) => match policy.as_str() {
+            "structural" | "producer" => Some(policy.as_str()),
+            _ => {
+                return Err(format!(
+                    "model_view must be `structural` or `producer`, got `{policy}`"
+                ));
+            }
+        },
+        Some(other) => return Err(format!("model_view must be a string, got {other:?}")),
+    };
+
+    let schema_path = resolve_manifest_asset(manifest_path, output_schema_ref)?;
+    let schema_source = fs::read_to_string(&schema_path).map_err(|error| {
+        format!(
+            "failed to read output schema `{output_schema_ref}` at {}: {error}",
+            schema_path.display()
+        )
+    })?;
+    let schema: Value = serde_json::from_str(&schema_source).map_err(|error| {
+        format!(
+            "failed to parse output schema `{output_schema_ref}` at {}: {error}",
+            schema_path.display()
+        )
+    })?;
+    let has_open_object = schema_contains_open_object(&schema);
+    if has_open_object && model_view.is_none() {
+        return Err(format!(
+            "open-object output schema `{output_schema_ref}` requires model_view = \
+             `structural` or `producer`"
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_manifest_asset(manifest_path: &Path, asset_ref: &str) -> Result<PathBuf, String> {
+    let asset = Path::new(asset_ref);
+    if asset_ref.trim().is_empty() || asset.is_absolute() {
+        return Err(format!(
+            "output schema path `{asset_ref}` must be a relative asset path"
+        ));
+    }
+    if asset
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "output schema path `{asset_ref}` contains a non-normal path component"
+        ));
+    }
+    let package_root = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "manifest path {} has no package root",
+            manifest_path.display()
+        )
+    })?;
+    let resolved = package_root.join(asset);
+    if !resolved.starts_with(package_root) {
+        return Err(format!(
+            "output schema path `{asset_ref}` escapes package root {}",
+            package_root.display()
+        ));
+    }
+    if !resolved.is_file() {
+        return Err(format!(
+            "output schema asset `{asset_ref}` does not exist under {}",
+            package_root.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Return whether a JSON Schema contains the open-object shape this ratchet
+/// covers. Boolean `true` schemas and any nested object with an explicit
+/// `additionalProperties = true` are open; all other shape analysis belongs
+/// to a later schema contract.
+fn schema_contains_open_object(schema: &Value) -> bool {
+    match schema {
+        Value::Bool(value) => *value,
+        Value::Array(items) => items.iter().any(schema_contains_open_object),
+        Value::Object(object) => {
+            matches!(object.get("additionalProperties"), Some(Value::Bool(true)))
+                || object.values().any(schema_contains_open_object)
+        }
+        Value::Null | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn validate_manifest_capabilities(manifests: &[PathBuf]) -> (Vec<String>, usize) {
+    let allowlist: BTreeSet<&str> = UNGATED_LOOP_RUN_CAPABILITIES.iter().copied().collect();
+    let mut violations = Vec::new();
+    let mut checked_capabilities = 0usize;
+
+    for path in manifests {
+        let raw = fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        let value: toml::Value = toml::from_str(&raw)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+        let mut capabilities = Vec::new();
+        collect_capability_tables(&value, &mut capabilities);
+
+        for capability in capabilities {
+            checked_capabilities += 1;
+            let id = capability
+                .get("id")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("<capability with no id>");
+
+            if let Err(error) = validate_network_output_schema_policy(path, capability) {
+                violations.push(format!("{} :: {id}: {error}", path.display()));
+            }
+
+            let Some(matrix_value) = capability.get("origin_gate_matrix") else {
+                violations.push(format!(
+                    "{} :: {id}: capability declares no origin_gate_matrix (§5.2.1 invariant 1)",
+                    path.display()
+                ));
+                continue;
+            };
+
+            let matrix: OriginGateMatrix = match matrix_value.clone().try_into() {
+                Ok(matrix) => matrix,
+                Err(err) => {
+                    violations.push(format!(
+                        "{} :: {id}: invalid origin_gate_matrix structure or policy: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+
+            if matrix.loop_run == OriginGatePolicy::ConsentSufficient {
+                violations.push(format!(
+                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
+                     loop_run column"
+                ));
+            }
+            if matrix.automation == OriginGatePolicy::ConsentSufficient {
+                violations.push(format!(
+                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
+                     automation column"
+                ));
+            }
+
+            if matrix.loop_run == OriginGatePolicy::Ungated && !allowlist.contains(id) {
+                violations.push(format!(
+                    "{id}: loop_run = \"ungated\" but id is NOT in the reviewed \
+                     UNGATED_LOOP_RUN_CAPABILITIES allowlist — a hand-authored typo would \
+                     silently remove this capability's approval gate for the model"
+                ));
+            }
+        }
+    }
+
+    (violations, checked_capabilities)
+}
+
 /// Invariant 1 (of the S5 ratchet): the Ungated allowlist is pinned to the
 /// reviewed 17-id seed, deduplicated, and every id well-formed. See the header.
 #[test]
@@ -255,66 +444,7 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
         );
     }
 
-    let allowlist: BTreeSet<&str> = UNGATED_LOOP_RUN_CAPABILITIES.iter().copied().collect();
-    let mut violations: Vec<String> = Vec::new();
-    let mut checked_capabilities = 0usize;
-
-    for path in &manifests {
-        let raw = fs::read_to_string(path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let value: toml::Value = toml::from_str(&raw)
-            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-        let mut capabilities = Vec::new();
-        collect_capability_tables(&value, &mut capabilities);
-
-        for capability in capabilities {
-            checked_capabilities += 1;
-            let id = capability
-                .get("id")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("<capability with no id>");
-
-            let Some(matrix_value) = capability.get("origin_gate_matrix") else {
-                violations.push(format!(
-                    "{} :: {id}: capability declares no origin_gate_matrix (§5.2.1 invariant 1)",
-                    path.display()
-                ));
-                continue;
-            };
-
-            let matrix: OriginGateMatrix = match matrix_value.clone().try_into() {
-                Ok(matrix) => matrix,
-                Err(err) => {
-                    violations.push(format!(
-                        "{} :: {id}: invalid origin_gate_matrix structure or policy: {err}",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
-
-            if matrix.loop_run == OriginGatePolicy::ConsentSufficient {
-                violations.push(format!(
-                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
-                     loop_run column"
-                ));
-            }
-            if matrix.automation == OriginGatePolicy::ConsentSufficient {
-                violations.push(format!(
-                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
-                     automation column"
-                ));
-            }
-
-            if matrix.loop_run == OriginGatePolicy::Ungated && !allowlist.contains(id) {
-                violations.push(format!(
-                    "{id}: loop_run = \"ungated\" but id is NOT in the reviewed \
-                     UNGATED_LOOP_RUN_CAPABILITIES allowlist — a hand-authored typo would \
-                     silently remove this capability's approval gate for the model"
-                ));
-            }
-        }
-    }
+    let (violations, checked_capabilities) = validate_manifest_capabilities(&manifests);
 
     assert!(
         checked_capabilities > 0,
@@ -324,6 +454,41 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
         violations.is_empty(),
         "hand-authored extension-manifest origin_gate_matrix violations (§5.2.1):\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn package_manifest_scan_reaches_network_output_policy() {
+    let temp = tempfile::tempdir().expect("temporary package root");
+    let schema_path = temp.path().join("schemas/open.json");
+    fs::create_dir_all(schema_path.parent().expect("schema parent")).expect("schema directory");
+    fs::write(&schema_path, r#"{"additionalProperties":true}"#).expect("open-object schema");
+    let manifest_path = temp.path().join("manifest.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "sample"
+
+[[tools]]
+id = "sample.network"
+effects = ["network"]
+output_schema_ref = "schemas/open.json"
+origin_gate_matrix = { loop_run = "gated", product = "gated", automation = "gated" }
+"#,
+    )
+    .expect("manifest fixture");
+
+    let (violations, checked_capabilities) =
+        validate_manifest_capabilities(std::slice::from_ref(&manifest_path));
+
+    assert_eq!(checked_capabilities, 1);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("requires model_view")),
+        "the package scanner must route network output schemas through the model-view gate: \
+         {violations:?}"
     );
 }
 
@@ -384,4 +549,98 @@ origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden",
         Some("ungated"),
         "the walker must surface the raw loop_run policy for the allowlist check"
     );
+}
+
+#[test]
+fn network_output_schema_gate_rejects_open_object_without_model_view() {
+    let temp = tempfile::tempdir().expect("temporary package root");
+    let manifest_path = temp.path().join("manifest.toml");
+    let schema_path = temp.path().join("schemas/output.json");
+    fs::create_dir_all(schema_path.parent().expect("schema parent")).expect("schema directory");
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","additionalProperties":true}"#,
+    )
+    .expect("open-object schema");
+    fs::write(&manifest_path, "").expect("manifest placeholder");
+
+    let value: toml::Value = toml::from_str(
+        r#"
+effects = ["network"]
+output_schema_ref = "schemas/output.json"
+"#,
+    )
+    .expect("capability fixture parses");
+    let capability = value.as_table().expect("capability table");
+    let error = validate_network_output_schema_policy(&manifest_path, capability)
+        .expect_err("an open-object network output must declare a model-view policy");
+    assert!(error.contains("requires model_view"), "{error}");
+}
+
+#[test]
+fn network_output_schema_gate_accepts_policies_and_closed_object_schema() {
+    let temp = tempfile::tempdir().expect("temporary package root");
+    let manifest_path = temp.path().join("manifest.toml");
+    let schema_path = temp.path().join("schemas/output.json");
+    fs::create_dir_all(schema_path.parent().expect("schema parent")).expect("schema directory");
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","additionalProperties":true}"#,
+    )
+    .expect("open-object schema");
+    fs::write(&manifest_path, "").expect("manifest placeholder");
+
+    for policy in ["structural", "producer"] {
+        let value: toml::Value = toml::from_str(&format!(
+            "effects = [\"network\"]\noutput_schema_ref = \"schemas/output.json\"\nmodel_view = \"{policy}\"\n"
+        ))
+        .expect("capability fixture parses");
+        let capability = value.as_table().expect("capability table");
+        validate_network_output_schema_policy(&manifest_path, capability)
+            .unwrap_or_else(|error| panic!("{policy} policy should pass: {error}"));
+    }
+
+    fs::write(
+        &schema_path,
+        r#"{"type":"object","additionalProperties":false,"properties":{"message":{"type":"string","maxLength":128}}}"#,
+    )
+    .expect("closed-object schema");
+    let value: toml::Value =
+        toml::from_str("effects = [\"network\"]\noutput_schema_ref = \"schemas/output.json\"\n")
+            .expect("capability fixture parses");
+    let capability = value.as_table().expect("capability table");
+    validate_network_output_schema_policy(&manifest_path, capability)
+        .expect("a closed-object output need not declare a policy");
+}
+
+#[test]
+fn network_output_schema_gate_fails_closed_for_missing_or_malformed_assets() {
+    let temp = tempfile::tempdir().expect("temporary package root");
+    let manifest_path = temp.path().join("manifest.toml");
+    fs::write(&manifest_path, "").expect("manifest placeholder");
+
+    let missing: toml::Value = toml::from_str(
+        "effects = [\"network\"]\noutput_schema_ref = \"schemas/missing.json\"\nmodel_view = \"structural\"\n",
+    )
+    .expect("capability fixture parses");
+    let error = validate_network_output_schema_policy(
+        &manifest_path,
+        missing.as_table().expect("capability table"),
+    )
+    .expect_err("missing schema assets must fail closed");
+    assert!(error.contains("does not exist"), "{error}");
+
+    let schema_path = temp.path().join("schemas/malformed.json");
+    fs::create_dir_all(schema_path.parent().expect("schema parent")).expect("schema directory");
+    fs::write(&schema_path, "{not-json").expect("malformed schema");
+    let malformed: toml::Value = toml::from_str(
+        "effects = [\"network\"]\noutput_schema_ref = \"schemas/malformed.json\"\nmodel_view = \"producer\"\n",
+    )
+    .expect("capability fixture parses");
+    let error = validate_network_output_schema_policy(
+        &manifest_path,
+        malformed.as_table().expect("capability table"),
+    )
+    .expect_err("malformed schema assets must fail closed");
+    assert!(error.contains("failed to parse output schema"), "{error}");
 }

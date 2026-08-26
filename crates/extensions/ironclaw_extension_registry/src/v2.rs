@@ -243,6 +243,20 @@ pub enum CapabilityVisibility {
     Api,
 }
 
+/// Declarative policy for the model-facing view of a capability result.
+///
+/// This is registry metadata only: it describes which result-view contract a
+/// capability declares, without naming a runtime lane or changing execution
+/// taxonomy. The host always retains the complete durable result; `structural`
+/// selects the generic structural fallback and `producer` permits a producer's
+/// semantic preview with that fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelViewPolicy {
+    Structural,
+    Producer,
+}
+
 /// Host API contract identifier declared by an extension manifest.
 ///
 /// This is the manifest-level contract discriminator, for example
@@ -562,6 +576,11 @@ pub struct CapabilityDeclV2 {
     /// v2 manifests may still carry one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema_ref: Option<CapabilityProfileSchemaRef>,
+    /// Optional model-facing result-view policy. Missing values are retained
+    /// as `None` for compatibility with resolved records written before this
+    /// declaration existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_view: Option<ModelViewPolicy>,
     pub prompt_doc_ref: Option<CapabilityProfileSchemaRef>,
     pub required_host_ports: Vec<HostPortId>,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
@@ -1410,6 +1429,7 @@ impl CapabilityDeclV2 {
             standard_op: raw.standard_op,
             input_schema_ref,
             output_schema_ref,
+            model_view: raw.model_view,
             prompt_doc_ref,
             required_host_ports,
             runtime_credentials,
@@ -1954,6 +1974,8 @@ pub(crate) struct RawCapabilityV2 {
     pub(crate) input_schema_ref: String,
     #[serde(default)]
     pub(crate) output_schema_ref: Option<String>,
+    #[serde(default)]
+    pub(crate) model_view: Option<ModelViewPolicy>,
     #[serde(default)]
     pub(crate) prompt_doc_ref: Option<String>,
     #[serde(default)]

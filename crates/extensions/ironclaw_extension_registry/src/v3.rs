@@ -47,7 +47,7 @@ use crate::resolved::{
 };
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
-    MAX_MANIFEST_BYTES, ManifestSource, RawCapabilityV2, RawRuntimeCredentialV2,
+    MAX_MANIFEST_BYTES, ManifestSource, ModelViewPolicy, RawCapabilityV2, RawRuntimeCredentialV2,
     requested_trust_to_descriptor_trust,
 };
 
@@ -169,6 +169,10 @@ struct RawToolV3 {
     input_schema_ref: Option<String>,
     #[serde(default)]
     output_schema_ref: Option<String>,
+    /// Optional registry-owned model-facing result-view policy. This is
+    /// declaration metadata only; runtime lanes remain orthogonal.
+    #[serde(default)]
+    model_view: Option<ModelViewPolicy>,
     #[serde(default)]
     prompt_doc_ref: Option<String>,
     #[serde(default)]
@@ -472,6 +476,7 @@ pub(crate) fn parse_v3(
             standard_op: None,
             input_schema_ref: format!("schemas/{id}/dynamic/mcp_server.input.v1.json"),
             output_schema_ref: None,
+            model_view: None,
             prompt_doc_ref: None,
             required_host_ports: derived_host_ports(&mcp.effects, true),
             runtime_credentials: template_credentials.clone(),
@@ -617,6 +622,7 @@ pub(crate) fn parse_v3(
                     standard_op: None,
                     input_schema_ref,
                     output_schema_ref: None,
+                    model_view: tool.model_view,
                     prompt_doc_ref: tool.prompt_doc_ref,
                     required_host_ports: derived_host_ports(&mcp.effects, true),
                     runtime_credentials: template_credentials.clone(),
@@ -635,6 +641,7 @@ pub(crate) fn parse_v3(
                 standard_op: tool.standard_op,
                 input_schema_ref,
                 output_schema_ref,
+                model_view: tool.model_view,
                 prompt_doc_ref: tool.prompt_doc_ref,
                 required_host_ports: derived_host_ports(&tool.effects, sandboxed_runtime),
                 runtime_credentials: tool

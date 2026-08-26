@@ -165,6 +165,7 @@ fn dispatch_result() -> CapabilityDispatchResult {
         provider: extension_id(),
         runtime: RuntimeKind::Wasm,
         output: json!({"ok": true}),
+        model_preview: None,
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {

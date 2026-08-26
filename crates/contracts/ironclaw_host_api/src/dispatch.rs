@@ -17,6 +17,7 @@ use crate::{
     host_remediation::HostRemediation,
     ids::{CapabilityId, ExtensionId, RunId, SecretHandle, UserId},
     invocation::InvocationOrigin,
+    model_result_preview::ModelResultPreview,
     mount::MountView,
     resource::{
         ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
@@ -181,6 +182,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,

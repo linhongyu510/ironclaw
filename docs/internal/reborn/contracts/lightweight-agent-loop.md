@@ -124,7 +124,13 @@ model-facing recovery information, it may attach a bounded
 `ModelVisibleToolObservation` side channel to the tool-result reference. That
 observation is model-visible untrusted tool output, not a replacement for
 `LoopSafeSummary`, and must be validated/redacted before it can be replayed to
-the model.
+the model. A completed runtime result may carry a bounded `model_preview` in
+that observation: it can be a semantic projection (such as parsed headers and
+decoded plain-text content) rather than the serialized output prefix. The
+complete canonical output remains durable behind the result reference, and
+`result_read` pages that durable byte stream; the loop must preserve the
+reference and continuation metadata even when the inline preview is truncated
+or transformed.
 
 Equivalent pseudocode:
 

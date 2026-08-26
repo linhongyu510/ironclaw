@@ -439,15 +439,17 @@ pub struct OutcomeRefs {
     /// inline preview (was the `ResultReference` observation's `detail.preview`).
     /// A [`ModelResultPreview`], NOT a [`SafeSummary`]: it carries the tool's own
     /// output (delimiters, JSON, newlines), credential-redacted at a word
-    /// boundary, up to 24 KiB — so the model sees the result inline without a
-    /// follow-up `result_read`. The full bytes stay host-owned behind `result`;
-    /// `None` when no preview is staged or the content failed the credential
-    /// redaction contract.
+    /// boundary. Automatic completion projections are capped at 4 KiB; explicit
+    /// `result_read` pages may carry up to 24 KiB. The full bytes stay host-owned
+    /// behind `result`; `None` when no preview is staged or the content failed
+    /// the credential redaction contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<ModelResultPreview>,
-    /// Continuation metadata for a TRUNCATED first-look preview so the model can
+    /// Continuation metadata for a bounded first-look preview so the model can
     /// read the full result (`result_read`, large results): the referenced ref,
-    /// full byte size, next offset, and JSON-array element count. The metadata
+    /// full byte size, next offset, and JSON-array element count. Semantic or
+    /// structural projections use offset zero because they are not source-byte
+    /// prefixes. The metadata
     /// remains present when an unsafe preview is suppressed, so the durable
     /// source ref stays authoritative without exposing rejected content.
     #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
@@ -477,16 +479,17 @@ pub struct ResultPreviewMeta {
     /// (`OutcomeRefs::origin`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referenced_result_ref: Option<LoopRef>,
-    /// Full byte size of the referenced result when the preview is a truncated
-    /// chunk; `None` for a complete inline preview.
+    /// Full byte size of the referenced result when the preview is incomplete;
+    /// `None` for a complete inline preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_bytes: Option<u64>,
-    /// Byte offset to continue reading from for a truncated preview; `None` when
-    /// the preview is the complete result.
+    /// Byte offset to continue reading from for a source prefix, or zero when the
+    /// preview is a semantic/structural projection; `None` when the preview is
+    /// the complete result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
-    /// Element count when the full result is a top-level JSON array (truncated
-    /// previews only), so the model does not misread a byte-sliced array.
+    /// Element count when the full result is a top-level JSON array (incomplete
+    /// previews only), so the model does not misread a projection as complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_count: Option<u64>,
     /// The observation's own model-visible summary caption — the host-authored

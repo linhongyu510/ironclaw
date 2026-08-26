@@ -11,6 +11,7 @@ use ironclaw_extension_contracts::{
     channel::ConversationModel, memory::MemoryLifecycleHook, recipe::VendorAuthRecipe,
     surface::CapabilitySurfaceKind,
 };
+use ironclaw_extension_registry::v2::ModelViewPolicy;
 use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
@@ -62,6 +63,57 @@ fn parse_v3_with_source(
 
 fn acme_record() -> ExtensionManifestRecord {
     parse_v3(ACME_MANIFEST).expect("acme fixture manifest must parse")
+}
+
+#[test]
+fn parses_and_resolves_optional_model_view_policy_on_v3_tool() {
+    let toml = ACME_MANIFEST.replace(
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"",
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"\noutput_schema_ref = \"schemas/acme/send_note.output.v1.json\"\nmodel_view = \"producer\"",
+    );
+    let record = parse_v3(&toml).expect("model-view policy is a valid optional v3 declaration");
+    let tool = &record.manifest().capabilities[0];
+    assert_eq!(tool.model_view, Some(ModelViewPolicy::Producer));
+    assert_eq!(
+        record.resolved().tools[0].model_view,
+        Some(ModelViewPolicy::Producer)
+    );
+}
+
+#[test]
+fn rejects_unknown_model_view_policy_on_v3_tool() {
+    let toml = ACME_MANIFEST.replace(
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"",
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"\nmodel_view = \"semantic\"",
+    );
+    let error = parse_v3(&toml).expect_err("the model-view policy vocabulary is closed");
+    assert!(
+        error.contains("model_view") || error.contains("unknown variant"),
+        "{error}"
+    );
+}
+
+#[test]
+fn legacy_resolved_tools_without_model_view_rehydrate_to_none() {
+    let toml = ACME_MANIFEST.replace(
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"",
+        "input_schema_ref = \"schemas/acme/send_note.input.v1.json\"\noutput_schema_ref = \"schemas/acme/send_note.output.v1.json\"\nmodel_view = \"structural\"",
+    );
+    let record = parse_v3(&toml).expect("model-view policy fixture parses");
+    let mut resolved = serde_json::to_value(record.resolved()).expect("serialize resolved record");
+    for tool in resolved["tools"].as_array_mut().expect("tools array") {
+        tool.as_object_mut()
+            .expect("tool object")
+            .remove("model_view");
+    }
+    let rehydrated: ironclaw_extension_registry::ResolvedExtensionManifest =
+        serde_json::from_value(resolved).expect("legacy resolved record must remain readable");
+    assert!(
+        rehydrated
+            .tools
+            .iter()
+            .all(|tool| tool.model_view.is_none())
+    );
 }
 
 // arch-exempt: large_file, manifest-v3 cases remain one conformance suite pending fixture split, plan #7477

@@ -22,8 +22,10 @@
 /// Human-readable credential markers. Matched at a word boundary (see
 /// [`contains_credential_marker`]); the ones ending/starting in a non-alnum
 /// delimiter carry their own boundary.
-const CREDENTIAL_MARKERS: [&str; 9] = [
+const CREDENTIAL_MARKERS: [&str; 11] = [
     "access token",
+    "access-token",
+    "access_token",
     "api key",
     "api_key",
     "apikey",
@@ -117,8 +119,9 @@ pub(crate) fn redact_credential_text(value: &str) -> String {
                 let start = from + found;
                 let end = start + marker.len();
                 if marker_match_at(&lower, marker, start, end) {
+                    let redaction_end = credential_marker_redaction_end(rest, marker, end);
                     if best.is_none_or(|(best_start, _)| start < best_start) {
-                        best = Some((start, end));
+                        best = Some((start, redaction_end));
                     }
                     break;
                 }
@@ -138,6 +141,21 @@ pub(crate) fn redact_credential_text(value: &str) -> String {
         }
     }
     redact_secret_like_tokens(&redacted)
+}
+
+fn credential_marker_redaction_end(value: &str, marker: &str, marker_end: usize) -> usize {
+    if marker != "bearer " {
+        return marker_end;
+    }
+
+    value[marker_end..]
+        .char_indices()
+        .find_map(|(offset, character)| {
+            (character.is_whitespace()
+                || matches!(character, '"' | '\'' | ',' | ';' | ')' | ']' | '}'))
+            .then_some(marker_end + offset)
+        })
+        .unwrap_or(value.len())
 }
 
 /// Replace whole tokens with a credential-shaped prefix (`sk-`, `ghp_`, `AKIA…`).

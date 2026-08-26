@@ -66,18 +66,18 @@ const DOCUMENT_OUTPUT_CAPABILITIES: &[&str] = &["google-drive.download_file"];
 /// removed — on a missing `mime_type`, a non-string payload, an oversize
 /// payload, or an extraction failure the field is dropped and a short marker is
 /// placed in `content` instead, so raw base64 can never reach the model.
-pub(crate) fn extract_documents_in_output(capability_id: &str, mut output: Value) -> Value {
+pub(crate) fn extract_documents_in_output(capability_id: &str, mut output: Value) -> (Value, bool) {
     // Opt-in per capability: a result from any non-listed capability passes
     // through unchanged, even if it contains a `content_base64` field.
     if !DOCUMENT_OUTPUT_CAPABILITIES.contains(&capability_id) {
-        return output;
+        return (output, false);
     }
     let Some(obj) = output.as_object_mut() else {
-        return output;
+        return (output, false);
     };
     // The only leak-free early exit: there is no base64 payload to handle.
     if !obj.contains_key("content_base64") {
-        return output;
+        return (output, false);
     }
 
     // From here we are committed to removing `content_base64` below, whatever
@@ -103,7 +103,7 @@ pub(crate) fn extract_documents_in_output(capability_id: &str, mut output: Value
 
     obj.remove("content_base64");
     obj.insert("content".to_string(), Value::String(content));
-    output
+    (output, true)
 }
 
 /// Decode base64 bytes and run the type-aware extractor, returning the text or
@@ -165,7 +165,8 @@ mod tests {
 
     #[test]
     fn non_object_passes_through() {
-        let out = extract_documents_in_output(GATED, json!("just a string"));
+        let (out, changed) = extract_documents_in_output(GATED, json!("just a string"));
+        assert!(!changed);
         assert_eq!(out, json!("just a string"));
     }
 
@@ -180,9 +181,10 @@ mod tests {
             "mime_type": "text/csv",
             "content_base64": b64(b"name,age\nAlice,30"),
         });
-        let out = extract_documents_in_output("builtin.echo", input.clone());
+        let (out, changed) = extract_documents_in_output("builtin.echo", input.clone());
+        assert!(!changed);
         assert_eq!(
-            out, input,
+            &out, &input,
             "a non-listed capability must leave `content_base64` untouched"
         );
         assert!(
@@ -202,14 +204,18 @@ mod tests {
             "mime_type": "text/plain",
             "content": "hello world",
         });
-        assert_eq!(extract_documents_in_output(GATED, input.clone()), input);
+        let (out, changed) = extract_documents_in_output(GATED, input.clone());
+        assert!(!changed);
+        assert_eq!(out, input);
     }
 
     #[test]
     fn missing_mime_strips_base64_and_marks() {
         // content_base64 present but no mime_type must NOT leak base64: it is
         // stripped and replaced with a marker.
-        let out = extract_documents_in_output(GATED, json!({ "content_base64": b64(b"abc") }));
+        let (out, changed) =
+            extract_documents_in_output(GATED, json!({ "content_base64": b64(b"abc") }));
+        assert!(changed);
         assert!(
             out.get("content_base64").is_none(),
             "base64 must be stripped even when mime_type is missing"
@@ -225,13 +231,14 @@ mod tests {
     fn non_string_content_base64_is_stripped() {
         // An unexpected non-string `content_base64` must still be removed, never
         // passed through.
-        let out = extract_documents_in_output(
+        let (out, changed) = extract_documents_in_output(
             GATED,
             json!({
                 "mime_type": "application/pdf",
                 "content_base64": { "nested": "object" },
             }),
         );
+        assert!(changed);
         assert!(out.get("content_base64").is_none());
         assert!(out["content"].as_str().unwrap_or("").starts_with('['));
     }
@@ -240,7 +247,7 @@ mod tests {
     fn extracts_csv_and_drops_base64() {
         // Exercises the decode -> extract_text -> replace path end-to-end
         // without a binary fixture; text/csv is handled by the extractor.
-        let out = extract_documents_in_output(
+        let (out, changed) = extract_documents_in_output(
             GATED,
             json!({
                 "file_id": "f1",
@@ -249,6 +256,7 @@ mod tests {
                 "content_base64": b64(b"name,age\nAlice,30"),
             }),
         );
+        assert!(changed);
         assert_eq!(out["content"], json!("name,age\nAlice,30"));
         assert!(
             out.get("content_base64").is_none(),
@@ -260,7 +268,7 @@ mod tests {
     fn extracts_pdf_binary() {
         // Real binary document: a minimal PDF whose text is "Hello World".
         let pdf = include_bytes!("../../../../tests/fixtures/hello.pdf");
-        let out = extract_documents_in_output(
+        let (out, changed) = extract_documents_in_output(
             GATED,
             json!({
                 "file_id": "f1",
@@ -269,6 +277,7 @@ mod tests {
                 "content_base64": b64(pdf),
             }),
         );
+        assert!(changed);
         let content = out["content"].as_str().unwrap_or("");
         assert!(
             content.contains("Hello"),
@@ -281,7 +290,7 @@ mod tests {
     fn unsupported_binary_yields_failure_marker_not_base64() {
         // An unsupported/opaque binary still must not leak base64; the model
         // gets a bracketed marker instead.
-        let out = extract_documents_in_output(
+        let (out, changed) = extract_documents_in_output(
             GATED,
             json!({
                 "file_id": "f1",
@@ -290,6 +299,7 @@ mod tests {
                 "content_base64": b64(&[0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]),
             }),
         );
+        assert!(changed);
         let content = out["content"].as_str().unwrap_or("");
         assert!(content.starts_with('['), "expected marker, got: {content}");
         assert!(out.get("content_base64").is_none());
@@ -297,13 +307,14 @@ mod tests {
 
     #[test]
     fn invalid_base64_yields_marker() {
-        let out = extract_documents_in_output(
+        let (out, changed) = extract_documents_in_output(
             GATED,
             json!({
                 "mime_type": "application/pdf",
                 "content_base64": "not valid base64 !!!",
             }),
         );
+        assert!(changed);
         let content = out["content"].as_str().unwrap_or("");
         assert!(content.contains("Could not decode"), "got: {content}");
         assert!(out.get("content_base64").is_none());

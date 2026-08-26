@@ -128,6 +128,7 @@ impl SyntheticCapabilityHandler for StructuredResultHandler {
                 invocation_id: InvocationId::new(),
                 capability_id: &invocation.request.capability_id,
                 output: invocation.input.clone(),
+                model_preview: None,
                 display_preview: None,
                 // The validated value IS the run's terminal output: durable,
                 // read back by the product tier after the run completes.

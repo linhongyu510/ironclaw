@@ -17,8 +17,9 @@ const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
 /// Whole-envelope cap for a `model_observation` JSON blob (preview text plus
 /// surrounding schema fields). Derived as 2x
-/// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest raw
-/// preview/chunk this crate will ever embed): a preview of ordinary tool
+/// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest explicit
+/// result-read chunk this crate will ever embed; automatic completion previews
+/// use a smaller bound): a preview of ordinary tool
 /// output (text/JSON) grows only slightly under JSON-string escaping, so 2x
 /// leaves ample room for the preview plus the fixed envelope fields (summary,
 /// result_ref, artifacts). A pathological all-`"`/all-control preview that

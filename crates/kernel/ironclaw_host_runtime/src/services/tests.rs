@@ -896,6 +896,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
         provider: context.extension_id.clone(),
         runtime: RuntimeKind::Wasm,
         output: Value::String("hello AKIAABCDEFGHIJKLMNOP goodbye".to_string()),
+        model_preview: None,
         display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
@@ -1564,6 +1565,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
+            model_preview: None,
             display_preview: None,
             usage,
             receipt,

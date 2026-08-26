@@ -711,6 +711,7 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_job_logs.input.v1.json"
 output_schema_ref = "schemas/github/raw_output.v1.json"
+model_view = "structural"
 prompt_doc_ref = "prompts/github/get_job_logs.md"
 # The logs endpoint 302-redirects to a short-lived, pre-signed Azure blob URL
 # (e.g. productionresultssaN.blob.core.windows.net). The host egress follows the

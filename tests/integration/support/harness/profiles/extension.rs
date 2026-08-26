@@ -1043,6 +1043,7 @@ impl ToolAdapter for AcmeFixtureToolAdapter {
                     .unwrap_or_default();
                 Ok(ironclaw_extension_contracts::tool_adapter::ToolResult {
                     output,
+                    model_preview: None,
                     display_preview: None,
                     output_bytes,
                 })
@@ -1407,6 +1408,7 @@ fn tool_result(output: serde_json::Value) -> ToolResult {
         .unwrap_or_default();
     ToolResult {
         output,
+        model_preview: None,
         display_preview: None,
         output_bytes,
     }

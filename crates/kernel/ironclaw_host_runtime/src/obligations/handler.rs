@@ -556,16 +556,18 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         // Turn any base64 document payload into extracted text before redaction
         // and the output-size obligations run, so the model gets bounded text
         // (leak-scanned, size-checked) and the large base64 never survives.
-        dispatch.output = crate::document_output::extract_documents_in_output(
-            dispatch.capability_id.as_str(),
-            dispatch.output,
-        );
+        let (document_output, mut output_changed) =
+            crate::document_output::extract_documents_in_output(
+                dispatch.capability_id.as_str(),
+                dispatch.output,
+            );
+        dispatch.output = document_output;
         if request
             .obligations
             .iter()
             .any(|obligation| matches!(obligation, Obligation::RedactOutput))
         {
-            dispatch.output = match redact_output(dispatch.output) {
+            let redacted_output = match redact_output(dispatch.output) {
                 Ok(value) => value,
                 Err(error) => {
                     // Leak-detector blocked: record the boundary decision
@@ -586,7 +588,12 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                     return Err(error);
                 }
             };
+            dispatch.output = redacted_output.0;
+            output_changed |= redacted_output.1;
             dispatch.display_preview = None;
+        }
+        if output_changed {
+            dispatch.model_preview = None;
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -1128,34 +1135,43 @@ pub const LEAK_REDACT_FAILED_CODE: &str = "leak_redact_failed";
 
 fn redact_output(
     output: serde_json::Value,
-) -> Result<serde_json::Value, CapabilityObligationError> {
+) -> Result<(serde_json::Value, bool), CapabilityObligationError> {
     match output {
         serde_json::Value::String(value) => {
-            redact_output_string(value).map(serde_json::Value::String)
+            let redacted = redact_output_string(&value)?;
+            let changed = redacted != value;
+            Ok((serde_json::Value::String(redacted), changed))
         }
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(redact_output)
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array),
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            let mut redacted = Vec::with_capacity(values.len());
+            for value in values {
+                let result = redact_output(value)?;
+                changed |= result.1;
+                redacted.push(result.0);
+            }
+            Ok((serde_json::Value::Array(redacted), changed))
+        }
         serde_json::Value::Object(entries) => {
             let mut redacted = serde_json::Map::with_capacity(entries.len());
+            let mut changed = false;
             for (key, value) in entries {
-                let key = redact_output_string(key)?;
-                let value = redact_output(value)?;
-                if redacted.insert(key, value).is_some() {
+                let redacted_key = redact_output_string(&key)?;
+                let redacted_value = redact_output(value)?;
+                changed |= redacted_key != key || redacted_value.1;
+                if redacted.insert(redacted_key, redacted_value.0).is_some() {
                     return Err(output_obligation_failed());
                 }
             }
-            Ok(serde_json::Value::Object(redacted))
+            Ok((serde_json::Value::Object(redacted), changed))
         }
-        value => Ok(value),
+        value => Ok((value, false)),
     }
 }
 
-fn redact_output_string(value: String) -> Result<String, CapabilityObligationError> {
+fn redact_output_string(value: &str) -> Result<String, CapabilityObligationError> {
     LeakDetector::new()
-        .scan_and_clean(&value)
+        .scan_and_clean(value)
         .map_err(|_| output_obligation_failed())
 }
 

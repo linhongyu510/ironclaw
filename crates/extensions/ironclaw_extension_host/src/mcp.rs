@@ -559,6 +559,7 @@ mod tests {
                                 )
                                 .unwrap(),
                             ),
+                            model_view: None,
                             prompt_doc_ref: None,
                             required_host_ports: Vec::new(),
                             runtime_credentials: vec![

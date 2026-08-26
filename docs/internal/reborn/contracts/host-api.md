@@ -751,7 +751,12 @@ pub struct SandboxQuota {
 pub struct Authorized {
     /* private: sealed invocation + RuntimeLane + mounts + reservation + deadline */
 }
-pub struct CapabilityDispatchResult;
+pub struct ModelResultPreview;
+pub struct CapabilityDispatchResult {
+    pub output: serde_json::Value,
+    pub model_preview: Option<ModelResultPreview>,
+    /* capability identity, runtime, usage, and receipt */
+}
 pub struct CapabilityDisplayOutputPreview;
 pub trait CapabilityDispatcher {
     async fn dispatch_json(
@@ -777,7 +782,8 @@ Rules:
 - `Actor::Sealed(user_id)` on the authorized invocation is forwarded unchanged as the authenticated actor. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
 - Process re-dispatch uses a durable `ProcessAuthorizedContinuation` and a kernel-only, process-record-backed remint port to re-mint an `Authorized` witness at execution; missing continuations fail closed as `MissingProcessAuthorization`. The continuation is process-lifetime authority, not a second policy check, and reminting must validate the persisted process record before sealing.
 - A re-minted witness carries the original process reservation when one exists. If that reservation has been released/revoked before or during execution, runtime settlement fails closed with a resource dispatch error; adapters must not silently reserve replacement capacity.
-- `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, optional display-preview metadata, usage, and resource receipt.
+- `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, canonical output, optional bounded `model_preview`, optional display-preview metadata, usage, and resource receipt.
+- `model_preview` is a bounded, credential-redacted model-facing content projection. It may be semantic (for example, parsed readable Gmail headers and plain-text body) rather than a prefix of `output`; the canonical output remains durable behind the result reference and is the authority for `result_read` paging.
 - `CapabilityDisplayOutputPreview` is a display-only side channel for renderer-ready output such as unified diffs. It must not change model-visible capability output, grant authority, or carry backend-private paths/secrets.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.

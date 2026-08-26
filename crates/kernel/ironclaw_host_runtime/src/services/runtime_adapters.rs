@@ -456,6 +456,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            model_preview: None,
             display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
@@ -535,6 +536,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            model_preview: None,
             display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
@@ -1021,6 +1023,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: result.output,
+            model_preview: result.model_preview,
             display_preview: result.display_preview,
             usage,
             receipt,

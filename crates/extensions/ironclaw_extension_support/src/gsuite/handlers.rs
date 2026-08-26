@@ -25,6 +25,7 @@ use ironclaw_host_api::{
         RuntimeHttpEgressRequest,
     },
     ids::{CapabilityId, ExtensionId},
+    model_result_preview::ModelResultPreview,
     resource::{ResourceScope, ResourceUsage},
     runtime::RuntimeKind,
 };
@@ -45,6 +46,7 @@ use crate::latency::{
 };
 
 mod calendar_list_events;
+mod gmail_message_preview;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -505,6 +507,12 @@ impl GsuiteExecutor {
                 return Err(error);
             }
         };
+        let model_preview = match capability.operation {
+            GsuiteCapabilityOperation::GmailGetMessage => {
+                Some(gmail_message_preview::from_get_message_output(&output)?)
+            }
+            _ => None,
+        };
         let output_bytes = json_bytes(&output);
         trace_gsuite_latency_ok(
             "shape_output",
@@ -516,6 +524,7 @@ impl GsuiteExecutor {
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         Ok(GsuiteDispatchResult {
             output,
+            model_preview,
             usage: ResourceUsage::default()
                 .set_wall_clock_ms(wall_clock_ms)
                 .set_output_bytes(output_bytes)
@@ -550,6 +559,7 @@ pub struct GsuiteDispatchRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GsuiteDispatchResult {
     pub output: Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub usage: ResourceUsage,
 }
 

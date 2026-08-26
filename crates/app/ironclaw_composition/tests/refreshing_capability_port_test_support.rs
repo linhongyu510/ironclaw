@@ -115,6 +115,7 @@ impl HostRuntime for StubHostRuntime {
             ironclaw_host_runtime::RuntimeCapabilityCompleted {
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ironclaw_host_api::resource::ResourceUsage::default(),
             },

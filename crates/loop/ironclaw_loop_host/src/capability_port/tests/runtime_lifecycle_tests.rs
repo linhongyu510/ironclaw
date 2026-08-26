@@ -130,7 +130,7 @@ async fn runtime_capability_emits_completion_after_result_write_retry_succeeds()
 }
 
 #[tokio::test]
-async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
+async fn runtime_completed_previews_are_forwarded_to_result_writer() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let result_writer = Arc::new(RecordingResultWriter::default());
@@ -148,6 +148,10 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
                 RuntimeCapabilityCompleted {
                     capability_id: capability_id.clone(),
                     output: serde_json::json!({"ok": true}),
+                    model_preview: Some(
+                        ModelResultPreview::new(r#"{"message":"semantic"}"#)
+                            .expect("model preview"),
+                    ),
                     display_preview: Some(CapabilityDisplayOutputPreview {
                         output_summary: Some("Edited 1 file: +1/-1".to_string()),
                         output_preview: "--- a/file\n+++ b/file\n-old\n+new\n".to_string(),
@@ -178,6 +182,16 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
         .expect("display preview forwarded");
     assert_eq!(preview.output_kind, "unified_diff");
     assert!(preview.output_preview.contains("+new"));
+    assert_eq!(
+        result_writer
+            .model_previews()
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("model preview forwarded")
+            .as_str(),
+        r#"{"message":"semantic"}"#
+    );
 }
 
 #[tokio::test]
@@ -313,6 +327,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                     RuntimeCapabilityCompleted {
                         capability_id: capability_id.clone(),
                         output: serde_json::json!({"ok": true}),
+                        model_preview: None,
                         display_preview: None,
                         usage: ResourceUsage::default(),
                     },
@@ -470,6 +485,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
                 RuntimeCapabilityCompleted {
                     capability_id: other_capability_id,
                     output: serde_json::json!({"ok": true}),
+                    model_preview: None,
                     display_preview: None,
                     usage: ResourceUsage::default(),
                 },
@@ -640,6 +656,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
             Box::new(RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output: serde_json::json!({"auth_resumed": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ResourceUsage::default(),
             }),
@@ -1596,6 +1613,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             RuntimeCapabilityCompleted {
                 capability_id: request.2,
                 output: serde_json::json!({"resumed": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ResourceUsage::default(),
             },
@@ -1614,6 +1632,7 @@ impl HostRuntime for ApprovalResumeRecordingRuntime {
             RuntimeCapabilityCompleted {
                 capability_id: request.1,
                 output: serde_json::json!({"auth_resumed": true}),
+                model_preview: None,
                 display_preview: None,
                 usage: ResourceUsage::default(),
             },

@@ -108,8 +108,8 @@ Implementation evidence:
   `CapabilityDispatcher::dispatch_json(Authorized)` port and internal
   `CapabilityDispatchRequest`.
 - `crates/kernel/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` covers sealed-lane
-  mismatch rejection, `None` mount preservation, resolver misses, and prepared
-  reservation validation.
+  mismatch rejection, `None` mount preservation, resolver misses, prepared
+  reservation validation, and preservation of a non-`None` model preview.
 
 ---
 
@@ -194,6 +194,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: serde_json::Value,
+    pub model_preview: Option<ModelResultPreview>,
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
@@ -201,7 +202,8 @@ pub struct CapabilityDispatchResult {
 ```
 
 The shape intentionally exposes common host-level facts and avoids leaking WASM-specific internals as the generic contract.
-`display_preview` is an optional, model-hidden presentation side channel for already-sanitizable UI material such as unified diffs; callers must keep the canonical capability output in `output`.
+`model_preview` is an optional bounded, credential-redacted model-facing content projection. A producer may use a semantic projection (for example, parsed readable Gmail headers and decoded plain-text content), so it need not be a prefix of `output`. The dispatcher copies it unchanged from the resolved binding; the canonical capability output remains in `output` and is persisted behind the result reference for `result_read` paging.
+`display_preview` is an optional, model-hidden presentation side channel for already-sanitizable UI material such as unified diffs; callers must keep both preview channels separate from the canonical capability output and from authorization decisions.
 
 ---
 

@@ -151,6 +151,7 @@ impl BoundCapabilityAdapter for ToolAdapterCapabilityHandler {
         };
         Ok(RuntimeAdapterResult {
             output: result.output,
+            model_preview: result.model_preview,
             display_preview: result.display_preview,
             output_bytes,
             usage: usage.clone(),
@@ -262,6 +263,7 @@ mod tests {
         ) -> Result<ToolResult, ToolError> {
             Ok(ToolResult {
                 output: json!({"ok": true}),
+                model_preview: None,
                 display_preview: None,
                 output_bytes: 11,
             })
