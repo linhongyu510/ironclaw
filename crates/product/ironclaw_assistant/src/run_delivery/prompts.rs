@@ -307,8 +307,8 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
 /// `None` and blank are the same answer: a notice must never advertise a
 /// relative path into a customer conversation.
 fn extensions_page_link(base_url: Option<&str>) -> Option<String> {
-    let base = base_url?.trim().trim_end_matches('/');
-    (!base.is_empty()).then(|| format!("{base}/extensions"))
+    let base = ironclaw_extension_contracts::connect_link::validated_connect_link_origin(base_url)?;
+    Some(format!("{base}/extensions"))
 }
 
 /// The message shown when a challenge cannot be completed from a chat surface,
