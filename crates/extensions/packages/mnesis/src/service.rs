@@ -303,6 +303,11 @@ fn ensure_lane_succeeded(response: &MnesisResponse) -> Result<(), MemoryServiceE
 }
 
 fn lane_failure(response: &MnesisResponse) -> MemoryServiceError {
+    tracing::debug!(
+        target: "ironclaw_memory_mnesis",
+        status = response.status,
+        "Mnesis lane refused the call"
+    );
     if response.is_server_error() {
         MemoryServiceError::unavailable()
     } else {
@@ -569,6 +574,7 @@ fn degrade_availability(
         Err(error) if error.kind() == MemoryServiceErrorKind::Unavailable => {
             tracing::debug!(
                 target: "ironclaw_memory_mnesis",
+                ?error,
                 "Mnesis lane unavailable; degrading to an empty memory lane"
             );
             Ok(Vec::new())

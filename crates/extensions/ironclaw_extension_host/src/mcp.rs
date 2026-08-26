@@ -80,9 +80,22 @@ impl RegistryMcpEgressPlanner {
 impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
         let Some(endpoint) = self.provider_endpoint(request.provider) else {
+            tracing::debug!(
+                target: "ironclaw_extension_host",
+                provider = %request.provider,
+                url = %request.url,
+                "hosted MCP egress plan withheld: no registry endpoint for provider"
+            );
             return McpHostHttpEgressPlan::default();
         };
         if !hosted_mcp_url_allowed(request.url, &endpoint) {
+            tracing::debug!(
+                target: "ironclaw_extension_host",
+                provider = %request.provider,
+                url = %request.url,
+                endpoint = ?endpoint,
+                "hosted MCP egress plan withheld: url does not match the registry endpoint"
+            );
             return McpHostHttpEgressPlan::default();
         }
         let credential_injections =

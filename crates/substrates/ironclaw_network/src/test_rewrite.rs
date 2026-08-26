@@ -236,8 +236,20 @@ pub fn default_policy_http_egress() -> Result<
     PolicyNetworkHttpEgress<RewriteNetworkTransport<ReqwestNetworkTransport>>,
     HostRewriteMapError,
 > {
-    Ok(PolicyNetworkHttpEgress::new(
+    default_policy_http_egress_with_private_hosts(Vec::new())
+}
+
+/// Same construction, with the deployment's private-host allowlist supplied by
+/// the caller. Empty keeps the private-address denial fully closed.
+pub fn default_policy_http_egress_with_private_hosts(
+    private_hosts: Vec<String>,
+) -> Result<
+    PolicyNetworkHttpEgress<RewriteNetworkTransport<ReqwestNetworkTransport>>,
+    HostRewriteMapError,
+> {
+    Ok(PolicyNetworkHttpEgress::new_with_resolver(
         RewriteNetworkTransport::from_env(ReqwestNetworkTransport::default())?,
+        crate::resolver::SystemNetworkResolver::with_private_host_allowlist(private_hosts),
     ))
 }
 

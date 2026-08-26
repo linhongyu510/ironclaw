@@ -749,6 +749,10 @@ fn push_search_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
 
 const MNESIS_RAR_ENDPOINT_ENV: &str = "MEMORY_MNESIS_KNOWLEDGE_ENDPOINT";
 
+/// Reserved for the same reason NEAR AI is: host-bundled, materialized on
+/// install, and absent from `PACKAGES` because the host patches its endpoint.
+const MNESIS_RAR_EXTENSION_ID: &str = "mnesis-rar";
+
 fn mnesis_rar_endpoint_from_env() -> Result<Option<String>, String> {
     let Ok(raw) = std::env::var(MNESIS_RAR_ENDPOINT_ENV) else {
         return Ok(None);
@@ -1350,6 +1354,7 @@ pub fn reserved_host_bundled_extension_id(
         .iter()
         .any(|id| id == extension_id.as_str())
         || extension_id.as_str() == NEARAI_EXTENSION_ID
+        || extension_id.as_str() == MNESIS_RAR_EXTENSION_ID
 }
 
 pub fn map_binding_error(error: impl std::fmt::Display) -> ProductOperationFailure {

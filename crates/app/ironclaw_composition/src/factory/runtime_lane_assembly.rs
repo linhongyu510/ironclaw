@@ -27,20 +27,42 @@ pub(super) type HostHttpEgress = ironclaw_network::PolicyNetworkHttpEgress<
 pub(super) type HostHttpEgress =
     ironclaw_network::PolicyNetworkHttpEgress<ironclaw_network::ReqwestNetworkTransport>;
 
+/// Deployment-owned hosts permitted to resolve inside a private range, for an
+/// operator whose internal service sits on a private network. Unset denies
+/// every private target, which is the shipped default; entries are exact hosts,
+/// never patterns, and never come from a manifest.
+pub(super) const EGRESS_PRIVATE_HOST_ALLOWLIST_ENV: &str =
+    "IRONCLAW_REBORN_EGRESS_PRIVATE_HOST_ALLOWLIST";
+
+fn egress_private_host_allowlist() -> Vec<String> {
+    std::env::var(EGRESS_PRIVATE_HOST_ALLOWLIST_ENV)
+        .map(|raw| {
+            raw.split(',')
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(any(debug_assertions, feature = "test-support"))]
 pub(super) fn default_host_http_egress() -> Result<HostHttpEgress, RebornBuildError> {
-    ironclaw_network::default_policy_http_egress().map_err(|error| {
-        RebornBuildError::InvalidConfig {
+    ironclaw_network::default_policy_http_egress_with_private_hosts(egress_private_host_allowlist())
+        .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
-        }
-    })
+        })
 }
 
 #[cfg(not(any(debug_assertions, feature = "test-support")))]
 pub(super) fn default_host_http_egress() -> Result<HostHttpEgress, RebornBuildError> {
-    Ok(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))
+    Ok(
+        ironclaw_network::PolicyNetworkHttpEgress::new_with_resolver(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+            ironclaw_network::SystemNetworkResolver::with_private_host_allowlist(
+                egress_private_host_allowlist(),
+            ),
+        ),
+    )
 }
 
 pub(super) fn apply_post_edit_check_from_env<F, G>(

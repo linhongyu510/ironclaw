@@ -393,6 +393,7 @@ service = "acme_memoryless_provider"
             "/system/extensions/acme_memoryless",
             "acme",
             &[],
+            &[],
         )
         .expect_err("a bundled memory provider manifest must declare [memory]");
         assert!(error.to_string().contains("[memory]"), "{error}");
@@ -425,6 +426,7 @@ guidance_doc = "prompts/missing.md"
             DESYNCED_GUIDANCE_MANIFEST,
             "/system/extensions/acme_desynced",
             "acme",
+            &[],
             &[],
         )
         .expect_err("a guidance_doc ref with no matching bundled asset must fail loud");

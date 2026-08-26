@@ -321,6 +321,12 @@ impl MnesisHttpTransport {
         let _ = self.bounded_body(response, "initialize").await?;
 
         if !(200..300).contains(&status) {
+            tracing::debug!(
+                target: "ironclaw_memory_mnesis",
+                status,
+                ?lane,
+                "Mnesis lane refused the session handshake"
+            );
             return Err(if (500..600).contains(&status) {
                 MnesisTransportError::retryable("the Mnesis lane refused the session handshake")
             } else {

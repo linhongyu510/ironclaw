@@ -191,7 +191,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// assembly wiring; this record moves with them to the same figure in this
 /// commit, per the pairing this file's own history keeps. Measured with
 /// `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_791;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_977;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

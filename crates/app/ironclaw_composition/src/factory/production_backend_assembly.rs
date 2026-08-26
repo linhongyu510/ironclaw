@@ -1033,6 +1033,13 @@ pub(super) async fn build_backend_production(
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
+    crate::mnesis_rar_bootstrap::bootstrap_mnesis_rar(
+        &product_auth_dependencies,
+        &extension_management,
+        channel_egress_scope.clone(),
+    )
+    .await?
+    .log_completion();
     let admin_configuration_resolver = Arc::new(
         ChannelConfigService::new(
             extension_management.installation_store_handle(),

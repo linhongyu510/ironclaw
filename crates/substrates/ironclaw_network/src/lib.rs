@@ -23,11 +23,11 @@ pub use policy::{
     NetworkPolicyError, StaticNetworkPolicyEnforcer, parse_egress_limit, parse_host_pattern,
     target_matches_pattern,
 };
-pub use resolver::NetworkResolver;
+pub use resolver::{NetworkResolver, SystemNetworkResolver};
 #[cfg(any(debug_assertions, feature = "test-support"))]
 pub use test_rewrite::{
     HostRewriteMap, HostRewriteMapError, RewriteNetworkTransport, TEST_HTTP_REWRITE_MAP_ENV,
-    default_policy_http_egress,
+    default_policy_http_egress, default_policy_http_egress_with_private_hosts,
 };
 pub use transport::ReqwestNetworkTransport;
 pub use types::{

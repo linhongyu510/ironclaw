@@ -40,6 +40,7 @@ mod ironhub_link_serve;
 mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
+mod mnesis_rar_bootstrap;
 mod model_gateway_assembly;
 mod notification_store_assembly;
 mod observability;

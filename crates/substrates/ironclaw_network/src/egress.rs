@@ -49,7 +49,7 @@ impl<T> PolicyNetworkHttpEgress<T, SystemNetworkResolver> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,
-            resolver: SystemNetworkResolver,
+            resolver: SystemNetworkResolver::default(),
         }
     }
 }

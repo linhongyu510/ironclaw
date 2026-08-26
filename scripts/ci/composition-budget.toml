@@ -257,7 +257,16 @@ observed_date = "2026-08-08"
 # the seed is 42371 rather than 42380. Measured with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
 # Re-measured 42371 -> 42791 on 2026-08-25 after merging main into the Mnesis branch.
-loc_ceiling = 42791
+#
+# Re-seeded 42791 -> 42977 on 2026-08-25 for the Mnesis retrieval bootstrap
+# (`mnesis_rar_bootstrap.rs`): boot-time credential bind plus install/activate
+# for the `[mcp]` retrieval package, mirroring `llm_admin/nearai_mcp.rs`, which
+# solves the same problem for the same package shape and already lives here. It
+# is service-graph assembly — composition is the only layer that can see
+# product-auth, the extension-management port, and the deployment's Mnesis
+# configuration at once; no policy is computed and no record shape is owned.
+# Measured with `bash scripts/ci/check-composition-budget.sh --print`, not padded.
+loc_ceiling = 42977
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -268,7 +277,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42791
+loc_observed = 42977
 loc_observed_date = "2026-08-25"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
