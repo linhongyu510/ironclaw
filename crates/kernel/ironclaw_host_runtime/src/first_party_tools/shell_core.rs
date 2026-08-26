@@ -544,6 +544,14 @@ mod tests {
             json!({"command": "echo hi", "workdir": 123}),
             json!({"command": "echo hi", "timeout": 0}),
             json!({"command": "echo hi", "timeout": "1"}),
+            json!({"command": "echo hi", "credential_contexts": "atlas"}),
+            json!({"command": "echo hi", "credential_contexts": ["atlas", "atlas"]}),
+            json!({
+                "command": "echo hi",
+                "credential_contexts": [
+                    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"
+                ]
+            }),
         ] {
             assert!(
                 matches!(

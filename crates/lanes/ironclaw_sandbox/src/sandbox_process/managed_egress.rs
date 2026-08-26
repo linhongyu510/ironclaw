@@ -512,6 +512,7 @@ impl ManagedEgressRuntime {
         let configured = async {
             remove_credential_material(material_root).await?;
             let mut credential_bundle = BTreeMap::new();
+            let mut placeholder_values = HashSet::with_capacity(credentials.len());
             let mut rendered = Vec::with_capacity(credentials.len());
             for credential in credentials {
                 if !self.policy.allowed_targets.iter().any(|target| {
@@ -533,6 +534,11 @@ impl ManagedEgressRuntime {
                 {
                     return Err(RuntimeProcessError::ExecutionFailed(
                         "sandbox credential replacement rule is invalid".to_string(),
+                    ));
+                }
+                if !placeholder_values.insert(placeholder_value.clone()) {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential bundle contains a duplicate placeholder".to_string(),
                     ));
                 }
                 let bundle_key = credential.credential_key.as_str().to_string();
@@ -1792,6 +1798,19 @@ async fn write_atomic_material_file_if_changed(
         Ok(existing) => {
             let existing = Zeroizing::new(existing);
             if existing.as_slice() == contents {
+                #[cfg(unix)]
+                tokio::fs::set_permissions(path, {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::Permissions::from_mode(mode)
+                })
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox managed-egress material permissions failed: {error}"
+                    ))
+                })?;
+                #[cfg(not(unix))]
+                let _ = mode;
                 return Ok(());
             }
         }
@@ -2365,6 +2384,14 @@ mod tests {
         #[cfg(unix)]
         let original_inode = tokio::fs::metadata(&certificate).await.unwrap().ino();
 
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&certificate, {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::Permissions::from_mode(0o666)
+        })
+        .await
+        .unwrap();
+
         write_atomic_material_file_if_changed(&certificate, b"same-root", 0o644)
             .await
             .unwrap();
@@ -2376,6 +2403,20 @@ mod tests {
             original_inode,
             "an unchanged CA must remain visible through an existing file bind mount"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                tokio::fs::metadata(&certificate)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644,
+                "unchanged material must have its required mode repaired"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2468,6 +2509,24 @@ mod tests {
             assert!(result.is_err());
             assert!(!directory.path().join("credentials.json").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_credential_placeholders_fail_before_material_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credentials = [
+            test_credential("icsbx_duplicate", "Authorization", "first-secret"),
+            test_credential("icsbx_duplicate", "X-Api-Key", "second-secret"),
+        ];
+
+        let result = runtime
+            .configure_credentials_with_restart(&bundle, &credentials, || async { Ok(()) })
+            .await;
+
+        assert!(result.is_err());
+        assert!(!directory.path().join("credentials.json").exists());
     }
 
     #[tokio::test]

@@ -287,7 +287,7 @@ where
         // before the spawn-approval decision. Facts only; `Indeterminate` skips.
         match self
             .policy_facts
-            .credential_presence(&request.capability_id, &scope)
+            .credential_presence(&descriptor, &scope)
             .await
         {
             CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
@@ -372,7 +372,7 @@ where
                     &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
-                );
+                )?;
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
                     frozen_deadline: None,

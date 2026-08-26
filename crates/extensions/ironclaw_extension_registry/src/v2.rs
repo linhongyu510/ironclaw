@@ -1331,6 +1331,7 @@ impl CapabilityDeclV2 {
             });
         }
         let mut credential_handles_seen = BTreeSet::new();
+        let mut placeholder_envs_seen = BTreeSet::new();
         let mut runtime_credentials = Vec::with_capacity(raw.runtime_credentials.len());
         for raw_credential in raw.runtime_credentials {
             let handle = SecretHandle::new(raw_credential.handle)?;
@@ -1340,6 +1341,26 @@ impl CapabilityDeclV2 {
                         "capability {id} declares duplicate runtime credential handle {handle}"
                     ),
                 });
+            }
+            if let Some(placeholder_env) = raw_credential.placeholder_env.as_deref() {
+                if !ironclaw_host_api::process::is_valid_sandbox_credential_env_name(
+                    placeholder_env,
+                ) {
+                    return Err(ManifestV2Error::Invalid {
+                        reason: format!(
+                            "capability {id} declares invalid shell credential environment \
+                             {placeholder_env}"
+                        ),
+                    });
+                }
+                if !placeholder_envs_seen.insert(placeholder_env.to_string()) {
+                    return Err(ManifestV2Error::Invalid {
+                        reason: format!(
+                            "capability {id} declares duplicate shell credential environment \
+                             {placeholder_env}"
+                        ),
+                    });
+                }
             }
             raw_credential
                 .target

@@ -213,6 +213,16 @@ where
                 return Err(error);
             }
         };
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "RuntimePolicyDenied",
+            )
+            .await;
+            return Err(error);
+        }
 
         let Some(lease) = matching_approval_lease(
             capability_leases,

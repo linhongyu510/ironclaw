@@ -97,6 +97,7 @@ fn seal_with_mounts_and_reservation(
         reservation,
         deadline,
     )
+    .expect("matching capability ids seal")
 }
 
 fn seal_invocation(invocation: Invocation) -> Authorized {
@@ -110,6 +111,30 @@ fn seal_invocation(invocation: Invocation) -> Authorized {
         Some(reservation()),
         ts(1000),
     )
+    .expect("matching capability ids seal")
+}
+
+#[test]
+fn seal_rejects_mismatched_descriptor_in_release_builds() {
+    let grant = TestAuthorizer.authorization_grant();
+    let mut invocation = invocation();
+    invocation.capability = CapabilityId::new("other.capability").unwrap();
+
+    let error = Authorized::seal(
+        grant,
+        invocation,
+        descriptor(),
+        RuntimeLane::Process,
+        None,
+        None,
+        ts(1000),
+    )
+    .expect_err("mismatched capability ids must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::authorized::AuthorizedSealError::CapabilityMismatch { .. }
+    ));
 }
 
 fn ts(secs: i64) -> Timestamp {

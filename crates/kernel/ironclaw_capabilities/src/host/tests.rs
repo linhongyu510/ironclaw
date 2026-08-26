@@ -213,7 +213,7 @@ struct SatisfiedPolicyFacts;
 impl HostPolicyFacts for SatisfiedPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -240,7 +240,7 @@ struct GrantWithExpiryPolicyFacts {
 impl HostPolicyFacts for GrantWithExpiryPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -476,6 +476,26 @@ impl TrustPolicy for StaticTrustPolicy {
     }
 }
 
+fn privileged_local_manifest_policy(
+    package_id: &str,
+    manifest_path: &str,
+) -> ironclaw_trust::HostTrustPolicy {
+    use ironclaw_host_api::ids::PackageId;
+    use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries([
+        AdminEntry::for_local_manifest(
+            PackageId::new(package_id).unwrap(),
+            manifest_path.to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![ironclaw_host_api::capability::EffectKind::UseSecret],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
 /// Permissive runtime policy so the in-fold planner never denies the echo
 /// capability (echo declares only `dispatch_capability`, so no backend
 /// constraint is even exercised).
@@ -518,7 +538,8 @@ async fn sandbox_shell_enrichment_uses_explicit_manifest_credential_context() {
             })
         });
     let authorizer = AllowAuthorizer;
-    let trust_policy = StaticTrustPolicy;
+    let trust_policy =
+        privileged_local_manifest_policy("atlas", "/system/extensions/atlas/manifest.toml");
     let mut runtime_policy = permissive_runtime_policy();
     runtime_policy.requested_profile = RuntimeProfile::HostedSafe;
     runtime_policy.resolved_profile = RuntimeProfile::HostedSafe;

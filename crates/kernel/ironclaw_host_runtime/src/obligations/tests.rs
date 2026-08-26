@@ -124,6 +124,13 @@ fn runtime_secret_injection_store_takes_multiple_handles_atomically() {
     );
     assert!(
         store
+            .take_many(&scope, &capability_id, &[staged.clone(), staged.clone()])
+            .unwrap()
+            .is_none(),
+        "a duplicate handle must not consume one staged value twice"
+    );
+    assert!(
+        store
             .take(&scope, &capability_id, &staged)
             .unwrap()
             .is_some(),

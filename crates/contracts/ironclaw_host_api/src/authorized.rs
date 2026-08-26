@@ -128,6 +128,15 @@ pub struct Authorized {
     deadline: Timestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizedSealError {
+    #[error("authorized descriptor capability does not match the invocation")]
+    CapabilityMismatch {
+        invocation: CapabilityId,
+        descriptor: CapabilityId,
+    },
+}
+
 impl Authorized {
     /// Mint an `Authorized`. Callable only with an [`AuthorizationGrant`], which
     /// only a [`CapabilityAuthorizer`] can produce — i.e. only `authorize()` in
@@ -147,16 +156,21 @@ impl Authorized {
         mounts: Option<MountView>,
         reservation: Option<ResourceReservation>,
         deadline: Timestamp,
-    ) -> Self {
-        debug_assert_eq!(descriptor.id, invocation.capability);
-        Self {
+    ) -> Result<Self, AuthorizedSealError> {
+        if descriptor.id != invocation.capability {
+            return Err(AuthorizedSealError::CapabilityMismatch {
+                invocation: invocation.capability,
+                descriptor: descriptor.id,
+            });
+        }
+        Ok(Self {
             invocation,
             descriptor: Some(descriptor),
             lane,
             mounts,
             reservation,
             deadline,
-        }
+        })
     }
 
     /// Re-mint a witness from a durable continuation written before the

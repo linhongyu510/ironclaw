@@ -147,9 +147,14 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
 
     async fn run_credentialed_command(
         &self,
-        request: CredentialedSandboxCommandRequest,
+        mut request: CredentialedSandboxCommandRequest,
         credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        let timeout = request
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        request.timeout_secs = Some(timeout.as_secs());
         let mut output = self
             .transport
             .run_credentialed_command(request, credentials)
@@ -303,8 +308,9 @@ fn validate_credential_bindings(
                     .to_string(),
             ));
         }
-        if !valid_env_name(&binding.placeholder_env)
-            || request.extra_env.contains_key(&binding.placeholder_env)
+        if !ironclaw_host_api::process::is_valid_sandbox_credential_env_name(
+            &binding.placeholder_env,
+        ) || request.extra_env.contains_key(&binding.placeholder_env)
             || !handles.insert(&requirement.handle)
             || !env_names.insert(&binding.placeholder_env)
         {
@@ -314,14 +320,6 @@ fn validate_credential_bindings(
         }
     }
     Ok(())
-}
-
-fn valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 /// Host-process command environment handling.
@@ -832,6 +830,20 @@ mod tests {
         assert!(!unsupported.supports_credentialed_command());
     }
 
+    #[tokio::test]
+    async fn user_sandbox_process_port_defaults_credentialed_timeout_to_120_seconds() {
+        let transport = Arc::new(RecordingSandboxTransport::default());
+        let port = UserSandboxProcessPort::new(transport.clone());
+        let mut request = credentialed_request(Vec::new());
+        request.timeout_secs = None;
+
+        port.run_credentialed_command(request, Vec::new())
+            .await
+            .unwrap();
+
+        let requests = transport.credentialed_requests.lock();
+        assert_eq!(requests[0].0.timeout_secs, Some(120));
+    }
     #[tokio::test]
     async fn staged_port_rejects_invalid_bindings_without_consuming_staged_material() {
         use ironclaw_secrets::SecretMaterial;

@@ -624,13 +624,14 @@ sources resolve through product auth before runtime egress and stage material
 under the runtime slot handle, so the sandbox never sees account ids or backend
 secret handles.
 
-`builtin.shell` input can select active extensions through the bounded
+`builtin.shell` input can select at most eight active extensions through the
 `credential_contexts` array. The values are extension ids, not secret handles,
 provider names, environment-variable names, or executable names. Before approval
 or credential staging, authorization copies the selected extensions' complete
 manifest-declared runtime credential requirements into the invocation descriptor.
-Unknown, inactive, duplicate, conflicting, or non-sandbox contexts fail closed.
-An ordinary shell invocation with no contexts receives no credential authority.
+Unknown, inactive, duplicate, over-limit, conflicting, non-privileged, or
+non-sandbox contexts fail closed. An ordinary shell invocation with no contexts
+receives no credential authority.
 
 The authorized descriptor requirements are copied into the first-party process
 request without secret material. The host process port atomically consumes the

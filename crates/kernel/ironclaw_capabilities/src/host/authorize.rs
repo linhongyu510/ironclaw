@@ -35,7 +35,7 @@ use crate::helpers::{
     validate_approval_request_matches_invocation,
 };
 use crate::ports::{CredentialPresence, PolicyAction};
-use crate::trust::evaluate_invocation_trust;
+use crate::trust::{evaluate_invocation_trust, evaluate_package_trust};
 use crate::{CapabilityInvocationError, CapabilityObligationOutcome, CapabilityObligationPhase};
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -116,6 +116,17 @@ where
                     )),
                 });
             };
+            let package_trust = evaluate_package_trust(self.registry, self.trust_policy, &context)
+                .map_err(|error| trust_error_to_invocation_error(capability_id, error))?;
+            if !package_trust.effective_trust.is_privileged() {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` is not trusted for host execution"
+                    )),
+                });
+            }
             let mut context_selected = 0usize;
             for declared in package
                 .capabilities
@@ -351,7 +362,7 @@ where
         // enforcing backstop and a fault must not burn a user auth interaction.
         match self
             .policy_facts
-            .credential_presence(&request.capability_id, &scope)
+            .credential_presence(&descriptor, &scope)
             .await
         {
             CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
@@ -447,7 +458,7 @@ where
                     &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
-                );
+                )?;
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
                     frozen_deadline: None,
@@ -656,7 +667,7 @@ where
         descriptor: &CapabilityDescriptor,
         obligation_outcome: &CapabilityObligationOutcome,
         frozen_deadline: Option<Timestamp>,
-    ) -> Option<AuthorizeResult> {
+    ) -> Result<Option<AuthorizeResult>, CapabilityInvocationError> {
         // Actor is sealed at the membrane; NO fallback to `user_id`. An
         // actor-less (system service / one-shot) context seals `Actor::System`
         // as its own class.
@@ -666,12 +677,16 @@ where
         };
         // Lane resolved from the descriptor's runtime kind; `System` runtimes
         // have no untrusted execution lane (`None`) and are not sealed here.
-        let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
+        let Some(lane) = RuntimeLane::from_runtime_kind(descriptor.runtime) else {
+            return Ok(None);
+        };
         let scope = &context.resource_scope;
         // Origin is the ingress-stamped authority fact (§5.2.1). The loop path
         // also carries `run_id`, so a context that stamped only `run_id` still
         // reconstructs `LoopRun` for transitional compatibility.
-        let origin = context.resolved_origin()?;
+        let Some(origin) = context.resolved_origin() else {
+            return Ok(None);
+        };
         let invocation = Invocation {
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
@@ -698,7 +713,7 @@ where
         // candidates into `frozen_deadline`), or a bounded default TTL. See
         // [`witness_deadline`].
         let deadline = witness_deadline([frozen_deadline]);
-        Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
+        Authorized::seal(
             self.authorization_grant(),
             invocation,
             descriptor.clone(),
@@ -706,7 +721,13 @@ where
             mounts,
             reservation,
             deadline,
-        ))))
+        )
+        .map(|authorized| Some(AuthorizeResult::Authorized(Box::new(authorized))))
+        .map_err(|error| CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::PolicyDenied,
+            detail: Some(error.to_string()),
+        })
     }
 }
 

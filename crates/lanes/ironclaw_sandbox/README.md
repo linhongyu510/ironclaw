@@ -27,9 +27,9 @@ the point of the crate.
   credentialed-run phases stay separate.
 - Execution machinery: `RebornScopedSandboxCommandTransport` (implements the
   `ironclaw_host_api::process::SandboxCommandTransport` port — contracts
-  vocabulary this lane implements and the kernel consumes), direct executable
-  plus argument-vector dispatch, invocation cancellation, `RebornSandboxConfig`,
-  and the broker/firewall/CA/identity types (`sandbox_process`).
+  vocabulary this lane implements and the kernel consumes), bounded shell
+  command dispatch, invocation cancellation, `RebornSandboxConfig`, and the
+  broker/firewall/CA/identity types (`sandbox_process`).
 - Script lane: `ScriptRuntime`, `ScriptExecutor`/`ScriptBackend`,
   `DockerScriptBackend`, `ScriptRuntimeHttpAdapter`, normalized
   request/result/error types (`script`).

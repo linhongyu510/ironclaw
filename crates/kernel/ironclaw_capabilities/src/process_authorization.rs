@@ -175,6 +175,11 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
             mounts,
             resource_reservation,
         } = continuation;
+        let descriptor = descriptor.ok_or_else(|| {
+            ProcessAuthorizationRemintError::MissingProcessAuthorization {
+                capability: request.capability_id.clone(),
+            }
+        })?;
         let invocation = Invocation {
             activity_id: invocation.activity_id,
             capability: invocation.capability,
@@ -188,24 +193,17 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
             parent_process_id: invocation.parent_process_id,
         };
         let grant = self.authorization_grant();
-        Ok(match descriptor {
-            Some(descriptor) => Authorized::seal(
-                grant,
-                invocation,
-                descriptor,
-                lane,
-                mounts,
-                resource_reservation,
-                Timestamp::MAX_UTC,
-            ),
-            None => Authorized::seal_legacy_process_continuation(
-                grant,
-                invocation,
-                lane,
-                mounts,
-                resource_reservation,
-                Timestamp::MAX_UTC,
-            ),
+        Authorized::seal(
+            grant,
+            invocation,
+            descriptor,
+            lane,
+            mounts,
+            resource_reservation,
+            Timestamp::MAX_UTC,
+        )
+        .map_err(|_| ProcessAuthorizationRemintError::RecordMismatch {
+            field: "continuation.descriptor.capability",
         })
     }
 }

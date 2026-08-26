@@ -491,15 +491,15 @@ impl From<CommandExecutionRequest> for SandboxExecutionRequest {
 
 impl From<CredentialedSandboxCommandRequest> for SandboxExecutionRequest {
     fn from(request: CredentialedSandboxCommandRequest) -> Self {
-        Self {
+        CommandExecutionRequest {
             scope: request.scope,
             mounts: request.mounts,
-            executable: "sh".to_string(),
-            args: vec!["-c".to_string(), request.command],
+            command: request.command,
             workdir: request.workdir,
             timeout_secs: request.timeout_secs,
             extra_env: request.extra_env,
         }
+        .into()
     }
 }
 
@@ -1451,6 +1451,40 @@ mod tests {
                         (*key).to_string(),
                         "caller-controlled".to_string(),
                     )]))
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_bundle_rejects_reserved_broker_environment_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = ManagedEgressRuntime::test_runtime(
+            NetworkPolicy {
+                allowed_targets: vec![NetworkTargetPattern {
+                    scheme: None,
+                    host_pattern: "example.com".to_string(),
+                    port: None,
+                }],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: None,
+            },
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        let bundle = ManagedEgressBundle::test_bundle(directory.path());
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
+
+        for key in broker::RESERVED_BROKER_ENV_KEYS {
+            assert!(
+                config
+                    .command_env_for_bundle(
+                        HashMap::from([((*key).to_string(), "caller-controlled".to_string(),)]),
+                        &[],
+                        Some(&managed),
+                        Some(&bundle),
+                    )
                     .is_err(),
                 "{key}"
             );

@@ -43,11 +43,11 @@ that fold across boundaries without adding isolation.
 - Capability surface policy (`src/surface.rs`), hot catalog
   (`src/capability_catalog.rs`), first-party registry + builtin tool host
   halves (`src/first_party*`), and the process boundary
-  (`src/process_port.rs`). A manifest maps an already-authorized
-  `RuntimeCredentialRequirement` to a direct executable and placeholder
-  environment variable. `StagedCredentialProcessPort` consumes that exact
-  one-shot handle and emits provider-neutral sandbox bindings. The sandbox lane
-  owns proxy substitution.
+  (`src/process_port.rs`). A manifest may expose an already-authorized
+  `RuntimeCredentialRequirement` to managed shell execution through a
+  placeholder environment variable. `StagedCredentialProcessPort` consumes
+  that exact one-shot handle and emits provider-neutral sandbox bindings. The
+  sandbox lane owns shell execution and proxy substitution.
   Memory-context builders and extension-contract *discovery* also live here
   (the `RootFilesystem` binding; default catalogs live with their vocabulary
   owners — see `AGENTS.md`).
@@ -96,13 +96,13 @@ that fold across boundaries without adding isolation.
   and percent-decoded URLs are scanned, leased values are redacted from
   runtime-visible errors/responses, sensitive response headers stripped.
 - Credentialed process execution does not search for secrets. The manifest
-  declares the direct executable and placeholder environment variable on each
-  exact header-target requirement. Authorization selects and stages matching
-  requirements. `StagedCredentialProcessPort` validates the executable,
-  placeholder, and exact HTTPS header targets, atomically consumes all requested
-  handles, and passes raw material only to `SandboxCommandTransport`. The sandbox
-  proxy loads one invocation-scoped credential bundle and substitutes each value
-  only for its approved destination. No host layer branches on a provider.
+  declares a placeholder environment variable on each exact header-target
+  requirement. Authorization selects and stages matching requirements.
+  `StagedCredentialProcessPort` validates the placeholder and exact HTTPS
+  header targets, atomically consumes all requested handles, and passes raw
+  material only to `SandboxCommandTransport`. The sandbox proxy loads one
+  invocation-scoped credential bundle and substitutes each value only for its
+  approved destination. No host layer branches on a provider.
 - No verified tenant sandbox ⇒ the process/shell capability is hidden by the
   visibility filter (`src/surface.rs`) and refused by the planner
   (`ironclaw_runtime_policy`, `ProcessBackendKind::None`) — never silently

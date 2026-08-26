@@ -418,7 +418,9 @@ impl<'a> CapabilityCatalog<'a> {
                  credential contexts for this runtime: {active_contexts}."
             )
         });
-        if !context_ids.is_empty() {
+        if context_ids.is_empty() {
+            context_schema["maxItems"] = json!(0);
+        } else {
             context_schema["items"]["enum"] = json!(context_ids);
         }
 
@@ -1071,6 +1073,26 @@ required = true
     }
 
     #[tokio::test]
+    async fn managed_shell_with_no_active_contexts_accepts_only_empty_selection() {
+        let registry = ExtensionRegistry::new();
+        let mut runtime_policy = test_runtime_policy();
+        runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let resolved = catalog
+            .surface_descriptor(&shell_descriptor())
+            .await
+            .expect("managed shell schema resolves");
+        let contexts = &resolved.parameters_schema["properties"]["credential_contexts"];
+
+        assert_eq!(contexts["maxItems"], json!(0));
+        assert!(contexts["items"].get("enum").is_none());
+    }
+
+    #[tokio::test]
     async fn local_shell_schema_omits_managed_credential_contexts() {
         let mut registry = ExtensionRegistry::new();
         registry
@@ -1088,7 +1110,9 @@ required = true
             .expect("local shell schema resolves");
 
         assert!(
-            resolved.parameters_schema["properties"]["credential_contexts"].is_null(),
+            resolved.parameters_schema["properties"]
+                .get("credential_contexts")
+                .is_none(),
             "local shells use the host's existing CLI configuration"
         );
         assert_eq!(resolved.parameters_schema["required"], json!(["command"]));

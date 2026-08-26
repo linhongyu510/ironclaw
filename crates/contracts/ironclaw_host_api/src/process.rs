@@ -181,8 +181,8 @@ pub fn shell_credential_contexts(
         let raw = value
             .as_str()
             .ok_or(ShellCredentialContextError::InvalidExtensionId)?;
-        let context =
-            ExtensionId::new(raw).map_err(|_| ShellCredentialContextError::InvalidExtensionId)?;
+        let context = ExtensionId::new(raw)
+            .map_err(|source| ShellCredentialContextError::MalformedExtensionId { source })?;
         if !unique.insert(context.clone()) {
             return Err(ShellCredentialContextError::Duplicate {
                 context: context.to_string(),
@@ -193,12 +193,37 @@ pub fn shell_credential_contexts(
     Ok(contexts)
 }
 
+pub fn is_valid_sandbox_credential_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|ch: char| ch.is_ascii_digit())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        && !matches!(
+            name,
+            "BASH_ENV"
+                | "CDPATH"
+                | "ENV"
+                | "IFS"
+                | "LD_AUDIT"
+                | "LD_LIBRARY_PATH"
+                | "LD_PRELOAD"
+                | "PATH"
+                | "SHELLOPTS"
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ShellCredentialContextError {
     #[error("credential_contexts must be an array of active extension IDs")]
     NotArray,
     #[error("credential_contexts entries must be valid extension IDs")]
     InvalidExtensionId,
+    #[error("credential_contexts entries must be valid extension IDs")]
+    MalformedExtensionId {
+        #[source]
+        source: crate::error::HostApiError,
+    },
     #[error("credential_contexts may contain at most {maximum} entries")]
     TooMany { maximum: usize },
     #[error("credential context `{context}` is duplicated")]
@@ -294,6 +319,30 @@ mod tests {
             })),
             Err(ShellCredentialContextError::TooMany { .. })
         ));
+    }
+
+    #[test]
+    fn sandbox_credential_environment_names_share_the_fail_closed_contract() {
+        for valid in ["GH_TOKEN", "ATLAS_API_KEY", "_PRIVATE"] {
+            assert!(is_valid_sandbox_credential_env_name(valid), "{valid}");
+        }
+        for invalid in ["", "lowercase", "9TOKEN", "BASH_ENV", "LD_PRELOAD", "PATH"] {
+            assert!(!is_valid_sandbox_credential_env_name(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn malformed_shell_context_keeps_its_id_validation_source() {
+        let error = shell_credential_contexts(&serde_json::json!({
+            "credential_contexts": ["Bad Context"]
+        }))
+        .expect_err("malformed extension id must fail");
+
+        assert!(matches!(
+            error,
+            ShellCredentialContextError::MalformedExtensionId { .. }
+        ));
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]

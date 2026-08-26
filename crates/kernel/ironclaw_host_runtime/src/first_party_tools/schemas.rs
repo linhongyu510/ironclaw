@@ -1225,7 +1225,10 @@ mod tests {
         let schema = resolve_builtin_input_schema_ref("schemas/builtin/shell.input.v1.json")
             .expect("shell schema is registered");
 
-        assert!(schema["properties"]["credential_contexts"].is_null());
+        assert!(
+            schema["properties"].get("credential_contexts").is_none(),
+            "base shell schema must omit managed credential contexts"
+        );
         assert_eq!(schema["required"], serde_json::json!(["command"]));
         assert!(
             schema["properties"]["command"]["description"]
