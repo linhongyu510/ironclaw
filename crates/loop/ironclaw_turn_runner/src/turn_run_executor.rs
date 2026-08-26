@@ -16,9 +16,10 @@ use ironclaw_loop_contracts::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest,
     AgentLoopHostError, LoopBlocked, LoopBlockedKind, LoopExit, LoopModelUsage,
 };
+use ironclaw_loop_host::AwaitEdgeSettler;
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
-use ironclaw_turns::{TurnError, TurnStatus, runner::ClaimedTurnRun};
+use ironclaw_turns::{ActivationProvenance, TurnError, TurnStatus, runner::ClaimedTurnRun};
 use tracing::{debug, error, warn};
 
 /// The loop-facing routing-ref prefix an auth gate carries
@@ -31,6 +32,7 @@ const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 use ironclaw_turns::loop_exit::LoopExitApplier;
 
 use crate::{
+    after_turn_hooks::after_turn_hook_context,
     after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
@@ -44,6 +46,20 @@ use crate::{
 /// skipped (the run is already `Completed`). Generous because a network-backed
 /// provider performs a thread-history read plus a write.
 const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Outer bound on the whole `after_turn` hook dispatch. The dispatcher owns the
+/// real budget: it bounds each hook individually and classifies a hook that
+/// overruns as a timeout failure, poisoning that binding. This is only a
+/// backstop against a dispatcher-level surprise, so the scheduler worker stays
+/// bounded no matter what.
+///
+/// It must therefore be STRICTLY LARGER than (the dispatcher's per-hook
+/// timeout x a plausible hook count), never equal to it: an outer cancel that
+/// lands at the same instant as the inner one takes the whole dispatch away
+/// mid-classification, so the slow hook is neither recorded nor poisoned and
+/// repeats its full budget on every later run. At the recorder's scale (30s)
+/// against a 5s per-hook bound, the dispatcher gets to finish and classify.
+const AFTER_TURN_HOOK_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn trace_executor_latency_ok(
     operation: &'static str,
@@ -112,6 +128,9 @@ enum DriverInvocationError {
         reason: String,
     },
     HostFinalizationFailed {
+        // Boxed: `AgentLoopHostError` is the enum's ≥128-byte outlier (clippy
+        // `result_large_err`); the `DriverError` variant stays unboxed
+        // because five match sites destructure its payload by pattern.
         error: Box<AgentLoopHostError>,
         cumulative_usage: Option<LoopModelUsage>,
     },
@@ -166,6 +185,24 @@ pub struct RebornTurnRunExecutor {
     /// `DefaultPlannedRuntimeParts`).
     // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
+    /// Builds the dispatcher fired at the `after_turn` lifecycle point — a
+    /// FACTORY, not a dispatcher, because the executor outlives every run.
+    /// Hook poison isolation is run-scoped by contract
+    /// (`crates/loop/ironclaw_hooks/AGENTS.md`, "poisoned for the rest of the
+    /// current turn run"): a panicking or timing-out hook must be barred for
+    /// the run it misbehaved in and tried again on the next one. Holding one
+    /// process-lifetime dispatcher here would instead bar it until the process
+    /// restarts, silently. Optional for the same reason as the recorder above:
+    /// only compositions that register lifecycle hooks attach one, and a run
+    /// finishes cleanly without it.
+    // arch-exempt: optional_arc, lifecycle hooks are opt-in per composition, plan #7770
+    after_turn_hook_dispatchers: Option<crate::loop_driver_host::HookDispatcherFactory>,
+    /// Run-start sweep target (§4.2): heals background await-edges left
+    /// mid-delivery on the claimed run's thread before `invoke_driver` runs.
+    /// Required — every production composition wires the same resolver it
+    /// registers as the process-commit observer (`runtime.rs`); tests wire a
+    /// no-op fake.
+    await_edge_settler: Arc<dyn AwaitEdgeSettler>,
 }
 
 impl RebornTurnRunExecutor {
@@ -174,6 +211,7 @@ impl RebornTurnRunExecutor {
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
         gate_record_store: Option<Arc<dyn GateRecordStorePort>>,
+        await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     ) -> Self {
         Self {
             loop_exit_applier,
@@ -181,6 +219,8 @@ impl RebornTurnRunExecutor {
             host_factory,
             gate_record_store,
             after_turn_memory_recorder: None,
+            after_turn_hook_dispatchers: None,
+            await_edge_settler,
         }
     }
 
@@ -194,6 +234,18 @@ impl RebornTurnRunExecutor {
         self.after_turn_memory_recorder = Some(recorder);
         self
     }
+
+    /// Attach the factory that mints one `after_turn` dispatcher per terminal
+    /// run. Wired by compositions that register lifecycle hooks; absent
+    /// everywhere else, and a run finishes cleanly without it. A factory
+    /// rather than a dispatcher so poison stays run-scoped — see the field.
+    pub fn with_after_turn_hook_dispatcher_factory(
+        mut self,
+        dispatchers: crate::loop_driver_host::HookDispatcherFactory,
+    ) -> Self {
+        self.after_turn_hook_dispatchers = Some(dispatchers);
+        self
+    }
 }
 
 #[async_trait]
@@ -204,6 +256,29 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
         _process_transitions: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     ) -> Result<(), TurnRunExecutorError> {
         let started_at = live_latency_started_at();
+        // Run-start sweep (§4.2), before the driver runs: heal any background
+        // await-edges left mid-delivery on this thread. `human_initiated`
+        // mirrors the streak-cap admission rule (`activation_streak.rs`) —
+        // absent or `Human` provenance is a permitted start; `System` (a
+        // background wake) or `ParentAgent` is not, so a streak-capped edge
+        // stays parked. A sweep failure must not fail the run start — it is
+        // logged and the driver still runs, matching the sweep's own
+        // per-edge non-fatal contract.
+        let human_initiated = !matches!(
+            claimed.subagent_activation_provenance,
+            Some(ActivationProvenance::System | ActivationProvenance::ParentAgent)
+        );
+        if let Err(error) = self
+            .await_edge_settler
+            .sweep_thread_on_run_start(&claimed.state.scope, human_initiated)
+            .await
+        {
+            debug!(
+                run_id = %claimed.state.run_id,
+                error = %error,
+                "background await-edge run-start sweep failed; continuing without it"
+            );
+        }
         match self.invoke_driver(&claimed).await {
             Ok(DriverInvocationSuccess {
                 exit,
@@ -531,6 +606,35 @@ impl RebornTurnRunExecutor {
                         debug!(
                             run_id = ?run_id,
                             "after-turn memory recording timed out; skipping (run already complete)"
+                        );
+                    }
+                }
+                // `after_turn` lifecycle hooks (#7276). Same post-terminal,
+                // bounded, best-effort discipline as the recorder above: the run
+                // is already terminal, so a slow or failing hook must never fail
+                // it or hold the scheduler worker. The context derivation decides
+                // whether this run may fire the point at all (never an unbound
+                // run — otherwise hook-started background work would schedule its
+                // own successor forever).
+                if let Some(dispatchers) = self.after_turn_hook_dispatchers.as_ref()
+                    && let Some(ctx) = after_turn_hook_context(&state)
+                {
+                    // One FRESH dispatcher for this run. Poison from a hook that
+                    // panicked or overran its budget is scoped to the run it
+                    // happened in; the next run gets a clean registry and tries
+                    // the hook again.
+                    let dispatcher = dispatchers();
+                    if tokio::time::timeout(
+                        AFTER_TURN_HOOK_DISPATCH_TIMEOUT,
+                        dispatcher.dispatch_after_turn(ctx),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        // silent-ok: lifecycle hooks are best-effort post-completion.
+                        debug!(
+                            run_id = ?run_id,
+                            "after-turn hook dispatch timed out; skipping (run already terminal)"
                         );
                     }
                 }
