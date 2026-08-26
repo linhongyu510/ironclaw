@@ -166,6 +166,7 @@ fn github_issue_tools_with_credential_result(
         root,
         workspace_root,
         mounts,
+        workspace_scoped_per_caller: false,
         capability_mount_overrides: Vec::new(),
         capability_ids: github_support::capability_ids()?,
         runtime_kind: RuntimeKind::Wasm,

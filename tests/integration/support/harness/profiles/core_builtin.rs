@@ -386,6 +386,7 @@ fn core_builtin_tools_from_runtime(
         root,
         workspace_root,
         mounts,
+        workspace_scoped_per_caller: false,
         capability_mount_overrides: memory_capability_ids
             .iter()
             .cloned()

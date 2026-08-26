@@ -896,25 +896,31 @@ fn build_sandboxed_local_runtime_services_input(
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let process_binding = match profile {
+    let (process_binding, workspace_root) = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
             let workspace_root =
                 local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-            block_on_cli(
-                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+            let process_binding = block_on_cli(
+                ironclaw_composition::build_local_docker_user_sandbox_binding(
+                    workspace_root.clone(),
+                ),
             )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
                 profile,
                 reason: error.to_string(),
-            })?
+            })?;
+            (process_binding, Some(workspace_root))
         }
         RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            railway_preview_process_binding_from_env()?
+            (railway_preview_process_binding_from_env()?, None)
         }
         _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
     };
-    let services_input =
+    let mut services_input =
         build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+    if let Some(workspace_root) = workspace_root {
+        services_input = services_input.with_local_runtime_workspace_root(workspace_root);
+    }
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 

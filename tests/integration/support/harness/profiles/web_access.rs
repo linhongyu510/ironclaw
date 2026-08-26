@@ -61,6 +61,7 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         root,
         workspace_root,
         mounts,
+        workspace_scoped_per_caller: false,
         capability_mount_overrides: Vec::new(),
         capability_ids: web_access_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,

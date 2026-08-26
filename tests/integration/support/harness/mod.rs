@@ -297,6 +297,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
     mounts: MountView,
+    workspace_scoped_per_caller: bool,
     capability_mount_overrides: Vec<(CapabilityId, MountView)>,
     capability_ids: Vec<CapabilityId>,
     runtime_kind: RuntimeKind,
@@ -806,7 +807,11 @@ impl HostRuntimeCapabilityHarness {
             tempfile::tempdir()?
         });
         let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
+        let workspace_root = if sandboxed_shell {
+            storage_root.join("sandbox-workspaces")
+        } else {
+            storage_root.join("workspace")
+        };
         std::fs::create_dir_all(&workspace_root)?;
         for fixture in &system_skill_fixtures {
             write_system_skill_fixture(
@@ -859,7 +864,7 @@ impl HostRuntimeCapabilityHarness {
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
-                storage_root.join("sandbox-workspaces"),
+                workspace_root.clone(),
             )
             .await?;
             sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();
@@ -868,6 +873,7 @@ impl HostRuntimeCapabilityHarness {
                 service_label,
                 storage_root,
             )
+            .with_local_runtime_workspace_root(workspace_root.clone())
             .with_runtime_process_binding(user_sandbox)
         } else {
             ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
@@ -1076,6 +1082,7 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
+            workspace_scoped_per_caller,
             capability_mount_overrides: Vec::new(),
             capability_ids,
             runtime_kind: RuntimeKind::FirstParty,
@@ -1860,6 +1867,33 @@ impl HostRuntimeCapabilityHarness {
         // resolved user) is captured once for the lifetime of the returned
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
+        let workspace_mounts = if self.workspace_scoped_per_caller {
+            let permissions = self
+                .mounts
+                .mounts
+                .iter()
+                .find(|mount| mount.alias.as_str() == "/workspace")
+                .map(|mount| mount.permissions.clone())
+                .ok_or_else(|| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "per-caller workspace harness requires a /workspace mount",
+                    )
+                })?;
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/workspace").map_err(host_runtime_harness_error)?,
+                VirtualPath::new(format!(
+                    "/projects/workspace/tenants/{}/users/{}",
+                    run_context.scope.tenant_id.as_str(),
+                    dispatch_user.as_str()
+                ))
+                .map_err(host_runtime_harness_error)?,
+                permissions,
+            )])
+            .map_err(host_runtime_harness_error)?
+        } else {
+            self.mounts.clone()
+        };
         // ONE shared io, both roles: production assigns a single
         // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
@@ -2038,7 +2072,7 @@ impl HostRuntimeCapabilityHarness {
                     .iter()
                     .find(|(override_capability, _mounts)| override_capability == capability)
                     .map(|(_capability, mounts)| mounts.clone())
-                    .unwrap_or_else(|| self.mounts.clone());
+                    .unwrap_or_else(|| workspace_mounts.clone());
                 CapabilityGrant {
                     id: CapabilityGrantId::new(),
                     capability: capability.clone(),
@@ -2071,7 +2105,7 @@ impl HostRuntimeCapabilityHarness {
             // memory/skill capability families down to an empty view via
             // `build_inner`'s per-domain `with_capability_execution_mount`
             // special-cases, silently blinding `builtin.memory_*`.
-            workspace_mounts: self.mounts.clone(),
+            workspace_mounts,
             skill_mounts: self.mounts.clone(),
             memory_mounts: self.mounts.clone(),
             system_extensions_lifecycle_mounts: self.mounts.clone(),

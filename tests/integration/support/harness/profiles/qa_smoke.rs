@@ -110,6 +110,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         root,
         workspace_root,
         mounts,
+        workspace_scoped_per_caller: false,
         capability_mount_overrides: memory_capability_ids
             .iter()
             .cloned()

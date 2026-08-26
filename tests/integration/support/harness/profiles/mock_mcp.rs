@@ -73,6 +73,7 @@ pub(crate) async fn mock_mcp_tools(
         root,
         workspace_root,
         mounts,
+        workspace_scoped_per_caller: false,
         capability_mount_overrides: Vec::new(),
         capability_ids: vec![CapabilityId::new(capability_id)?],
         runtime_kind: RuntimeKind::Mcp,
