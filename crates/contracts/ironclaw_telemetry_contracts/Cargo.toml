@@ -14,7 +14,9 @@ publish = false
 layer = "contracts"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+thiserror = "2"
 
 [lints]
 workspace = true

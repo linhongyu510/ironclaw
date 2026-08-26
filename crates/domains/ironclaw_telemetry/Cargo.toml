@@ -14,11 +14,16 @@ publish = false
 layer = "substrates"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
 ironclaw_libsql_runtime = { path = "../../substrates/ironclaw_libsql_runtime", version = "0.1.0" }
 ironclaw_telemetry_contracts = { path = "../../contracts/ironclaw_telemetry_contracts", version = "0.1.0" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+thiserror = "2"
 tokio-postgres = "0.7"
+
+[dev-dependencies]
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 
 [lints]
 workspace = true

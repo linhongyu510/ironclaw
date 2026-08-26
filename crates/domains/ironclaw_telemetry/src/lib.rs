@@ -1,5 +1,13 @@
 //! Tenant-scoped BI telemetry domain boundary.
-//!
-//! This shell establishes crate placement and the ADR-governed persistence
-//! dependency cone. Observation, aggregation, repository, and worker behavior
-//! are introduced by later slices.
+
+pub mod aggregate;
+pub mod records;
+
+pub use aggregate::{
+    AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,
+    floor_utc_year,
+};
+pub use records::{
+    CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
+    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch,
+};

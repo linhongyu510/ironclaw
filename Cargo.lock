@@ -5231,10 +5231,13 @@ dependencies = [
 name = "ironclaw_telemetry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "deadpool-postgres",
+ "ironclaw_host_api",
  "ironclaw_libsql_runtime",
  "ironclaw_telemetry_contracts",
  "libsql",
+ "thiserror 2.0.20",
  "tokio-postgres",
 ]
 
@@ -5242,7 +5245,9 @@ dependencies = [
 name = "ironclaw_telemetry_contracts"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ironclaw_host_api",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
