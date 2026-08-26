@@ -5228,6 +5228,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_telemetry"
+version = "0.1.0"
+dependencies = [
+ "deadpool-postgres",
+ "ironclaw_libsql_runtime",
+ "ironclaw_telemetry_contracts",
+ "libsql",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "ironclaw_telemetry_contracts"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_host_api",
+]
+
+[[package]]
 name = "ironclaw_threads"
 version = "0.1.0"
 dependencies = [

@@ -45,6 +45,8 @@ const DRIVER_LINKED_CRATES: &[&str] = &[
     "ironclaw_host_runtime",
     // ADR 0003 (`docs/internal/adr/0003-triggers-keeps-hand-written-sql.md`).
     "ironclaw_triggers",
+    // ADR 0005 (`docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md`).
+    "ironclaw_telemetry",
     // Owns the TLS/driver cone for durable event/audit logs (§6.3.2).
     "ironclaw_event_store",
     // The assembly root: opens each database once and wires the shared runtime
@@ -87,6 +89,10 @@ const ADDITIONAL_DRIVER_ALLOWLISTS: &[(&str, &[&str])] = &[
             // wording.
             "ironclaw_hooks",
             "ironclaw_triggers",
+            // ADR 0005, as above — telemetry's private adapters use the
+            // existing libSQL admission lane and an already-open Postgres
+            // pool; they do not create a second connection plane.
+            "ironclaw_telemetry",
             // Measured residue the clause names explicitly as "today also
             // includes". Each is a standing §11.2.6 target, not a charter.
             "ironclaw_host_runtime",
@@ -110,6 +116,7 @@ const ADDITIONAL_DRIVER_ALLOWLISTS: &[(&str, &[&str])] = &[
             "ironclaw_hooks",
             "ironclaw_triggers",
             "ironclaw_stress",
+            "ironclaw_telemetry",
         ],
     ),
 ];

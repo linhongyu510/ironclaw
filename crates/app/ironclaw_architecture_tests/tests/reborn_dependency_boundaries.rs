@@ -543,6 +543,40 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // PROPOSAL §11.2.3 contracts purity — the telemetry producer membrane.
+    // It carries only provider-neutral observation vocabulary and the
+    // synchronous recorder port; typed tenant/user identity comes from the
+    // foundational host API contracts crate. It must not absorb the durable
+    // telemetry domain or any storage/driver mechanism.
+    let telemetry_contracts_allowed = ["ironclaw_telemetry_contracts", "ironclaw_host_api"];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_telemetry_contracts",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !telemetry_contracts_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
+    // ADR 0005's durable exception is deliberately narrow: the domain owns
+    // records and private SQL adapters, but receives database admission from
+    // the existing libSQL runtime and exposes no upward/product dependency.
+    // External driver deps are pinned separately by
+    // `reborn_persistence_driver_boundary.rs`.
+    let telemetry_allowed = [
+        "ironclaw_telemetry",
+        "ironclaw_telemetry_contracts",
+        "ironclaw_libsql_runtime",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_telemetry",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !telemetry_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     // Carrier purity — `ironclaw_host_ingress` (WS2 re-layer, #7092).
     //
     // This crate exists for one reason: to keep `axum` out of the contracts
@@ -1076,6 +1110,9 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
         ("ironclaw_prompt_envelope", 432),
+        // 0 -> 5 (2026-08-26, WS6 tenant BI telemetry foundation): documented
+        // contract shell only; observation behavior remains a later slice.
+        ("ironclaw_telemetry_contracts", 5),
     ];
 
     let root = workspace_root();
@@ -4612,6 +4649,45 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_turns",
                 "ironclaw_wasm",
                 "ironclaw_webui",
+            ],
+        },
+        BoundaryRule {
+            // Telemetry producer vocabulary is a contracts-layer membrane. Its
+            // only workspace dependency is the foundational host API identity
+            // vocabulary; durable records, SQL, and worker behavior belong to
+            // the domain crate below.
+            crate_name: "ironclaw_telemetry_contracts",
+            forbidden: vec![
+                "ironclaw_telemetry",
+                "ironclaw_filesystem",
+                "ironclaw_libsql_runtime",
+                "ironclaw_event_store",
+                "ironclaw_triggers",
+                "ironclaw_composition",
+                "ironclaw_assistant",
+                "ironclaw_webui",
+            ],
+        },
+        BoundaryRule {
+            // The telemetry domain is an ADR-governed persistence exception,
+            // not a new authority or product layer. It may use its neutral
+            // contract and the admitted libSQL runtime, but never reaches
+            // upward or imports another domain's workflow.
+            crate_name: "ironclaw_telemetry",
+            forbidden: vec![
+                "ironclaw_assistant",
+                "ironclaw_composition",
+                "ironclaw_config",
+                "ironclaw_webui",
+                "ironclaw_turns",
+                "ironclaw_capabilities",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_filesystem",
+                "ironclaw_threads",
+                "ironclaw_triggers",
+                "ironclaw_event_store",
+                "ironclaw_extension_manager",
             ],
         },
         BoundaryRule {
