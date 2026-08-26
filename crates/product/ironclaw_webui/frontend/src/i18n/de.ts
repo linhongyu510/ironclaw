@@ -1666,7 +1666,7 @@ registerPack("de", {
   "deviceLink.revokeHint": "IronClaw erscheint jetzt als Gerät in {name}. Wenn du dort ein unbekanntes Gerät siehst, widerrufe es.",
   "deviceLink.startAgain": "Neu starten",
   "deviceLink.cannotRetry": "Dieses {name}-Konto kann nicht verknüpft werden.",
-  "deviceLink.setupIncomplete": "Das Verkn\u00fcpfen eines {name}-Kontos ist auf dieser Instanz noch nicht eingerichtet. Ein Administrator muss dies unter Admin \u2192 Konfiguration abschlie\u00dfen.",
+  "deviceLink.setupIncomplete": "Das Verknüpfen eines {name}-Kontos ist auf dieser Instanz noch nicht eingerichtet. Ein Administrator muss dies unter Admin → Konfiguration abschließen.",
   "deviceLink.error.expired": "Der Code ist abgelaufen, bevor er verwendet wurde.",
   "deviceLink.error.unknown_flow": "Diese Verknüpfung ist nicht mehr offen.",
   "deviceLink.error.declined": "Das Gerät wurde abgelehnt.",
@@ -1676,6 +1676,6 @@ registerPack("de", {
   "deviceLink.error.identity_conflict": "Dieses Konto ist bereits verknüpft. Trennen Sie es von dem verbundenen IronClaw-Konto und versuchen Sie es erneut.",
   "deviceLink.error.vendor_unavailable": "Der Dienst ist vorübergehend nicht verfügbar.",
   "deviceLink.error.custody_failed": "Die Verknüpfung konnte nicht sicher gespeichert werden.",
-  "deviceLink.error.not_configured": "Auf dieser Instanz fehlen die Einstellungen, die diese Verbindung ben\u00f6tigt.",
+  "deviceLink.error.not_configured": "Auf dieser Instanz fehlen die Einstellungen, die diese Verbindung benötigt.",
   "deviceLink.error.internal": "Beim Verknüpfen ist etwas schiefgelaufen."
 });

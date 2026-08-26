@@ -1666,7 +1666,7 @@ registerPack("ar", {
   "deviceLink.revokeHint": "يظهر IronClaw الآن كجهاز في {name}. إذا رأيت جهازًا لا تعرفه، فقم بإلغائه من هناك.",
   "deviceLink.startAgain": "ابدأ من جديد",
   "deviceLink.cannotRetry": "لا يمكن ربط حساب {name} هذا.",
-  "deviceLink.setupIncomplete": "\u0631\u0628\u0637 \u062d\u0633\u0627\u0628 {name} \u063a\u064a\u0631 \u0645\u064f\u0639\u062f\u0651 \u0628\u0639\u062f \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u0646\u0638\u0627\u0645. \u064a\u062c\u0628 \u0639\u0644\u0649 \u0627\u0644\u0645\u0633\u0624\u0648\u0644 \u0625\u0643\u0645\u0627\u0644\u0647 \u0645\u0646 Admin \u2192 Configuration.",
+  "deviceLink.setupIncomplete": "ربط حساب {name} غير مُعدّ بعد على هذا النظام. يجب على المسؤول إكماله من الإدارة → الإعدادات.",
   "deviceLink.error.expired": "انتهت صلاحية الرمز قبل استخدامه.",
   "deviceLink.error.unknown_flow": "لم يعد هذا الربط مفتوحًا.",
   "deviceLink.error.declined": "تم رفض الجهاز.",
@@ -1676,6 +1676,6 @@ registerPack("ar", {
   "deviceLink.error.identity_conflict": "هذا الحساب مرتبط بالفعل. ألغِ ربطه من حساب IronClaw المتصل به، ثم حاول مرة أخرى.",
   "deviceLink.error.vendor_unavailable": "الخدمة غير متاحة مؤقتًا.",
   "deviceLink.error.custody_failed": "تعذّر حفظ الربط بأمان.",
-  "deviceLink.error.not_configured": "\u062a\u0641\u062a\u0642\u0631 \u0647\u0630\u0647 \u0627\u0644\u0646\u0633\u062e\u0629 \u0625\u0644\u0649 \u0627\u0644\u0625\u0639\u062f\u0627\u062f\u0627\u062a \u0627\u0644\u062a\u064a \u064a\u062d\u062a\u0627\u062c\u0647\u0627 \u0647\u0630\u0627 \u0627\u0644\u0627\u062a\u0635\u0627\u0644.",
+  "deviceLink.error.not_configured": "يفتقر هذا النظام إلى الإعدادات اللازمة لهذا الاتصال.",
   "deviceLink.error.internal": "حدث خطأ ما أثناء الربط."
 });

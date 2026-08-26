@@ -1666,7 +1666,7 @@ registerPack("hi", {
   "deviceLink.revokeHint": "IronClaw अब {name} में एक डिवाइस के रूप में दिखता है। कोई अनजान डिवाइस दिखे तो उसे वहीं से हटाएँ।",
   "deviceLink.startAgain": "फिर से शुरू करें",
   "deviceLink.cannotRetry": "यह {name} खाता लिंक नहीं किया जा सकता।",
-  "deviceLink.setupIncomplete": "\u0907\u0938 \u0921\u093f\u092a\u094d\u0932\u0949\u092f\u092e\u0947\u0902\u091f \u092a\u0930 {name} \u0916\u093e\u0924\u093e \u091c\u094b\u0921\u093c\u0928\u093e \u0905\u092d\u0940 \u0938\u0947\u091f \u0905\u092a \u0928\u0939\u0940\u0902 \u0939\u0948\u0964 \u0915\u093f\u0938\u0940 \u092a\u094d\u0930\u0936\u093e\u0938\u0915 \u0915\u094b Admin \u2192 Configuration \u092e\u0947\u0902 \u0907\u0938\u0947 \u092a\u0942\u0930\u093e \u0915\u0930\u0928\u093e \u0939\u094b\u0917\u093e\u0964",
+  "deviceLink.setupIncomplete": "इस डिप्लॉयमेंट पर {name} खाता जोड़ना अभी सेट अप नहीं है। किसी प्रशासक को एडमिन → कॉन्फ़िगरेशन में इसे पूरा करना होगा।",
   "deviceLink.error.expired": "कोड इस्तेमाल होने से पहले ही समाप्त हो गया।",
   "deviceLink.error.unknown_flow": "यह लिंक अब खुला नहीं है।",
   "deviceLink.error.declined": "डिवाइस अस्वीकार कर दिया गया।",
@@ -1676,6 +1676,6 @@ registerPack("hi", {
   "deviceLink.error.identity_conflict": "यह खाता पहले से लिंक है। जिस IronClaw खाते से यह जुड़ा है, वहाँ से इसे अनलिंक करें और फिर कोशिश करें।",
   "deviceLink.error.vendor_unavailable": "सेवा फ़िलहाल उपलब्ध नहीं है।",
   "deviceLink.error.custody_failed": "लिंक सुरक्षित रूप से सहेजा नहीं जा सका।",
-  "deviceLink.error.not_configured": "\u0907\u0938 \u0921\u093f\u092a\u094d\u0932\u0949\u092f\u092e\u0947\u0902\u091f \u092e\u0947\u0902 \u0907\u0938 \u0915\u0928\u0947\u0915\u094d\u0936\u0928 \u0915\u0947 \u0932\u093f\u090f \u0906\u0935\u0936\u094d\u092f\u0915 \u0938\u0947\u091f\u093f\u0902\u0917\u094d\u0938 \u0928\u0939\u0940\u0902 \u0939\u0948\u0902\u0964",
+  "deviceLink.error.not_configured": "इस डिप्लॉयमेंट में इस कनेक्शन के लिए आवश्यक सेटिंग्स नहीं हैं।",
   "deviceLink.error.internal": "लिंक करते समय कुछ गड़बड़ हो गई।"
 });

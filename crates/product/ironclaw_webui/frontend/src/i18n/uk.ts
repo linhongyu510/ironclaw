@@ -1666,7 +1666,7 @@ registerPack("uk", {
   "deviceLink.revokeHint": "IronClaw тепер відображається як пристрій у {name}. Якщо побачите незнайомий пристрій, відкличте його там.",
   "deviceLink.startAgain": "Почати спочатку",
   "deviceLink.cannotRetry": "Цей обліковий запис {name} не можна прив'язати.",
-  "deviceLink.setupIncomplete": "\u041f\u0440\u0438\u0432\u0027\u044f\u0437\u043a\u0430 \u043e\u0431\u043b\u0456\u043a\u043e\u0432\u043e\u0433\u043e \u0437\u0430\u043f\u0438\u0441\u0443 {name} \u0449\u0435 \u043d\u0435 \u043d\u0430\u043b\u0430\u0448\u0442\u043e\u0432\u0430\u043d\u0430 \u0432 \u0446\u044c\u043e\u043c\u0443 \u0440\u043e\u0437\u0433\u043e\u0440\u0442\u0430\u043d\u043d\u0456. \u0410\u0434\u043c\u0456\u043d\u0456\u0441\u0442\u0440\u0430\u0442\u043e\u0440 \u043c\u0430\u0454 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u0438 \u0457\u0457 \u0432 Admin \u2192 Configuration.",
+  "deviceLink.setupIncomplete": "Прив'язка облікового запису {name} ще не налаштована в цьому розгортанні. Адміністратор має завершити її в Адмін → Конфігурація.",
   "deviceLink.error.expired": "Код застарів, перш ніж його використали.",
   "deviceLink.error.unknown_flow": "Ця прив'язка більше не відкрита.",
   "deviceLink.error.declined": "Пристрій відхилено.",
@@ -1676,6 +1676,6 @@ registerPack("uk", {
   "deviceLink.error.identity_conflict": "Цей обліковий запис уже прив'язано. Від'єднайте його від облікового запису IronClaw, до якого його підключено, і повторіть спробу.",
   "deviceLink.error.vendor_unavailable": "Сервіс тимчасово недоступний.",
   "deviceLink.error.custody_failed": "Не вдалося безпечно зберегти прив'язку.",
-  "deviceLink.error.not_configured": "\u0423 \u0446\u044c\u043e\u043c\u0443 \u0440\u043e\u0437\u0433\u043e\u0440\u0442\u0430\u043d\u043d\u0456 \u0431\u0440\u0430\u043a\u0443\u0454 \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u044c, \u043f\u043e\u0442\u0440\u0456\u0431\u043d\u0438\u0445 \u0434\u043b\u044f \u0446\u044c\u043e\u0433\u043e \u0437\u0027\u0454\u0434\u043d\u0430\u043d\u043d\u044f.",
+  "deviceLink.error.not_configured": "У цьому розгортанні бракує налаштувань, потрібних для цього з'єднання.",
   "deviceLink.error.internal": "Під час прив'язки сталася помилка."
 });

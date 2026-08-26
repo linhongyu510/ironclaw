@@ -1666,7 +1666,7 @@ registerPack("ja", {
   "deviceLink.revokeHint": "IronClaw は {name} のデバイス一覧に表示されます。見覚えのないデバイスがあれば、そこで解除してください。",
   "deviceLink.startAgain": "やり直す",
   "deviceLink.cannotRetry": "この {name} アカウントは連携できません。",
-  "deviceLink.setupIncomplete": "\u3053\u306e\u74b0\u5883\u3067\u306f {name} \u30a2\u30ab\u30a6\u30f3\u30c8\u306e\u9023\u643a\u304c\u307e\u3060\u8a2d\u5b9a\u3055\u308c\u3066\u3044\u307e\u305b\u3093\u3002\u7ba1\u7406\u8005\u304c Admin \u2192 Configuration \u3067\u5b8c\u4e86\u3055\u305b\u308b\u5fc5\u8981\u304c\u3042\u308a\u307e\u3059\u3002",
+  "deviceLink.setupIncomplete": "この環境では {name} アカウントの連携がまだ設定されていません。管理者が 管理 → 設定 で完了させる必要があります。",
   "deviceLink.error.expired": "コードは使用される前に期限切れになりました。",
   "deviceLink.error.unknown_flow": "この連携はすでに終了しています。",
   "deviceLink.error.declined": "デバイスが拒否されました。",
@@ -1676,6 +1676,6 @@ registerPack("ja", {
   "deviceLink.error.identity_conflict": "このアカウントはすでに連携されています。接続先の IronClaw アカウントから解除して、もう一度お試しください。",
   "deviceLink.error.vendor_unavailable": "サービスが一時的に利用できません。",
   "deviceLink.error.custody_failed": "連携を安全に保存できませんでした。",
-  "deviceLink.error.not_configured": "\u3053\u306e\u74b0\u5883\u306b\u306f\u3053\u306e\u63a5\u7d9a\u306b\u5fc5\u8981\u306a\u8a2d\u5b9a\u304c\u3042\u308a\u307e\u305b\u3093\u3002",
+  "deviceLink.error.not_configured": "この環境にはこの接続に必要な設定がありません。",
   "deviceLink.error.internal": "連携中に問題が発生しました。"
 });

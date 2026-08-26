@@ -1664,7 +1664,7 @@ registerPack("zh-CN", {
   "deviceLink.revokeHint": "IronClaw 现在会显示在 {name} 的设备列表中。如果看到不认识的设备，请在那里撤销它。",
   "deviceLink.startAgain": "重新开始",
   "deviceLink.cannotRetry": "无法关联此 {name} 账号。",
-  "deviceLink.setupIncomplete": "\u6b64\u90e8\u7f72\u5c1a\u672a\u914d\u7f6e {name} \u8d26\u6237\u5173\u8054\u3002\u9700\u8981\u7ba1\u7406\u5458\u5728 Admin \u2192 Configuration \u4e2d\u5b8c\u6210\u3002",
+  "deviceLink.setupIncomplete": "此部署尚未配置 {name} 账户关联。需要管理员在“管理”→“配置”中完成。",
   "deviceLink.error.expired": "代码在使用前已过期。",
   "deviceLink.error.unknown_flow": "此关联已不再有效。",
   "deviceLink.error.declined": "设备被拒绝。",
@@ -1674,6 +1674,6 @@ registerPack("zh-CN", {
   "deviceLink.error.identity_conflict": "此账号已关联。请先在其所连接的 IronClaw 账号中取消关联，然后重试。",
   "deviceLink.error.vendor_unavailable": "服务暂时不可用。",
   "deviceLink.error.custody_failed": "无法安全保存关联。",
-  "deviceLink.error.not_configured": "\u6b64\u90e8\u7f72\u7f3a\u5c11\u6b64\u8fde\u63a5\u6240\u9700\u7684\u8bbe\u7f6e\u3002",
+  "deviceLink.error.not_configured": "此部署缺少此连接所需的设置。",
   "deviceLink.error.internal": "关联时出现问题。"
 });

@@ -1666,7 +1666,7 @@ registerPack("ko", {
   "deviceLink.revokeHint": "이제 IronClaw가 {name}의 기기 목록에 표시됩니다. 모르는 기기가 보이면 거기에서 해제하세요.",
   "deviceLink.startAgain": "다시 시작",
   "deviceLink.cannotRetry": "이 {name} 계정은 연결할 수 없습니다.",
-  "deviceLink.setupIncomplete": "\uc774 \ubc30\ud3ec\uc5d0\uc11c\ub294 {name} \uacc4\uc815 \uc5f0\uacb0\uc774 \uc544\uc9c1 \uc124\uc815\ub418\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4. \uad00\ub9ac\uc790\uac00 Admin \u2192 Configuration\uc5d0\uc11c \uc644\ub8cc\ud574\uc57c \ud569\ub2c8\ub2e4.",
+  "deviceLink.setupIncomplete": "이 배포에서는 {name} 계정 연결이 아직 설정되지 않았습니다. 관리자가 관리 → 구성에서 완료해야 합니다.",
   "deviceLink.error.expired": "코드가 사용되기 전에 만료되었습니다.",
   "deviceLink.error.unknown_flow": "이 연결은 더 이상 열려 있지 않습니다.",
   "deviceLink.error.declined": "기기가 거부되었습니다.",
@@ -1676,6 +1676,6 @@ registerPack("ko", {
   "deviceLink.error.identity_conflict": "이 계정은 이미 연결되어 있습니다. 연결된 IronClaw 계정에서 연결을 해제한 후 다시 시도하세요.",
   "deviceLink.error.vendor_unavailable": "서비스를 일시적으로 사용할 수 없습니다.",
   "deviceLink.error.custody_failed": "연결을 안전하게 저장하지 못했습니다.",
-  "deviceLink.error.not_configured": "\uc774 \ubc30\ud3ec\uc5d0\ub294 \uc774 \uc5f0\uacb0\uc5d0 \ud544\uc694\ud55c \uc124\uc815\uc774 \uc5c6\uc2b5\ub2c8\ub2e4.",
+  "deviceLink.error.not_configured": "이 배포에는 이 연결에 필요한 설정이 없습니다.",
   "deviceLink.error.internal": "연결 중 문제가 발생했습니다."
 });
