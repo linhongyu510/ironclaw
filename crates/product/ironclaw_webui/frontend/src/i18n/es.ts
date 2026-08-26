@@ -1667,7 +1667,7 @@ registerPack("es", {
   "deviceLink.revokeHint": "IronClaw aparece ahora como un dispositivo en {name}. Si ves un dispositivo que no reconoces, revócalo allí.",
   "deviceLink.startAgain": "Empezar de nuevo",
   "deviceLink.cannotRetry": "Esta cuenta de {name} no se puede vincular.",
-  "deviceLink.setupIncomplete": "La vinculación de una cuenta de {name} aún no está configurada en esta instancia. Un administrador debe completarla en Admin → Configuración.",
+  "deviceLink.setupIncomplete": "La vinculación de una cuenta de {name} aún no está configurada en esta instancia. Un administrador debe completar la configuración en Admin → Configuración.",
   "deviceLink.error.expired": "El código caducó antes de usarse.",
   "deviceLink.error.unknown_flow": "Esta vinculación ya no está abierta.",
   "deviceLink.error.declined": "Se rechazó el dispositivo.",
