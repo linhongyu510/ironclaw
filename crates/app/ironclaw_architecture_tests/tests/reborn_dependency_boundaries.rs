@@ -811,19 +811,32 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // ToolAdapter auth errors carry the neutral bounded provider diagnostic
         // through the extension ABI. Parsing and model-safety behavior remain
         // in runtime lanes and loop_host.
-        // 10_841 -> 11_092 (2026-08-26, PR #7897 connect-link validation fix):
+        // 10_841 -> 11_451 (2026-08-22, `[[memory.scheduled_ops]]`): the
+        // scheduled-op declaration family on the `[memory]` surface — the
+        // closed trigger vocabulary, the tagged op kind and its pass shape,
+        // two host-owned bounds (interval floor, model-call ceiling), the
+        // wire/parsed split that makes an invalid entry unrepresentable, and
+        // the inline test module this ratchet also counts. Declaration and
+        // shape validation only: the two rules needing the manifest-wide view
+        // live in `ironclaw_extension_registry::v3`, asset resolution stays
+        // host-side like `guidance_doc`'s, and nothing here schedules,
+        // dispatches, or invokes anything. Count read from this test's own
+        // failure message.
+        // 11_451 -> 11_633 (2026-08-26, PR #7897 connect-link validation):
         // the new `connect_link` module — one `validated_connect_link_origin`
-        // helper plus its dedicated 10-case unit test suite — replaces three
-        // near-duplicate trim-and-check-non-empty implementations
+        // helper plus its unit tests — replaces three near-duplicate
+        // trim-and-check-non-empty implementations
         // (`ironclaw_extension_host::channel_host::configured_origin`,
         // `ironclaw_assistant::run_delivery::prompts::extensions_page_link`,
         // `ironclaw_extension_manager::install_guidance::personal_setup_link`)
         // that never validated `IRONCLAW_REBORN_WEBUI_BASE_URL` was an
         // absolute origin, so a scheme-less deployment value rendered a
         // relative link into a customer conversation. Pure validation, no
-        // execution/persistence — see the module's own doc for the admission
-        // reasoning. Measured with this row at 0 on the branch tip.
-        ("ironclaw_extension_contracts", 11_092),
+        // execution/persistence. Both raises are kept: this row grew twice,
+        // independently, and each delta has its own reason. 11_633 is the
+        // count read from this test's own failure message after merging main,
+        // not the two deltas added — they do not sum.
+        ("ironclaw_extension_contracts", 11_633),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
