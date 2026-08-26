@@ -129,6 +129,17 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
 /// `Arc`s; cloning shares them.
 #[derive(Clone)]
 pub struct RunDeliveryServices {
+    /// The deployment's public web origin, when one is published.
+    ///
+    /// Lets a chat user be handed the Extensions page address when a
+    /// challenge cannot be completed from their surface (#7887). `None` keeps
+    /// the link-free copy rather than advertising a relative path — the same
+    /// fallback the channel connect notice uses, fed by the same
+    /// `connect_link_base_url_from_env` read in composition.
+    ///
+    /// Lives here rather than in `RunDeliverySettings` because that struct is
+    /// `Copy` and this is an owned `String`.
+    pub setup_link_base_url: Option<String>,
     pub binding_service: Arc<dyn ProductBindingResolver>,
     pub thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,

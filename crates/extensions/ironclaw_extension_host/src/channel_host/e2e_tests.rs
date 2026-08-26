@@ -636,6 +636,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let model_preferences = Arc::new(ChannelModelPreferences::default());
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
+            setup_link_base_url: None,
             filesystem: Arc::new(InMemoryBackend::new()),
             thread_service: Arc::new(threads.clone()),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -1625,6 +1626,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1906,6 +1908,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -2034,6 +2037,7 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
