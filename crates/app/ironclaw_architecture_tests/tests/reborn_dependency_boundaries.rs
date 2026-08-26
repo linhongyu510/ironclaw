@@ -894,37 +894,27 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        // 20_516 -> 20_535 (generic credentialed process boundary): +19 lines
-        // add the provider-neutral authorized binding DTO and carry the
-        // capability identity plus bindings on direct sandbox requests.
-        // Credential selection, staging, validation, and proxy substitution
-        // remain in host-runtime and sandbox; this crate owns declarations only.
-        // Re-captured at the exact 20_685 measured count minus the standing
-        // 150-line working tolerance.
-        // 20_685 -> 20_729 (2026-08-23, #7825 stages 1-2): +44 lines add
-        // serde-defaulted manifest direct-process binding fields, the
-        // invocation bundle credential key, and their wire-contract test.
-        // Executable selection, secret staging, and bundle I/O remain in the
-        // kernel and sandbox crates; host_api still owns declarations only.
-        // 20_729 -> 20_728 (2026-08-24, #7810 review fixes): +149 lines move
-        // the quote-aware `single_direct_argv` predicate into `process.rs` so
-        // kernel authorization enrichment and host-runtime shell dispatch
-        // share ONE command predicate (review: the two tokenizers disagreed
-        // on quoted executables), plus case-normalized credential comparison
-        // fields and their tests. Pure declaration-adjacent parsing with zero
-        // dependencies; execution, staging, and proxy substitution stay in
-        // the kernel and sandbox crates. Re-captured at the exact 20_878
-        // measured count minus the standing 150-line working tolerance.
-        // 20_878 -> 21_027 (authorized descriptor freeze): +149 lines carry the
-        // exact capability descriptor evaluated by authorization through the
-        // sealed one-shot witness, durable process continuation, and dispatch
-        // request. This closes the gap where runtime credential requirements
-        // were discarded before sandbox execution. Trusted-runtime serde is
-        // scoped to the host-written continuation record; authorization,
-        // credential staging, and execution remain in their owning kernel and
-        // runtime crates. Re-captured at the exact 21_027 measured count minus
-        // the standing 150-line working tolerance.
-        ("ironclaw_host_api", 20_877),
+        // 20_516 -> 20_632 (2026-08-23, #7812): +116 lines for the
+        // `PreparedTurnDeclarations::require_no_approval` narrowing flag and the
+        // `CapabilitySurfacePolicy::without_approval_gated` builder, plus their
+        // inline tests. Both are contract vocabulary with no logic: the flag is
+        // a defaulted bool DTO field, and the builder sets an existing field of
+        // the type that already owns it, matching the sibling
+        // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
+        // behavior that reads them lives in `ironclaw_turn_runner`, so there is
+        // no lower crate to move this to.
+        // 20_632 -> 21_035 (2026-08-26, #7810 merged with main): the
+        // provider-neutral credentialed-process boundary adds authorized
+        // binding DTOs, manifest-declared direct-exec fields, the shared
+        // quote-aware `single_direct_argv` parser, invocation bundle keys, and
+        // the exact capability descriptor carried through sealed authorization
+        // and durable process continuation. These are neutral contract and
+        // authorization-evidence declarations. Credential selection, staging,
+        // execution, bundle I/O, and proxy substitution remain in their owning
+        // kernel, host-runtime, and sandbox crates. Count re-captured from this
+        // test after merging both branches; the stored ceiling excludes the
+        // standing 150-line working tolerance.
+        ("ironclaw_host_api", 20_885),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -980,27 +970,32 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // 13_306 -> 13_390 (2026-08-11, #6985 prompt-prefix stability): typed
+        // leading inline roles keep subagent framing ahead of persisted
+        // conversation history. Role vocabulary and its partition only —
+        // provider assembly stays in ironclaw_llm. Count read from this test's
+        // own failure message.
+        // 13_390 -> 13_400 (2026-08-12, #7416 hook-aware parallel batches):
         // one defaulted port capability declares when ordered batch middleware
         // must retain batch entry. Scheduling and hook behavior remain in their
         // owning loop crates. Count read from this test's own failure message.
-        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // 13_400 -> 13_410 (2026-08-12, merge with #7484 context eviction):
         // one bounded truncation-watermark DTO carried across the existing
         // context and prompt contracts. Window selection and task-pinning
         // behavior remain in ironclaw_threads and ironclaw_loop_host.
-        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
+        // 13_410 -> 13_418 (2026-08-11, #7484 eviction compaction): typed
         // tool-result compaction metadata plus window-eviction initiator/mode
         // variants. Cut-point policy and execution remain in agent_loop and
         // loop_host. Count read from this test's own failure message.
-        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // 13_418 -> 13_429 (2026-08-12, #7416 fail-closed batch ordering):
         // the batch-ordering port contract now defaults to ordered entry and
         // documents the explicit opt-in required for concurrent singles.
         // Scheduling and wrapper behavior remain in their owning loop crates.
-        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
+        // 13_429 -> 13_608 (2026-08-12, #7509 prompt recovery hardening):
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
-        // read from this test's own failure message after merging #7416.
-        ("ironclaw_loop_contracts", 13_524),
+        // read from this test's own failure message after merging #7416 and #6985.
+        ("ironclaw_loop_contracts", 13_608),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
