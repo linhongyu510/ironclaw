@@ -324,6 +324,7 @@ mod tests {
             authenticated_actor_user_id: actor,
             run_id,
             origin: None,
+            automation_trigger_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {

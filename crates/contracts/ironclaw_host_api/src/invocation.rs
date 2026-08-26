@@ -171,6 +171,11 @@ pub struct Invocation {
     pub actor: Actor,
     /// Where the call came from — the only fact the kernel consults about origin.
     pub origin: InvocationOrigin,
+    /// The typed trigger identity of the scheduled automation fire that
+    /// produced the current run, sealed from
+    /// [`crate::scope::ExecutionContext::automation_trigger_id`]. `None` for
+    /// every non-automation caller.
+    pub automation_trigger_id: Option<crate::ids::AutomationTriggerId>,
     /// Host-derived resource estimate, consumed by `authorize()` at reservation
     /// (§5.3.3). Never model-supplied.
     pub estimate: ResourceEstimate,
@@ -317,6 +322,7 @@ mod tests {
                 scope: sample_scope(),
                 actor: Actor::Sealed(UserId::new("user1").unwrap()),
                 origin,
+                automation_trigger_id: None,
                 estimate: ResourceEstimate::default(),
                 correlation_id: CorrelationId::new(),
                 process_id: None,

@@ -214,6 +214,7 @@ mod tests {
                 scope: ResourceScope::system(),
                 actor: Actor::System,
                 origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                automation_trigger_id: None,
                 estimate: ResourceEstimate::default(),
                 correlation_id: CorrelationId::new(),
                 process_id: None,

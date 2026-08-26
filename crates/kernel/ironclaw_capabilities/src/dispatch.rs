@@ -209,6 +209,7 @@ where
             capability_id: invocation.capability,
             scope: invocation.scope,
             origin,
+            automation_trigger_id: invocation.automation_trigger_id,
             authenticated_actor_user_id,
             run_id,
             estimate: invocation.estimate,

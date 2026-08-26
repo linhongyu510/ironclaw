@@ -48,7 +48,7 @@ where
         &self,
         request: InboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        self.handle_inbound_turn_inner(request, BindingResolutionPolicy::Untrusted)
+        self.handle_inbound_turn_inner(request, BindingResolutionPolicy::Untrusted, None)
             .await
     }
 
@@ -63,6 +63,7 @@ where
             trusted_owner_user_id,
             kind,
             execution_policy,
+            automation_trigger_id,
         } = request;
         self.handle_inbound_turn_inner(
             request,
@@ -73,14 +74,17 @@ where
                 kind,
                 execution_policy,
             },
+            automation_trigger_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_inbound_turn_inner(
         &self,
         request: InboundTurnRequest,
         binding_policy: BindingResolutionPolicy,
+        automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         let InboundTurnRequest {
             tenant_id,
@@ -150,6 +154,10 @@ where
                     run_adapter,
                     surface_type,
                     execution_policy.clone(),
+                    // A replayed submission is looked up by message id; the
+                    // trigger identity of the ORIGINAL fire is already
+                    // persisted on its turn submission.
+                    None,
                 )
                 .await;
         }
@@ -219,10 +227,12 @@ where
             run_adapter,
             surface_type,
             execution_policy,
+            automation_trigger_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_or_replay(
         &self,
         mut resolution: ConversationBindingResolution,
@@ -231,6 +241,7 @@ where
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
         execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
+        automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         resolution.actor = accepted_message.actor.clone();
 
@@ -265,6 +276,7 @@ where
                 origin_adapter: run_adapter,
                 surface_type,
                 execution_policy,
+                automation_trigger_id,
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -417,6 +429,17 @@ fn trusted_inbound_request_from_trigger(
         Some(fire.creator_user_id),
         TrustedInboundKind::Trigger,
         fire.execution_policy,
+        // The typed trigger identity, bound from the sealed fire — never a
+        // display string. This is the automation-identity thread for
+        // per-automation host state (issue #7893).
+        Some(
+            ironclaw_host_api::ids::AutomationTriggerId::new(
+                fire.identity.trigger_id().to_string(),
+            )
+            .map_err(|reason| InboundTurnError::InvalidCanonicalRef {
+                reason: reason.to_string(),
+            })?,
+        ),
     ))
 }
 
@@ -718,6 +741,7 @@ mod tests {
             Some(creator.clone()),
             TrustedInboundKind::Trigger,
             None,
+            None,
         );
 
         let response = service
@@ -749,6 +773,7 @@ mod tests {
             None,
             TrustedInboundKind::Trigger,
             None,
+            None,
         );
         service
             .handle_inbound_turn_with_trusted_scope(first)
@@ -767,6 +792,7 @@ mod tests {
             Some(project()),
             Some(creator),
             TrustedInboundKind::Trigger,
+            None,
             None,
         );
         let response = service
@@ -1108,6 +1134,7 @@ mod tests {
             trusted_project_id,
             None,
             TrustedInboundKind::Trigger,
+            None,
             None,
         )
     }
@@ -1627,6 +1654,7 @@ mod tests {
             Some(project()),
             None,
             TrustedInboundKind::Other,
+            None,
             None,
         );
 

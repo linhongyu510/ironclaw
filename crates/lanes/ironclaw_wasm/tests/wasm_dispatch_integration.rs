@@ -1016,6 +1016,7 @@ fn dispatch_request(capability: &str, input: Value) -> Authorized {
             scope: sample_scope(),
             actor: Actor::System,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             estimate,
             correlation_id: CorrelationId::new(),
             process_id: None,

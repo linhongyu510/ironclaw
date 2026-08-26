@@ -58,6 +58,7 @@ ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_hooks = { path = "../../loop/ironclaw_hooks" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_prompt_envelope = { path = "../../contracts/ironclaw_prompt_envelope" }
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../../product/ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../../extensions/ironclaw_extension_host" }

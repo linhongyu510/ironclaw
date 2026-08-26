@@ -1369,6 +1369,7 @@ mod tests {
     fn test_request(input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
             origin: None,
+            automation_trigger_id: None,
             run_id: None,
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),

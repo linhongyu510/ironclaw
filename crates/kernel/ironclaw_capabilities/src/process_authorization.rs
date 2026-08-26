@@ -181,6 +181,10 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
             scope: invocation.scope,
             actor: invocation.actor,
             origin: invocation.origin,
+            // A process continuation is not the automation fire's own loop
+            // turn; per-automation identity does not survive into spawned
+            // processes.
+            automation_trigger_id: None,
             estimate: invocation.estimate,
             correlation_id: invocation.correlation_id,
             process_id: Some(invocation.process_id),

@@ -85,6 +85,14 @@ pub struct ExecutionContext {
     /// an ingress either knows its true origin or leaves this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<InvocationOrigin>,
+    /// The typed trigger identity of the scheduled automation fire that
+    /// produced the current run, stamped by loop orchestration from the run's
+    /// persisted product context. `None` for every non-automation caller.
+    /// Consumed only through this typed field — never re-derived from a
+    /// display string — so a capability handler can bind per-automation
+    /// host state to exactly one automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_trigger_id: Option<crate::ids::AutomationTriggerId>,
     pub extension_id: ExtensionId,
     pub runtime: RuntimeKind,
     pub trust: TrustClass,
@@ -124,6 +132,7 @@ impl ExecutionContext {
             thread_id: None,
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             extension_id,
             runtime,
             trust,

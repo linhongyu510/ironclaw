@@ -1719,3 +1719,99 @@ fn memory_guidance_is_a_compact_self_contained_section() {
         "guidance is appended to every turn's prompt and must stay compact; {lines} lines"
     );
 }
+
+// ---------------------------------------------------------------------------
+// automation_lessons_set / automation_lessons_read (issue #7893)
+// ---------------------------------------------------------------------------
+
+use ironclaw_memory::{
+    AUTOMATION_LESSONS_MAX_CONTENT_BYTES, AutomationOwner, MemoryDocumentScope,
+    MemoryLessonsSetStatus, MemoryServiceLessonsSetRequest,
+};
+
+fn lessons_owner() -> AutomationOwner {
+    AutomationOwner::new("01J9Z8G7S4XK2WQ6P3N5R8TVCY").expect("valid ULID-shaped owner")
+}
+
+#[tokio::test]
+async fn lessons_set_replaces_whole_file_and_read_round_trips() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let owner = lessons_owner();
+
+    let first = service
+        .automation_lessons_set(
+            invocation(),
+            &owner,
+            MemoryServiceLessonsSetRequest {
+                content: "step 3 of the install fails; retry twice first".to_string(),
+            },
+        )
+        .await
+        .expect("first lessons write succeeds");
+    assert_eq!(first.status, MemoryLessonsSetStatus::Ok);
+
+    // Second write fully SUPERSEDES the first: whole-file replace semantics,
+    // never append. The read-back proves the old lesson is gone.
+    let second = service
+        .automation_lessons_set(
+            invocation(),
+            &owner,
+            MemoryServiceLessonsSetRequest {
+                content: "the report should skip section X".to_string(),
+            },
+        )
+        .await
+        .expect("second lessons write succeeds");
+    assert_eq!(second.status, MemoryLessonsSetStatus::Ok);
+
+    let scope = MemoryDocumentScope::new("tenant-native-memory", "user-native-memory", None)
+        .expect("valid scope");
+    let content = service
+        .automation_lessons_read(&scope, &owner)
+        .await
+        .expect("lessons file exists after a write");
+    assert_eq!(content, "the report should skip section X");
+}
+
+#[tokio::test]
+async fn lessons_set_oversize_content_is_a_model_visible_rejected_outcome() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let owner = lessons_owner();
+    let oversize = "x".repeat(AUTOMATION_LESSONS_MAX_CONTENT_BYTES + 1);
+
+    let response = service
+        .automation_lessons_set(
+            invocation(),
+            &owner,
+            MemoryServiceLessonsSetRequest { content: oversize },
+        )
+        .await
+        .expect("oversize write is a model-visible outcome, not an error");
+    assert_eq!(response.status, MemoryLessonsSetStatus::Rejected);
+    assert!(
+        response
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("limit")),
+        "rejection carries the bounded reason"
+    );
+
+    // The rejected write must not have touched the file.
+    let scope = MemoryDocumentScope::new("tenant-native-memory", "user-native-memory", None)
+        .expect("valid scope");
+    assert_eq!(service.automation_lessons_read(&scope, &owner).await, None);
+}
+
+#[tokio::test]
+async fn lessons_read_missing_file_is_none_not_an_error() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let scope = MemoryDocumentScope::new("tenant-native-memory", "user-native-memory", None)
+        .expect("valid scope");
+    assert_eq!(
+        service
+            .automation_lessons_read(&scope, &lessons_owner())
+            .await,
+        None,
+        "a missing lessons file is the normal first-run state"
+    );
+}

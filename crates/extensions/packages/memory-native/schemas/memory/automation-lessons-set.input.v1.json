@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "description": "Rewrite this automation's lessons file (scheduled runs only). Whole-file replace, 2 KiB max. Keep only what the next run needs.",
+  "properties": {
+    "content": {
+      "type": "string",
+      "description": "The full new content of this automation's lessons file. Replaces whatever was there before."
+    }
+  },
+  "required": [
+    "content"
+  ],
+  "additionalProperties": false
+}

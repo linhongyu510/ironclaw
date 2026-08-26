@@ -137,6 +137,10 @@ pub struct CapabilityDispatchRequest {
     /// Authoritative invocation origin preserved from the sealed
     /// [`Authorized`] witness for capability-boundary policy.
     pub origin: InvocationOrigin,
+    /// The typed trigger identity of the scheduled automation fire that
+    /// produced the current run, preserved from the sealed [`Invocation`].
+    /// `None` for every non-automation caller.
+    pub automation_trigger_id: Option<crate::ids::AutomationTriggerId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,

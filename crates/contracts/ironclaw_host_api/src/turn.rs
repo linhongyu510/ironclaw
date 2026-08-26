@@ -1134,6 +1134,14 @@ pub struct ProductTurnContext {
     /// Host-sealed restrictions for unattended execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_policy: Option<crate::execution_policy::TurnExecutionPolicy>,
+    /// The typed trigger identity of the scheduled automation fire that
+    /// produced this turn, stamped ONLY by the trusted-trigger submit seam.
+    /// `None` for every other origin. Carried as a typed value end-to-end so
+    /// capability handlers can bind per-automation host state (e.g. the
+    /// automation lessons file) without ever re-deriving it from a display
+    /// string. Persisted with the run so a resume re-renders the same context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_trigger_id: Option<crate::ids::AutomationTriggerId>,
 }
 
 impl ProductTurnContext {
@@ -1162,7 +1170,19 @@ impl ProductTurnContext {
             owner,
             channel_context: None,
             execution_policy: None,
+            automation_trigger_id: None,
         }
+    }
+
+    /// Stamp the typed trigger identity of the scheduled fire that produced
+    /// this turn. Only the trusted-trigger submit seam may call this; every
+    /// other origin leaves the field `None`.
+    pub fn with_automation_trigger_id(
+        mut self,
+        automation_trigger_id: crate::ids::AutomationTriggerId,
+    ) -> Self {
+        self.automation_trigger_id = Some(automation_trigger_id);
+        self
     }
 
     /// Attach host-fetched channel conversation context. See

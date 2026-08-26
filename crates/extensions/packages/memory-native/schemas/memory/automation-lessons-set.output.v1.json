@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "description": "automation_lessons_set result: either ok with the replaced length, or rejected with a bounded reason.",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "rejected"
+      ]
+    },
+    "content_length": {
+      "type": "integer",
+      "description": "Present when status is ok: the replaced file's byte length."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Present when status is rejected: why the write was refused (e.g. content over the size cap)."
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "additionalProperties": false
+}

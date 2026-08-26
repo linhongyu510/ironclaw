@@ -3336,6 +3336,13 @@ fn auth_decline_context_from_visible(
             | None => InvocationOrigin::LoopRun(run_id),
         },
     );
+    // The typed trigger identity rides the same persisted product context the
+    // origin was stamped from, so a scheduled fire's tool calls carry exactly
+    // one host-bound automation identity.
+    context.automation_trigger_id = run_context
+        .product_context
+        .as_ref()
+        .and_then(|product_context| product_context.automation_trigger_id.clone());
     context.authenticated_actor_user_id = run_context.actor().map(|actor| actor.user_id.clone());
     context.validate().map_err(|_| {
         AgentLoopHostError::new(

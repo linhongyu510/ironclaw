@@ -585,6 +585,7 @@ where
             scope: scope.clone(),
             actor,
             origin,
+            automation_trigger_id: context.automation_trigger_id.clone(),
             estimate: estimate.clone(),
             correlation_id: context.correlation_id,
             process_id: context.process_id,

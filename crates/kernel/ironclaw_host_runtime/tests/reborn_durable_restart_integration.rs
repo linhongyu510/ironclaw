@@ -930,6 +930,7 @@ fn execution_context_without_grants_for_scope(scope: ResourceScope) -> Execution
     let context = ExecutionContext {
         run_id: Some(RunId::new()),
         origin: None,
+        automation_trigger_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -959,6 +960,7 @@ fn execution_context_with_dispatch_grant_for_scope(
     let context = ExecutionContext {
         run_id: Some(RunId::new()),
         origin: None,
+        automation_trigger_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

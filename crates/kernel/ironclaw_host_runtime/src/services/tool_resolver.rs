@@ -244,6 +244,7 @@ where
                     authenticated_actor_user_id: request.authenticated_actor_user_id,
                     run_id: request.run_id,
                     origin: Some(request.origin),
+                    automation_trigger_id: request.automation_trigger_id,
                     estimate: request.estimate,
                     mounts: request.mounts,
                     resource_reservation: request.resource_reservation,

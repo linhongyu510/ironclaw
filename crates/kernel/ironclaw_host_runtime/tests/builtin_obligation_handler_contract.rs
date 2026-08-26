@@ -1243,6 +1243,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     ExecutionContext {
         run_id: Some(RunId::new()),
         origin: None,
+        automation_trigger_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

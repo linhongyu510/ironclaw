@@ -25,6 +25,7 @@
 //! | `write` (clear)    | unsupported (no addressable doc to truncate)   | none     |
 //! | `profile_set`      | read-merge-write a `kind=profile` memory       | good     |
 //! | `profile_read`     | latest `kind=profile` memory bytes             | loose    |
+//! | automation lessons | newest target-tagged replacement record        | good     |
 //!
 //! ## `infer=false` (verbatim) document-tool mapping
 //!
@@ -42,13 +43,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_memory::{
-    MemoryInvocation, MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceProfileReadResponse,
+    AutomationOwner, MemoryDocumentScope, MemoryInvocation, MemoryLessonsSetStatus,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceLessonsSetRequest,
+    MemoryServiceLessonsSetResponse, MemoryServiceProfileReadResponse,
     MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse, MemoryServiceReadRequest,
     MemoryServiceReadResponse, MemoryServiceSearchRequest, MemoryServiceSearchResponse,
     MemoryServiceSearchResult, MemoryServiceTreeRequest, MemoryServiceTreeResponse,
     MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus,
-    memory_context_disabled,
+    automation_lessons_document_path, memory_context_disabled, validated_lessons_content,
 };
 use serde_json::{Map, Value, json};
 
@@ -71,6 +74,7 @@ const PROFILE_KIND: &str = "profile";
 /// Mirrors the native provider's profile document location so a deployment that
 /// swaps providers keeps a recognizable profile target tag.
 const PROFILE_TARGET: &str = "context/profile.json";
+const AUTOMATION_LESSONS_KIND: &str = "automation_lessons";
 
 /// A [`MemoryService`] backed by the mem0 REST API over an injected transport.
 pub struct Mem0MemoryService {
@@ -152,6 +156,21 @@ impl Mem0MemoryService {
     /// Owner-only (profile) namespace (tenant/user) + workspace prefix.
     fn owner_scoped_namespace(&self, scope: &ResourceScope) -> String {
         self.with_workspace_prefix(owner_namespace(scope))
+    }
+
+    /// Namespace one automation's retained lesson replacements separately from
+    /// the owner's general memory. This keeps the fire-time list read bounded
+    /// to that automation instead of scanning the full memory namespace.
+    fn automation_lessons_namespace(
+        &self,
+        scope: &ResourceScope,
+        owner: &AutomationOwner,
+    ) -> String {
+        format!(
+            "{}/automations/{}",
+            self.scoped_namespace(scope),
+            owner.as_str()
+        )
     }
 
     /// Build the query-string parameters for a GET `/memories` (list) request.
@@ -398,6 +417,44 @@ impl Mem0MemoryService {
             status: MemoryProfileSetStatus::Ok,
         })
     }
+
+    /// Store one logical replacement for this automation's lessons. mem0 is
+    /// append-only, so the newest target-tagged record is the current file;
+    /// older records remain retained but are not returned by the read seam.
+    pub async fn automation_lessons_set(
+        &self,
+        invocation: MemoryInvocation,
+        owner: &AutomationOwner,
+        request: MemoryServiceLessonsSetRequest,
+    ) -> Result<MemoryServiceLessonsSetResponse, MemoryServiceError> {
+        if let Err(reason) = validated_lessons_content(&request.content) {
+            return Ok(MemoryServiceLessonsSetResponse {
+                status: MemoryLessonsSetStatus::Rejected,
+                content_length: None,
+                reason: Some(reason),
+            });
+        }
+        let target = automation_lessons_target(&invocation.scope, owner)?;
+        let namespace = self.automation_lessons_namespace(&invocation.scope, owner);
+        let metadata = json!({
+            KIND_KEY: AUTOMATION_LESSONS_KIND,
+            TARGET_KEY: target,
+            SOURCE_KEY: SOURCE_VALUE,
+        });
+        let body = self.add_body(&namespace, &request.content, metadata);
+        let response = self
+            .transport
+            .execute(Mem0HttpRequest::post(ADD_PATH, body))
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        ensure_success(&response, "automation_lessons_set")
+            .map_err(MemoryServiceError::operation_from)?;
+        Ok(MemoryServiceLessonsSetResponse {
+            status: MemoryLessonsSetStatus::Ok,
+            content_length: Some(request.content.len()),
+            reason: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -419,6 +476,26 @@ impl MemoryService for Mem0MemoryService {
         let items = response_items(&response.body).map_err(MemoryServiceError::operation_from)?;
         let document = latest_profile_text(&items).map(|text| text.as_bytes().to_vec());
         Ok(MemoryServiceProfileReadResponse { document })
+    }
+
+    async fn automation_lessons_read(
+        &self,
+        invocation: MemoryInvocation,
+        owner: &AutomationOwner,
+    ) -> Result<Option<String>, MemoryServiceError> {
+        let target = automation_lessons_target(&invocation.scope, owner)?;
+        let namespace = self.automation_lessons_namespace(&invocation.scope, owner);
+        let response = self
+            .transport
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
+            .await
+            .map_err(MemoryServiceError::unavailable_from)?;
+        ensure_success(&response, "automation_lessons_read")
+            .map_err(MemoryServiceError::unavailable_from)?;
+        let items = response_items(&response.body).map_err(MemoryServiceError::unavailable_from)?;
+        Ok(latest_target_text(&items, &target)
+            .filter(|content| !content.is_empty())
+            .map(str::to_string))
     }
 
     /// Long-term retrieval lane, the only lane mem0 declares: its namespace
@@ -456,12 +533,15 @@ impl MemoryService for Mem0MemoryService {
         let snippets = response_items(&response.body)
             .map_err(MemoryServiceError::unavailable_from)?
             .into_iter()
-            // The `kind=profile` record `profile_set` writes shares the owner
-            // namespace (agent/project-less scopes collapse to it), and search
-            // can return it. Profile state has its own read path
-            // (`profile_read`); raw profile JSON must not enter the prompt as
-            // a memory snippet.
-            .filter(|item| item_metadata_str(item, KIND_KEY) != Some(PROFILE_KIND))
+            // Structured profile state and deterministic automation lessons
+            // have dedicated host read paths. Do not also admit their raw
+            // records through semantic recall.
+            .filter(|item| {
+                !matches!(
+                    item_metadata_str(item, KIND_KEY),
+                    Some(PROFILE_KIND | AUTOMATION_LESSONS_KIND)
+                )
+            })
             .filter_map(|item| {
                 Some(MemoryServiceContextSnippet {
                     tenant_id: scope.tenant_id.as_str().to_string(),
@@ -551,6 +631,33 @@ fn item_metadata_str<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_object)
         .and_then(|metadata| metadata.get(key))
         .and_then(Value::as_str)
+}
+
+fn automation_lessons_target(
+    scope: &ResourceScope,
+    owner: &AutomationOwner,
+) -> Result<String, MemoryServiceError> {
+    let document_scope = MemoryDocumentScope::new_with_agent(
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str(),
+        scope.agent_id.as_ref().map(|id| id.as_str()),
+        scope.project_id.as_ref().map(|id| id.as_str()),
+    )
+    .map_err(|_| MemoryServiceError::input())?;
+    automation_lessons_document_path(document_scope, owner)
+        .map(|path| path.relative_path().to_string())
+        .map_err(|_| MemoryServiceError::input())
+}
+
+fn latest_target_text<'a>(items: &[&'a Value], target: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .filter(|item| {
+            item_metadata_str(item, KIND_KEY) == Some(AUTOMATION_LESSONS_KIND)
+                && item_metadata_str(item, TARGET_KEY) == Some(target)
+        })
+        .max_by(|left, right| item_created_at(left).cmp(item_created_at(right)))
+        .and_then(|item| item_text(item))
 }
 
 /// mem0 returns an ISO-8601 `created_at` on each memory. Used to pick the newest
@@ -963,6 +1070,74 @@ mod tests {
             .await
             .expect("profile_read should succeed");
         assert_eq!(read.document, Some(b"{\"timezone\":\"UTC\"}".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn automation_lessons_set_tags_one_host_derived_target() {
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "id": "lesson-1" })));
+        let owner = AutomationOwner::new("trigger-one").expect("owner");
+        let response = service
+            .automation_lessons_set(
+                invocation(),
+                &owner,
+                MemoryServiceLessonsSetRequest {
+                    content: "use the v2 feed".to_string(),
+                },
+            )
+            .await
+            .expect("lessons write succeeds");
+        assert_eq!(response.status, MemoryLessonsSetStatus::Ok);
+        let requests = transport.recorded();
+        assert_eq!(requests.len(), 1);
+        let body = requests[0].body.as_ref().expect("request body");
+        assert_eq!(
+            body["metadata"]["target"],
+            json!("automations/trigger-one/lessons.md")
+        );
+        assert_eq!(body["metadata"]["kind"], json!("automation_lessons"));
+        assert!(
+            body["user_id"]
+                .as_str()
+                .is_some_and(|namespace| namespace.ends_with("/automations/trigger-one")),
+            "lessons must use an automation-specific mem0 namespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_lessons_read_selects_latest_matching_target() {
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
+            {
+                "memory": "old lesson",
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": {
+                    "kind": "automation_lessons",
+                    "target": "automations/trigger-one/lessons.md"
+                }
+            },
+            {
+                "memory": "other automation",
+                "created_at": "2026-03-01T00:00:00Z",
+                "metadata": {
+                    "kind": "automation_lessons",
+                    "target": "automations/trigger-two/lessons.md"
+                }
+            },
+            {
+                "memory": "new lesson",
+                "created_at": "2026-02-01T00:00:00Z",
+                "metadata": {
+                    "kind": "automation_lessons",
+                    "target": "automations/trigger-one/lessons.md"
+                }
+            }
+        ])));
+        let owner = AutomationOwner::new("trigger-one").expect("owner");
+        let lessons = service
+            .automation_lessons_read(invocation(), &owner)
+            .await
+            .expect("lessons read succeeds");
+        assert_eq!(lessons.as_deref(), Some("new lesson"));
     }
 
     #[tokio::test]

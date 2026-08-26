@@ -262,9 +262,16 @@ pub(crate) struct TrustedInboundTurnRequest {
     pub(crate) trusted_owner_user_id: Option<UserId>,
     pub(crate) kind: TrustedInboundKind,
     pub(crate) execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
+    /// The typed trigger identity of the fire, carried only by the
+    /// trusted-trigger seam (`TrustedInboundKind::Trigger`). Threaded through
+    /// the turn submission into the run's persisted product context so
+    /// capability handlers can bind per-automation host state without ever
+    /// re-deriving it from a display string.
+    pub(crate) automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
 }
 
 impl TrustedInboundTurnRequest {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
@@ -272,6 +279,7 @@ impl TrustedInboundTurnRequest {
         trusted_owner_user_id: Option<UserId>,
         kind: TrustedInboundKind,
         execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
+        automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
     ) -> Self {
         Self {
             request,
@@ -280,6 +288,7 @@ impl TrustedInboundTurnRequest {
             trusted_owner_user_id,
             kind,
             execution_policy,
+            automation_trigger_id,
         }
     }
 }

@@ -187,6 +187,7 @@ fn product_execution_context(
         mission_id: None,
         thread_id: None,
         run_id: None,
+        automation_trigger_id: None,
         origin: Some(InvocationOrigin::Product(
             ProductKind::new("webui").map_err(ProductSurfaceError::internal_from)?,
         )),

@@ -73,6 +73,28 @@ exempt_capabilities = [
     #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
     #   NOT exempt and still hits the gate).
     "ironclaw.memory.profile_set",
+    #
+    # `ironclaw.memory.automation_lessons_set` is safe to exempt (no approval
+    # gate needed) because:
+    # - Scheduled runs are UNATTENDED — a gated write blocks every fire on an
+    #   approval nobody answers, so gating this tool would silently kill the
+    #   feature it exists for (#7893).
+    # - It writes only to one fixed, host-derived path per automation
+    #   (automations/<trigger-id>/lessons.md) under the already-scoped memory
+    #   mount. The trigger id is bound from the run's typed execution context;
+    #   the model never supplies a path and cannot reach another automation's
+    #   file or anything else.
+    # - Content is size-capped at 2 KiB and whole-file replaced, so the file
+    #   cannot grow without bound. No network, no secrets, no external write,
+    #   no process.
+    # - HONEST CAVEAT vs `ironclaw.memory.profile_set` above: profile_set's
+    #   field set is closed and validated server-side, while lessons content is
+    #   FREE TEXT. The write itself stays safe (fixed path, private,
+    #   size-capped); the residual risk is on the READ side — untrusted notes
+    #   re-entering a later prompt — which is handled by the fire-time framing
+    #   that presents them as past-run recollections to verify, not
+    #   instructions. The handler also denies every non-automation origin.
+    "ironclaw.memory.automation_lessons_set",
     # This API-only capability is reachable only from an authenticated
     # operator's explicit save gesture. Its handler repeats operator identity
     # enforcement and uses revision CAS plus idempotent replay.
@@ -131,6 +153,12 @@ capability = "builtin.http.save"
 effects = ["dispatch_capability", "network", "write_filesystem"]
 mounts = "workspace"
 network = "dev_wildcard"
+
+[[grants]]
+capability = "ironclaw.memory.automation_lessons_set"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+mounts = "memory"
+network = "default"
 
 [[grants]]
 capability = "ironclaw.memory.search"

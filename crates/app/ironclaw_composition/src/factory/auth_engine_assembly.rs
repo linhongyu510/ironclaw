@@ -500,6 +500,7 @@ fn auth_execution_context(
         mission_id: resource_scope.mission_id.clone(),
         thread_id: resource_scope.thread_id.clone(),
         origin: None,
+        automation_trigger_id: None,
         extension_id: ExtensionId::new("ironclaw_auth").map_err(|error| {
             tracing::warn!(%error, "auth execution-context extension id invalid");
             AuthProductError::BackendUnavailable

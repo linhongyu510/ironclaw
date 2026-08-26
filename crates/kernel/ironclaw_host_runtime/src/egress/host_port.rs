@@ -210,6 +210,7 @@ fn execution_context_for_host_http_egress(
     let context = ExecutionContext {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         process_id: None,

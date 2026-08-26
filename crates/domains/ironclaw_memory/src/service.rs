@@ -13,7 +13,7 @@ use ironclaw_host_api::{ids::CorrelationId, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::metadata::DocumentMetadata;
+use crate::{metadata::DocumentMetadata, path::AutomationOwner};
 
 const MAX_LOCALE_LEN: usize = 35;
 
@@ -243,6 +243,79 @@ impl MemoryServiceProfileSetRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryServiceProfileSetResponse {
     pub status: MemoryProfileSetStatus,
+}
+
+/// Maximum raw UTF-8 content bytes one `automation_lessons_set` write may
+/// carry. The cap forces curation (the model rewrites its own notes instead of
+/// appending) and bounds the fire-time prompt re-entry blast radius.
+pub const AUTOMATION_LESSONS_MAX_CONTENT_BYTES: usize = 2048;
+
+/// Request for the `automation_lessons_set` tool: `{ content }` ONLY. The
+/// document path is host-derived from the firing run's typed automation
+/// identity — no path field exists on this request, so a run can never name
+/// another automation's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryServiceLessonsSetRequest {
+    pub content: String,
+}
+
+impl MemoryServiceLessonsSetRequest {
+    /// Parse and shape-validate the tool input: exactly one string field
+    /// `content`. Size is NOT validated here — an oversize write is a
+    /// model-visible rejected OUTCOME (see [`MemoryLessonsSetStatus::Rejected`]),
+    /// not a host error, so providers must route it through
+    /// [`validated_lessons_content`].
+    pub fn from_tool_input(input: &Value) -> Result<Self, MemoryServiceError> {
+        let Value::Object(fields) = input else {
+            return Err(MemoryServiceError::input());
+        };
+        if fields.len() != 1 {
+            return Err(MemoryServiceError::input());
+        }
+        let Some(Value::String(content)) = fields.get("content") else {
+            return Err(MemoryServiceError::input());
+        };
+        Ok(Self {
+            content: content.clone(),
+        })
+    }
+}
+
+/// Validate lessons content against the size cap. `Ok(())` means the write
+/// proceeds; `Err(reason)` is a model-visible rejection reason, never a host
+/// fault. Empty content is allowed: whole-file replace semantics make the
+/// empty write the legitimate "clear my notes" operation.
+pub fn validated_lessons_content(content: &str) -> Result<(), String> {
+    if content.len() > AUTOMATION_LESSONS_MAX_CONTENT_BYTES {
+        return Err(format!(
+            "content is {} bytes; the limit is {} bytes — rewrite the file to only what the \
+             next run needs",
+            content.len(),
+            AUTOMATION_LESSONS_MAX_CONTENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// Status of an `automation_lessons_set` operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLessonsSetStatus {
+    /// The lessons file was fully replaced with the new content.
+    Ok,
+    /// The write was refused as a model-visible outcome (oversize content).
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryServiceLessonsSetResponse {
+    pub status: MemoryLessonsSetStatus,
+    /// Present when the write landed: the replaced file's byte length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_length: Option<usize>,
+    /// Present when rejected: the bounded model-visible reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Response for a provider-neutral profile-document read.
@@ -577,6 +650,20 @@ pub trait MemoryService: Send + Sync {
         Err(MemoryServiceError::unavailable())
     }
 
+    /// Read the deterministic notes owned by one scheduled automation.
+    ///
+    /// The host calls this at trigger fire time and injects the returned text
+    /// with untrusted-memory framing. Providers that do not implement the
+    /// conventional automation-lessons tool degrade to no notes.
+    async fn automation_lessons_read(
+        &self,
+        invocation: MemoryInvocation,
+        owner: &AutomationOwner,
+    ) -> Result<Option<String>, MemoryServiceError> {
+        let _ = (invocation, owner);
+        Ok(None)
+    }
+
     /// Long-term lane (retrieve-before-run): the user's general / durable
     /// memory. The host calls this only when the bound provider's manifest
     /// declares the `read_long_term` lifecycle hook.
@@ -644,8 +731,7 @@ pub trait MemoryService: Send + Sync {
 
 // ---------------------------------------------------------------------------
 // The shared memory tool vocabulary
-// ---------------------------------------------------------------------------
-// The five tools both bundled providers happen to declare, under the reserved
+// The six tools both bundled providers happen to declare, under the reserved
 // stable namespace, plus the wire-output helpers their handlers share so the
 // model-visible shapes cannot drift between backends. These are CONVENTIONS —
 // not a required surface: a provider may declare any subset, or entirely
@@ -653,6 +739,11 @@ pub trait MemoryService: Send + Sync {
 
 pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
 pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
+/// The per-automation lessons write. Same fixed-path/closed/ungated class as
+/// `profile_set`: the document path is host-derived from the firing run's
+/// typed automation identity, whole-file replace, size-capped — safe to run
+/// without an approval gate on scheduled (automation-origin) runs.
+pub const AUTOMATION_LESSONS_SET_CAPABILITY_ID: &str = "ironclaw.memory.automation_lessons_set";
 pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
 pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
 pub const PROFILE_SET_CAPABILITY_ID: &str = "ironclaw.memory.profile_set";
@@ -876,6 +967,21 @@ pub fn tree_response_output(response: MemoryServiceTreeResponse) -> Value {
 /// Wire output for a profile_set tool response.
 pub fn profile_set_response_output(response: MemoryServiceProfileSetResponse) -> Value {
     json!({ "status": response.status })
+}
+
+/// Wire output for an `automation_lessons_set` tool response. Shared by every
+/// provider declaring the tool so the model-visible shape cannot drift.
+pub fn lessons_set_response_output(response: MemoryServiceLessonsSetResponse) -> Value {
+    match (response.status, response.content_length, response.reason) {
+        (MemoryLessonsSetStatus::Ok, content_length, _) => json!({
+            "status": "ok",
+            "content_length": content_length.unwrap_or(0),
+        }),
+        (MemoryLessonsSetStatus::Rejected, _, reason) => json!({
+            "status": "rejected",
+            "reason": reason.unwrap_or_else(|| "write refused".to_string()),
+        }),
+    }
 }
 
 fn search_query(input: &Value) -> Result<&str, MemoryServiceError> {

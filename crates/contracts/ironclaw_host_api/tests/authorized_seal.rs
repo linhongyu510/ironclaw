@@ -35,6 +35,7 @@ fn invocation() -> Invocation {
         scope: ResourceScope::system(),
         actor: Actor::Sealed(UserId::new("user1").unwrap()),
         origin: InvocationOrigin::Product(ProductKind::new("settings").unwrap()),
+        automation_trigger_id: None,
         estimate: ResourceEstimate::default(),
         correlation_id: CorrelationId::new(),
         process_id: None,

@@ -4014,6 +4014,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_contracts",
+ "ironclaw_prompt_envelope",
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",

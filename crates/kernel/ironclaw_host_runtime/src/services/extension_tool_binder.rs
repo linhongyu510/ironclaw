@@ -175,6 +175,7 @@ where
                     // lineage; origin-sensitive first-party policy therefore
                     // sees `None` rather than a fabricated classification.
                     origin: None,
+                    automation_trigger_id: None,
                     estimate: call.resources.estimate,
                     mounts: call.resources.mounts,
                     resource_reservation: call.resources.reservation,

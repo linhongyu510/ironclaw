@@ -44,6 +44,11 @@ pub struct FirstPartyCapabilityRequest {
     /// policy consumes this typed value and never re-derives it from
     /// presentation data.
     pub origin: Option<InvocationOrigin>,
+    /// The typed trigger identity of the scheduled automation fire that
+    /// produced this run, preserved host-side end-to-end. `None` for every
+    /// non-automation caller. A handler MUST bind per-automation state to
+    /// this value and never accept a caller-supplied path or id.
+    pub automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -97,6 +102,7 @@ impl FirstPartyCapabilityRequest {
             scope,
             authenticated_actor_user_id: None,
             run_id: None,
+            automation_trigger_id: None,
             origin: Some(InvocationOrigin::Product(
                 ironclaw_host_api::ids::ProductKind::new("test").expect("valid test product kind"), // safety: test-support-only static fixture.
             )),

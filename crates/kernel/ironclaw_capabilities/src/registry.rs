@@ -413,6 +413,7 @@ mod tests {
             authenticated_actor_user_id: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").expect("product kind")),
+            automation_trigger_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,

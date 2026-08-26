@@ -34,7 +34,7 @@ fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
 
     assert_eq!(
         spec.render_prompt(),
-        "## Goal\n\nIdentify yesterday's failed payments.\n\n## Success criteria\n\n- Include every failed payment exactly once.\n- Include customer, amount, currency, and failure reason.\n\n## Output requirements\n\nReturn a Markdown table and total.\n\n## When there is nothing to report\n\nNo failed payments were found yesterday.\n"
+        "## Goal\n\nIdentify yesterday's failed payments.\n\n## Success criteria\n\n- Include every failed payment exactly once.\n- Include customer, amount, currency, and failure reason.\n\n## Output requirements\n\nReturn a Markdown table and total.\n\n## When there is nothing to report\n\nNo failed payments were found yesterday.\n\n## Lessons for the next run\n\nBefore you finish, call `ironclaw.memory.automation_lessons_set` to rewrite this automation's lessons file. Keep only facts, preferences, environment details, and proven procedures that the next run needs. The call replaces the whole file; it does not append.\n"
     );
 }
 

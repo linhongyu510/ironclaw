@@ -36,6 +36,9 @@ pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<
                 "../../../../extensions/packages/memory-native/schemas/memory/profile-set.input.v1.json"
             )
         }
+        "schemas/memory/automation-lessons-set.input.v1.json" => {
+            ironclaw_memory_native::AUTOMATION_LESSONS_SET_INPUT_SCHEMA
+        }
         _ => return None,
     };
     // silent-ok: these are compile-embedded assets validated by the

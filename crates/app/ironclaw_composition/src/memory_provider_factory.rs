@@ -364,15 +364,17 @@ impl FirstPartyCapabilityHandler for Mem0MemoryToolHandler {
     > {
         use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
         use ironclaw_host_runtime::{
-            FirstPartyCapabilityError, finish_memory_tool_result, map_memory_service_error,
-            memory_invocation_for_request,
+            FirstPartyCapabilityError, automation_owner_for_request, finish_memory_tool_result,
+            map_memory_service_error, memory_invocation_for_request,
         };
         use ironclaw_memory::{
-            MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-            MEMORY_WRITE_CAPABILITY_ID, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
-            MemoryServiceSearchRequest, MemoryServiceTreeRequest, MemoryServiceWriteRequest,
-            PROFILE_SET_CAPABILITY_ID, profile_set_response_output, read_response_output,
-            search_response_output, tree_response_output, write_response_output,
+            AUTOMATION_LESSONS_SET_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+            MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+            MemoryServiceLessonsSetRequest, MemoryServiceProfileSetRequest,
+            MemoryServiceReadRequest, MemoryServiceSearchRequest, MemoryServiceTreeRequest,
+            MemoryServiceWriteRequest, PROFILE_SET_CAPABILITY_ID, lessons_set_response_output,
+            profile_set_response_output, read_response_output, search_response_output,
+            tree_response_output, write_response_output,
         };
 
         let start = std::time::Instant::now();
@@ -387,6 +389,17 @@ impl FirstPartyCapabilityHandler for Mem0MemoryToolHandler {
                     .await
                     .map_err(map_memory_service_error)?;
                 profile_set_response_output(response)
+            }
+            AUTOMATION_LESSONS_SET_CAPABILITY_ID => {
+                let owner = automation_owner_for_request(&request)?;
+                let parsed = MemoryServiceLessonsSetRequest::from_tool_input(&request.input)
+                    .map_err(map_memory_service_error)?;
+                let response = self
+                    .provider
+                    .automation_lessons_set(invocation, &owner, parsed)
+                    .await
+                    .map_err(map_memory_service_error)?;
+                lessons_set_response_output(response)
             }
             MEMORY_SEARCH_CAPABILITY_ID => {
                 let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)

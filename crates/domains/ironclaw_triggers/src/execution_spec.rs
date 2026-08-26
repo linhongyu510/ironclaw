@@ -16,6 +16,8 @@ const MAX_REQUIRED_SKILLS: usize = 8;
 const PROMPT_TEMPLATE: &str = include_str!("prompts/trigger_execution.md");
 const SUPPRESSED_NO_RESULT_TEMPLATE: &str =
     include_str!("prompts/suppress_when_nothing_to_report.md");
+pub const AUTOMATION_LESSONS_FRAMING_PROMPT: &str =
+    include_str!("prompts/automation_lessons_framing.md");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

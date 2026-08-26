@@ -613,6 +613,7 @@ fn execution_context() -> ExecutionContext {
     ExecutionContext {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

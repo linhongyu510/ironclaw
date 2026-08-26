@@ -261,6 +261,142 @@ pub fn validated_memory_relative_path(value: String) -> Result<String, HostApiEr
     Ok(value)
 }
 
+/// Opaque owner segment naming ONE automation inside the per-automation
+/// memory namespace (`automations/<owner>/lessons.md`).
+///
+/// The value is host-bound: callers construct it from a typed trigger
+/// identity's string form (a trigger id), never from model input or a
+/// display string, so the charset/bounds here are a defense-in-depth
+/// grammar, not the trust boundary. Validation rejects traversal and any
+/// byte that could escape a single path segment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AutomationOwner(String);
+
+impl AutomationOwner {
+    /// Maximum owner length in bytes. Trigger ids are far shorter; the
+    /// bound keeps one malformed value from producing an unbounded path.
+    pub const MAX_LEN_BYTES: usize = 128;
+
+    pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(HostApiError::InvalidId {
+                kind: "automation owner",
+                value,
+                reason: "owner must not be empty".to_string(),
+            });
+        }
+        if value.len() > Self::MAX_LEN_BYTES {
+            return Err(HostApiError::InvalidId {
+                kind: "automation owner",
+                value,
+                reason: format!("owner must be at most {} bytes", Self::MAX_LEN_BYTES),
+            });
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(HostApiError::InvalidId {
+                kind: "automation owner",
+                value,
+                reason: "owner must contain only ASCII letters, digits, '_', and '-'".to_string(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for AutomationOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The per-automation lessons document under `scope`: the fixed relative
+/// path `automations/<owner>/lessons.md`. The WRITER (the
+/// `automation_lessons_set` tool, host-derived path) and the READER (the
+/// fire-time prompt injection) share this one constructor so the grammar
+/// cannot drift between them.
+pub fn automation_lessons_document_path(
+    scope: MemoryDocumentScope,
+    owner: &AutomationOwner,
+) -> Result<MemoryDocumentPath, HostApiError> {
+    MemoryDocumentPath::from_scope(scope, format!("automations/{}/lessons.md", owner.as_str()))
+}
+
+#[cfg(test)]
+mod automation_owner_tests {
+    use super::{AutomationOwner, MemoryDocumentScope, automation_lessons_document_path};
+
+    #[test]
+    fn accepts_trigger_id_shaped_owners() {
+        // A ULID trigger id (Crockford base32: digits + uppercase letters).
+        let ulid = "01J9Z8G7S4XK2WQ6P3N5R8TVCY";
+        let owner = AutomationOwner::new(ulid).expect("ULID-shaped owner is valid");
+        assert_eq!(owner.as_str(), ulid);
+        for ok in ["nightly-report", "triage_2"] {
+            AutomationOwner::new(ok).unwrap_or_else(|_| panic!("{ok} must be accepted"));
+        }
+    }
+
+    #[test]
+    fn rejects_empty_oversized_and_non_charset_owners() {
+        assert!(AutomationOwner::new("").is_err(), "empty owner rejected");
+        let oversized = "a".repeat(AutomationOwner::MAX_LEN_BYTES + 1);
+        assert!(
+            AutomationOwner::new(oversized).is_err(),
+            "oversized rejected"
+        );
+        assert!(
+            AutomationOwner::new("a".repeat(AutomationOwner::MAX_LEN_BYTES)).is_ok(),
+            "exactly at the bound is accepted"
+        );
+        for bad in [
+            "../escape",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "a b",
+            "a.b",
+            "héllo",
+            "a\nb",
+        ] {
+            assert!(
+                AutomationOwner::new(bad).is_err(),
+                "owner {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn lessons_path_is_fixed_under_the_owner_segment() {
+        let scope = MemoryDocumentScope::new("tenant-a", "user-a", None).expect("valid scope");
+        let owner = AutomationOwner::new("01J9Z8G7S4XK2WQ6P3N5R8TVCY").expect("valid owner");
+        let path = automation_lessons_document_path(scope, &owner).expect("valid path");
+        assert_eq!(
+            path.relative_path(),
+            "automations/01J9Z8G7S4XK2WQ6P3N5R8TVCY/lessons.md",
+        );
+    }
+
+    #[test]
+    fn lessons_path_flows_through_the_shared_relative_path_validator() {
+        // Defense in depth: the constructed path re-runs
+        // `validated_memory_relative_path` inside
+        // `MemoryDocumentPath::from_scope`, so even if the owner grammar ever
+        // loosened, a traversal segment cannot reach the repository.
+        let scope = MemoryDocumentScope::new("tenant-a", "user-a", None).expect("valid scope");
+        let owner = AutomationOwner::new("ok-owner").expect("valid owner");
+        let path = automation_lessons_document_path(scope, &owner).expect("valid path");
+        assert_eq!(path.relative_path(), "automations/ok-owner/lessons.md");
+    }
+}
+
 #[cfg(test)]
 mod path_validation_tests {
     use super::validated_memory_relative_path;

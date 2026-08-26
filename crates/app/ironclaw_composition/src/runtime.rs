@@ -201,8 +201,8 @@ use crate::runtime_input::{
 };
 use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
 use crate::trigger_poller_assembly::{
-    build_trigger_active_run_lookup, build_trigger_poller_services, poller_user_directory,
-    validate_trigger_poller_authorization,
+    TriggerPromptMaterializerDeps, build_trigger_active_run_lookup, build_trigger_poller_services,
+    poller_user_directory, validate_trigger_poller_authorization,
 };
 use crate::{RebornBuildError, RebornReadiness};
 use ironclaw_triggers::{
@@ -3792,7 +3792,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         after_turn_memory_writer: wired_after_turn_memory_writer,
         user_profile_source: wired_memory_user_profile_source,
     } = crate::memory_provider_factory::memory_lifecycle_consumers(
-        resolved_memory_provider,
+        resolved_memory_provider.clone(),
         &memory_lifecycle,
     );
     // The bound provider's own memory guidance for the model, if it ships any
@@ -4363,11 +4363,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let trigger_poller_services = build_trigger_poller_services(
             conversation_services,
             Arc::clone(&planned_turn_coordinator),
-            Arc::clone(&thread_service),
+            TriggerPromptMaterializerDeps {
+                thread_service: Arc::clone(&thread_service),
+                default_agent_id: validated_identity.agent_id.clone(),
+                memory_service: resolved_memory_provider.clone(),
+            },
             trigger_poller.authorizer,
             effective_trigger_fire_access_checker.clone(),
             thread_scope.tenant_id.clone(),
-            validated_identity.agent_id.clone(),
         )?;
         let active_run_lookup =
             build_trigger_active_run_lookup(Arc::clone(&process_lifecycle_lookup_source));

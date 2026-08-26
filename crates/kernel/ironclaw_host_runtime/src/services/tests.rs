@@ -872,6 +872,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
     let context = ExecutionContext {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -971,6 +972,7 @@ async fn service_guard_releases_reservation_on_planner_denial() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1029,6 +1031,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1092,6 +1095,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1150,6 +1154,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1215,6 +1220,7 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1347,6 +1353,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -1497,6 +1504,7 @@ async fn assert_first_party_denies_before_handler(
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

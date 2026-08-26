@@ -29,8 +29,8 @@ pub use events::{
 pub use hash::{content_bytes_sha256, content_sha256};
 pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata};
 pub use path::{
-    MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path,
-    validated_memory_segment,
+    AutomationOwner, MemoryDocumentPath, MemoryDocumentScope, automation_lessons_document_path,
+    validated_memory_relative_path, validated_memory_segment,
 };
 pub use safety::{
     DEFAULT_PROMPT_PROTECTED_PATHS, PromptProtectedPathClass, PromptProtectedPathRegistry,
@@ -41,17 +41,19 @@ pub use safety::{
     PromptWriteSource,
 };
 pub use service::{
+    AUTOMATION_LESSONS_MAX_CONTENT_BYTES, AUTOMATION_LESSONS_SET_CAPABILITY_ID,
     MEMORY_DISABLED_CONTEXT_ALIASES, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
     MEMORY_SEARCH_SCOPE, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
-    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryLessonsSetStatus, MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceLessonsSetRequest, MemoryServiceLessonsSetResponse,
     MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
     MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID, memory_context_disabled,
-    profile_set_response_output, read_response_output, search_response_output,
-    tree_response_output, write_response_output,
+    MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID, lessons_set_response_output,
+    memory_context_disabled, profile_set_response_output, read_response_output,
+    search_response_output, tree_response_output, validated_lessons_content, write_response_output,
 };

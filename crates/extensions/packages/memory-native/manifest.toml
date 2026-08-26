@@ -93,3 +93,19 @@ visibility = "model"
 origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/profile-set.input.v1.json"
 output_schema_ref = "schemas/memory/profile-set.output.v1.json"
+
+[[tools]]
+id = "ironclaw.memory.automation_lessons_set"
+description = "Rewrite this automation's lessons file (scheduled runs only). Whole-file replace, 2 KiB max. Keep only what the next run needs. Use ironclaw.memory.write for anything else."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+# Scheduled-only is NOT expressible on the matrix: an interactive LoopRun and a
+# trigger-fired ScheduledLoopRun share one column, so the handler repeats the
+# posture check host-side and denies every non-automation caller.
+# loop_run stays gated_unless_granted (covered by the standing builtin grant +
+# approval-gate exemption, so scheduled fires never block on an approval);
+# Product/Automation are deny-by-default like every sibling memory tool.
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/automation-lessons-set.input.v1.json"
+output_schema_ref = "schemas/memory/automation-lessons-set.output.v1.json"

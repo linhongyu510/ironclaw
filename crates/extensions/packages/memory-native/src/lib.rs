@@ -37,3 +37,10 @@ pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
 pub use service::{
     MEMORY_GUIDANCE, MEMORY_GUIDANCE_ASSETS, MEMORY_GUIDANCE_DOC_REF, NativeMemoryService,
 };
+
+/// Input schema for the fixed-path per-automation lessons write.
+///
+/// Exported by the asset owner so host runtime does not reach into this
+/// crate's source tree with a cross-crate `include_str!`.
+pub const AUTOMATION_LESSONS_SET_INPUT_SCHEMA: &str =
+    include_str!("../schemas/memory/automation-lessons-set.input.v1.json");

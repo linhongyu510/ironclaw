@@ -91,3 +91,17 @@ visibility = "model"
 origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/memory/profile-set.input.v1.json"
 output_schema_ref = "schemas/memory/profile-set.output.v1.json"
+
+# The per-automation lessons write (issue #7893). Declared so the model's tool
+# surface does not change with the [memory] backend binding. mem0 is
+# append-only, so each replacement is a new target-tagged record and the
+# newest record is the logical file; older records remain retained.
+[[tools]]
+id = "ironclaw.memory.automation_lessons_set"
+description = "Rewrite this automation's lessons file (scheduled runs only). Whole-file replace, 2 KiB max. Keep only what the next run needs. Use ironclaw.memory.write for anything else."
+effects = ["read_filesystem", "write_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/automation-lessons-set.input.v1.json"
+output_schema_ref = "schemas/memory/automation-lessons-set.output.v1.json"

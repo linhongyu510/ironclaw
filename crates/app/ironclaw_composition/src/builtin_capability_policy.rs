@@ -765,6 +765,35 @@ mod tests {
             CapabilityNetworkProfile::Default
         );
 
+        assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "ironclaw.memory.automation_lessons_set"
+                }),
+            "scheduled automation lessons writes must not block on an unattended approval"
+        );
+        let automation_lessons = policy
+            .grant(
+                &CapabilityId::new("ironclaw.memory.automation_lessons_set")
+                    .expect("capability id"),
+            )
+            .expect("automation lessons grant must be present");
+        assert_eq!(
+            automation_lessons.effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(automation_lessons.mounts, CapabilityMountProfile::Memory);
+        assert_eq!(
+            automation_lessons.network,
+            CapabilityNetworkProfile::Default
+        );
+
         // profile_token writes profile_token.jwt (0600), so its grant carries
         // WriteFilesystem; trace_commons.profile_set only reads policy + posts, so it does not.
         let profile_token = policy

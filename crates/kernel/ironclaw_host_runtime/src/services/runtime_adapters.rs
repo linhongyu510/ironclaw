@@ -118,6 +118,9 @@ where
     pub run_id: Option<ironclaw_host_api::ids::RunId>,
     /// Host-sealed origin used by capability-boundary policy.
     pub origin: Option<InvocationOrigin>,
+    /// The typed trigger identity of the scheduled fire behind this run, when
+    /// the origin is an automation fire. Preserved from the sealed invocation.
+    pub automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -839,7 +842,8 @@ where
             // attribute the action to the acting user.
             authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             run_id: request.run_id,
-            origin: request.origin,
+            origin: request.origin.clone(),
+            automation_trigger_id: request.automation_trigger_id.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
             services,

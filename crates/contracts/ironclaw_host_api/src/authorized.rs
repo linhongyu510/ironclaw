@@ -294,6 +294,7 @@ impl ProcessAuthorizedContinuation {
             scope,
             actor,
             origin,
+            automation_trigger_id: _,
             estimate,
             correlation_id,
             // The original process id is the direct spawner for nested process

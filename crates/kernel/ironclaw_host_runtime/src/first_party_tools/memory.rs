@@ -33,14 +33,15 @@ use ironclaw_host_api::{
     resource::ResourceUsage,
 };
 use ironclaw_memory::{
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-    MEMORY_WRITE_CAPABILITY_ID, MemoryEventSinkError, MemoryInvocation, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
+    AUTOMATION_LESSONS_SET_CAPABILITY_ID, AutomationOwner, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    MemoryEventSinkError, MemoryInvocation, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceLessonsSetRequest, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
     MemoryServiceSearchRequest, MemoryServiceTreeRequest, MemoryServiceWriteRequest,
     PROFILE_SET_CAPABILITY_ID, PromptSafetyReasonCode, PromptWriteOperation,
     PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    profile_set_response_output, read_response_output, search_response_output,
-    tree_response_output, write_response_output,
+    lessons_set_response_output, profile_set_response_output, read_response_output,
+    search_response_output, tree_response_output, write_response_output,
 };
 use ironclaw_memory_native::NativeMemoryService;
 use serde_json::Value;
@@ -259,6 +260,22 @@ async fn serve_native_tool(
                 .map_err(map_memory_service_error)?;
             Ok(profile_set_response_output(response))
         }
+
+        AUTOMATION_LESSONS_SET_CAPABILITY_ID => {
+            // Origin gate: scheduled (automation-fire) runs only. The
+            // matrix cannot express "scheduled-only" — interactive `LoopRun`
+            // and trigger-fired `ScheduledLoopRun` share one column — so the
+            // handler repeats the posture check host-side, exactly like the
+            // trigger-mutation tools do.
+            let owner = automation_owner_for_request(request)?;
+            let parsed = MemoryServiceLessonsSetRequest::from_tool_input(&request.input)
+                .map_err(map_memory_service_error)?;
+            let response = service
+                .automation_lessons_set(invocation, &owner, parsed)
+                .await
+                .map_err(map_memory_service_error)?;
+            Ok(lessons_set_response_output(response))
+        }
         MEMORY_SEARCH_CAPABILITY_ID => {
             let parsed = MemoryServiceSearchRequest::from_tool_input(&request.input)
                 .map_err(map_memory_service_error)?;
@@ -299,6 +316,37 @@ async fn serve_native_tool(
         // fail closed with the model-visible operation error.
         _ => Err(operation_error()),
     }
+}
+
+/// Bind the per-automation identity for `automation_lessons_set` from the
+/// host-sealed execution context.
+///
+/// Two checks, both mandatory:
+///
+/// 1. the run's origin is a scheduled (trigger-fired) loop run — an
+///    interactive `LoopRun`, a product call, or a non-model routine has no
+///    automation to bind and is denied;
+/// 2. the typed trigger identity is present. It arrives only through the
+///    trusted-trigger submit → product-context → execution-context thread;
+///    it is NEVER parsed out of `external_conversation_id` or any other
+///    display string, so a model-supplied value can never influence it.
+pub fn automation_owner_for_request(
+    request: &FirstPartyCapabilityRequest,
+) -> Result<AutomationOwner, FirstPartyCapabilityError> {
+    fn denied() -> FirstPartyCapabilityError {
+        FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::PolicyDenied,
+            "automation lessons are writable only by that automation's own scheduled runs",
+        )
+    }
+    if !matches!(
+        request.origin.as_ref(),
+        Some(ironclaw_host_api::invocation::InvocationOrigin::ScheduledLoopRun(_))
+    ) {
+        return Err(denied());
+    }
+    let trigger_id = request.automation_trigger_id.as_ref().ok_or_else(denied)?;
+    AutomationOwner::new(trigger_id.as_str()).map_err(|_| denied())
 }
 
 fn audit_sinks_match(
@@ -585,6 +633,7 @@ mod tests {
         input: Value,
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            automation_trigger_id: None,
             origin: None,
             run_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -605,6 +654,156 @@ mod tests {
             },
             input,
         }
+    }
+
+    /// A scheduled (automation-fire) request: `ScheduledLoopRun` origin plus
+    /// the typed trigger identity threaded from the trusted submit seam.
+    fn scheduled_lessons_request(
+        filesystem: Arc<InMemoryBackend>,
+        input: Value,
+        with_trigger_id: bool,
+    ) -> FirstPartyCapabilityRequest {
+        let mut request =
+            memory_request_over(filesystem, AUTOMATION_LESSONS_SET_CAPABILITY_ID, input);
+        let run_id = ironclaw_host_api::ids::RunId::new();
+        request.run_id = Some(run_id);
+        request.origin =
+            Some(ironclaw_host_api::invocation::InvocationOrigin::ScheduledLoopRun(run_id));
+        if with_trigger_id {
+            request.automation_trigger_id = Some(
+                ironclaw_host_api::ids::AutomationTriggerId::new("01J9Z8G7S4XK2WQ6P3N5R8TVCY")
+                    .unwrap(),
+            );
+        }
+        request
+    }
+
+    /// A scheduled run writes its lessons through the full guard→native
+    /// chain; the file lands at the host-derived path
+    /// `automations/<trigger-id>/lessons.md` and a second write fully
+    /// supersedes the first.
+    #[tokio::test]
+    async fn scheduled_run_writes_host_derived_lessons_path_with_replace_semantics() {
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
+
+        let first = handler
+            .dispatch(scheduled_lessons_request(
+                Arc::clone(&filesystem),
+                json!({"content": "install fails at step 3; retry twice"}),
+                true,
+            ))
+            .await
+            .expect("first lessons write succeeds");
+        assert_eq!(first.output["status"], "ok");
+
+        let second = handler
+            .dispatch(scheduled_lessons_request(
+                Arc::clone(&filesystem),
+                json!({"content": "skip section X"}),
+                true,
+            ))
+            .await
+            .expect("second lessons write succeeds");
+        assert_eq!(second.output["status"], "ok");
+        assert_eq!(
+            second.output["content_length"],
+            "skip section X".len() as u64
+        );
+
+        // The document lives at the host-derived path under the request's own
+        // memory scope — the model never named it.
+        let scope_prefix = format!(
+            "/memory/tenants/{}/users/{}/agents/_none/projects/_none/automations/\
+             01J9Z8G7S4XK2WQ6P3N5R8TVCY",
+            sample_scope().tenant_id.as_str(),
+            sample_scope().user_id.as_str(),
+        );
+        let lessons_path = ironclaw_memory::automation_lessons_document_path(
+            ironclaw_memory::MemoryDocumentScope::new(
+                sample_scope().tenant_id.as_str(),
+                sample_scope().user_id.as_str(),
+                None,
+            )
+            .unwrap(),
+            &AutomationOwner::new("01J9Z8G7S4XK2WQ6P3N5R8TVCY").unwrap(),
+        )
+        .unwrap()
+        .virtual_path()
+        .unwrap();
+        assert!(
+            lessons_path.as_str().starts_with(&scope_prefix),
+            "unexpected lessons path {lessons_path:?}"
+        );
+        let stored = filesystem
+            .get(&lessons_path)
+            .await
+            .unwrap()
+            .expect("lessons document exists");
+        assert_eq!(stored.entry.body, b"skip section X");
+    }
+
+    /// Oversize content is a model-visible rejected outcome — the dispatch
+    /// SUCCEEDS and the output carries `status=rejected` — never a host error.
+    #[tokio::test]
+    async fn oversize_lessons_content_is_a_model_visible_rejected_outcome() {
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let result = handler
+            .dispatch(scheduled_lessons_request(
+                filesystem,
+                json!({"content": "x".repeat(2049)}),
+                true,
+            ))
+            .await
+            .expect("oversize write is an outcome, not an error");
+        assert_eq!(result.output["status"], "rejected");
+        assert!(
+            result.output["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("limit")),
+        );
+    }
+
+    /// An interactive loop-run caller is denied even though the capability is
+    /// granted: only that automation's own scheduled runs may write lessons.
+    #[tokio::test]
+    async fn interactive_loop_run_caller_is_denied() {
+        let handler = handler();
+        let mut request = memory_request_over(
+            Arc::new(InMemoryBackend::new()),
+            AUTOMATION_LESSONS_SET_CAPABILITY_ID,
+            json!({"content": "hi"}),
+        );
+        let run_id = ironclaw_host_api::ids::RunId::new();
+        request.run_id = Some(run_id);
+        request.origin = Some(ironclaw_host_api::invocation::InvocationOrigin::LoopRun(
+            run_id,
+        ));
+        request.automation_trigger_id = None;
+        let error = handler
+            .dispatch(request)
+            .await
+            .expect_err("interactive caller must be denied");
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::PolicyDenied));
+    }
+
+    /// Even a scheduled origin cannot write lessons when the typed trigger
+    /// identity is absent — there is nothing host-bound to derive the path
+    /// from, so the handler fails closed instead of guessing.
+    #[tokio::test]
+    async fn scheduled_origin_without_typed_trigger_id_fails_closed() {
+        let handler = handler();
+        let request = scheduled_lessons_request(
+            Arc::new(InMemoryBackend::new()),
+            json!({"content": "hi"}),
+            false,
+        );
+        let error = handler
+            .dispatch(request)
+            .await
+            .expect_err("missing trigger id must fail closed");
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::PolicyDenied));
     }
 
     /// The registry-routed handler serves the conventional tools end to end

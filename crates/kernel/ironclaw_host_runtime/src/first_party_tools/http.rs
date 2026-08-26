@@ -677,6 +677,7 @@ mod tests {
     ) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
             origin: None,
+            automation_trigger_id: None,
             capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
             run_id: None,

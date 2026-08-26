@@ -224,6 +224,44 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+
+/// The typed trigger identity of the scheduled automation fire that produced
+/// a run. Minted by the trusted-trigger submit seam (which carries
+/// trigger-ness as a typed value) and threaded through the turn/run context
+/// to capability handlers, so a handler can derive a per-automation host path
+/// (`automations/<id>/...`) without ever re-deriving it from a display string.
+///
+/// Deliberately NOT `validate_name_segment`: trigger ids are ULIDs and carry
+/// uppercase letters. The grammar is single-path-segment-safe: non-empty,
+/// bounded, ASCII alphanumeric plus `_`/`-` — no separators, no traversal.
+fn validate_automation_trigger_id(kind: &'static str, value: &str) -> Result<(), HostApiError> {
+    if value.is_empty() {
+        return Err(HostApiError::invalid_id(kind, value, "must not be empty"));
+    }
+    if value.len() > 128 {
+        return Err(HostApiError::invalid_id(
+            kind,
+            value,
+            "must be at most 128 bytes",
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(HostApiError::invalid_id(
+            kind,
+            value,
+            "only ASCII letters, digits, '_', and '-' are allowed",
+        ));
+    }
+    Ok(())
+}
+string_id!(
+    AutomationTriggerId,
+    "automation_trigger",
+    validate_automation_trigger_id
+);
 // Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
 // handle to a durably-stored host-error record. The recoverability *class* rides
 // the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays

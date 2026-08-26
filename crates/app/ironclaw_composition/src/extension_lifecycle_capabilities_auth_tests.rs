@@ -305,6 +305,7 @@ fn execution_context_for_scope<'a>(
     let context = ExecutionContext {
         run_id: Some(RunId::new()),
         origin: None,
+        automation_trigger_id: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         process_id: None,

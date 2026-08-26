@@ -73,6 +73,10 @@ fn coordinator_submit_request(submission: ConversationTurnSubmission) -> SubmitT
     );
     if is_trusted_trigger {
         product_context.execution_policy = submission.execution_policy;
+        // The typed trigger identity of the fire, carried through the
+        // conversations submit seam. Only a `TrustedTrigger` classification can
+        // arrive with one, so this never stamps an interactive run.
+        product_context.automation_trigger_id = submission.automation_trigger_id;
     }
     SubmitTurnRequest {
         subagent_activation_provenance: None,
@@ -388,6 +392,7 @@ mod tests {
             origin_adapter: RunOriginAdapter::new(adapter).expect("adapter"),
             surface_type,
             execution_policy: None,
+            automation_trigger_id: None,
         }
     }
 

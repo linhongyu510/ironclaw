@@ -62,6 +62,9 @@ pub struct ConversationTurnSubmission {
     pub origin_adapter: RunOriginAdapter,
     pub surface_type: Option<TurnSurfaceType>,
     pub execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
+    /// The typed trigger identity of the fire, set ONLY on the trusted-trigger
+    /// path. `None` for every other inbound classification.
+    pub automation_trigger_id: Option<ironclaw_host_api::ids::AutomationTriggerId>,
 }
 
 /// The retry/idempotency partition of a submission failure.

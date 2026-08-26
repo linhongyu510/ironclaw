@@ -111,6 +111,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -179,6 +180,7 @@ async fn first_party_adapter_forwards_scheduled_loop_origin_unchanged() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: Some(run_id),
             origin: Some(origin.clone()),
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -275,6 +277,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -341,6 +344,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -398,6 +402,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -462,6 +467,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -519,6 +525,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -716,6 +723,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -872,6 +880,7 @@ async fn first_party_adapter_retries_a_failed_reservation_release_on_the_next_di
     let lane_request = || RuntimeLaneRequest {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -983,6 +992,7 @@ async fn first_party_adapter_defers_a_failed_release_after_planner_failure() {
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -1053,6 +1063,7 @@ async fn first_party_adapter_defers_a_failed_release_after_service_resolution_fa
     let request = |reservation: Option<ResourceReservation>| RuntimeLaneRequest {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -1159,6 +1170,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     let dispatch = adapter.dispatch_json(RuntimeLaneRequest {
         run_id: None,
         origin: None,
+        automation_trigger_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -1273,6 +1285,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

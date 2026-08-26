@@ -299,6 +299,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -385,6 +386,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
         .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
@@ -563,6 +565,7 @@ fn authorized_in_process(
             .run_id
             .map(InvocationOrigin::LoopRun)
             .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        automation_trigger_id: request.automation_trigger_id,
         estimate: request.estimate,
         correlation_id: CorrelationId::new(),
         process_id,
@@ -581,6 +584,7 @@ fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+        automation_trigger_id: None,
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,
@@ -605,6 +609,7 @@ fn loop_run_request_in_process(
         CapabilityDispatchRequest {
             run_id: Some(run_id),
             origin: InvocationOrigin::LoopRun(run_id),
+            automation_trigger_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
@@ -625,6 +630,7 @@ fn loop_run_request(run_id: RunId, capability_id: &str, input: Value) -> Authori
     authorized(CapabilityDispatchRequest {
         run_id: Some(run_id),
         origin: InvocationOrigin::LoopRun(run_id),
+        automation_trigger_id: None,
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
         authenticated_actor_user_id: None,

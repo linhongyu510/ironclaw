@@ -2,6 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_memory::MemoryService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
 
@@ -26,14 +27,19 @@ pub(crate) struct TriggerPollerServices {
     pub(crate) pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
 
+pub(crate) struct TriggerPromptMaterializerDeps {
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) default_agent_id: AgentId,
+    pub(crate) memory_service: Option<Arc<dyn MemoryService>>,
+}
+
 pub(crate) fn build_trigger_poller_services<C>(
     conversation_services: C,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    thread_service: Arc<dyn SessionThreadService>,
+    materializer_deps: TriggerPromptMaterializerDeps,
     authorizer_config: TriggerPollerAuthorizerConfig,
     access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     tenant_id: TenantId,
-    default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError>
 where
     C: ironclaw_conversations::ConversationBindingService
@@ -45,12 +51,15 @@ where
     let authorizer = build_trigger_fire_authorizer(authorizer_config, access_checker, tenant_id)?;
     let pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         Arc::new(conversation_services.clone());
-    let materializer = Arc::new(ConversationContentRefMaterializer::new(
-        conversation_services.clone(),
-        Arc::clone(&thread_service),
-        default_agent_id,
-        authorizer,
-    ));
+    let materializer = Arc::new(
+        ConversationContentRefMaterializer::new(
+            conversation_services.clone(),
+            Arc::clone(&materializer_deps.thread_service),
+            materializer_deps.default_agent_id,
+            authorizer,
+        )
+        .with_memory_service(materializer_deps.memory_service),
+    );
     // `ironclaw_conversations` does not hold the coordinator; it declares the
     // one submission call it makes as a port, which this adapter implements
     // over the handle composition already owns.

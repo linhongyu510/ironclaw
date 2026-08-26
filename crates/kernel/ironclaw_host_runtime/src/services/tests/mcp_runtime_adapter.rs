@@ -41,6 +41,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -94,6 +95,7 @@ async fn mcp_adapter_sanitizes_executor_failure_paths() {
         .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             origin: None,
+            automation_trigger_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

@@ -18,18 +18,20 @@ use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_memory::{
-    DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
-    PromptSafetyAllowanceId, PromptWriteSafetyEventSink, content_bytes_sha256,
+    AutomationOwner, DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
+    PromptSafetyAllowanceId, PromptWriteSafetyEventSink, automation_lessons_document_path,
+    content_bytes_sha256,
 };
 use ironclaw_memory::{
-    MemoryInteractionMessage, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
+    MemoryInteractionMessage, MemoryInvocation, MemoryLessonsSetStatus, MemoryProfileSetStatus,
+    MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
+    MemoryServiceLessonsSetRequest, MemoryServiceLessonsSetResponse,
     MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
     MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, memory_context_disabled,
+    MemoryWriteStatus, memory_context_disabled, validated_lessons_content,
 };
 use serde_json::{Map, Value, json};
 
@@ -398,6 +400,78 @@ impl NativeMemoryService {
         }
         Err(MemoryServiceError::operation())
     }
+
+    /// Replace this automation's lessons file with `request.content`
+    /// (whole-file replace — the model curates its own notes, the file cannot
+    /// grow without bound). The document path is host-derived from `owner`;
+    /// the model never names it. An oversize write is a model-visible
+    /// rejected outcome, not a host error.
+    pub async fn automation_lessons_set(
+        &self,
+        invocation: MemoryInvocation,
+        owner: &AutomationOwner,
+        request: MemoryServiceLessonsSetRequest,
+    ) -> Result<MemoryServiceLessonsSetResponse, MemoryServiceError> {
+        if let Err(reason) = validated_lessons_content(&request.content) {
+            return Ok(MemoryServiceLessonsSetResponse {
+                status: MemoryLessonsSetStatus::Rejected,
+                content_length: None,
+                reason: Some(reason),
+            });
+        }
+        let (scope, context) = self.scoped_context(&invocation)?;
+        let path = automation_lessons_document_path(scope, owner)
+            .map_err(|_| MemoryServiceError::input())?;
+        let options = write_options(None);
+        self.backend
+            .write_document_with_backend_options(
+                &context,
+                &path,
+                request.content.as_bytes(),
+                &options,
+            )
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        Ok(MemoryServiceLessonsSetResponse {
+            status: MemoryLessonsSetStatus::Ok,
+            content_length: Some(request.content.len()),
+            reason: None,
+        })
+    }
+
+    /// Read this automation's lessons file for fire-time prompt injection.
+    /// A missing or empty document is the NORMAL first-run state and returns
+    /// `None` (no section, no error); a backend fault also degrades to
+    /// `None` with a `debug!` — memory is best-effort context and must never
+    /// take a fire down.
+    pub async fn automation_lessons_read(
+        &self,
+        scope: &MemoryDocumentScope,
+        owner: &AutomationOwner,
+    ) -> Option<String> {
+        let Ok(path) = automation_lessons_document_path(scope.clone(), owner) else {
+            return None;
+        };
+        let context = MemoryContext::new(scope.clone());
+        let bytes = match self.backend.read_document(&context, &path).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!("automation lessons read failed; injecting no section: {error}");
+                return None;
+            }
+        };
+        match String::from_utf8(bytes) {
+            Ok(content) if !content.is_empty() => Some(content),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(
+                    "automation lessons document is not valid UTF-8; skipping injection: {error}"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -419,6 +493,15 @@ impl MemoryService for NativeMemoryService {
             .await
             .map_err(MemoryServiceError::operation_from)?;
         Ok(MemoryServiceProfileReadResponse { document })
+    }
+
+    async fn automation_lessons_read(
+        &self,
+        invocation: MemoryInvocation,
+        owner: &AutomationOwner,
+    ) -> Result<Option<String>, MemoryServiceError> {
+        let (scope, _context) = self.scoped_context(&invocation)?;
+        Ok(self.automation_lessons_read(&scope, owner).await)
     }
 
     /// Long-term lane: the standing memory document first, then the full-text

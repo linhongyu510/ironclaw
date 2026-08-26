@@ -566,6 +566,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
         .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             capability_id: ping.clone(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
@@ -643,6 +644,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
@@ -738,6 +740,7 @@ async fn snapshot_resolver_preserves_typed_provider_rejection() {
         .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            automation_trigger_id: None,
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
             estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
