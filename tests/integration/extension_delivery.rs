@@ -984,6 +984,7 @@ fn start_channel_host_assembly(
                 project_id: inbound.binding.project_id.clone(),
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
+            blocked_auth_prompts: None,
         })
         .expect("production channel host assembly starts")
 }
@@ -1487,6 +1488,380 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     assert_eq!(authorization.1, format!("Bearer {SLACK_BOT_TOKEN}"));
 }
 
+/// #7897: a fixed `BlockedAuthPromptSource` standing in for the real
+/// `product_auth`/pairing-registry-backed one composition wires in
+/// production (this harness has no test double for that yet — see
+/// `ChannelHostAssemblyTestWiring::blocked_auth_prompts`'s doc comment). It
+/// always reports the challenge as `ManualToken` (github's real credential
+/// setup kind, pinned by `auth_gate.rs`'s W4-AUTHGATE-WIRE test), so the
+/// unserviceable message renders `MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE`
+/// instead of the generic fallback.
+struct ManualTokenAuthPromptSource;
+
+#[async_trait::async_trait]
+impl ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource
+    for ManualTokenAuthPromptSource
+{
+    async fn auth_prompt_for_blocked_run(
+        &self,
+        request: ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest<'_>,
+    ) -> Result<
+        ironclaw_extension_contracts::auth_prompt::AuthPromptView,
+        ironclaw_host_api::product_adapter_error::ProductAdapterError,
+    > {
+        Ok(ironclaw_extension_contracts::auth_prompt::AuthPromptView {
+            turn_run_id: request.run_id,
+            auth_request_ref: request.gate_ref.as_str().to_string(),
+            invocation_id: request.invocation_id,
+            headline: "Authentication required".to_string(),
+            body: request.body,
+            challenge_kind: Some(
+                ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind::ManualToken,
+            ),
+            provider: Some("github".to_string()),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+            connection: None,
+            pairing: None,
+            device_link: None,
+        })
+    }
+}
+
+/// #7897: `IRONCLAW_REBORN_WEBUI_BASE_URL` is read directly by
+/// `extension_host_assembly::connect_link_base_url_from_env` — the exact
+/// production seam `slack_unserviceable_auth_gate_*` below exercises through
+/// the assembled channel-host path (`start_channel_host_assembly_for_test`),
+/// so unlike everywhere else in this suite the origin has to be a real
+/// process env var, not a harness-level override. The read happens exactly
+/// once, synchronously, inside that one assembly call — so the guard only
+/// ever needs to span a non-async block, never an `.await`, and nothing else
+/// in this binary sets or reads this variable. Mirrors
+/// `crates/app/ironclaw_composition/tests/service_factory.rs`'s
+/// `EnvVarGuard`, scoped to this one key.
+struct WebUiBaseUrlEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl WebUiBaseUrlEnvGuard {
+    const KEY: &'static str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    fn set(value: &str) -> Self {
+        let lock = ironclaw_common::env_helpers::lock_env();
+        let previous = std::env::var_os(Self::KEY);
+        // SAFETY: serialized by `lock_env()`; restored on `Drop` before this
+        // guard's scope releases the lock.
+        unsafe { std::env::set_var(Self::KEY, value) };
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    fn unset() -> Self {
+        let lock = ironclaw_common::env_helpers::lock_env();
+        let previous = std::env::var_os(Self::KEY);
+        // SAFETY: serialized by `lock_env()`; restored on `Drop`.
+        unsafe { std::env::remove_var(Self::KEY) };
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for WebUiBaseUrlEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: still holding `_lock`.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(Self::KEY, value),
+                None => std::env::remove_var(Self::KEY),
+            }
+        }
+    }
+}
+
+/// Drive a `builtin.extension_install` of github through a real admitted
+/// Slack turn on a fresh `extension_delivery` group. Github has no entry in
+/// the provider-instance readiness map, so install always opens the ordinary
+/// per-account credential gate through the generic product-auth mechanism —
+/// proven by `scenario_extension_install_github_normal_gate.rs` — with no
+/// `GithubHarnessAuthorizer`/fixed resolver and no WASM dispatch needed
+/// (`github.get_repo` itself needs extra asset-copy/publish wiring this
+/// group doesn't carry; installing does not). Raises a REAL
+/// `TurnStatus::BlockedAuth` (provider=github, ManualToken —
+/// `auth_gate.rs`'s W4-AUTHGATE-WIRE pin).
+///
+/// The channel host assembly is the REAL production wiring
+/// (`start_channel_host_assembly_for_test` -> `start_channel_host` ->
+/// `extension_host_assembly.rs:587-589`), not a hand-built
+/// `RunDeliveryServices` literal — codex's "exercise the assembled caller
+/// path rather than only this helper" — so `origin` reaches the delivered
+/// message the same way a real deployment's `IRONCLAW_REBORN_WEBUI_BASE_URL`
+/// would: through the env-guarded assembly call, `channel_workflow.rs:474`'s
+/// per-conversation `RunDeliveryServices`, and `observer.rs:1052-1055`.
+///
+/// The observer auto-cancels an unserviceable auth gate
+/// (`cancel_auth_blocked_run`, a hard cancel — never a resume), so the
+/// script needs exactly one entry: the initial `tool_call`. Returns the
+/// delivered `chat.postMessage` body text.
+async fn unserviceable_auth_gate_delivered_slack_message(origin: Option<&str>) -> String {
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    activate_slack(&group).await;
+    let services = reborn_services(&group);
+    assert!(
+        services.register_static_channel_egress_credentials_for_test(vec![(
+            "slack".to_string(),
+            "slack_bot_token".to_string(),
+            ironclaw_secrets::SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+        )]),
+        "the composed runtime must expose channel-egress credential bridging"
+    );
+    // `VendorIngress::production` posts through the REAL manifest route,
+    // whose signature check reads the ADMIN-CONFIGURED secret (verified by
+    // `admin_configured_slack_unconnected_dm_gets_connect_notice_without_installation_or_turn`'s
+    // 401-before/200-after pair) -- a separate axis from `activate_slack`'s
+    // install-to-Active. `slack_final_reply_flows_through_the_real_delivery_coordinator`
+    // skips this because it uses `VendorIngress::register` (a manual test-only
+    // sink registration, not the assembled route this test exercises).
+    configure_admin_group(
+        &group,
+        "extension.slack",
+        0,
+        json!([
+            {"handle": "slack_bot_token", "value": SLACK_BOT_TOKEN},
+            {"handle": "slack_signing_secret", "value": String::from_utf8_lossy(SLACK_SIGNING_SECRET)},
+            {"handle": "slack_team_id", "value": "T-A"},
+            {"handle": "slack_api_app_id", "value": "A-ITEST"},
+            {"handle": "slack_installation_id", "value": SLACK_INSTALLATION},
+            {"handle": "slack_bot_user_id", "value": "U-BOT"},
+            {"handle": "slack_oauth_client_id", "value": "slack-oauth-client"},
+            {"handle": "slack_oauth_client_secret", "value": "slack-oauth-secret"}
+        ]),
+    )
+    .await;
+    // Real admission (the assembled path's own workflow surface, distinct
+    // from `inbound`'s per-thread harness surface `preresolve_vendor_turn_scope`
+    // resolves against below) requires this Slack user to already be bound
+    // AND channel-connected, or a first-contact shared-conversation ping
+    // rejects `BindingRequired` before ever reaching a turn
+    // (`observer.rs`'s `post_connect_nudge_if_unbound_user_message`). Drive
+    // the real identity-binding write the OAuth callback performs
+    // (`scenario_slack_channel_lifecycle_state_machine.rs`'s
+    // `connect_provider_user` pattern) for the group's canonical actor under
+    // vendor subject "U777" — the same user id the event body below names.
+    group
+        .channel_connection()
+        .expect("extension_delivery group composes production channel connection")
+        .connect_provider_user(
+            &group.canonical_actor_user(),
+            "slack",
+            ironclaw_auth::OAuthProviderIdentity::new(
+                "U777",
+                Some("T-A".to_string()),
+                None,
+                Some("A-ITEST".to_string()),
+            )
+            .expect("valid slack identity"),
+        )
+        .await
+        .expect("slack connect succeeds for the canonical actor");
+
+    let inbound = group
+        .thread("conv-slack-auth-unserviceable-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+
+    let assembly = {
+        // The env var is read exactly once, synchronously, inside this call
+        // — the guard never spans an `.await`.
+        let _env_guard = match origin {
+            Some(origin) => WebUiBaseUrlEnvGuard::set(origin),
+            None => WebUiBaseUrlEnvGuard::unset(),
+        };
+        services
+            .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+                thread_service: inbound
+                    .thread_service_for_test()
+                    .expect("group thread service"),
+                turn_coordinator: inbound.turn_coordinator_for_test(),
+                run_delivery_settings: RunDeliverySettings::default(),
+                identity: ChannelHostIdentity {
+                    tenant_id: inbound.binding.tenant_id.clone(),
+                    agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                    project_id: inbound.binding.project_id.clone(),
+                    operator_user_id: inbound.binding.actor_user_id.clone(),
+                },
+                blocked_auth_prompts: Some(Arc::new(ManualTokenAuthPromptSource)),
+            })
+            .expect("the production channel host assembly starts over the composed runtime")
+    };
+
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+    );
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        "slack", // real lifecycle-minted installation id ("builtin.extension_install" mints id == extension id)
+    );
+    // The REAL production binding service the assembled admission path
+    // resolves against — NOT `inbound.binding_service_for_test()` (a
+    // separate, per-harness resolver `preresolve_vendor_turn_scope` would
+    // otherwise precompute a scope against that the real admission never
+    // sees). Mirrors `telegram_update_becomes_a_turn_and_a_coordinated_reply_impl`.
+    let slack_binding_service =
+        wait_for_production_registration(&assembly, services, "slack").await;
+    let body = json!({
+        "type": "event_callback",
+        "event_id": "Ev-auth-unserviceable",
+        "team_id": "T-A",
+        "event": {
+            "type": "app_mention",
+            "user": "U777",
+            "channel": "C-AUTH-UNSERVICEABLE",
+            "text": "<@UBOT> look up a repo for me",
+            "thread_ts": "1710000600.000050",
+            "ts": "1710000600.000100"
+        }
+    })
+    .to_string();
+    // `auth_prompt_is_serviceable` never runs for this challenge kind, so
+    // `can_reply_in_threads` and thread placement do not affect which
+    // message renders; `true` matches Slack's real manifest value.
+    let (vendor_scope, _vendor_actor_user_id) = preresolve_vendor_turn_scope(
+        &slack_binding_service,
+        &ironclaw_slack_extension::SlackChannelAdapter,
+        "slack",
+        "slack",
+        &[],
+        &evidence,
+        &body,
+        true,
+    )
+    .await;
+    group
+        .register_scope_script_for_test(
+            vendor_scope.clone(),
+            "auth-unserviceable",
+            // `github.get_repo`'s dispatchability needs extra wiring this
+            // group doesn't carry (`file_and_github_auth_tools_profile`'s own
+            // doc comment: asset copying + publish-to-active-registry beyond
+            // a bare capability grant). Installing github instead raises the
+            // SAME real `BlockedAuth`/ManualToken gate through the generic
+            // product-auth credential-account mechanism, proven by
+            // `scenario_extension_install_github_normal_gate.rs` (github has
+            // no readiness-map entry, so install always opens the ordinary
+            // per-account gate) — no WASM dispatch involved.
+            [RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "github"}),
+            )],
+        )
+        .await
+        .expect("scripted gateway registers for the vendor scope");
+
+    let timestamp = now_unix().to_string();
+    let signature = slack_signature(&timestamp, &body);
+    let status = ingress
+        .post(
+            SLACK_ROUTE,
+            &body,
+            vec![
+                ("X-Slack-Signature", signature),
+                ("X-Slack-Request-Timestamp", timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the signed event must be accepted");
+    ingress.drain().await;
+
+    // The BlockedAuth transition, auto-cancel, and delivery are all async
+    // past `drain()` (real turn execution through the loop/executor), so
+    // poll the wire the same way the Telegram DEL-10 proof does for its
+    // paused-model working indicator. The FIRST `chat.postMessage` is the
+    // generic "Working on it…" indicator the run posts while executing, not
+    // the notice under test — match on content, not just the endpoint.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let requests = inbound.captured_network_requests_for_test();
+        if let Some(request) = requests.iter().find(|request| {
+            request.url.ends_with("/api/chat.postMessage")
+                && String::from_utf8_lossy(&request.body).contains("Ironclaw web app")
+        }) {
+            return String::from_utf8_lossy(&request.body).to_string();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the unserviceable-auth notice to reach chat.postMessage; \
+             captured requests: {:?}",
+            requests
+                .iter()
+                .map(|request| (&request.url, String::from_utf8_lossy(&request.body)))
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// coderabbit (#7897): "Add integration or E2E coverage for an unserviceable
+/// ManualToken or DeviceLink gate. Set a configured origin. Assert the actual
+/// live... channel messages contain the Extensions URL." Driven through the
+/// REAL assembled composition path — see
+/// `unserviceable_auth_gate_delivered_slack_message`'s doc comment.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_unserviceable_auth_gate_carries_the_extensions_url_when_an_origin_is_configured() {
+    // This journey future (group build + real turn + poll loop) exceeds
+    // libtest's default 2 MiB thread stack even boxed; the root-tests CI job
+    // already runs this package under `RUST_MIN_STACK=67108864`
+    // (`.github/workflows/reborn-tests.yml`) for the same reason group
+    // suites need it. Locally: `RUST_MIN_STACK=67108864 cargo test -p
+    // ironclaw_integration_tests --test reborn_integration_extension_delivery`.
+    let delivered = Box::pin(unserviceable_auth_gate_delivered_slack_message(Some(
+        "https://app.example.com",
+    )))
+    .await;
+    assert!(
+        delivered.contains("Ironclaw web app"),
+        "the copy still has to name the destination in words: {delivered}"
+    );
+    assert!(
+        delivered.contains("https://app.example.com/extensions"),
+        "a configured origin must reach the delivered channel message: {delivered}"
+    );
+}
+
+/// coderabbit (#7897): "Also assert a blank origin remains link-free." No
+/// `IRONCLAW_REBORN_WEBUI_BASE_URL` set means no address, never a relative
+/// path into a customer conversation — mirrors the ships-dark half of
+/// `channel_host/e2e_tests.rs`'s `slack_dm_device_link_auth_prompt_*` pair,
+/// but through the assembled composition path rather than a hand-built
+/// `RebornChannelWorkflowServices`.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_unserviceable_auth_gate_ships_dark_without_a_configured_origin() {
+    // See the sibling test above: box before awaiting.
+    let delivered = Box::pin(unserviceable_auth_gate_delivered_slack_message(None)).await;
+    assert!(
+        delivered.contains("Ironclaw web app"),
+        "the copy still has to name the destination in words: {delivered}"
+    );
+    assert!(
+        !delivered.contains("/extensions"),
+        "no origin means no address, never a relative path: {delivered}"
+    );
+}
+
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter
 /// crate, zero bespoke host code — installs through the production
 /// lifecycle tool, consumes the authorized manifest-driven administrator
@@ -1543,6 +1918,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 project_id: inbound.binding.project_id.clone(),
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
+            blocked_auth_prompts: None,
         })
         .expect("the production channel host assembly starts over the composed runtime");
 
@@ -2489,6 +2865,7 @@ async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_d
                 project_id: lifecycle.binding.project_id.clone(),
                 operator_user_id: lifecycle.binding.actor_user_id.clone(),
             },
+            blocked_auth_prompts: None,
         })
         .expect("the production channel host assembly starts over the composed runtime");
 
@@ -2727,6 +3104,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
                 project_id: inbound.binding.project_id.clone(),
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
+            blocked_auth_prompts: None,
         })
         .expect("the production channel host assembly starts over the composed runtime");
 
