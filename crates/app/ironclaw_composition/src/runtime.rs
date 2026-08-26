@@ -3103,7 +3103,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         admin_api_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
-        sandbox_loop_worker_transport,
         #[cfg(any(test, feature = "test-support"))]
         model_cost_table_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -3134,6 +3133,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 reason: "RebornRuntimeInput.services must include a resolved runtime policy"
                     .to_string(),
             })?;
+    let sandbox_loop_worker_transport = services_input
+        .runtime_process_binding
+        .loop_worker_transport();
 
     let validated_identity = validate_runtime_identity(identity)?;
     services_input = services_input.with_local_runtime_identity(

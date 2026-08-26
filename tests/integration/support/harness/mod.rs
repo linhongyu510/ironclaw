@@ -920,9 +920,6 @@ impl HostRuntimeCapabilityHarness {
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let mut runtime_input = RebornRuntimeInput::from_build_input(input);
-        if let Some(transport) = sandbox_loop_worker_transport.clone() {
-            runtime_input = runtime_input.with_sandbox_loop_worker_transport(transport);
-        }
         if workspace_scoped_per_caller {
             // The same raise `serve` applies unconditionally: agent tool
             // grants, approval leases, and attachment handles resolve the
