@@ -42,7 +42,7 @@ that owns that boundary — never thread it through a UI or runtime crate.
 
 ## The ten families
 
-Counts updated 2026-08-12 (`cargo metadata --no-deps`; the enforcing gate is
+Counts updated 2026-08-26 (`cargo metadata --no-deps`; the enforcing gate is
 `python3 scripts/ci/check-target-tree.py`). Every family has an `AGENTS.md`
 (its boundary and crate table) and an in-depth spec in
 [`docs/internal/reborn/target-architecture/families/`](../docs/internal/reborn/target-architecture/families/);

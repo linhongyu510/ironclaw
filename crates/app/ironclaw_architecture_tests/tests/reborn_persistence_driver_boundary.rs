@@ -33,10 +33,11 @@ use serde_json::Value;
 const DRIVER_LINKED_CRATES: &[&str] = &[
     // Substrates that execute SQL directly.
     //
-    // Two of these are the §11.2.6 "ADR-or-converge" exceptions, decided
-    // 2026-08-04 as KEEP with a written ADR each — `ironclaw_hooks` and
-    // `ironclaw_triggers`, tagged below. The ADRs state why convergence onto
-    // the `RootFilesystem` fabric is not available and what would reopen the
+    // Three of these are the §11.2.6 "ADR-or-converge" exceptions: `ironclaw_hooks`,
+    // `ironclaw_triggers`, and `ironclaw_telemetry`, each tagged below with its
+    // own ADR (hooks/triggers decided KEEP 2026-08-04; telemetry admitted by
+    // ADR 0005 on 2026-08-26). Their ADRs state why convergence onto the
+    // `RootFilesystem` fabric is not available and what would reopen the
     // decision; read the one that argues for an entry before removing it.
     "ironclaw_auth",
     "ironclaw_filesystem",

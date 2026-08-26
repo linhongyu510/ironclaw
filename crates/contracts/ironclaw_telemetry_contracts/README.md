@@ -10,6 +10,6 @@ and user identities. It contains no storage, execution, queue, driver, product,
 or transport behavior. Observation grammar and the recorder port arrive in the
 next telemetry behavior slice.
 
-See [ADR 0005](../../../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)
+See [ADR 0005](../../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)
 and the target-architecture contracts family specification for the persistence
 exception's boundary.

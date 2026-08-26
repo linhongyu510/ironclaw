@@ -16,5 +16,5 @@ declared now so their driver cone is mechanically chartered before behavior
 lands. It does not depend on `ironclaw_filesystem`, product, composition, or any
 producer.
 
-See [ADR 0005](../../../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)
+See [ADR 0005](../../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)
 for the exception rationale and limits.
