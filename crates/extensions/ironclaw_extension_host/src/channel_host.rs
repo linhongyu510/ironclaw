@@ -123,18 +123,24 @@ fn configured_origin(base_url: Option<&str>) -> Option<&str> {
 /// `AdminManagedChannels` still renders verbatim: that channel is provisioned
 /// by an operator, and sending an end user to a configure page they have no
 /// permission to act on is worse than saying nothing.
+/// Takes the already-resolved copy rather than the manifest descriptor, so it
+/// can be applied to a notice that came from the pairing service as well as
+/// one built from the manifest — see [`GenericChannelHostAssembly::connection_notices`],
+/// where both branches converge on this call. An earlier revision took the
+/// descriptor and was therefore reachable only on the manifest branch, which
+/// made it dead code for every `WebGeneratedCode` extension (#7887).
 fn connect_required_notice(
-    connection: &ChannelConnectionDescriptor,
+    text: &str,
+    strategy: ChannelConnectionStrategy,
     extension_id: &str,
     base_url: Option<&str>,
     supports_private_delivery: bool,
 ) -> String {
-    let text = &connection.notices.connect_required;
     let Some(base) = configured_origin(base_url) else {
-        return text.clone();
+        return text.to_string();
     };
     let extension_id = percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
-    match connection.strategy {
+    match strategy {
         ChannelConnectionStrategy::OAuth if supports_private_delivery => {
             format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
         }
@@ -142,9 +148,53 @@ fn connect_required_notice(
             format!("{text} Finish setup here: {base}/extensions?configure={extension_id}")
         }
         ChannelConnectionStrategy::OAuth | ChannelConnectionStrategy::AdminManagedChannels => {
-            text.clone()
+            text.to_string()
         }
     }
+}
+
+/// Pick the connect-notice policy and append the destination to it.
+///
+/// `pairing_policy` is the pairing service's own copy when the extension has
+/// one — for every production `WebGeneratedCode` channel, it does, and it wins
+/// over the manifest branch below. The append therefore happens **after** the
+/// choice, not inside one arm of it: an earlier revision decorated only the
+/// manifest arm, which left every pairing-service extension on the raw
+/// manifest text and made the fix invisible on the exact path #7887 reported.
+///
+/// Split out of `GenericChannelHostAssembly::connection_notices` so the
+/// pairing arm is testable: a `ChannelPairingService` needs seventeen
+/// constructor fields, nine of them trait objects, and a test that cannot
+/// reach the arm cannot protect it.
+fn resolve_connection_notices(
+    pairing_policy: Option<ChannelConnectionNoticePolicy>,
+    connection: Option<&ChannelConnectionDescriptor>,
+    extension_id: &str,
+    base_url: Option<&str>,
+    supports_private_delivery: bool,
+    fallback_name: &str,
+) -> ChannelConnectionNoticePolicy {
+    let mut policy = pairing_policy
+        .or_else(|| {
+            connection.map(|connection| ChannelConnectionNoticePolicy {
+                connect_required: connection.notices.connect_required.clone(),
+                paired: connection.notices.paired.clone(),
+                already_paired_same_user: connection.notices.already_paired_same_user.clone(),
+                already_bound_to_other_user: connection.notices.already_bound_to_other_user.clone(),
+                expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+            })
+        })
+        .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(fallback_name));
+    if let Some(connection) = connection {
+        policy.connect_required = connect_required_notice(
+            &policy.connect_required,
+            connection.strategy,
+            extension_id,
+            base_url,
+            supports_private_delivery,
+        );
+    }
+    policy
 }
 
 /// Whether a channel's bound reply adapter delivers an
@@ -960,40 +1010,31 @@ impl GenericChannelHostAssembly {
     }
 
     /// The connect notice wording for one extension: the pairing service's
-    /// own policy when it has one, otherwise the manifest connection policy
-    /// for non-pairing strategies such as `device_link`, then generic copy.
+    /// own policy when it has one, otherwise the manifest connection policy,
+    /// then generic copy — with the destination appended either way.
+    ///
+    /// Fetches the pairing policy and delegates; the decision itself lives in
+    /// [`resolve_connection_notices`] so the pairing branch is reachable from
+    /// a test without standing up a whole [`ChannelPairingService`].
     fn connection_notices(&self, source: &HostedChannelSource) -> ChannelConnectionNoticePolicy {
-        self.deps
+        let pairing_policy = self
+            .deps
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
-            .map(|service| service.connection_notices().clone())
-            .or_else(|| {
-                source
-                    .resolved()
-                    .channel
-                    .as_ref()
-                    .and_then(|channel| channel.connection.as_ref())
-                    .map(|connection| ChannelConnectionNoticePolicy {
-                        connect_required: connect_required_notice(
-                            connection,
-                            source.extension_id(),
-                            self.deps.connect_link_base_url.as_deref(),
-                            source.supports_private_delivery(),
-                        ),
-                        paired: connection.notices.paired.clone(),
-                        already_paired_same_user: connection
-                            .notices
-                            .already_paired_same_user
-                            .clone(),
-                        already_bound_to_other_user: connection
-                            .notices
-                            .already_bound_to_other_user
-                            .clone(),
-                        expired_or_unknown: connection.notices.expired_or_unknown.clone(),
-                    })
-            })
-            .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name))
+            .map(|service| service.connection_notices().clone());
+        resolve_connection_notices(
+            pairing_policy,
+            source
+                .resolved()
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.connection.as_ref()),
+            source.extension_id(),
+            self.deps.connect_link_base_url.as_deref(),
+            source.supports_private_delivery(),
+            &source.resolved().name,
+        )
     }
 
     /// The live conversation-binding service the assembly registered for one
@@ -1379,6 +1420,68 @@ mod tests {
         }
     }
 
+    /// #7887 regression: the destination must be appended to the policy the
+    /// PAIRING SERVICE supplied, not only to one built from the manifest.
+    ///
+    /// This is the arm the first fix missed. Every production
+    /// `WebGeneratedCode` channel registers a pairing service, and
+    /// `connection_notices` takes that service's copy verbatim before the
+    /// manifest branch runs — so decorating only the manifest branch left the
+    /// reported path on the raw, link-free text while every test stayed green.
+    /// The helper-level tests below cannot catch it: they call
+    /// `connect_required_notice` directly, and the e2e harness wires
+    /// `channel_pairing: None`, so both exercise the manifest arm only.
+    #[test]
+    fn pairing_service_notices_still_receive_the_destination() {
+        let descriptor = connection_descriptor(ChannelConnectionStrategy::WebGeneratedCode);
+        // What the pairing service hands over: its own copy, not the
+        // manifest's, and deliberately different text so a test that silently
+        // fell back to the manifest arm would be visible.
+        let pairing_policy = ChannelConnectionNoticePolicy {
+            connect_required: "Pair this account from the extension page.".to_string(),
+            paired: "paired".to_string(),
+            already_paired_same_user: "already".to_string(),
+            already_bound_to_other_user: "other".to_string(),
+            expired_or_unknown: "expired".to_string(),
+        };
+
+        let resolved = resolve_connection_notices(
+            Some(pairing_policy),
+            Some(&descriptor),
+            "telegram",
+            Some("https://app.example.com"),
+            true,
+            "Telegram",
+        );
+
+        assert_eq!(
+            resolved.connect_required,
+            "Pair this account from the extension page. Finish setup here: \
+             https://app.example.com/extensions?configure=telegram",
+            "the pairing service's copy must keep its wording AND gain the address"
+        );
+        // No origin: the pairing copy survives untouched rather than gaining a
+        // relative path.
+        let dark = resolve_connection_notices(
+            Some(ChannelConnectionNoticePolicy {
+                connect_required: "Pair this account from the extension page.".to_string(),
+                paired: "paired".to_string(),
+                already_paired_same_user: "already".to_string(),
+                already_bound_to_other_user: "other".to_string(),
+                expired_or_unknown: "expired".to_string(),
+            }),
+            Some(&descriptor),
+            "telegram",
+            None,
+            true,
+            "Telegram",
+        );
+        assert_eq!(
+            dark.connect_required, "Pair this account from the extension page.",
+            "no configured origin must leave the pairing copy exactly as it was"
+        );
+    }
+
     /// #7887, CX cell "Not paired yet × Telegram": a strategy whose connect
     /// ceremony cannot be completed from the chat surface must still hand the
     /// user a destination.
@@ -1408,7 +1511,8 @@ mod tests {
             for supports_private_delivery in [true, false] {
                 assert_eq!(
                     connect_required_notice(
-                        &descriptor,
+                        &descriptor.notices.connect_required,
+                        descriptor.strategy,
                         "telegram",
                         Some("https://app.example.com"),
                         supports_private_delivery
@@ -1423,7 +1527,8 @@ mod tests {
             // `//extensions`.
             assert_eq!(
                 connect_required_notice(
-                    &descriptor,
+                    &descriptor.notices.connect_required,
+                    descriptor.strategy,
                     "telegram",
                     Some("https://app.example.com/"),
                     true
@@ -1434,7 +1539,13 @@ mod tests {
             // Unset origin still ships dark rather than advertising a
             // relative path into a customer conversation.
             assert_eq!(
-                connect_required_notice(&descriptor, "telegram", None, true),
+                connect_required_notice(
+                    &descriptor.notices.connect_required,
+                    descriptor.strategy,
+                    "telegram",
+                    None,
+                    true
+                ),
                 descriptor.notices.connect_required
             );
         }
@@ -1451,18 +1562,36 @@ mod tests {
         let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
 
         assert_eq!(
-            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), true),
+            connect_required_notice(
+                &oauth.notices.connect_required,
+                oauth.strategy,
+                "slack",
+                Some("https://app.example.com"),
+                true
+            ),
             "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
         );
         // A trailing slash on the configured origin must not produce `//chat`.
         assert_eq!(
-            connect_required_notice(&oauth, "slack", Some("https://app.example.com/"), true),
+            connect_required_notice(
+                &oauth.notices.connect_required,
+                oauth.strategy,
+                "slack",
+                Some("https://app.example.com/"),
+                true
+            ),
             "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
         );
         // Unset origin ships dark: the notice stays link-free rather than
         // advertising an unreachable relative path.
         assert_eq!(
-            connect_required_notice(&oauth, "slack", None, true),
+            connect_required_notice(
+                &oauth.notices.connect_required,
+                oauth.strategy,
+                "slack",
+                None,
+                true
+            ),
             oauth.notices.connect_required
         );
         // An operator-provisioned channel returns the manifest copy verbatim
@@ -1480,7 +1609,8 @@ mod tests {
         let admin_managed = connection_descriptor(ChannelConnectionStrategy::AdminManagedChannels);
         assert_eq!(
             connect_required_notice(
-                &admin_managed,
+                &admin_managed.notices.connect_required,
+                admin_managed.strategy,
                 "slack",
                 Some("https://app.example.com"),
                 true
@@ -1499,7 +1629,13 @@ mod tests {
             let descriptor = connection_descriptor(strategy);
             for blank in ["", "   "] {
                 assert_eq!(
-                    connect_required_notice(&descriptor, "slack", Some(blank), true),
+                    connect_required_notice(
+                        &descriptor.notices.connect_required,
+                        descriptor.strategy,
+                        "slack",
+                        Some(blank),
+                        true
+                    ),
                     descriptor.notices.connect_required,
                     "{strategy:?} must ship dark for a blank origin ({blank:?})"
                 );
@@ -1516,7 +1652,13 @@ mod tests {
     fn connect_notice_withholds_the_link_when_the_adapter_cannot_deliver_privately() {
         let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
         assert_eq!(
-            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), false),
+            connect_required_notice(
+                &oauth.notices.connect_required,
+                oauth.strategy,
+                "slack",
+                Some("https://app.example.com"),
+                false
+            ),
             oauth.notices.connect_required
         );
     }
@@ -1578,7 +1720,8 @@ mod tests {
         let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
         assert_eq!(
             connect_required_notice(
-                &oauth,
+                &oauth.notices.connect_required,
+                oauth.strategy,
                 "sl ack&evil=1",
                 Some("https://app.example.com"),
                 true
