@@ -1049,10 +1049,7 @@ impl RunDeliveryObserver {
                                 scope.clone(),
                                 Some(run_id),
                                 envelope.external_conversation_ref(),
-                                &prompts::unserviceable_auth_prompt_message(
-                                    view.as_ref(),
-                                    self.services.setup_link_base_url.as_deref(),
-                                ),
+                                &self.services.unserviceable_auth_message(view.as_ref()),
                                 format!("auth-unavailable:{run_id}"),
                             )
                             .await;
