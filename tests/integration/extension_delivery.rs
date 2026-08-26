@@ -971,8 +971,9 @@ fn start_channel_host_assembly(
     services: &RebornRuntime,
     inbound: &RebornIntegrationHarness,
 ) -> Arc<GenericChannelHostAssembly> {
-    services
-        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+    start_assembly_serialized(
+        services,
+        ChannelHostAssemblyTestWiring {
             thread_service: inbound
                 .thread_service_for_test()
                 .expect("group thread service"),
@@ -985,8 +986,43 @@ fn start_channel_host_assembly(
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
             blocked_auth_prompts: None,
-        })
-        .expect("production channel host assembly starts")
+        },
+        None,
+    )
+}
+
+/// The single caller EVERY `start_channel_host_assembly_for_test` call in
+/// this binary goes through (#7897 CodeRabbit follow-up). `extension_host_assembly::start_channel_host`
+/// reads process-global `IRONCLAW_REBORN_WEBUI_BASE_URL` synchronously —
+/// TWICE (`setup_link_base_url`, `connect_link_base_url`) — inside the
+/// assembly call. Rust runs this binary's tests on parallel threads, so
+/// without a shared lock around every assembly call, `WebUiBaseUrlEnvGuard`
+/// below (which sets/removes that var for the one test that needs a real
+/// origin) only serializes against other *writers*: a concurrent unguarded
+/// assembly call on another thread can still read the var mid-set,
+/// mid-remove, or leaked from a sibling test entirely.
+///
+/// `origin: None` — this call site never touches the env var, just needs the
+/// lock held for the duration of the assembly call so it can't race a
+/// concurrent writer. `origin: Some(value)` — this call site IS the writer:
+/// the var is set/unset (see `WebUiBaseUrlEnvGuard::apply`) for exactly the
+/// duration of the assembly call, under the SAME lock acquisition.
+///
+/// `ironclaw_common::env_helpers::lock_env()` guards a plain, non-reentrant
+/// `std::sync::Mutex<()>`. This function takes it exactly once, so the
+/// set-then-assemble-then-restore sequence never double-locks (which would
+/// deadlock): `WebUiBaseUrlEnvGuard::apply` deliberately does NOT lock itself
+/// — only this function does, and only this function may construct one.
+fn start_assembly_serialized(
+    services: &RebornRuntime,
+    wiring: ChannelHostAssemblyTestWiring,
+    origin: Option<Option<&str>>,
+) -> Arc<GenericChannelHostAssembly> {
+    let _lock = ironclaw_common::env_helpers::lock_env();
+    let _origin_guard = origin.map(WebUiBaseUrlEnvGuard::apply);
+    services
+        .start_channel_host_assembly_for_test(wiring)
+        .expect("the production channel host assembly starts over the composed runtime")
 }
 
 #[tokio::test]
@@ -1540,41 +1576,46 @@ impl ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource
 /// in this binary sets or reads this variable. Mirrors
 /// `crates/app/ironclaw_composition/tests/service_factory.rs`'s
 /// `EnvVarGuard`, scoped to this one key.
+///
+/// Deliberately does NOT call `lock_env()` itself (contrast the
+/// `EnvVarGuard` this mirrors). `extension_host_assembly::start_channel_host`
+/// reads this var synchronously TWICE inside the assembly call, so setting
+/// it only under a lock held by `set`/`unset` and then releasing it before
+/// the assembly call runs is not enough — some other unguarded assembly call
+/// site could still race the read against this guard's own set/restore. The
+/// sole constructor, `apply`, and the sole caller, `start_assembly_serialized`,
+/// hold `lock_env()` for the guard's ENTIRE lifetime (set through drop),
+/// spanning the assembly call too — see that function's doc comment for why
+/// the lock can't be taken here as well (it would deadlock; the underlying
+/// mutex is not reentrant).
 struct WebUiBaseUrlEnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,
 }
 
 impl WebUiBaseUrlEnvGuard {
     const KEY: &'static str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
-    fn set(value: &str) -> Self {
-        let lock = ironclaw_common::env_helpers::lock_env();
+    /// `origin: Some(value)` sets the var; `origin: None` removes it.
+    /// Caller must already hold `lock_env()` for this guard's entire scope —
+    /// only `start_assembly_serialized` may call this.
+    fn apply(origin: Option<&str>) -> Self {
         let previous = std::env::var_os(Self::KEY);
-        // SAFETY: serialized by `lock_env()`; restored on `Drop` before this
-        // guard's scope releases the lock.
-        unsafe { std::env::set_var(Self::KEY, value) };
-        Self {
-            _lock: lock,
-            previous,
+        // SAFETY: caller holds `lock_env()` for this guard's entire scope
+        // (see `start_assembly_serialized`); restored on `Drop`, still under
+        // that same lock.
+        unsafe {
+            match origin {
+                Some(value) => std::env::set_var(Self::KEY, value),
+                None => std::env::remove_var(Self::KEY),
+            }
         }
-    }
-
-    fn unset() -> Self {
-        let lock = ironclaw_common::env_helpers::lock_env();
-        let previous = std::env::var_os(Self::KEY);
-        // SAFETY: serialized by `lock_env()`; restored on `Drop`.
-        unsafe { std::env::remove_var(Self::KEY) };
-        Self {
-            _lock: lock,
-            previous,
-        }
+        Self { previous }
     }
 }
 
 impl Drop for WebUiBaseUrlEnvGuard {
     fn drop(&mut self) {
-        // SAFETY: still holding `_lock`.
+        // SAFETY: caller still holds `lock_env()` (see `apply`).
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(Self::KEY, value),
@@ -1679,30 +1720,28 @@ async fn unserviceable_auth_gate_delivered_slack_message(origin: Option<&str>) -
         .await
         .expect("inbound thread builds");
 
-    let assembly = {
-        // The env var is read exactly once, synchronously, inside this call
-        // — the guard never spans an `.await`.
-        let _env_guard = match origin {
-            Some(origin) => WebUiBaseUrlEnvGuard::set(origin),
-            None => WebUiBaseUrlEnvGuard::unset(),
-        };
-        services
-            .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
-                thread_service: inbound
-                    .thread_service_for_test()
-                    .expect("group thread service"),
-                turn_coordinator: inbound.turn_coordinator_for_test(),
-                run_delivery_settings: RunDeliverySettings::default(),
-                identity: ChannelHostIdentity {
-                    tenant_id: inbound.binding.tenant_id.clone(),
-                    agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
-                    project_id: inbound.binding.project_id.clone(),
-                    operator_user_id: inbound.binding.actor_user_id.clone(),
-                },
-                blocked_auth_prompts: Some(Arc::new(ManualTokenAuthPromptSource)),
-            })
-            .expect("the production channel host assembly starts over the composed runtime")
-    };
+    // The env var is read exactly once, synchronously, inside the assembly
+    // call — `start_assembly_serialized` holds `lock_env()` (and, since
+    // `origin` is `Some`, a `WebUiBaseUrlEnvGuard`) for the whole call, never
+    // spanning an `.await`.
+    let assembly = start_assembly_serialized(
+        services,
+        ChannelHostAssemblyTestWiring {
+            thread_service: inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            run_delivery_settings: RunDeliverySettings::default(),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound.binding.actor_user_id.clone(),
+            },
+            blocked_auth_prompts: Some(Arc::new(ManualTokenAuthPromptSource)),
+        },
+        Some(origin),
+    );
 
     let ingress = VendorIngress::production(
         services
@@ -1905,8 +1944,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     // durable workflow substrate, and delivery coordinator + outbound
     // stores are the production wiring. From here NOTHING registers the
     // telegram sink or observer manually.
-    let assembly = services
-        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+    let assembly = start_assembly_serialized(
+        services,
+        ChannelHostAssemblyTestWiring {
             thread_service: inbound
                 .thread_service_for_test()
                 .expect("group thread service"),
@@ -1919,8 +1959,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
             blocked_auth_prompts: None,
-        })
-        .expect("the production channel host assembly starts over the composed runtime");
+        },
+        None,
+    );
 
     // Admin bot configuration is a separate tenant axis and is valid before
     // any user installs the channel. Workspace-bot activation and generated
@@ -2848,8 +2889,9 @@ async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_d
     // regression test above — attaches the snapshot watch, ingress registry,
     // and admin-configuration secret storage the generic host's publish step
     // for a CHANNEL-declaring package (Telegram) needs.
-    let _assembly = services
-        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+    let _assembly = start_assembly_serialized(
+        services,
+        ChannelHostAssemblyTestWiring {
             thread_service: lifecycle
                 .thread_service_for_test()
                 .expect("group thread service"),
@@ -2866,8 +2908,9 @@ async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_d
                 operator_user_id: lifecycle.binding.actor_user_id.clone(),
             },
             blocked_auth_prompts: None,
-        })
-        .expect("the production channel host assembly starts over the composed runtime");
+        },
+        None,
+    );
 
     // Admin bot configuration is required before the generic host will
     // publish a CHANNEL-declaring package (Telegram) to `Active` — mirrors
@@ -3091,8 +3134,9 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
         .await
         .expect("inbound thread builds");
 
-    let assembly = services
-        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+    let assembly = start_assembly_serialized(
+        services,
+        ChannelHostAssemblyTestWiring {
             thread_service: inbound
                 .thread_service_for_test()
                 .expect("group thread service"),
@@ -3105,8 +3149,9 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
                 operator_user_id: inbound.binding.actor_user_id.clone(),
             },
             blocked_auth_prompts: None,
-        })
-        .expect("the production channel host assembly starts over the composed runtime");
+        },
+        None,
+    );
 
     let lifecycle = group
         .thread("conv-telegram-paired-lifecycle")
