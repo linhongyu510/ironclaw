@@ -79,16 +79,17 @@ const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_
     .remove(b'~');
 
 /// The deployment's public web origin with any trailing slash removed, or
-/// `None` when none is configured.
+/// `None` when none is configured or the configured value is not a safely
+/// renderable absolute origin.
 ///
-/// `None` and blank are the same answer — a notice must never advertise a
-/// relative path into a customer conversation, and an origin configured as
-/// `""` or whitespace would otherwise render `/chat?connect=…` as if it were
-/// a destination. Mirrors the normalization in
-/// `ironclaw_extension_manager::install_guidance::personal_setup_link`.
+/// `None` covers blank/whitespace, a relative value, a non-http(s) scheme, and
+/// a value carrying a query string or fragment — a notice must never
+/// advertise a relative or redirectable destination into a customer
+/// conversation. Delegates to the shared validator so this file, `prompts.rs`,
+/// and `install_guidance.rs` agree on exactly one definition of "safe to
+/// render."
 fn configured_origin(base_url: Option<&str>) -> Option<&str> {
-    let base = base_url?.trim().trim_end_matches('/');
-    (!base.is_empty()).then_some(base)
+    ironclaw_extension_contracts::connect_link::validated_connect_link_origin(base_url)
 }
 
 /// The channel's `connect_required` copy, with a destination appended when the
@@ -106,12 +107,18 @@ fn configured_origin(base_url: Option<&str>) -> Option<&str> {
 /// first time an OAuth channel without ephemeral support ships, so adapters
 /// that have not declared the capability keep the link-free manifest copy.
 ///
-/// **`WebGeneratedCode` / `DeviceLink`: `/extensions?configure=<extension>`,
+/// **`WebGeneratedCode` / `DeviceLink`: `/extensions?configure=<extension>&setup=<path>`,
 /// no privacy condition (#7887).** These ceremonies cannot be completed from
 /// the chat surface at all, and — unlike the OAuth route — this link *starts
 /// nothing*: it opens the Extensions page, where a bystander who clicks it
 /// authenticates as themselves and lands on their own page. Safe in a shared
-/// room, so it is not gated on ephemeral delivery.
+/// room, so it is not gated on ephemeral delivery. Each strategy names its own
+/// `setup` ceremony rather than sharing one link: `useSetupLanding.ts`
+/// recognizes exactly `personal_account` and `workspace_bot`, and an
+/// omitted/unrecognized value opens the connection-choice screen instead of
+/// the ceremony the notice promised — so `WebGeneratedCode` (a workspace bot
+/// pairing) sends `setup=workspace_bot` and `DeviceLink` (a personal-account
+/// pairing) sends `setup=personal_account`.
 ///
 /// An earlier revision withheld a link from every non-OAuth strategy on the
 /// grounds that they "carry their own `connection.deep_link_template`". That
@@ -144,8 +151,15 @@ fn connect_required_notice(
         ChannelConnectionStrategy::OAuth if supports_private_delivery => {
             format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
         }
-        ChannelConnectionStrategy::WebGeneratedCode | ChannelConnectionStrategy::DeviceLink => {
-            format!("{text} Finish setup here: {base}/extensions?configure={extension_id}")
+        ChannelConnectionStrategy::WebGeneratedCode => {
+            format!(
+                "{text} Finish setup here: {base}/extensions?configure={extension_id}&setup=workspace_bot"
+            )
+        }
+        ChannelConnectionStrategy::DeviceLink => {
+            format!(
+                "{text} Finish setup here: {base}/extensions?configure={extension_id}&setup=personal_account"
+            )
         }
         ChannelConnectionStrategy::OAuth | ChannelConnectionStrategy::AdminManagedChannels => {
             text.to_string()
@@ -1420,6 +1434,42 @@ mod tests {
         }
     }
 
+    /// The two strategies must land on DIFFERENT ceremonies.
+    ///
+    /// `useSetupLanding.ts` accepts `personal_account` and `workspace_bot`,
+    /// and opens the connection-CHOICE screen for anything else — including a
+    /// missing value. So merging these arms back together (they were one arm
+    /// until #7887) does not fail loudly: it silently offers a workspace-bot
+    /// pairer the personal-account path, which is the wrong-ceremony
+    /// confusion this issue exists to remove, with a click attached.
+    ///
+    /// Asserted as a difference rather than two literals so the test states
+    /// the invariant, not just today's strings. Verified red by re-merging the
+    /// arms: the `assert_ne!` fires.
+    #[test]
+    fn each_strategy_names_its_own_setup_ceremony() {
+        let notice = |strategy| {
+            let descriptor = connection_descriptor(strategy);
+            connect_required_notice(
+                &descriptor.notices.connect_required,
+                strategy,
+                "telegram",
+                Some("https://app.example.com"),
+                true,
+            )
+        };
+
+        let workspace = notice(ChannelConnectionStrategy::WebGeneratedCode);
+        let personal = notice(ChannelConnectionStrategy::DeviceLink);
+
+        assert!(workspace.ends_with("&setup=workspace_bot"), "{workspace}");
+        assert!(personal.ends_with("&setup=personal_account"), "{personal}");
+        assert_ne!(
+            workspace, personal,
+            "a workspace-bot pairing and a personal-account link must not open the same ceremony"
+        );
+    }
+
     /// #7887 regression: the destination must be appended to the policy the
     /// PAIRING SERVICE supplied, not only to one built from the manifest.
     ///
@@ -1457,7 +1507,7 @@ mod tests {
         assert_eq!(
             resolved.connect_required,
             "Pair this account from the extension page. Finish setup here: \
-             https://app.example.com/extensions?configure=telegram",
+             https://app.example.com/extensions?configure=telegram&setup=workspace_bot",
             "the pairing service's copy must keep its wording AND gain the address"
         );
         // No origin: the pairing copy survives untouched rather than gaining a
@@ -1503,9 +1553,9 @@ mod tests {
     /// `supports_private_delivery` values and requiring the same copy.
     #[test]
     fn connect_notice_hands_a_web_app_link_to_strategies_that_cannot_self_serve() {
-        for strategy in [
-            ChannelConnectionStrategy::WebGeneratedCode,
-            ChannelConnectionStrategy::DeviceLink,
+        for (strategy, setup_param) in [
+            (ChannelConnectionStrategy::WebGeneratedCode, "workspace_bot"),
+            (ChannelConnectionStrategy::DeviceLink, "personal_account"),
         ] {
             let descriptor = connection_descriptor(strategy);
             for supports_private_delivery in [true, false] {
@@ -1517,9 +1567,11 @@ mod tests {
                         Some("https://app.example.com"),
                         supports_private_delivery
                     ),
-                    "Connect your account. Finish setup here: \
-                     https://app.example.com/extensions?configure=telegram",
-                    "{strategy:?} must hand over a destination \
+                    format!(
+                        "Connect your account. Finish setup here: \
+                         https://app.example.com/extensions?configure=telegram&setup={setup_param}"
+                    ),
+                    "{strategy:?} must hand over a destination naming its own ceremony \
                      (supports_private_delivery={supports_private_delivery})"
                 );
             }
@@ -1533,8 +1585,10 @@ mod tests {
                     Some("https://app.example.com/"),
                     true
                 ),
-                "Connect your account. Finish setup here: \
-                 https://app.example.com/extensions?configure=telegram"
+                format!(
+                    "Connect your account. Finish setup here: \
+                     https://app.example.com/extensions?configure=telegram&setup={setup_param}"
+                )
             );
             // Unset origin still ships dark rather than advertising a
             // relative path into a customer conversation.
