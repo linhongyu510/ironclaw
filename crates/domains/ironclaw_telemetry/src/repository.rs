@@ -185,8 +185,8 @@ impl<T> TelemetryPage<T> {
     }
 }
 
-/// The persistence exception has two private SQL adapters behind one domain
-/// contract. Both adapters must run the same repository conformance suite.
+/// Temporary backend-neutral repository surface retained while Task 3 replaces
+/// it with the concrete scoped-filesystem repository and typed read methods.
 #[async_trait]
 pub trait TelemetryRepository: Send + Sync {
     async fn migrate(&self) -> Result<(), TelemetryRepositoryError>;

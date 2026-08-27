@@ -309,6 +309,7 @@ fn telemetry_sql_exception_and_adr_are_retired_from_guidance() {
         assert!(
             !source.contains("ADR 0005")
                 && !source.contains("dedicated SQL tables")
+                && !source.contains("triggers and telemetry")
                 && !source.contains("ironclaw_telemetry` under"),
             "telemetry's retired SQL exception remains in {relative}"
         );

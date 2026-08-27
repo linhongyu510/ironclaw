@@ -163,7 +163,7 @@ were chartered.
 - **Down to `substrates/`** — `ironclaw_filesystem` for persistence
   (`ScopedFilesystem`, `cas_update`), `ironclaw_secrets` (auth only),
   `ironclaw_safety` (threads, triggers, llm, trace_commons),
-  `ironclaw_libsql_runtime` (triggers and telemetry, under their ADRs).
+  `ironclaw_libsql_runtime` (triggers, under its ADR).
 - **Down to `contracts/`** — shared vocabulary (`ironclaw_host_api`,
   `ironclaw_common`, `ironclaw_extension_contracts`,
   `ironclaw_product_contracts`); never re-declare a contract type here.
