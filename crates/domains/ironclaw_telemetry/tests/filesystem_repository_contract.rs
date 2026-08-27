@@ -16,12 +16,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_telemetry::{
-    FilesystemTelemetryRepository, HourlyModelUsage, HourlyUserActivity, LifecycleEvent,
-    ScopedTelemetryBatch, TelemetryBatch, TelemetryPageRequest,
+    CollectorCoverage, FilesystemTelemetryRepository, HourlyAutomationUsage, HourlyModelUsage,
+    HourlyRunFailure, HourlyUserActivity, LifecycleEvent, ScopedTelemetryBatch, TelemetryBatch,
+    TelemetryPageRequest,
 };
 use ironclaw_telemetry_contracts::observation::{
-    EffectiveModelId, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind, OriginKind,
-    ProviderId, SubjectId,
+    AutomationKind, CollectorInstanceId, EffectiveModelId, FailureCategory, LifecycleEventId,
+    LifecycleEventKind, LifecycleSubjectKind, OriginKind, ProviderId, SubjectId,
 };
 
 fn scope(tenant: &str, user: &str) -> ResourceScope {
@@ -121,6 +122,172 @@ fn request(
     after: Option<String>,
 ) -> TelemetryPageRequest {
     TelemetryPageRequest::new(from, to, now, page_size, after).expect("test request")
+}
+
+async fn assert_shared_repository_contract<F>(filesystem: Arc<ScopedFilesystem<F>>)
+where
+    F: RootFilesystem + 'static,
+{
+    let repository = FilesystemTelemetryRepository::new(filesystem);
+    let tenant = scope("tenant-contract", "user-contract");
+    let other_tenant = scope("tenant-other", "user-other");
+    let hour = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test hour");
+    let user_id = UserId::new("user-contract").expect("test user");
+    let tenant_id = TenantId::new("tenant-contract").expect("test tenant");
+
+    repository.ensure_indexes(&tenant).await.expect("indexes");
+    repository
+        .ensure_indexes(&tenant)
+        .await
+        .expect("duplicate index initialization");
+
+    let failure = HourlyRunFailure::new(
+        tenant_id.clone(),
+        hour,
+        user_id.clone(),
+        FailureCategory::new("provider_error").expect("failure category"),
+        1,
+        hour,
+        hour,
+    )
+    .expect("failure row");
+    let automation = HourlyAutomationUsage::new(
+        tenant_id.clone(),
+        hour,
+        user_id.clone(),
+        AutomationKind::Cron,
+        1,
+        1,
+        0,
+        0,
+        0,
+        hour,
+        hour,
+    )
+    .expect("automation row");
+    let lifecycle = LifecycleEvent::new(
+        tenant_id.clone(),
+        LifecycleEventId::new("contract-event").expect("event id"),
+        Some(user_id),
+        LifecycleEventKind::RoutineCreated,
+        LifecycleSubjectKind::Routine,
+        SubjectId::new("contract-routine").expect("subject id"),
+        hour,
+    )
+    .expect("lifecycle row");
+    let coverage = CollectorCoverage::new(
+        tenant_id,
+        hour,
+        CollectorInstanceId::new("contract-collector").expect("collector id"),
+        1,
+        0,
+        0,
+        0,
+        0,
+        hour,
+        hour,
+    )
+    .expect("coverage row");
+    let batch = TelemetryBatch::new(
+        vec![activity("tenant-contract", "user-contract", hour)],
+        vec![model(
+            "tenant-contract",
+            "user-contract",
+            hour,
+            "provider-contract",
+            "model-contract",
+        )],
+        vec![failure],
+        vec![automation],
+        vec![lifecycle],
+        vec![coverage],
+    )
+    .expect("shared contract batch");
+    let report = repository
+        .apply_batch(ScopedTelemetryBatch::new(tenant.clone(), batch))
+        .await
+        .expect("shared contract write");
+    assert_eq!(report.applied_record_count(), 6);
+    assert_eq!(report.failed_record_count(), 0);
+
+    let page_request = request(
+        hour,
+        hour + Duration::hours(1),
+        hour + Duration::hours(1),
+        100,
+        None,
+    );
+    assert_eq!(
+        repository
+            .read_activity_page(&tenant, &page_request)
+            .await
+            .expect("activity read")
+            .rows()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .read_model_page(&tenant, &page_request)
+            .await
+            .expect("model read")
+            .rows()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .read_failure_page(&tenant, &page_request)
+            .await
+            .expect("failure read")
+            .rows()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .read_automation_page(&tenant, &page_request)
+            .await
+            .expect("automation read")
+            .rows()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .read_lifecycle_page(&tenant, &page_request)
+            .await
+            .expect("lifecycle read")
+            .rows()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .read_coverage_page(&tenant, &page_request)
+            .await
+            .expect("coverage read")
+            .rows()
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .read_activity_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant read")
+            .rows()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn in_memory_repository_satisfies_shared_contract() {
+    let (_, filesystem) = in_memory_filesystem();
+    assert_shared_repository_contract(filesystem).await;
 }
 
 #[tokio::test]
@@ -294,6 +461,27 @@ async fn repository_pages_half_open_ranges_and_model_filters() {
     assert_eq!(
         provider_page.rows()[0].effective_model_id().as_str(),
         "model-b"
+    );
+    let model_page = repository
+        .read_model_page(
+            &tenant,
+            &request(
+                first_hour,
+                third_hour,
+                third_hour + Duration::hours(1),
+                100,
+                None,
+            )
+            .with_effective_model_id(Some(EffectiveModelId::new("model-a").expect("model"))),
+        )
+        .await
+        .expect("model filtered page");
+    assert_eq!(model_page.rows().len(), 2);
+    assert!(
+        model_page
+            .rows()
+            .iter()
+            .all(|row| row.effective_model_id().as_str() == "model-a")
     );
 }
 
@@ -495,7 +683,7 @@ async fn typed_reads_reject_malformed_json_even_with_valid_projection() {
 }
 
 #[tokio::test]
-async fn libsql_repository_uses_only_scoped_filesystem_operations() {
+async fn libsql_repository_satisfies_shared_contract_through_scoped_filesystem() {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let database_path = directory.path().join("telemetry.db");
     let runtime = Arc::new(
@@ -506,40 +694,5 @@ async fn libsql_repository_uses_only_scoped_filesystem_operations() {
     let root = Arc::new(LibSqlRootFilesystem::from_runtime(runtime));
     root.run_migrations().await.expect("libsql migrations");
     let filesystem = scoped_filesystem(Arc::clone(&root));
-    let repository = FilesystemTelemetryRepository::new(filesystem);
-    let tenant = scope("tenant-libsql", "user-libsql");
-    let hour = Utc
-        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
-        .single()
-        .expect("test hour");
-    repository
-        .apply_batch(ScopedTelemetryBatch::new(
-            tenant.clone(),
-            TelemetryBatch::new(
-                vec![activity("tenant-libsql", "user-libsql", hour)],
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-            )
-            .expect("batch"),
-        ))
-        .await
-        .expect("libsql write");
-    let page = repository
-        .read_activity_page(
-            &tenant,
-            &request(
-                hour - Duration::hours(1),
-                hour + Duration::hours(1),
-                hour + Duration::hours(1),
-                100,
-                None,
-            ),
-        )
-        .await
-        .expect("libsql read");
-    assert_eq!(page.rows().len(), 1);
-    assert_eq!(page.rows()[0].run_count(), 1);
+    assert_shared_repository_contract(filesystem).await;
 }
