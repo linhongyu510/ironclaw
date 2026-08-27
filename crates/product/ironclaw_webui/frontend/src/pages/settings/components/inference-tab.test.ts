@@ -45,6 +45,7 @@ function renderInferenceModule() {
     ProviderManagement: component("ProviderManagement"),
     ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
     UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
+    SkillLearningSection: component("SkillLearningSection"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
     html,
@@ -96,6 +97,11 @@ test("Inference tab omits unsupported operator-config fields", () => {
     1,
     "admins need a UI to enable the tenant model allowlist"
   );
+  assert.equal(
+    findComponentNodes(rendered, context.SkillLearningSection).length,
+    1,
+    "admins need a UI to control deployment-wide skill learning"
+  );
 });
 
 test("Inference tab gives non-admin users model preference without provider controls", () => {
@@ -124,5 +130,10 @@ test("Inference tab gives non-admin users model preference without provider cont
     findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
     0,
     "ordinary users must not receive tenant policy controls"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.SkillLearningSection).length,
+    0,
+    "ordinary users must not receive skill learning controls"
   );
 });

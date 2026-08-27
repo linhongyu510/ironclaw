@@ -105,8 +105,8 @@ use ironclaw_product_contracts::operator_llm::{
     SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
-    LLM_USER_MODEL_POLICY_SET_CAPABILITY, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
-    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
+    LLM_SKILL_LEARNING_SET_CAPABILITY, LLM_USER_MODEL_POLICY_SET_CAPABILITY,
+    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY, USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_product_contracts::package_lifecycle::{
@@ -4396,6 +4396,33 @@ pub async fn set_active_llm(
     )?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
+}
+
+/// `PUT /api/webchat/v2/llm/skill-learning`
+pub async fn set_skill_learning(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_SKILL_LEARNING_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "skill learning settings",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_llm_config_snapshot(state.services(), caller).await?,
+    ))
 }
 
 /// `POST /api/webchat/v2/llm/test-connection`

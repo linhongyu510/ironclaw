@@ -10,6 +10,7 @@ import { SettingsSearchEmpty } from "./settings-search-empty";
 import { useLlmProviders } from "../hooks/useLlmProviders";
 import { UserModelPreferenceSelector } from "./user-model-preference-selector";
 import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
+import { SkillLearningSection } from "./skill-learning-section";
 
 export function InferenceTab({
   isAdmin = false,
@@ -74,6 +75,8 @@ export function InferenceTab({
       {isAdmin && <ModelSelectionPolicyEditor providerState={providerState} />}
 
       <UserModelPreferenceSelector />
+
+      {isAdmin && <SkillLearningSection providerState={providerState} />}
 
       {isAdmin && showProviderSummary &&
       (

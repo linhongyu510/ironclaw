@@ -33,9 +33,11 @@ use ironclaw_product_contracts::operator_llm::{
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
-    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference, UserModelPreferenceStore,
-    UserModelPreferenceStoreError,
+    SetActiveLlmRequest, SetSkillLearningSettingsRequest, SetUserModelPolicyRequest,
+    SetUserModelPreferenceRequest, SkillLearningRuntimeController, SkillLearningSettings,
+    SkillLearningSettingsStore, SkillLearningSettingsStoreError, SkillLearningSnapshot,
+    SkillLearningStatus, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+    UserModelPreferenceStore, UserModelPreferenceStoreError,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -193,8 +195,14 @@ pub trait LlmReloadTrigger: Send + Sync {
     /// Re-resolve and hot-swap the active provider. The error string is for
     /// logging only and must stay free of secrets / backend internals.
     async fn reload(&self) -> Result<(), String>;
-}
 
+    /// Return model ids from the currently active provider. Providers without
+    /// a discovery endpoint return an empty list; callers then validate against
+    /// the provider's configured model.
+    async fn active_model_catalog(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+}
 /// Operator-wide LLM configuration service backing the webui2 settings surface.
 pub struct RebornLlmConfigService {
     boot: RebornBootConfig,
@@ -202,6 +210,8 @@ pub struct RebornLlmConfigService {
     keys: LlmKeyStore,
     model_policy_store: Option<Arc<dyn ModelSelectionPolicyStore>>,
     user_model_preference_store: Option<Arc<dyn UserModelPreferenceStore>>,
+    skill_learning_store: Option<Arc<dyn SkillLearningSettingsStore>>,
+    skill_learning_controller: Option<Arc<dyn SkillLearningRuntimeController>>,
     reload: Option<Arc<dyn LlmReloadTrigger>>,
     /// The runtime's NEAR AI session manager — the same instance the live
     /// provider reads its token from, so a completed login takes effect on
@@ -210,7 +220,6 @@ pub struct RebornLlmConfigService {
     nearai_login_states: Arc<NearAiLoginStateStore>,
     codex_login_attempts: Arc<tokio::sync::Mutex<HashMap<String, CodexLoginAttempt>>>,
 }
-
 impl RebornLlmConfigService {
     pub fn new(boot: RebornBootConfig, keys: LlmKeyStore) -> Self {
         let repo = ProviderRepo::new(boot.home().providers_file_path());
@@ -220,6 +229,8 @@ impl RebornLlmConfigService {
             keys,
             model_policy_store: None,
             user_model_preference_store: None,
+            skill_learning_store: None,
+            skill_learning_controller: None,
             reload: None,
             nearai_session: None,
             nearai_login_states: Arc::new(NearAiLoginStateStore::new()),
@@ -239,6 +250,21 @@ impl RebornLlmConfigService {
         store: Arc<dyn UserModelPreferenceStore>,
     ) -> Self {
         self.user_model_preference_store = Some(store);
+        self
+    }
+
+    /// Attach deployment-wide skill-learning persistence.
+    pub fn with_skill_learning_store(mut self, store: Arc<dyn SkillLearningSettingsStore>) -> Self {
+        self.skill_learning_store = Some(store);
+        self
+    }
+
+    /// Attach the live runtime skill-learning controller.
+    pub fn with_skill_learning_controller(
+        mut self,
+        controller: Arc<dyn SkillLearningRuntimeController>,
+    ) -> Self {
+        self.skill_learning_controller = Some(controller);
         self
     }
 
@@ -274,14 +300,12 @@ impl RebornLlmConfigService {
     /// provider's active model instead of the model selected at boot.
     async fn refresh_running_provider(&self) {
         let Some(reload) = self.reload.as_ref() else {
-            // Cold boot: no LLM was configured at startup, so there is no live
-            // provider to swap into. Don't fail silently — tell the operator the
-            // saved config needs a restart to take effect.
             tracing::warn!(
                 "LLM configuration saved, but no live LLM provider was configured at startup \
                  (no config.toml or provider env creds), so it cannot be applied to the running \
                  process. Restart the server to use the new configuration."
             );
+            self.reconcile_skill_learning_controller().await;
             return;
         };
         if let Err(reason) = reload.reload().await {
@@ -290,6 +314,7 @@ impl RebornLlmConfigService {
                 "LLM config persisted but live provider reload failed; change applies on restart"
             );
         }
+        self.reconcile_skill_learning_controller().await;
     }
 
     async fn build_provider_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
@@ -345,6 +370,7 @@ impl RebornLlmConfigService {
             providers,
             active,
             user_model_policy: None,
+            skill_learning: SkillLearningSnapshot::disabled(),
         })
     }
 
@@ -392,6 +418,159 @@ impl RebornLlmConfigService {
         ))
     }
 
+    async fn read_skill_learning_settings(
+        &self,
+    ) -> Result<SkillLearningSettings, LlmConfigServiceError> {
+        let Some(store) = self.skill_learning_store.as_ref() else {
+            return Ok(SkillLearningSettings::default());
+        };
+        store
+            .read()
+            .await
+            .map(|settings| settings.unwrap_or_default())
+            .map_err(map_skill_learning_store_error)
+    }
+
+    async fn build_skill_learning_snapshot(
+        &self,
+        provider_snapshot: &LlmConfigSnapshot,
+    ) -> Result<SkillLearningSnapshot, LlmConfigServiceError> {
+        let settings = self.read_skill_learning_settings().await?;
+        if !settings.enabled {
+            return Ok(SkillLearningSnapshot {
+                enabled: false,
+                model: settings.model,
+                status: SkillLearningStatus::Disabled,
+                reason: None,
+            });
+        }
+
+        let Some(model) = settings.model.as_deref() else {
+            return Ok(invalid_skill_learning_snapshot(
+                settings,
+                "a model is required when skill learning is enabled",
+            ));
+        };
+        let Some(active) = provider_snapshot.active.as_ref() else {
+            return Ok(invalid_skill_learning_snapshot(
+                settings,
+                "an active provider is required when skill learning is enabled",
+            ));
+        };
+        let Some(provider) = provider_snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == active.provider_id)
+        else {
+            return Ok(invalid_skill_learning_snapshot(
+                settings,
+                "the active provider is unavailable",
+            ));
+        };
+
+        let available = match self.active_model_catalog().await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "skill-learning: active provider model catalog unavailable"
+                );
+                return Ok(invalid_skill_learning_snapshot(
+                    settings,
+                    "the active provider model catalog is unavailable",
+                ));
+            }
+        };
+        let valid = if available.is_empty() {
+            provider.default_model == model || active.model.as_deref() == Some(model)
+        } else {
+            available.iter().any(|available| available == model)
+        };
+        if !valid {
+            return Ok(invalid_skill_learning_snapshot(
+                settings,
+                "the selected model is not available from the active provider",
+            ));
+        }
+        Ok(SkillLearningSnapshot {
+            enabled: true,
+            model: settings.model,
+            status: SkillLearningStatus::Ready,
+            reason: None,
+        })
+    }
+
+    async fn active_model_catalog(&self) -> Result<Vec<String>, LlmConfigServiceError> {
+        let Some(reload) = self.reload.as_ref() else {
+            return Ok(Vec::new());
+        };
+        reload
+            .active_model_catalog()
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)
+    }
+
+    async fn validate_skill_learning_settings(
+        &self,
+        settings: &SkillLearningSettings,
+    ) -> Result<(), LlmConfigServiceError> {
+        if let Some(model) = settings.model.as_deref() {
+            validated_model_id("model", model)?;
+        }
+        if !settings.enabled {
+            return Ok(());
+        }
+        let snapshot = self.build_provider_snapshot().await?;
+        let active = snapshot
+            .active
+            .as_ref()
+            .ok_or_else(|| invalid_model("an active provider is required"))?;
+        let provider = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == active.provider_id)
+            .ok_or(LlmConfigServiceError::NotFound)?;
+        let model = settings
+            .model
+            .as_deref()
+            .ok_or_else(|| invalid_model("a model is required when enabled"))?;
+        let available = self.active_model_catalog().await?;
+        let valid = if available.is_empty() {
+            provider.default_model == model || active.model.as_deref() == Some(model)
+        } else {
+            available.iter().any(|available| available == model)
+        };
+        if !valid {
+            return Err(invalid_model(
+                "selected model is not available from the active provider",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn reconcile_skill_learning_controller(&self) {
+        let Some(controller) = self.skill_learning_controller.as_ref() else {
+            return;
+        };
+        let Ok(settings) = self.read_skill_learning_settings().await else {
+            controller.apply(SkillLearningSettings::default());
+            return;
+        };
+        if !settings.enabled
+            || self
+                .validate_skill_learning_settings(&settings)
+                .await
+                .is_ok()
+        {
+            controller.apply(settings);
+            return;
+        }
+        controller.apply(SkillLearningSettings {
+            enabled: false,
+            model: settings.model,
+        });
+    }
+
     async fn build_snapshot(
         &self,
         caller: &ProductSurfaceCaller,
@@ -400,6 +579,15 @@ impl RebornLlmConfigService {
         let stored = self.read_model_policy(caller).await?;
         snapshot.user_model_policy = stored
             .and_then(|policy| matching_active_model_policy(policy, snapshot.active.as_ref()));
+        let skill_learning = self.build_skill_learning_snapshot(&snapshot).await?;
+        if let Some(controller) = self.skill_learning_controller.as_ref() {
+            controller.apply(SkillLearningSettings {
+                enabled: skill_learning.enabled
+                    && matches!(skill_learning.status, SkillLearningStatus::Ready),
+                model: skill_learning.model.clone(),
+            });
+        }
+        snapshot.skill_learning = skill_learning;
         Ok(snapshot)
     }
 
@@ -755,6 +943,39 @@ impl LlmConfigService for RebornLlmConfigService {
             .await
             .map_err(map_admin_error)?;
         self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn set_skill_learning(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetSkillLearningSettingsRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if !caller.operator_config {
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: None,
+                reason: "operator configuration access is required".to_string(),
+            });
+        }
+        let settings = SkillLearningSettings {
+            enabled: request.enabled,
+            model: request
+                .model
+                .filter(|model| !model.trim().is_empty())
+                .map(|model| model.trim().to_string()),
+        };
+        self.validate_skill_learning_settings(&settings).await?;
+        let store = self
+            .skill_learning_store
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        store
+            .write(&settings)
+            .await
+            .map_err(map_skill_learning_store_error)?;
+        if let Some(controller) = self.skill_learning_controller.as_ref() {
+            controller.apply(settings);
+        }
         self.snapshot(caller).await
     }
 
@@ -1491,6 +1712,24 @@ fn is_masked_sentinel(value: &SecretString) -> bool {
     value.expose_secret().chars().all(|c| c == '\u{2022}')
 }
 
+fn invalid_skill_learning_snapshot(
+    settings: SkillLearningSettings,
+    reason: &'static str,
+) -> SkillLearningSnapshot {
+    SkillLearningSnapshot {
+        enabled: settings.enabled,
+        model: settings.model,
+        status: SkillLearningStatus::Invalid,
+        reason: Some(reason.to_string()),
+    }
+}
+
+fn map_skill_learning_store_error(error: SkillLearningSettingsStoreError) -> LlmConfigServiceError {
+    match error {
+        SkillLearningSettingsStoreError::Unavailable => LlmConfigServiceError::Unavailable,
+        SkillLearningSettingsStoreError::InvalidData => LlmConfigServiceError::Internal,
+    }
+}
 fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -1628,7 +1867,9 @@ mod tests {
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_product_contracts::operator_llm::{
-        SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
+        SetSkillLearningSettingsRequest, SetUserModelPreferenceRequest,
+        SkillLearningRuntimeController, SkillLearningSettings, SkillLearningSettingsStore,
+        SkillLearningSettingsStoreError, UserModelPreference, UserModelPreferenceStore,
         UserModelPreferenceStoreError,
     };
     use ironclaw_product_contracts::test_support::fakes::{
@@ -1779,6 +2020,39 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct InMemorySkillLearningStore {
+        settings: std::sync::Mutex<Option<SkillLearningSettings>>,
+    }
+
+    #[async_trait]
+    impl SkillLearningSettingsStore for InMemorySkillLearningStore {
+        async fn read(
+            &self,
+        ) -> Result<Option<SkillLearningSettings>, SkillLearningSettingsStoreError> {
+            Ok(self.settings.lock().expect("settings lock").clone())
+        }
+
+        async fn write(
+            &self,
+            settings: &SkillLearningSettings,
+        ) -> Result<(), SkillLearningSettingsStoreError> {
+            *self.settings.lock().expect("settings lock") = Some(settings.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSkillLearningController {
+        applied: std::sync::Mutex<Vec<SkillLearningSettings>>,
+    }
+
+    impl SkillLearningRuntimeController for RecordingSkillLearningController {
+        fn apply(&self, settings: SkillLearningSettings) {
+            self.applied.lock().expect("controller lock").push(settings);
+        }
+    }
+
     fn policy_request(default: &str, models: &[&str]) -> SetUserModelPolicyRequest {
         SetUserModelPolicyRequest {
             workspace_default: default.to_string(),
@@ -1801,6 +2075,106 @@ mod tests {
                 Arc::new(InMemoryUserModelPreferenceStore::default()),
             );
         (temp, service)
+    }
+
+    #[tokio::test]
+    async fn skill_learning_settings_validate_authorization_and_apply_live() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemorySkillLearningStore::default());
+        let controller = Arc::new(RecordingSkillLearningController::default());
+        let service = service
+            .with_skill_learning_store(Arc::clone(&store) as Arc<dyn SkillLearningSettingsStore>)
+            .with_skill_learning_controller(
+                Arc::clone(&controller) as Arc<dyn SkillLearningRuntimeController>
+            );
+
+        assert!(matches!(
+            service
+                .set_skill_learning(
+                    caller(),
+                    SetSkillLearningSettingsRequest {
+                        enabled: false,
+                        model: Some("later-model".to_string()),
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+
+        let admin = caller().with_operator_config(true);
+        let disabled = service
+            .set_skill_learning(
+                admin.clone(),
+                SetSkillLearningSettingsRequest {
+                    enabled: false,
+                    model: Some("later-model".to_string()),
+                },
+            )
+            .await
+            .expect("disabled settings");
+        assert_eq!(
+            disabled.skill_learning.status,
+            SkillLearningStatus::Disabled
+        );
+        assert_eq!(
+            disabled.skill_learning.model.as_deref(),
+            Some("later-model")
+        );
+
+        let ready = service
+            .set_skill_learning(
+                admin,
+                SetSkillLearningSettingsRequest {
+                    enabled: true,
+                    model: Some("model-a".to_string()),
+                },
+            )
+            .await
+            .expect("enabled settings");
+        assert_eq!(ready.skill_learning.status, SkillLearningStatus::Ready);
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&SkillLearningSettings {
+                enabled: true,
+                model: Some("model-a".to_string()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn active_provider_change_disables_an_invalid_learning_binding() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemorySkillLearningStore::default());
+        let controller = Arc::new(RecordingSkillLearningController::default());
+        let service = service
+            .with_skill_learning_store(Arc::clone(&store) as Arc<dyn SkillLearningSettingsStore>)
+            .with_skill_learning_controller(
+                Arc::clone(&controller) as Arc<dyn SkillLearningRuntimeController>
+            );
+        service
+            .set_skill_learning(
+                caller().with_operator_config(true),
+                SetSkillLearningSettingsRequest {
+                    enabled: true,
+                    model: Some("model-a".to_string()),
+                },
+            )
+            .await
+            .expect("initial learning settings");
+
+        RebornProviderAdmin::new(service.boot.clone())
+            .set_provider("nearai", Some("model-b"))
+            .expect("change active model");
+        service.reconcile_skill_learning_controller().await;
+
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&SkillLearningSettings {
+                enabled: false,
+                model: Some("model-a".to_string()),
+            }),
+            "an invalid retained model must not keep extraction live"
+        );
     }
 
     #[tokio::test]

@@ -18,10 +18,10 @@ use crate::runtime::RebornRuntimeError;
 /// said "composition implements it over the projection publisher"; this makes
 /// that true (PROPOSAL §6.8.2 shed list, CHECKLIST WS2 strays row).
 ///
-/// It sits in this module because composition's other skill-learning assembly
-/// piece — `build_skill_learning_provider` below — already does. It is
-/// deliberately *not* a crate-root `skill_learning` module: the whole module is
-/// what #6616/#6691 moved out of composition, and
+/// It sits in this module because composition's skill-learning assembly piece
+/// already wires the notifier beside the swappable provider. It is deliberately
+/// *not* a crate-root `skill_learning` module: the whole module is what
+/// #6616/#6691 moved out of composition, and
 /// `reborn_composition_boundaries.rs` holds it out.
 pub(crate) struct LiveSkillLearnedNotifier {
     publisher: Arc<LiveProjectionPublisher>,
@@ -63,35 +63,6 @@ pub(crate) async fn build_production_model_gateway(
     Ok((gateway, None, Some(reload)))
 }
 
-pub(crate) async fn build_skill_learning_provider(
-    config: &ironclaw_llm::LlmConfig,
-) -> Option<(Arc<dyn ironclaw_llm::LlmProvider>, String)> {
-    let model = std::env::var("IRONCLAW_SKILL_LEARNING_MODEL")
-        .ok()
-        .filter(|model| !model.trim().is_empty())?;
-    if !matches!(config.backend.as_str(), "nearai" | "near_ai" | "near") {
-        tracing::debug!(
-            backend = %config.backend,
-            "skill-learning: learning model is only wired for the nearai backend; skill learning disabled"
-        );
-        return None;
-    }
-    let mut nearai = config.nearai.clone();
-    nearai.model = model.clone();
-    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
-    match ironclaw_llm::create_llm_provider_with_config(
-        &nearai,
-        session,
-        config.request_timeout_secs,
-    ) {
-        Ok(provider) => Some((provider, model)),
-        Err(error) => {
-            tracing::debug!(%error, "skill-learning: could not build the learning provider; skill learning disabled");
-            None
-        }
-    }
-}
-
 pub(crate) struct LlmGatewayBundle {
     pub(crate) gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
     pub(crate) reload: RebornLlmReloadParts,
@@ -100,6 +71,7 @@ pub(crate) struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
+    pub(crate) provider: Arc<dyn ironclaw_llm::LlmProvider>,
     pub(crate) nearai_login_states:
         Arc<ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore>,
 }
@@ -128,7 +100,7 @@ pub(crate) fn wrap_swappable_gateway(
     let swappable_provider: Arc<dyn LlmProvider> = swappable;
     let provider: Arc<dyn LlmProvider> = match provider_factory {
         Some(factory) => factory(Arc::clone(&swappable_provider)),
-        None => swappable_provider,
+        None => Arc::clone(&swappable_provider),
     };
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
@@ -141,6 +113,7 @@ pub(crate) fn wrap_swappable_gateway(
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
+            provider: Arc::clone(&swappable_provider),
             nearai_login_states: Arc::new(
                 ironclaw_operator::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
             ),

@@ -3965,6 +3965,14 @@ impl LlmConfigService for ChannelModelPreferences {
         Err(LlmConfigServiceError::Unavailable)
     }
 
+    async fn set_skill_learning(
+        &self,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: ironclaw_product_contracts::operator_llm::SetSkillLearningSettingsRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
     async fn test_connection(
         &self,
         _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,

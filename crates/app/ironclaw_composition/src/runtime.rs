@@ -132,9 +132,7 @@ use crate::factory::{
 };
 #[cfg(test)]
 use crate::model_gateway_assembly::wrap_swappable_gateway;
-use crate::model_gateway_assembly::{
-    RebornLlmReloadParts, build_production_model_gateway, build_skill_learning_provider,
-};
+use crate::model_gateway_assembly::{RebornLlmReloadParts, build_production_model_gateway};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
@@ -1594,6 +1592,7 @@ impl RebornRuntime {
             ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
                 self.secret_store(),
             )),
+            Arc::clone(&parts.provider),
         )))
     }
 
@@ -3325,20 +3324,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
-
     // A test gateway override short-circuits the production build entirely:
     //    building a real gateway only to discard it wastes startup work (and, on
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
-    // Build the (optional) skill-learning provider from the resolved LLM config.
-    // Distillation/refinement runs against a stronger model
-    // (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI credentials
-    // with only the model overridden. `llm` no longer feeds the model gateway
-    // build below (see `build_production_model_gateway`).
-    let skill_learning_provider = match llm.as_ref() {
-        Some(resolved) => build_skill_learning_provider(resolved.config()).await,
-        None => None,
-    };
     // Caller instrumentation seam (e.g. a benchmark harness layering
     // token/reasoning capture): carry the resolved LLM's provider factory into
     // the cold-boot gateway so the wrapper wraps the swappable and stays in the
@@ -3356,6 +3345,55 @@ pub(crate) async fn build_runtime_with_resource_governor(
     #[cfg(not(any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) =
         build_production_model_gateway(boot_provider_factory).await?;
+
+    // Apply the effective LLM config before initializing skill-learning state,
+    // so persisted learning settings validate against the real active provider
+    // rather than the placeholder gateway.
+    if let (Some(boot_config), Some(reload_parts)) = (boot.as_ref(), llm_reload.as_ref()) {
+        let boot_reload_adapter = ironclaw_operator::RebornLlmReloadAdapter::new(
+            boot_config.clone(),
+            Arc::clone(&reload_parts.reload_handle),
+            Arc::clone(&reload_parts.session),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
+            Arc::clone(&reload_parts.provider),
+        );
+        if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
+        {
+            tracing::warn!(
+                %error,
+                "boot-time LLM reload failed; the placeholder provider stays active until the \
+                 next successful reload (e.g. through Settings -> Inference)"
+            );
+        }
+    }
+
+    let skill_learning_scope = ResourceScope {
+        tenant_id: thread_scope.tenant_id.clone(),
+        user_id: actor_user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+    .tenant_shared_managed_scope();
+    let (llm_config_service, skill_learning_controller) =
+        match crate::product_surface::compose_llm_config_service(
+            boot.as_ref(),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
+            Arc::clone(&scoped_filesystem),
+            llm_reload.as_ref(),
+            skill_learning_scope,
+        )
+        .await
+        {
+            Some((service, controller)) => (Some(service), Some(controller)),
+            None => (None, None),
+        };
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
@@ -3667,22 +3705,23 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ),
     );
     let projection_turn_event_wake_sink = projection_services.turn_event_wake_sink();
-    // Skill learning shares the turn-end seam with trace capture (composed
-    // additively, so the trace-capture path is unchanged). It is active only
-    // when a learning model is configured (a stronger model than the run's, via
-    // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
+    // Skill learning shares the turn-end seam with trace capture. It is always
+    // wired when the active provider exists; the live controller gates all
+    // transcript and inference work and defaults to disabled.
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink, projection_turn_event_wake_sink];
     let mut skill_learning_extraction_tasks: Option<
         Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
-    if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
-        (skill_learning_provider, local_runtime)
-    {
+    if let (Some(parts), Some(controller), Some(local_runtime)) = (
+        llm_reload.as_ref(),
+        skill_learning_controller.as_ref(),
+        local_runtime,
+    ) {
         let inference: Arc<dyn ironclaw_skills::learning::SkillInferencePort> = Arc::new(
             ironclaw_extension_host::skill_learning::SkillLearningInferenceAdapter::new(
-                learning_provider,
-                learning_model,
+                Arc::clone(&parts.provider),
+                Arc::clone(controller),
             ),
         );
         // Reuse the runtime's already-built scoped skill-management port so the
@@ -3719,6 +3758,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 skill_writer,
                 skill_learned_notifier,
                 extraction_tasks,
+                Arc::clone(controller),
             ),
         ));
     }
@@ -4302,14 +4342,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
     };
 
-    let llm_config_service = crate::product_surface::compose_llm_config_service(
-        boot.as_ref(),
-        ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-            Arc::clone(&services.secret_store),
-        )),
-        Arc::clone(&scoped_filesystem),
-        llm_reload.as_ref(),
-    );
     let started_channel_host = crate::extension_host_assembly::build_runtime_channel_host(
         &services,
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
@@ -4587,30 +4619,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             observer,
         )
     });
-
-    // Apply the effective LLM config (config.toml/env selection + any stored
-    // key) to the placeholder gateway exactly once, via the same live-reload
-    // path the settings UI uses (see `webui_llm_reload_trigger`). Failure
-    // degrades like a boot with no LLM configured: placeholder stays wired,
-    // operator retries through Settings -> Inference without a restart.
-    if let (Some(boot_config), Some(reload_parts)) = (boot.as_ref(), llm_reload.as_ref()) {
-        let boot_reload_adapter = ironclaw_operator::RebornLlmReloadAdapter::new(
-            boot_config.clone(),
-            Arc::clone(&reload_parts.reload_handle),
-            Arc::clone(&reload_parts.session),
-            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-                Arc::clone(&services.secret_store),
-            )),
-        );
-        if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
-        {
-            tracing::warn!(
-                %error,
-                "boot-time LLM reload failed; the placeholder provider stays active until the \
-                 next successful reload (e.g. through Settings -> Inference)"
-            );
-        }
-    }
 
     let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
     let ironhub_link_service = match ironhub_agent_shared_key {

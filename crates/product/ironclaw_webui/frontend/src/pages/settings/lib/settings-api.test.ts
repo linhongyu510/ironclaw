@@ -8,6 +8,7 @@ import {
   setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
+  setSkillLearning,
   updateToolPermission,
   upsertLlmProvider,
 } from "./settings-api";
@@ -321,6 +322,39 @@ test("updateToolPermission accepts canonical override and default responses", as
     assert.equal(inherited.success, true);
     assert.equal(inherited.tool.state, "ask_each_time");
     assert.equal(inherited.tool.effective_source, "global");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+test("skill learning API PUTs one coherent body and returns the authoritative snapshot", async () => {
+  let requestPath;
+  let requestOptions;
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal("fetch", async (path, options = {}) => {
+    requestPath = path;
+    requestOptions = options;
+    return new Response(
+      JSON.stringify({
+        providers: [],
+        active: null,
+        user_model_policy: null,
+        skill_learning: { enabled: true, model: "mock-model", status: "ready", reason: null },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  });
+
+  try {
+    const snapshot = await setSkillLearning({ enabled: true, model: "mock-model" });
+    assert.equal(requestPath, "/api/webchat/v2/llm/skill-learning");
+    assert.equal(requestOptions.method, "PUT");
+    assert.deepEqual(JSON.parse(requestOptions.body), { enabled: true, model: "mock-model" });
+    assert.equal(snapshot.skill_learning.enabled, true);
+    assert.equal(snapshot.skill_learning.status, "ready");
   } finally {
     vi.unstubAllGlobals();
   }

@@ -46,7 +46,6 @@ use ironclaw_assistant::{
     FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
@@ -177,10 +176,11 @@ use ironclaw_product_contracts::notification_inbox::{
     ProductNotificationMutationResponse,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPreferenceRequest,
+    ActiveModelReader, CodexLoginStart, LLM_SKILL_LEARNING_SET_CAPABILITY_ID, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    SetSkillLearningSettingsRequest, SetUserModelPreferenceRequest, SkillLearningSnapshot,
     UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
@@ -192,7 +192,10 @@ use ironclaw_product_contracts::operator_tools::{
 use ironclaw_product_contracts::outbound::{
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProjectionCursor,
 };
-use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+use ironclaw_product_contracts::package_lifecycle::{
+    ChannelConfigField as RebornChannelConfigField, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup,
+};
 use ironclaw_product_contracts::product_wire::{
     RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
@@ -11223,6 +11226,7 @@ struct SetupRecordingLlmConfigService {
     upsert_provider_calls: Mutex<Vec<SetupUpsertCall>>,
     delete_provider_calls: Mutex<Vec<String>>,
     set_active_calls: Mutex<Vec<SetupSetActiveCall>>,
+    set_skill_learning_calls: Mutex<Vec<SetSkillLearningSettingsRequest>>,
     test_connection_calls: Mutex<usize>,
     list_models_calls: Mutex<usize>,
     snapshot: Mutex<LlmConfigSnapshot>,
@@ -11244,6 +11248,7 @@ impl Default for SetupRecordingLlmConfigService {
             upsert_provider_calls: Mutex::new(Vec::new()),
             delete_provider_calls: Mutex::new(Vec::new()),
             set_active_calls: Mutex::new(Vec::new()),
+            set_skill_learning_calls: Mutex::new(Vec::new()),
             test_connection_calls: Mutex::new(0),
             list_models_calls: Mutex::new(0),
             snapshot: Mutex::new(Self::empty_snapshot()),
@@ -11347,6 +11352,7 @@ impl SetupRecordingLlmConfigService {
             providers: Vec::new(),
             active: None,
             user_model_policy: None,
+            skill_learning: SkillLearningSnapshot::disabled(),
         }
     }
 
@@ -11371,6 +11377,7 @@ impl SetupRecordingLlmConfigService {
                 model: Some(model.to_string()),
             }),
             user_model_policy: None,
+            skill_learning: SkillLearningSnapshot::disabled(),
         }
     }
 }
@@ -11439,6 +11446,18 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
                 provider_id: request.provider_id,
                 model: request.model,
             });
+        Ok(self.snapshot.lock().expect("lock").clone())
+    }
+
+    async fn set_skill_learning(
+        &self,
+        _caller: ProductSurfaceCaller,
+        request: SetSkillLearningSettingsRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        self.set_skill_learning_calls
+            .lock()
+            .expect("lock")
+            .push(request);
         Ok(self.snapshot.lock().expect("lock").clone())
     }
 
@@ -13585,6 +13604,15 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         )
         .await
         .expect("set active provider");
+    services
+        .invoke(
+            caller(),
+            CapabilityId::new(LLM_SKILL_LEARNING_SET_CAPABILITY_ID).expect("capability id"),
+            json!({ "enabled": false, "model": "later-model" }),
+            ActivityId::new(),
+        )
+        .await
+        .expect("set skill-learning settings");
 
     assert_eq!(
         llm_config
@@ -13599,6 +13627,17 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         [SetupSetActiveCall {
             provider_id: "openai".to_string(),
             model: Some("gpt-5-mini".to_string()),
+        }]
+    );
+    assert_eq!(
+        llm_config
+            .set_skill_learning_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [SetSkillLearningSettingsRequest {
+            enabled: false,
+            model: Some("later-model".to_string()),
         }]
     );
 }

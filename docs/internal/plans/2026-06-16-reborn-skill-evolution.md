@@ -147,13 +147,11 @@ Branch `feat/skill-evolution` off `origin/main`.
   (`prompts/skill_extraction.md`). 6 unit tests.
 
 ### Increment 2b — wire distillation into the sink (DONE)
-- IMPORTANT (direction correction): `SystemInferencePort` was REJECTED — it has no per-request
-  model override (would force the run's model, violating the strong-learning-model decision) and
-  would require editing the `ironclaw_turns` contract crate. Instead: a dedicated strong-model
-  `LlmProvider` built from the run's NEAR config with the model overridden
-  (`IRONCLAW_SKILL_LEARNING_MODEL`) via `build_skill_learning_provider` in `runtime.rs` (no churn
-  to `build_llm_gateway`). `SkillLearningInferenceAdapter` bridges `LlmProvider` -> the crate's
-  `SkillInferencePort`. Sink gated on `root-llm-provider`.
+- IMPORTANT (direction correction, superseded by #7920): `SystemInferencePort` was rejected.
+  The first implementation built a NEAR-only provider from `IRONCLAW_SKILL_LEARNING_MODEL`.
+  #7920 removes that hidden environment switch: Settings → Inference persists a deployment-wide
+  enabled flag and model, while `SkillLearningInferenceAdapter` uses the active provider's
+  live-swappable handle with the selected model per request.
 
 ### Increment 3 — install distilled skill (DONE)
 - `SkillWriter` seam; `PortSkillWriter` over the runtime's existing

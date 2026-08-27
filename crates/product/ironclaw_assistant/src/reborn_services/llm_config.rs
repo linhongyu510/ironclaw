@@ -23,8 +23,8 @@ use ironclaw_product_contracts::surface::{
 use super::{ProductCapabilityInvoker, RebornServices};
 
 use ironclaw_product_contracts::operator_llm::{
-    LlmConfigSnapshot, SetActiveLlmRequest, SetUserModelPolicyRequest, UpsertLlmProviderRequest,
-    UserModelCatalog,
+    LlmConfigSnapshot, SetActiveLlmRequest, SetSkillLearningSettingsRequest,
+    SetUserModelPolicyRequest, UpsertLlmProviderRequest, UserModelCatalog,
 };
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -99,6 +99,24 @@ where
             serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
         service
             .set_active(caller, request)
+            .await
+            .map_err(ProductSurfaceError::from)?;
+        Ok(())
+    }
+
+    pub(super) async fn invoke_llm_skill_learning_set(
+        &self,
+        caller: ProductSurfaceCaller,
+        input: serde_json::Value,
+    ) -> Result<(), ProductSurfaceError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        let request: SetSkillLearningSettingsRequest =
+            serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
+        service
+            .set_skill_learning(caller, request)
             .await
             .map_err(ProductSurfaceError::from)?;
         Ok(())

@@ -40,10 +40,23 @@ pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID: &str =
     "builtin.llm_user_model_preference_set";
 pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID);
+pub const LLM_SKILL_LEARNING_SET_CAPABILITY_ID: &str = "builtin.llm_skill_learning_set";
+pub const LLM_SKILL_LEARNING_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_SKILL_LEARNING_SET_CAPABILITY_ID);
 pub const USER_MODEL_CATALOG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "user_model_catalog",
     paginated: false,
 };
+
+/// Live runtime control for deployment-wide skill learning.
+///
+/// The implementation owns the in-memory gate and selected model used by the
+/// turn-event sink. The operator service calls this only after durable
+/// persistence succeeds, so a failed write can never leave the process in a
+/// state that is not recoverable after restart.
+pub trait SkillLearningRuntimeController: Send + Sync {
+    fn apply(&self, settings: SkillLearningSettings);
+}
 pub const USER_MODEL_PREFERENCE_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "user_model_preference",
     paginated: false,
@@ -99,6 +112,13 @@ pub trait LlmConfigService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
+
+    /// Replace deployment-wide skill-learning settings and apply them live.
+    async fn set_skill_learning(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetSkillLearningSettingsRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Probe a provider's credentials/endpoint without persisting anything.
@@ -423,6 +443,60 @@ pub struct LlmConfigSnapshot {
     /// ordinary users receive [`UserModelCatalog`] instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_model_policy: Option<ModelSelectionPolicy>,
+    #[serde(default)]
+    pub skill_learning: SkillLearningSnapshot,
+}
+
+/// Durable deployment-wide skill-learning settings. Missing fields deserialize
+/// to the disabled default so records written before this feature remain valid.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillLearningSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Runtime/read-back state for skill learning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillLearningSnapshot {
+    pub enabled: bool,
+    pub model: Option<String>,
+    pub status: SkillLearningStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillLearningStatus {
+    Disabled,
+    Ready,
+    Invalid,
+}
+
+impl SkillLearningSnapshot {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+            status: SkillLearningStatus::Disabled,
+            reason: None,
+        }
+    }
+}
+
+impl Default for SkillLearningSnapshot {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+/// Mutation request for deployment-wide skill-learning settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSkillLearningSettingsRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// One provider in the merged catalog, annotated for the settings UI.
@@ -571,6 +645,24 @@ pub struct UserModelPreference {
 pub struct SetUserModelPreferenceRequest {
     #[serde(default)]
     pub model: Option<String>,
+}
+
+/// Persistence port for deployment-wide skill-learning settings.
+#[async_trait]
+pub trait SkillLearningSettingsStore: Send + Sync {
+    async fn read(&self) -> Result<Option<SkillLearningSettings>, SkillLearningSettingsStoreError>;
+
+    async fn write(
+        &self,
+        settings: &SkillLearningSettings,
+    ) -> Result<(), SkillLearningSettingsStoreError>;
+}
+
+/// Opaque skill-learning settings-store failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillLearningSettingsStoreError {
+    Unavailable,
+    InvalidData,
 }
 
 /// Persistence port for tenant-scoped model policies.
@@ -763,6 +855,7 @@ mod tests {
                     model: None,
                 }),
                 user_model_policy: None,
+                skill_learning: SkillLearningSnapshot::disabled(),
             })
         }
 
@@ -789,6 +882,7 @@ mod tests {
                 }],
                 active: None,
                 user_model_policy: None,
+                skill_learning: SkillLearningSnapshot::disabled(),
             })
         }
 
@@ -815,7 +909,16 @@ mod tests {
                     model: request.model,
                 }),
                 user_model_policy: None,
+                skill_learning: SkillLearningSnapshot::disabled(),
             })
+        }
+
+        async fn set_skill_learning(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: SetSkillLearningSettingsRequest,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Err(LlmConfigServiceError::Unavailable)
         }
 
         async fn test_connection(

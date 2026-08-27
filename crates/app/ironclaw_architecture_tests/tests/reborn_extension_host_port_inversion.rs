@@ -145,6 +145,7 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     // shared-route subject retirement (run-acts-as-invoker) reshaped it to
     // admission-only — same declaration home, same implementor.
     ("SharedConversationAdmission", EXTENSION_HOST),
+    ("SkillLearningRuntimeController", EXTENSION_HOST),
     // WS2.4: the admin-configuration view provider is a credential/admin view.
     ("RebornViewProvider", EXTENSION_MANAGER),
 ];

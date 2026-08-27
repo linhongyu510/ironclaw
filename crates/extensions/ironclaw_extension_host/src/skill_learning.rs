@@ -1,16 +1,15 @@
 //! Skill learning: turn-end skill distillation for the Reborn runtime.
 //!
 //! Mirrors the trace-capture sink (`trace_capture.rs`): every successful
-//! terminal turn lifecycle event spawns a supervised best-effort task that reads
-//! the just-finished run's transcript and, when the run is substantive enough,
-//! distills a reusable `SKILL.md` via the learning model, safety-scans it,
-//! installs it for the run's owner, and notifies the UI. The distillation
-//! *logic* lives in `ironclaw_skills::learning`; this file owns the composition
-//! seam: the eligibility gate, the transcript read, the inference adapter, the
-//! scoped write, and the learned-skill live notification.
+//! terminal turn lifecycle event spawns a supervised best-effort task that
+//! reads the just-finished run's transcript, asks the learning model whether a
+//! reusable skill exists, safety-scans it, installs it for the run's owner, and
+//! notifies the UI. The distillation logic lives in `ironclaw_skills::learning`;
+//! this file owns the transcript read, inference adapter, scoped write, and
+//! learned-skill notification.
 //!
-//! Skill learning requires a learning LLM provider; the sink is only wired when
-//! one is resolved from the runtime's LLM config.
+//! Skill learning reuses the active provider's swappable runtime handle; the
+//! selected learning model is applied as a per-request model override.
 //!
 //! Invariants (shared with `trace_capture.rs`):
 //! - Never block or fail the turn lifecycle path: the sink is subscribed
@@ -56,13 +55,13 @@ impl TurnEventSink for CompositeTurnEventSink {
 
 pub use learning::{
     LlmSkillRefiner, MergeAction, PortSkillWriter, SkillLearnedNotifier,
-    SkillLearningExtractionTasks, SkillLearningInferenceAdapter, SkillLearningTurnEventSink,
-    SkillRefiner, SkillWriter,
+    SkillLearningExtractionTasks, SkillLearningInferenceAdapter,
+    SkillLearningRuntimeControllerImpl, SkillLearningTurnEventSink, SkillRefiner, SkillWriter,
 };
 
 mod learning {
     use std::collections::BTreeSet;
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
@@ -81,29 +80,64 @@ mod learning {
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,
-        MessageKind, SessionThreadService, ThreadHistoryRequest, ThreadScope,
+        MessageKind, SessionThreadService, ThreadScope,
     };
     use ironclaw_turns::{
         TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnScope,
     };
     use tokio::task::JoinHandle;
 
+    use ironclaw_product_contracts::operator_llm::{
+        SkillLearningRuntimeController, SkillLearningSettings,
+    };
     use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
-    /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
-    /// obviously can't yield a reusable skill (pure chat, a single lookup). The
-    /// *real* quality gate is the learning model's own `SKIP` judgement, so this
-    /// is kept lenient — an efficient agent may complete a skill-worthy,
-    /// multi-step task in only two tool calls (e.g. `shell` mkdir + batch write).
-    const MIN_TOOL_ACTIONS: usize = 2;
-    const MIN_TRANSCRIPT_MESSAGES: usize = 3;
-    /// Recent-transcript bound for the eligibility read.
     const TRANSCRIPT_READ_LIMIT: usize = 64;
-
-    /// Output ceiling for a distilled `SKILL.md`. Generous: the learning model
-    /// may be a reasoning model that spends tokens on reasoning before emitting
-    /// the `SKILL.md`, so a tight cap would truncate the document.
     const SKILL_LEARNING_MAX_TOKENS: u32 = 16384;
+
+    /// Live, deployment-wide gate shared by the operator settings service,
+    /// turn-event sink, and inference adapter.
+    pub struct SkillLearningRuntimeControllerImpl {
+        settings: RwLock<SkillLearningSettings>,
+    }
+
+    impl SkillLearningRuntimeControllerImpl {
+        pub fn new(settings: SkillLearningSettings) -> Self {
+            Self {
+                settings: RwLock::new(settings),
+            }
+        }
+
+        pub fn enabled(&self) -> bool {
+            self.read_settings().enabled
+        }
+
+        pub fn current_model(&self) -> Option<String> {
+            self.read_settings().model
+        }
+
+        fn read_settings(&self) -> SkillLearningSettings {
+            match self.settings.read() {
+                Ok(settings) => settings.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+    }
+
+    impl Default for SkillLearningRuntimeControllerImpl {
+        fn default() -> Self {
+            Self::new(SkillLearningSettings::default())
+        }
+    }
+
+    impl SkillLearningRuntimeController for SkillLearningRuntimeControllerImpl {
+        fn apply(&self, settings: SkillLearningSettings) {
+            match self.settings.write() {
+                Ok(mut current) => *current = settings,
+                Err(poisoned) => *poisoned.into_inner() = settings,
+            }
+        }
+    }
 
     /// User-facing note shown on the learned-skill bubble.
     const LEARNED_SKILL_FEEDBACK: &str =
@@ -490,14 +524,15 @@ mod learning {
         );
     }
 
-    /// Turn-end sink that distills a reusable skill from successful, substantive
-    /// runs, installs it for the run's owner, and notifies the UI.
+    /// Turn-end sink that offers every successful owned run to the learning
+    /// model, installs validated reusable skills, and notifies the UI.
     pub struct SkillLearningTurnEventSink {
         thread_service: Arc<dyn SessionThreadService>,
         inference: Arc<dyn SkillInferencePort>,
         skill_writer: Arc<dyn SkillWriter>,
         notifier: Arc<dyn SkillLearnedNotifier>,
         extraction_tasks: Arc<SkillLearningExtractionTasks>,
+        controller: Arc<SkillLearningRuntimeControllerImpl>,
     }
 
     impl SkillLearningTurnEventSink {
@@ -507,6 +542,7 @@ mod learning {
             skill_writer: Arc<dyn SkillWriter>,
             notifier: Arc<dyn SkillLearnedNotifier>,
             extraction_tasks: Arc<SkillLearningExtractionTasks>,
+            controller: Arc<SkillLearningRuntimeControllerImpl>,
         ) -> Self {
             Self {
                 thread_service,
@@ -514,6 +550,7 @@ mod learning {
                 skill_writer,
                 notifier,
                 extraction_tasks,
+                controller,
             }
         }
     }
@@ -579,6 +616,9 @@ mod learning {
             if !matches!(event.kind, TurnEventKind::Completed) {
                 return Ok(());
             }
+            if !self.controller.enabled() {
+                return Ok(());
+            }
             // System/sentinel-scoped turns have no owner to attribute a skill to.
             let Some(owner_user_id) = event
                 .owner_user_id
@@ -613,6 +653,7 @@ mod learning {
                 inference: Arc::clone(&self.inference),
                 skill_writer: Arc::clone(&self.skill_writer),
                 notifier: Arc::clone(&self.notifier),
+                controller: Arc::clone(&self.controller),
                 scope: read_scope,
                 thread_id,
                 run_id,
@@ -635,6 +676,7 @@ mod learning {
         inference: Arc<dyn SkillInferencePort>,
         skill_writer: Arc<dyn SkillWriter>,
         notifier: Arc<dyn SkillLearnedNotifier>,
+        controller: Arc<SkillLearningRuntimeControllerImpl>,
         /// Read scope (transcript) and write/announce scope are the same — both
         /// derive from the turn event.
         scope: ThreadScope,
@@ -647,10 +689,11 @@ mod learning {
 
     impl ExtractionJob {
         async fn run(self) {
-            // Read the model-context (replay) view, NOT list_thread_history:
-            // the history projection nulls tool-call metadata for product
-            // display, which would hide the very tool actions that make a
-            // run worth distilling.
+            if !self.controller.enabled() {
+                return;
+            }
+            // Read the model-context (replay) view, bounded to keep a runaway
+            // thread from producing an unbounded inference request.
             let window = match self
                 .thread_service
                 .load_context_window(LoadContextWindowRequest {
@@ -667,52 +710,10 @@ mod learning {
                 }
             };
 
-            // Eligibility counts tool actions from THIS run only, not the whole
-            // thread window: `window` is the recent thread slice with no run
-            // filter, so a trivial follow-up turn after a tool-heavy task would
-            // otherwise re-pass the gate on the previous run's stale tool results
-            // and re-distill it (wasted inference + a stale-transcript refine that
-            // can regress an evolved skill). `window` is still used below as the
-            // multi-turn distillation CONTEXT (intentional). The per-run COUNT
-            // comes from the history projection, which keeps message `kind` +
-            // `turn_run_id` and only nulls the tool metadata the transcript needs
-            // (hence the separate window read above). The producer writes
-            // `turn_run_id = run_id.to_string()`, matching `self.run_id`.
-            let run_id_str = self.run_id.to_string();
-            let history = match self
-                .thread_service
-                .list_thread_history(ThreadHistoryRequest {
-                    scope: self.scope.clone(),
-                    thread_id: self.thread_id.clone(),
-                })
-                .await
-            {
-                Ok(history) => history,
-                Err(error) => {
-                    tracing::debug!(%error, run_id = ?self.run_id, "skill-learning: could not load history for run-scoped eligibility");
-                    return;
-                }
-            };
-            let tool_actions = history
-                .messages
-                .iter()
-                .filter(|message| {
-                    matches!(message.kind, MessageKind::ToolResultReference)
-                        && message.turn_run_id.as_deref() == Some(run_id_str.as_str())
-                })
-                .count();
-            let message_count = window.messages.len();
-            tracing::debug!(
-                run_id = ?self.run_id,
-                tool_actions,
-                message_count,
-                "skill-learning: evaluating completed run for extraction"
-            );
-            if tool_actions < MIN_TOOL_ACTIONS || message_count < MIN_TRANSCRIPT_MESSAGES {
+            let transcript = format_transcript(&window);
+            if !self.controller.enabled() {
                 return;
             }
-
-            let transcript = format_transcript(&window);
             match distill_skill(&transcript, self.inference.as_ref()).await {
                 Ok(DistillOutcome::Skill(skill)) => {
                     if let Some(installed_name) = persist_learned_skill(
@@ -897,27 +898,40 @@ mod learning {
         out
     }
 
-    /// Adapts a concrete strong-model [`LlmProvider`] to the logic crate's
-    /// [`SkillInferencePort`]. The learning model is passed as a per-request
-    /// override (NEAR AI honours it), so distillation runs against a stronger
-    /// model than the run's without touching the run's model gateway.
+    /// Adapts the active provider's swappable [`LlmProvider`] to the logic
+    /// crate's [`SkillInferencePort`]. The selected model is read from the live
+    /// controller for every call, so settings changes apply without restart.
     pub struct SkillLearningInferenceAdapter {
         provider: Arc<dyn LlmProvider>,
-        model: String,
+        controller: Arc<SkillLearningRuntimeControllerImpl>,
     }
 
     impl SkillLearningInferenceAdapter {
-        pub fn new(provider: Arc<dyn LlmProvider>, model: String) -> Self {
-            Self { provider, model }
+        pub fn new(
+            provider: Arc<dyn LlmProvider>,
+            controller: Arc<SkillLearningRuntimeControllerImpl>,
+        ) -> Self {
+            Self {
+                provider,
+                controller,
+            }
         }
     }
 
     #[async_trait]
     impl SkillInferencePort for SkillLearningInferenceAdapter {
         async fn infer(&self, system: &str, user: &str) -> Result<String, SkillInferenceError> {
+            if !self.controller.enabled() {
+                return Err(SkillInferenceError(
+                    "skill learning is disabled".to_string(),
+                ));
+            }
+            let model = self.controller.current_model().ok_or_else(|| {
+                SkillInferenceError("skill learning has no selected model".to_string())
+            })?;
             let request =
                 CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
-                    .with_model(self.model.clone())
+                    .with_model(model)
                     // No temperature override: reasoning models (e.g. gpt-5.x)
                     // reject any non-default temperature with HTTP 400.
                     .with_max_tokens(SKILL_LEARNING_MAX_TOKENS);
@@ -934,11 +948,17 @@ mod learning {
     mod tests {
         use super::*;
         use ironclaw_host_api::ids::{AgentId, ThreadId};
+        use ironclaw_llm::{CompletionResponse, FinishReason};
+        use ironclaw_product_contracts::operator_llm::{
+            SkillLearningRuntimeController, SkillLearningSettings,
+        };
         use ironclaw_threads::{
             AppendToolResultReferenceRequest, EnsureThreadRequest, InMemorySessionThreadService,
             MessageStatus, ThreadHistoryRequest, ToolResultSafeSummary,
         };
         use ironclaw_turns::{EventCursor, TurnStatus};
+        use rust_decimal::Decimal;
+        use std::sync::Mutex as StdMutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct StubInference;
@@ -951,6 +971,55 @@ mod learning {
                 _user: &str,
             ) -> Result<String, SkillInferenceError> {
                 Ok("SKIP: test stub".to_string())
+            }
+        }
+
+        struct RecordingProvider {
+            models: Arc<StdMutex<Vec<String>>>,
+            calls: Arc<StdMutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl ironclaw_llm::LlmProvider for RecordingProvider {
+            fn model_name(&self) -> &str {
+                "active-model"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                request: ironclaw_llm::CompletionRequest,
+            ) -> Result<CompletionResponse, ironclaw_llm::LlmError> {
+                self.calls
+                    .lock()
+                    .expect("provider calls lock")
+                    .push(request.model.unwrap_or_default());
+                Ok(CompletionResponse {
+                    content: "SKIP: test".to_string(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    reasoning: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ironclaw_llm::ToolCompletionRequest,
+            ) -> Result<ironclaw_llm::ToolCompletionResponse, ironclaw_llm::LlmError> {
+                Err(ironclaw_llm::LlmError::RequestFailed {
+                    provider: "test".to_string(),
+                    reason: "tool completion is not used by this test".to_string(),
+                })
+            }
+
+            async fn list_models(&self) -> Result<Vec<String>, ironclaw_llm::LlmError> {
+                Ok(self.models.lock().expect("provider models lock").clone())
             }
         }
 
@@ -1009,6 +1078,46 @@ mod learning {
         }
 
         #[tokio::test]
+        async fn inference_reads_the_current_model_after_live_changes() {
+            let calls = Arc::new(StdMutex::new(Vec::new()));
+            let provider: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(RecordingProvider {
+                models: Arc::new(StdMutex::new(vec![
+                    "model-a".to_string(),
+                    "model-b".to_string(),
+                ])),
+                calls: Arc::clone(&calls),
+            });
+            let controller = Arc::new(SkillLearningRuntimeControllerImpl::new(
+                SkillLearningSettings {
+                    enabled: true,
+                    model: Some("model-a".to_string()),
+                },
+            ));
+            let adapter = SkillLearningInferenceAdapter::new(provider, Arc::clone(&controller));
+
+            adapter
+                .infer("system", "first")
+                .await
+                .expect("first inference");
+            SkillLearningRuntimeController::apply(
+                controller.as_ref(),
+                SkillLearningSettings {
+                    enabled: true,
+                    model: Some("model-b".to_string()),
+                },
+            );
+            adapter
+                .infer("system", "second")
+                .await
+                .expect("second inference");
+
+            assert_eq!(
+                *calls.lock().expect("provider calls lock"),
+                vec!["model-a".to_string(), "model-b".to_string()]
+            );
+        }
+
+        #[tokio::test]
         async fn ignores_non_completed_and_ownerless_completions() {
             let service: Arc<dyn SessionThreadService> =
                 Arc::new(InMemorySessionThreadService::default());
@@ -1018,6 +1127,7 @@ mod learning {
                 Arc::new(StubWriter),
                 Arc::new(StubNotifier),
                 Arc::new(SkillLearningExtractionTasks::new()),
+                Arc::new(SkillLearningRuntimeControllerImpl::default()),
             );
             // A failed run is the self-improvement loop's concern, not extraction.
             sink.publish(event(TurnEventKind::Failed, Some("alice")))
@@ -1027,6 +1137,33 @@ mod learning {
             sink.publish(event(TurnEventKind::Completed, None))
                 .await
                 .expect("ownerless completion is a no-op");
+        }
+
+        #[tokio::test]
+        async fn disabled_learning_does_not_start_transcript_extraction() {
+            let service: Arc<dyn SessionThreadService> =
+                Arc::new(InMemorySessionThreadService::default());
+            let extraction_tasks = Arc::new(SkillLearningExtractionTasks::new());
+            let sink = SkillLearningTurnEventSink::new(
+                service,
+                Arc::new(StubInference),
+                Arc::new(StubWriter),
+                Arc::new(StubNotifier),
+                Arc::clone(&extraction_tasks),
+                Arc::new(SkillLearningRuntimeControllerImpl::default()),
+            );
+
+            sink.publish(event(TurnEventKind::Completed, Some("alice")))
+                .await
+                .expect("disabled completion is a no-op");
+            assert!(
+                extraction_tasks
+                    .handles
+                    .lock()
+                    .expect("handles lock")
+                    .is_empty(),
+                "disabled learning must return before transcript I/O is scheduled"
+            );
         }
 
         // Durable feedback regression: a learned skill must leave a persisted
@@ -1144,7 +1281,7 @@ mod learning {
         // tool-heavy task would otherwise re-pass the gate on the previous run's
         // stale tool results and re-distill it.
         #[tokio::test]
-        async fn eligibility_counts_tool_actions_for_the_completed_run_only() {
+        async fn completed_run_without_own_tool_actions_reaches_distillation() {
             async fn seed_tool_result(
                 service: &dyn SessionThreadService,
                 scope: &ThreadScope,
@@ -1205,6 +1342,12 @@ mod learning {
                     inference,
                     skill_writer: Arc::new(StubWriter),
                     notifier: Arc::new(StubNotifier),
+                    controller: Arc::new(SkillLearningRuntimeControllerImpl::new(
+                        ironclaw_product_contracts::operator_llm::SkillLearningSettings {
+                            enabled: true,
+                            model: Some("test-model".to_string()),
+                        },
+                    )),
                     scope: scope.clone(),
                     thread_id: thread_id.clone(),
                     run_id,
@@ -1249,8 +1392,8 @@ mod learning {
             seed_tool_result(service.as_ref(), &scope, &thread_id, &prior_run, "r2").await;
             seed_filler_message(service.as_ref(), &scope, &thread_id, &current_run).await;
 
-            // The window has enough messages and >= MIN_TOOL_ACTIONS tool results
-            // overall, but NONE belong to the current run → no distillation.
+            // Every successful owned run is now a candidate. The learning model,
+            // not a host-side activity threshold, decides whether to return SKIP.
             let trivial_calls = Arc::new(AtomicUsize::new(0));
             job(
                 Arc::clone(&service),
@@ -1263,10 +1406,9 @@ mod learning {
             )
             .run()
             .await;
-            assert_eq!(
-                trivial_calls.load(Ordering::Relaxed),
-                0,
-                "a trivial follow-up turn must not re-distill the previous run's stale tool work"
+            assert!(
+                trivial_calls.load(Ordering::Relaxed) >= 1,
+                "a successful run without tool actions must reach distillation"
             );
 
             // Control: a run that DID its own tool work stays eligible.

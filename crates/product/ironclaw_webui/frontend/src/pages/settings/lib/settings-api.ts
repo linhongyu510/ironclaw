@@ -181,6 +181,16 @@ export function setUserModelPreference(model) {
     body: JSON.stringify({ model }),
   });
 }
+
+// Deployment-wide skill learning controls (#7920). The request body carries
+// `{ enabled, model }`; the response is the authoritative LLM config snapshot
+// with the applied `skill_learning` field.
+export function setSkillLearning(payload) {
+  return apiFetch("/api/webchat/v2/llm/skill-learning", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
 export function upsertLlmProvider(payload) {
   const { clientActionId: callerClientActionId, ...request } = payload;
   return apiFetch("/api/webchat/v2/llm/providers", {
