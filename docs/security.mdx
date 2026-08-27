@@ -113,16 +113,16 @@ Full pattern catalog and the exact boundaries: [Credential Protection → The Le
 
 ## Prompt Injection Defense
 
-A prompt injection is any external string that tries to redirect the model against you — a webhook payload telling the agent to forward your inbox, a fetched page asking it to reveal stored credentials, a tool response pretending to be a system message.
+A prompt injection is any external text that tries to turn the model against you — a webhook payload telling the agent to forward your inbox, a fetched page asking it to reveal stored credentials, a tool response pretending to be a system message.
 
-IronClaw's honest position on this is that **structural containment, not pattern matching, is what carries the weight.** Injection-detection heuristics are a real layer, but they are the weakest one; a determined injection will get past regexes. What holds is the boundary underneath:
+IronClaw's honest position: **structural containment, not pattern matching, is what carries the weight.** Detection heuristics are a real layer, but the weakest one; a determined injection will get past a regex. What holds is the set of boundaries an injection cannot talk its way past:
 
-1. **Untrusted content is fenced.** Error text and diagnostics from tools and providers are scanned for injection patterns before they reach the model; when any survive, the text is wrapped in explicit `EXTERNAL, UNTRUSTED` delimiters with an instruction to treat it as data, and any attempt to forge a closing delimiter inside that content is escaped on the way in.
-2. **Secret values are scrubbed from that same text** using the full leak-detector registry, so a hijacked tool call can't turn an error message into an exfiltration channel.
-3. **Capabilities are gated by origin.** `origin_gate_matrix` means a tool the model can reach during an agent turn can be `forbidden` to routine/heartbeat automation. Scheduled trigger runs are agent turns and follow the `loop_run` policy — so an injected trigger payload still meets the same approval gates as an interactive turn.
-4. **Effects can require approval.** Tools carrying `financial`, `modify_approval`, or `modify_budget` effects always stop and wait for you, as does any tool you set to *ask each time* or whose manifest gates an origin `ask_always`. For everything else, note the default: global auto-approve is **on** for new users, so an `ask` tool such as Gmail send runs without a prompt until you turn auto-approve off or set a per-tool override. An injection that convinces the model to send an email only has to convince *you* if you have made that choice.
+- **Untrusted text is labelled as such.** Error messages and diagnostics from tools and providers are scanned for injection patterns, and anything suspicious is wrapped in explicit "external, untrusted" markers before the model sees it, with an instruction to treat it as data.
+- **Secrets are scrubbed from that text** by the leak detector, so a hijacked tool call cannot turn an error message into an exfiltration channel.
+- **Tools are gated by where the call came from.** A tool the model can use during a conversation can be declared off-limits to routine and heartbeat automation entirely. A run started by a scheduled trigger counts as an agent turn and meets the same approval gates as an interactive one.
+- **Some actions always ask you** — anything financial, anything that changes approvals or budgets, and any tool you have set to ask each time. For everything else, know the default: **auto-approve is on** for new installs, so a tool marked `ask` (Gmail send, for example) runs without a prompt until you turn auto-approve off or set a per-tool override. An injection that convinces the model to send an email only has to convince *you* if you have made that choice.
 
-And underneath all of that, the sandbox is the boundary that does not depend on detecting anything: a fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Credential Protection](/security/secrets-and-sandboxing) for that structural mitigation.
+And underneath all of that is the sandbox — the boundary that does not depend on detecting anything. A fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Credential Protection](/security/secrets-and-sandboxing) for how that holds, and [How to implement a tool](/extensions/building-a-tool) for the origin-gate policies a manifest can declare.
 
 ---
 
