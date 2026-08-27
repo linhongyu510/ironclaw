@@ -11,7 +11,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     CollectorCoverage, TelemetryBatch, TelemetryRepository, aggregate_batch,
-    buffered_recorder::{DiagnosticsState, TelemetryClock, classify_repository_error},
+    buffered_recorder::{
+        CoverageSideDelta, DiagnosticsState, Intake, TelemetryClock, TenantHourKey,
+        classify_repository_error,
+    },
     floor_utc_hour,
 };
 
@@ -35,6 +38,20 @@ struct CoverageAccumulator {
 }
 
 impl CoverageAccumulator {
+    fn from_key(key: &TenantHourKey) -> Self {
+        Self {
+            tenant_id: key.tenant_id.clone(),
+            window_start: key.window_start,
+            accepted_observation_count: 0,
+            queue_full_drop_count: 0,
+            closed_drop_count: 0,
+            invalid_drop_count: 0,
+            write_failed_observation_count: 0,
+            first_observed_at: key.window_start,
+            last_observed_at: key.window_start,
+        }
+    }
+
     fn from_observation(observation: &TelemetryObservation) -> Self {
         let occurred_at = observation.occurred_at();
         Self {
@@ -55,6 +72,26 @@ impl CoverageAccumulator {
             self.accepted_observation_count.checked_add(1).ok_or(())?;
         self.first_observed_at = self.first_observed_at.min(observation.occurred_at());
         self.last_observed_at = self.last_observed_at.max(observation.occurred_at());
+        Ok(())
+    }
+
+    fn add_side_delta(&mut self, delta: CoverageSideDelta) -> Result<(), ()> {
+        self.accepted_observation_count = self
+            .accepted_observation_count
+            .checked_add(delta.accepted_pending)
+            .ok_or(())?;
+        self.queue_full_drop_count = self
+            .queue_full_drop_count
+            .checked_add(delta.queue_full_drop_count)
+            .ok_or(())?;
+        self.closed_drop_count = self
+            .closed_drop_count
+            .checked_add(delta.closed_drop_count)
+            .ok_or(())?;
+        self.invalid_drop_count = self
+            .invalid_drop_count
+            .checked_add(delta.invalid_drop_count)
+            .ok_or(())?;
         Ok(())
     }
 
@@ -90,9 +127,16 @@ impl CoverageAccumulator {
     }
 }
 
+enum FirstWork {
+    Observation(TelemetryObservation),
+    CoverageNotice,
+    Shutdown,
+}
+
 pub(crate) async fn run(
     config: WorkerConfig,
     mut receiver: mpsc::Receiver<TelemetryObservation>,
+    intake: Arc<Intake>,
     repository: Arc<dyn TelemetryRepository>,
     clock: Arc<dyn TelemetryClock>,
     diagnostics: Arc<DiagnosticsState>,
@@ -101,8 +145,28 @@ pub(crate) async fn run(
     let mut pending_coverage = BTreeMap::<(TenantId, DateTime<Utc>), CoverageAccumulator>::new();
     let mut shutting_down = false;
     loop {
-        let Some(first) = receive_first(&mut receiver, &cancellation, shutting_down).await else {
+        let first = receive_first(&mut receiver, &intake, &cancellation, shutting_down).await;
+        let Some(first) = first else {
             break;
+        };
+        let FirstWork::Observation(first) = first else {
+            if matches!(first, FirstWork::Shutdown) {
+                shutting_down = true;
+            }
+            flush(
+                &[],
+                &mut pending_coverage,
+                &intake,
+                config.collector_instance_id.as_ref(),
+                repository.as_ref(),
+                clock.as_ref(),
+                diagnostics.as_ref(),
+            )
+            .await;
+            if shutting_down {
+                break;
+            }
+            continue;
         };
         let mut observations = vec![first];
         if !shutting_down {
@@ -115,6 +179,7 @@ pub(crate) async fn run(
                         shutting_down = true;
                         break;
                     }
+                    _ = intake.notified() => {}
                     _ = &mut deadline => break,
                     next = receiver.recv() => match next {
                         Some(observation) => observations.push(observation),
@@ -139,6 +204,7 @@ pub(crate) async fn run(
         flush(
             &observations,
             &mut pending_coverage,
+            &intake,
             config.collector_instance_id.as_ref(),
             repository.as_ref(),
             clock.as_ref(),
@@ -150,6 +216,16 @@ pub(crate) async fn run(
             shutting_down = true;
         }
         if shutting_down && receiver.is_empty() {
+            flush(
+                &[],
+                &mut pending_coverage,
+                &intake,
+                config.collector_instance_id.as_ref(),
+                repository.as_ref(),
+                clock.as_ref(),
+                diagnostics.as_ref(),
+            )
+            .await;
             break;
         }
     }
@@ -157,27 +233,46 @@ pub(crate) async fn run(
 
 async fn receive_first(
     receiver: &mut mpsc::Receiver<TelemetryObservation>,
+    intake: &Intake,
     cancellation: &CancellationToken,
     shutting_down: bool,
-) -> Option<TelemetryObservation> {
+) -> Option<FirstWork> {
     if shutting_down {
-        return receiver.try_recv().ok();
+        return match receiver.try_recv() {
+            Ok(observation) => Some(FirstWork::Observation(observation)),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => None,
+        };
     }
     select! {
         biased;
-        _ = cancellation.cancelled() => receiver.try_recv().ok(),
-        observation = receiver.recv() => observation,
+        _ = cancellation.cancelled() => match receiver.try_recv() {
+            Ok(observation) => Some(FirstWork::Observation(observation)),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) =>
+                Some(FirstWork::Shutdown),
+        },
+        _ = intake.notified() => Some(FirstWork::CoverageNotice),
+        observation = receiver.recv() => observation.map(FirstWork::Observation),
     }
 }
 
 async fn flush(
     observations: &[TelemetryObservation],
     pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
+    intake: &Intake,
     collector_instance_id: Option<&CollectorInstanceId>,
     repository: &dyn TelemetryRepository,
     clock: &dyn TelemetryClock,
     diagnostics: &DiagnosticsState,
 ) {
+    for (key, delta) in intake.take_drop_deltas() {
+        let accumulator = pending_coverage
+            .entry((key.tenant_id.clone(), key.window_start))
+            .or_insert_with(|| CoverageAccumulator::from_key(&key));
+        if accumulator.add_side_delta(delta).is_err() {
+            diagnostics.add_invalid(1);
+            return;
+        }
+    }
     for observation in observations {
         let key = (
             observation.tenant_id().clone(),
@@ -185,7 +280,8 @@ async fn flush(
         );
         if let Some(accumulator) = pending_coverage.get_mut(&key) {
             if accumulator.add_observation(observation).is_err() {
-                diagnostics.add_invalid(observations.len());
+                diagnostics.add_invalid(1);
+                intake.account_observations(observation_keys(observations));
                 return;
             }
         } else {
@@ -198,18 +294,18 @@ async fn flush(
         Ok(batch) => batch,
         Err(_) => {
             diagnostics.add_invalid(observations.len());
-            for key in observations.iter().map(|observation| {
-                (
+            for observation in observations {
+                let key = (
                     observation.tenant_id().clone(),
                     floor_utc_hour(observation.occurred_at()),
-                )
-            }) {
+                );
                 if let Some(accumulator) = pending_coverage.get_mut(&key)
                     && accumulator.add_invalid(1).is_err()
                 {
                     return;
                 }
             }
+            intake.account_observations(observation_keys(observations));
             return;
         }
     };
@@ -221,6 +317,7 @@ async fn flush(
                 Ok(row) => coverage.push(row),
                 Err(_) => {
                     diagnostics.add_invalid(observations.len());
+                    intake.account_observations(observation_keys(observations));
                     return;
                 }
             }
@@ -236,28 +333,32 @@ async fn flush(
             Ok(batch) => batch,
             Err(_) => {
                 diagnostics.add_invalid(observations.len());
+                intake.account_observations(observation_keys(observations));
                 return;
             }
         };
     }
 
+    if observations.is_empty() && pending_coverage.is_empty() {
+        return;
+    }
     let started = clock.now();
     if let Err(error) = repository.upsert_batch(&batch).await {
         let class = classify_repository_error(&error);
         diagnostics.record_repository_failure(class);
         diagnostics.add_write_failed(observations.len());
-        for key in observations.iter().map(|observation| {
-            (
+        for observation in observations {
+            let key = (
                 observation.tenant_id().clone(),
                 floor_utc_hour(observation.occurred_at()),
-            )
-        }) {
+            );
             if let Some(accumulator) = pending_coverage.get_mut(&key)
                 && accumulator.add_write_failed(1).is_err()
             {
                 return;
             }
         }
+        intake.account_observations(observation_keys(observations));
         return;
     }
     let elapsed_ms = clock
@@ -265,5 +366,16 @@ async fn flush(
         .signed_duration_since(started)
         .num_milliseconds();
     diagnostics.record_flush(observations.len(), elapsed_ms.max(0) as u64);
+    intake.account_observations(observation_keys(observations));
     pending_coverage.clear();
+}
+
+fn observation_keys(observations: &[TelemetryObservation]) -> Vec<TenantHourKey> {
+    observations
+        .iter()
+        .map(|observation| TenantHourKey {
+            tenant_id: observation.tenant_id().clone(),
+            window_start: floor_utc_hour(observation.occurred_at()),
+        })
+        .collect()
 }
