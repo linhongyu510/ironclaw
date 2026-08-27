@@ -795,7 +795,7 @@ pub(crate) fn build_services_input_with_options(
     })
 }
 
-const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
+const HOSTED_WORKSPACES_SUBDIR: &str = "workspaces";
 const RAILWAY_SANDBOX_PROJECT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_PROJECT_ID";
 const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID";
 const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
@@ -896,31 +896,24 @@ fn build_sandboxed_local_runtime_services_input(
     config: &RebornBootConfig,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
-    let (process_binding, workspace_root) = match profile {
+    let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            let workspace_root =
-                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-            let process_binding = block_on_cli(
-                ironclaw_composition::build_local_docker_user_sandbox_binding(
-                    workspace_root.clone(),
-                ),
+            let workspace_root = runtime_workspace_root(config, profile)?;
+            block_on_cli(
+                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
             )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
                 profile,
                 reason: error.to_string(),
-            })?;
-            (process_binding, Some(workspace_root))
+            })?
         }
         RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            (railway_preview_process_binding_from_env()?, None)
+            railway_preview_process_binding_from_env()?
         }
         _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
     };
-    let mut services_input =
+    let services_input =
         build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
-    if let Some(workspace_root) = workspace_root {
-        services_input = services_input.with_local_runtime_workspace_root(workspace_root);
-    }
     Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
@@ -931,8 +924,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let workspace_root = runtime_workspace_root(config, profile)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -960,8 +952,7 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let workspace_root = runtime_workspace_root(config, profile)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
@@ -1334,6 +1325,28 @@ pub(crate) fn local_runtime_storage_root(
         .home()
         .path()
         .join(profile.local_runtime_storage_subdir())
+}
+
+fn runtime_workspace_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> anyhow::Result<PathBuf> {
+    match profile {
+        RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted => {
+            std::env::current_dir().with_context(|| {
+                format!("failed to resolve current directory for {profile} workspace")
+            })
+        }
+        RebornProfile::HostedSingleTenant
+        | RebornProfile::HostedSingleTenantVolume
+        | RebornProfile::HostedSingleTenantVolumeSandboxed
+        | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            Ok(config.home().path().join(HOSTED_WORKSPACES_SUBDIR))
+        }
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            anyhow::bail!("profile={profile} does not use the local runtime workspace")
+        }
+    }
 }
 
 pub(crate) async fn initialize_local_runtime_storage_root(
@@ -1728,7 +1741,7 @@ mod tests {
         no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
         resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
-        with_binary_host_extension_bindings_from_bundles,
+        runtime_workspace_root, with_binary_host_extension_bindings_from_bundles,
     };
     use ironclaw_config::GoogleSection;
     // Only the hosted-volume tests consume this.
@@ -2884,6 +2897,25 @@ regex_activation_enabled = false
         )
         .expect("boot config");
         (temp, config)
+    }
+
+    #[test]
+    fn hosted_profiles_share_one_transport_neutral_workspace_root() {
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+        let expected = config.home().path().join("workspaces");
+
+        for profile in [
+            ironclaw_config::RebornProfile::HostedSingleTenant,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            assert_eq!(
+                runtime_workspace_root(&config, profile).expect("workspace root"),
+                expected,
+                "profile {profile} must not change workspace identity"
+            );
+        }
     }
 
     #[tokio::test]

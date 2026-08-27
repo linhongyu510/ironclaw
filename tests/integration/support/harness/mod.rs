@@ -808,7 +808,7 @@ impl HostRuntimeCapabilityHarness {
         });
         let storage_root = root.path().join("local-dev");
         let workspace_root = if sandboxed_shell {
-            storage_root.join("sandbox-workspaces")
+            root.path().join("workspaces")
         } else {
             storage_root.join("workspace")
         };

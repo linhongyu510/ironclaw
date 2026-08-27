@@ -102,6 +102,7 @@ const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
+const SANDBOX_RUNTIME_STATE_SUBDIR: &str = ".ironclaw-sandbox-runtime";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
@@ -130,6 +131,7 @@ impl ContainerWorkdir {
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
+    runtime_state_root: PathBuf,
     mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
@@ -146,8 +148,11 @@ pub struct RebornSandboxConfig {
 
 impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        let workspace_root = workspace_root.into();
+        let runtime_state_root = workspace_root.join(SANDBOX_RUNTIME_STATE_SUBDIR);
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root,
+            runtime_state_root,
             mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
@@ -197,7 +202,7 @@ impl RebornSandboxConfig {
         })?;
         self.managed_egress = Some(ManagedEgressConfig::from_policy(
             policy,
-            self.workspace_root.join(".managed-egress"),
+            self.runtime_state_root.join("managed-egress"),
         )?);
         Ok(self)
     }
@@ -331,15 +336,15 @@ struct LocalDockerOwnerLock {
 }
 
 impl LocalDockerOwnerLock {
-    async fn acquire(workspace_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
-        tokio::fs::create_dir_all(workspace_root)
+    async fn acquire(runtime_state_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
+        tokio::fs::create_dir_all(runtime_state_root)
             .await
             .map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace root could not be initialized: {error}"
+                    "sandbox runtime state root could not be initialized: {error}"
                 ))
             })?;
-        let lock_path = workspace_root.join(".ironclaw-sandbox-owner.lock");
+        let lock_path = runtime_state_root.join(".ironclaw-sandbox-owner.lock");
         let file = tokio::task::spawn_blocking(move || {
             let file = std::fs::OpenOptions::new()
                 .create(true)
@@ -349,18 +354,18 @@ impl LocalDockerOwnerLock {
                 .open(lock_path)
                 .map_err(|error| {
                     RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace ownership could not be opened: {error}"
+                        "sandbox runtime ownership could not be opened: {error}"
                     ))
                 })?;
             file.try_lock_exclusive().map_err(|error| {
                 if error.kind() == std::io::ErrorKind::WouldBlock {
                     RuntimeProcessError::ExecutionFailed(
-                        "sandbox Docker workspace is already owned by another IronClaw process"
+                        "sandbox Docker runtime is already owned by another IronClaw process"
                             .to_string(),
                     )
                 } else {
                     RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace ownership could not be acquired: {error}"
+                        "sandbox runtime ownership could not be acquired: {error}"
                     ))
                 }
             })?;
@@ -369,7 +374,7 @@ impl LocalDockerOwnerLock {
         .await
         .map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace ownership task failed: {error}"
+                "sandbox runtime ownership task failed: {error}"
             ))
         })??;
         Ok(Arc::new(Self { _file: file }))
@@ -531,6 +536,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .debug_struct("RebornScopedSandboxCommandTransport")
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
+            .field("runtime_state_root", &self.config.runtime_state_root)
             .field("network_broker", &self.config.network_broker)
             .field("secret_broker", &self.config.secret_broker)
             .field("managed_egress", &self.managed_egress)
@@ -541,7 +547,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
-        let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
+        let owner_lock = LocalDockerOwnerLock::acquire(&config.runtime_state_root).await?;
         let docker = connect_docker().await?;
         let managed_egress = match config.managed_egress.clone() {
             Some(managed) => Some(ManagedEgressRuntime::connect(&docker, managed).await?),
@@ -1303,6 +1309,25 @@ mod tests {
         assert_eq!(config.container_network_mode(), Some("none".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+    }
+
+    #[test]
+    fn sandbox_runtime_state_is_not_a_user_workspace_subtree() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-workspaces");
+
+        assert_eq!(
+            config.workspace_root,
+            PathBuf::from("/tmp/reborn-workspaces")
+        );
+        assert_eq!(
+            config.runtime_state_root,
+            PathBuf::from("/tmp/reborn-workspaces/.ironclaw-sandbox-runtime")
+        );
+        assert!(
+            !config
+                .runtime_state_root
+                .starts_with(config.workspace_root.join("tenants"))
+        );
     }
 
     #[test]
