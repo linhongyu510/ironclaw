@@ -33,7 +33,12 @@ pub(crate) const MAX_DISCOVERED_MCP_TOOLS: usize = 65_536;
 
 /// Maximum number of `tools/list` pagination pages followed during a single
 /// discovery pass.
-pub(crate) const MAX_MCP_TOOLS_LIST_PAGES: usize = 50;
+///
+/// Sized against [`MAX_DISCOVERED_MCP_TOOLS`], not chosen independently: a server free to
+/// pick its own page size needs enough pages to deliver the tool ceiling. At 50 pages this
+/// was the effective ceiling regardless of the tool limit -- a 47,337-tool catalog served
+/// 200 per page stopped at exactly 10,000 tools (21%), because 50 pages ran out first.
+pub(crate) const MAX_MCP_TOOLS_LIST_PAGES: usize = 512;
 
 /// Maximum aggregate serialized bytes accepted across all `tools/list` pages
 /// during a single discovery pass.

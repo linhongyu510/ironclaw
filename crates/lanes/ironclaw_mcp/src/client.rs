@@ -629,10 +629,18 @@ where
                 PageIntake::Accept => discovered.extend(page_tools),
             }
             match next_cursor {
-                Some(_next_cursor) if page == MAX_MCP_TOOLS_LIST_PAGES => {
-                    return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
-                        McpInvalidToolListCause::TooManyPages,
-                    )));
+                // Running out of pages is a RESOURCE limit, like the tool and byte
+                // ceilings above -- so it truncates rather than discarding the catalog.
+                // Erroring here threw away every page already collected, which is how a
+                // 47,337-tool server yielded 10,000 tools' worth of work and then published
+                // nothing at all.
+                Some(_next_cursor) if page >= MAX_MCP_TOOLS_LIST_PAGES => {
+                    tracing::warn!(
+                        discovered = discovered.len(),
+                        pages = page,
+                        "hosted MCP catalog has more pages than the discovery limit; truncating"
+                    );
+                    break;
                 }
                 Some(next_cursor) => cursor = Some(next_cursor),
                 None => break,

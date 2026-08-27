@@ -126,6 +126,9 @@ pub(crate) enum McpInvalidToolListCause {
     UnsafeInputSchema,
     InvalidAnnotations,
     InvalidCursor,
+    /// Retained for the diagnostic vocabulary, no longer raised: exhausting the page
+    /// budget now truncates, for the same reason as the tool and byte ceilings.
+    #[allow(dead_code)]
     TooManyPages,
     /// Retained for the diagnostic vocabulary, no longer raised: an over-large catalog
     /// now truncates rather than failing the discovery pass, because discarding every
