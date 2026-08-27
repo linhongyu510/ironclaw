@@ -409,7 +409,7 @@ pub(super) async fn build_backend_production(
         telemetry_repository,
         Arc::new(SystemTelemetryClock),
     );
-    let telemetry_handle = TelemetryRuntimeHandle::new(telemetry_worker);
+    let telemetry_handle = telemetry_worker;
     let secret_store: Arc<dyn SecretStorePort> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(

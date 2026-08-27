@@ -125,15 +125,11 @@ pub struct BatchApplyReport {
 impl BatchApplyReport {
     /// Build a report for a batch whose complete row prefix was applied.
     pub(crate) const fn complete(applied_prefix: usize) -> Self {
-        Self {
-            applied_prefix,
-            failed_record_count: 0,
-        }
+        Self::from_counts(applied_prefix, 0)
     }
 
     /// Build a conservative report for a batch that did not fully apply.
-    #[cfg(test)]
-    pub(crate) const fn partial(applied_prefix: usize, failed_record_count: usize) -> Self {
+    pub(crate) const fn from_counts(applied_prefix: usize, failed_record_count: usize) -> Self {
         Self {
             applied_prefix,
             failed_record_count,

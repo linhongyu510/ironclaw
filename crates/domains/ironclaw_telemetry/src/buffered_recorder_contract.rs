@@ -263,7 +263,7 @@ trait TestRecorderCall {
     ) -> RecordOutcome;
 }
 
-impl TestRecorderCall for Arc<dyn TelemetryRecorder> {
+impl<T: TelemetryRecorder + ?Sized> TestRecorderCall for Arc<T> {
     fn try_record(&self, observation: TelemetryObservation) -> RecordOutcome {
         self.try_record_scoped(scope(), observation)
     }
@@ -324,7 +324,7 @@ async fn wait_for_batches(repository: &FakeRepository, count: usize) {
 async fn try_record_is_synchronous_and_queue_pressure_is_typed() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         BufferedRecorderConfig::default().with_queue_capacity(1),
         repository.clone(),
         clock,
@@ -341,7 +341,7 @@ async fn try_record_is_synchronous_and_queue_pressure_is_typed() {
 async fn queue_full_drop_is_written_to_tenant_hour_coverage() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(1),
         repository.clone(),
         clock,
@@ -369,7 +369,7 @@ async fn coverage_only_commit_then_error_retains_a_loss_marker() {
     repository.fail_next_after_commit();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     lifecycle.close_intake();
     assert_eq!(
@@ -407,7 +407,7 @@ async fn repeated_marker_failure_retains_a_fresh_marker_for_retry() {
     repository.fail_next_after_commit();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     lifecycle.close_intake();
     assert_eq!(
@@ -453,7 +453,7 @@ async fn closed_drop_is_written_to_tenant_hour_coverage() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     lifecycle.close_intake();
     assert_eq!(
         recorder.try_record(completed_run(0)),
@@ -473,7 +473,7 @@ async fn closed_drop_is_written_to_tenant_hour_coverage() {
 async fn five_hundred_twelve_items_trigger_one_aggregate_drain() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(600),
         repository.clone(),
         clock,
@@ -495,7 +495,7 @@ async fn one_second_of_paused_time_triggers_a_nonempty_drain() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     assert_eq!(recorder.try_record(model_call(0)), RecordOutcome::Accepted);
     assert!(repository.batches().is_empty());
     tokio::task::yield_now().await;
@@ -512,7 +512,7 @@ async fn one_second_of_paused_time_triggers_a_nonempty_drain() {
 async fn continuous_queue_drop_notifications_do_not_starve_the_batch_deadline() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(1),
         repository.clone(),
         clock,
@@ -550,7 +550,7 @@ async fn repository_failure_drops_only_that_drain_and_later_drain_continues() {
     repository.fail_next();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     assert_eq!(
         recorder.try_record(completed_run(0)),
         RecordOutcome::Accepted
@@ -591,7 +591,7 @@ async fn write_failure_coverage_counts_each_observation_in_a_tenant_hour() {
     repository.fail_next();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     assert_eq!(
         recorder.try_record(completed_run(0)),
@@ -634,10 +634,10 @@ async fn write_failure_coverage_counts_each_observation_in_a_tenant_hour() {
 #[tokio::test(start_paused = true)]
 async fn partial_report_is_not_counted_as_a_successful_flush() {
     let repository = Arc::new(FakeRepository::default());
-    repository.return_next_report(BatchApplyReport::partial(0, 1));
+    repository.return_next_report(BatchApplyReport::from_counts(0, 1));
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     assert_eq!(
         recorder.try_record(completed_run(0)),
@@ -678,7 +678,7 @@ async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
     repository.fail_on_write(2);
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let (tenant_a_scope, tenant_a_observation) = completed_run_for_tenant_hour(0);
     let (tenant_b_scope, tenant_b_observation) = completed_run_for_tenant_hour(1);
 
@@ -749,7 +749,7 @@ async fn commit_then_error_does_not_replay_attempted_coverage() {
     repository.fail_next_after_commit();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     assert_eq!(
         recorder.try_record(completed_run(0)),
@@ -800,7 +800,7 @@ async fn pending_coverage_is_bounded_during_an_outage_and_later_drains_continue(
     repository.set_fail_all(true);
     let (started, release) = repository.block_next_write();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(OBSERVATIONS),
         repository.clone(),
         clock,
@@ -869,7 +869,7 @@ async fn pending_coverage_is_bounded_during_an_outage_and_later_drains_continue(
 async fn drains_never_overlap_and_coverage_counters_carry_forward() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(4),
         repository.clone(),
         clock,
@@ -906,7 +906,7 @@ async fn shutdown_closes_intake_and_flushes_tail_within_budget() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     assert_eq!(
         recorder.try_record(completed_run(0)),
         RecordOutcome::Accepted
@@ -923,7 +923,7 @@ async fn shutdown_closes_intake_and_flushes_tail_within_budget() {
 async fn shutdown_aborts_a_stalled_write_after_the_five_second_budget() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_shutdown_timeout(Duration::from_secs(5)),
         repository.clone(),
         clock,
@@ -961,7 +961,7 @@ async fn shutdown_aborts_a_stalled_write_after_the_five_second_budget() {
 async fn shutdown_timeout_accounts_for_queued_and_in_flight_observations() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config()
             .with_queue_capacity(4)
             .with_shutdown_timeout(Duration::from_secs(5)),
@@ -1011,7 +1011,7 @@ async fn coverage_attribution_overflow_does_not_hide_global_shutdown_loss_count(
     const OBSERVATIONS: usize = 8_193;
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn_with_sink(
         config().with_queue_capacity(OBSERVATIONS + 1),
         repository.clone(),
         clock,
@@ -1065,7 +1065,7 @@ async fn invalid_timestamp_is_rejected_synchronously_and_covered() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let future = Utc
         .with_ymd_and_hms(10_000, 1, 1, 0, 0, 0)
         .single()
@@ -1102,7 +1102,7 @@ async fn close_and_send_are_linearized_without_persisting_closed_observations() 
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let recorder_for_thread = Arc::clone(&recorder);
     let sender = std::thread::spawn(move || recorder_for_thread.try_record(completed_run(2)));
     lifecycle.close_intake();
@@ -1129,12 +1129,12 @@ async fn a_new_recorder_after_shutdown_has_an_independent_worker() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (old_recorder, old_lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock.clone());
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock.clone());
     drop(old_recorder);
     drop(old_lifecycle);
 
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     assert_eq!(recorder.try_record(model_call(0)), RecordOutcome::Accepted);
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
@@ -1152,7 +1152,7 @@ async fn default_collector_ids_are_unique_per_recorder_instance() {
     let clock = Arc::new(FixedClock::new(timestamp(0)));
 
     let (first_recorder, first_lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock.clone());
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock.clone());
     first_lifecycle.close_intake();
     assert_eq!(
         first_recorder.try_record(completed_run(3599)),
@@ -1161,7 +1161,7 @@ async fn default_collector_ids_are_unique_per_recorder_instance() {
     first_lifecycle.shutdown().await;
 
     let (second_recorder, second_lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     second_lifecycle.close_intake();
     assert_eq!(
         second_recorder.try_record(completed_run(3599)),
@@ -1196,7 +1196,8 @@ async fn direct_oversized_queue_configuration_is_clamped_at_spawn() {
         ..BufferedRecorderConfig::default()
     };
     assert_eq!(zero_config.effective_queue_capacity(), 1);
-    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(direct_config, repository, clock);
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn_with_sink(direct_config, repository, clock);
 
     for offset in 0..8_192 {
         assert_eq!(
@@ -1216,7 +1217,7 @@ async fn drop_only_coverage_uses_the_drop_timestamp_for_its_span() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     lifecycle.close_intake();
     let dropped_at = timestamp(3_599);
     assert_eq!(
@@ -1235,7 +1236,7 @@ async fn invalid_aggregate_is_counted_without_a_repository_write() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let huge = RunSettledObservation::new(
         context(0),
         OriginKind::Human,
@@ -1288,7 +1289,7 @@ async fn repository_record_failures_preserve_typed_diagnostics() {
     ));
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     assert_eq!(
         recorder.try_record(completed_run(0)),
         RecordOutcome::Accepted
@@ -1318,7 +1319,7 @@ async fn system_scope_is_rejected_without_entering_a_global_bucket() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
 
     assert_eq!(
         recorder.try_record_scoped(ResourceScope::system(), completed_run(0)),
@@ -1334,7 +1335,7 @@ async fn queued_scope_is_the_only_usage_attribution_source() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let mut trusted_scope = scope();
     trusted_scope.tenant_id = TenantId::new("tenant-b").expect("tenant");
     trusted_scope.user_id = UserId::new("user-b").expect("user");
@@ -1356,7 +1357,7 @@ async fn lifecycle_subject_user_can_differ_from_scope_user() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let observation = TelemetryObservation::LifecycleTransition(
         LifecycleTransitionObservation::new(
             Some(UserId::new("subject-user").expect("subject user")),
@@ -1386,7 +1387,7 @@ async fn malformed_lifecycle_observation_does_not_poison_valid_usage() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) =
-        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+        BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let malformed = TelemetryObservation::LifecycleTransition(
         LifecycleTransitionObservation::new(
             None,

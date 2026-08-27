@@ -127,7 +127,7 @@ use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
-    ComposedToolPermissionOverrideStore, TelemetryRuntimeHandle, builtin_extension_registry,
+    ComposedToolPermissionOverrideStore, builtin_extension_registry,
     filesystem_reborn_identity_store,
 };
 #[cfg(test)]
@@ -714,7 +714,7 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
-    telemetry_handle: TelemetryRuntimeHandle,
+    telemetry_handle: ironclaw_telemetry::BufferedTelemetryRecorderHandle,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: ironclaw_trace_commons::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:

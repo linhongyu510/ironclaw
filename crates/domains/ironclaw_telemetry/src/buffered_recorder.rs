@@ -23,7 +23,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[cfg(not(test))]
 use crate::repository::FilesystemTelemetryRepository;
 use crate::{floor_utc_hour, repository::TelemetryBatchSink, worker};
 
@@ -774,27 +773,23 @@ impl Intake {
 }
 
 /// Shared non-blocking telemetry recorder.
-pub struct BufferedTelemetryRecorder;
+pub struct BufferedTelemetryRecorder {
+    intake: Arc<Intake>,
+    diagnostics: Arc<DiagnosticsState>,
+}
 
 impl BufferedTelemetryRecorder {
-    #[cfg(not(test))]
     pub fn spawn<F>(
         config: BufferedRecorderConfig,
         repository: Arc<FilesystemTelemetryRepository<F>>,
         clock: Arc<dyn TelemetryClock>,
-    ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle)
+    ) -> (
+        Arc<BufferedTelemetryRecorder>,
+        BufferedTelemetryRecorderHandle,
+    )
     where
         F: ironclaw_filesystem::RootFilesystem + ?Sized + 'static,
     {
-        Self::spawn_with_sink(config, repository, clock)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spawn(
-        config: BufferedRecorderConfig,
-        repository: Arc<dyn TelemetryBatchSink>,
-        clock: Arc<dyn TelemetryClock>,
-    ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle) {
         Self::spawn_with_sink(config, repository, clock)
     }
 
@@ -802,7 +797,10 @@ impl BufferedTelemetryRecorder {
         config: BufferedRecorderConfig,
         repository: Arc<dyn TelemetryBatchSink>,
         clock: Arc<dyn TelemetryClock>,
-    ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle) {
+    ) -> (
+        Arc<BufferedTelemetryRecorder>,
+        BufferedTelemetryRecorderHandle,
+    ) {
         let (sender, receiver) = mpsc::channel(config.effective_queue_capacity());
         let cancellation = CancellationToken::new();
         let diagnostics = Arc::new(DiagnosticsState::default());
@@ -828,7 +826,7 @@ impl BufferedTelemetryRecorder {
             Arc::clone(&diagnostics),
             cancellation.clone(),
         ));
-        let recorder = Arc::new(Recorder {
+        let recorder = Arc::new(BufferedTelemetryRecorder {
             intake: Arc::clone(&intake),
             diagnostics: Arc::clone(&diagnostics),
         });
@@ -872,12 +870,7 @@ fn resolve_collector_instance_id(
     }
 }
 
-struct Recorder {
-    intake: Arc<Intake>,
-    diagnostics: Arc<DiagnosticsState>,
-}
-
-impl TelemetryRecorder for Recorder {
+impl TelemetryRecorder for BufferedTelemetryRecorder {
     fn try_record(&self, scope: ResourceScope, observation: TelemetryObservation) -> RecordOutcome {
         let preflight = preflight_observation(&scope, &observation);
         if matches!(preflight, Err(PreflightError::SystemScope)) {
