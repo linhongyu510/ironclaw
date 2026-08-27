@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use crate::repository::TelemetryBatchSink;
+use crate::repository::{ScopedTelemetryBatch, TelemetryBatchSink};
 use crate::{
     BatchApplyReport, BufferedRecorderConfig, BufferedTelemetryRecorder, RecordError,
     RecordOutcome, TelemetryBatch, TelemetryClock, TelemetryRepositoryError,
@@ -54,10 +54,14 @@ struct FakeRepository {
 #[derive(Default)]
 struct FakeRepositoryState {
     batches: Vec<TelemetryBatch>,
+    scopes: Vec<ironclaw_host_api::resource::ResourceScope>,
     failures_remaining: usize,
     always_fail: bool,
     commit_then_error: bool,
     next_error: Option<TelemetryRepositoryError>,
+    fail_on_write: Option<usize>,
+    write_count: usize,
+    next_report: Option<BatchApplyReport>,
     active_writes: usize,
     max_active_writes: usize,
     write_started: Option<tokio::sync::oneshot::Sender<()>>,
@@ -82,6 +86,18 @@ impl FakeRepository {
 
     fn fail_next_with(&self, error: TelemetryRepositoryError) {
         self.state.lock().expect("repository lock").next_error = Some(error);
+    }
+
+    fn fail_on_write(&self, write_number: usize) {
+        self.state.lock().expect("repository lock").fail_on_write = Some(write_number);
+    }
+
+    fn return_next_report(&self, report: BatchApplyReport) {
+        self.state.lock().expect("repository lock").next_report = Some(report);
+    }
+
+    fn scopes(&self) -> Vec<ironclaw_host_api::resource::ResourceScope> {
+        self.state.lock().expect("repository lock").scopes.clone()
     }
 
     fn fail_next_after_commit(&self) {
@@ -116,10 +132,11 @@ impl FakeRepository {
 impl TelemetryBatchSink for FakeRepository {
     async fn apply_batch(
         &self,
-        batch: &TelemetryBatch,
+        batch: ScopedTelemetryBatch,
     ) -> Result<BatchApplyReport, TelemetryRepositoryError> {
-        let (started, release, fail, committed_before_error, injected_error) = {
+        let (started, release, fail, committed_before_error, injected_error, report) = {
             let mut state = self.state.lock().expect("repository lock");
+            state.write_count += 1;
             state.active_writes += 1;
             state.max_active_writes = state.max_active_writes.max(state.active_writes);
             let fail = state.next_error.is_some()
@@ -129,7 +146,7 @@ impl TelemetryBatchSink for FakeRepository {
                     state.failures_remaining -= 1;
                     true
                 } else {
-                    false
+                    state.fail_on_write == Some(state.write_count)
                 };
             let committed_before_error = fail && state.commit_then_error;
             if committed_before_error {
@@ -141,6 +158,7 @@ impl TelemetryBatchSink for FakeRepository {
                 fail,
                 committed_before_error,
                 state.next_error.take(),
+                state.next_report.take(),
             )
         };
         if let Some(started) = started {
@@ -153,7 +171,8 @@ impl TelemetryBatchSink for FakeRepository {
             let mut state = self.state.lock().expect("repository lock");
             state.active_writes -= 1;
             if !fail || committed_before_error {
-                state.batches.push(batch.clone());
+                state.scopes.push(batch.scope().clone());
+                state.batches.push(batch.batch().clone());
             }
         }
         if fail {
@@ -164,7 +183,7 @@ impl TelemetryBatchSink for FakeRepository {
                 }),
             )
         } else {
-            Ok(BatchApplyReport::default())
+            Ok(report.unwrap_or_else(|| BatchApplyReport::complete(batch.batch().record_count())))
         }
     }
 }
@@ -567,6 +586,164 @@ async fn repository_failure_drops_only_that_drain_and_later_drain_continues() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn write_failure_coverage_counts_each_observation_in_a_tenant_hour() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.fail_next();
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    assert_eq!(
+        recorder.try_record(completed_run(0)),
+        RecordOutcome::Accepted
+    );
+    assert_eq!(
+        recorder.try_record(completed_run(1)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        recorder.try_record(completed_run(2)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..100 {
+        if lifecycle.diagnostics().flushed_batch_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(lifecycle.diagnostics().flushed_batch_count(), 1);
+
+    let batches = repository.batches();
+    let coverage = &batches[0].collector_coverage()[0];
+    assert_eq!(coverage.accepted_observation_count(), 1);
+    assert_eq!(coverage.write_failed_observation_count(), 2);
+    lifecycle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn partial_report_is_not_counted_as_a_successful_flush() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.return_next_report(BatchApplyReport::partial(0, 1));
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    assert_eq!(
+        recorder.try_record(completed_run(0)),
+        RecordOutcome::Accepted
+    );
+    assert_eq!(
+        recorder.try_record(completed_run(1)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..100 {
+        if lifecycle.diagnostics().partial_batch_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(lifecycle.diagnostics().partial_batch_failure_count(), 1);
+    assert_eq!(lifecycle.diagnostics().flushed_batch_count(), 0);
+
+    assert_eq!(
+        recorder.try_record(completed_run(2)),
+        RecordOutcome::Accepted
+    );
+    let diagnostics = lifecycle.shutdown().await;
+    assert_eq!(diagnostics.flushed_batch_count(), 1);
+    let batches = repository.batches();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches[1].collector_coverage()[0].write_failed_observation_count(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.fail_on_write(2);
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    let (tenant_a_scope, tenant_a_observation) = completed_run_for_tenant_hour(0);
+    let (tenant_b_scope, tenant_b_observation) = completed_run_for_tenant_hour(1);
+
+    assert_eq!(
+        recorder.try_record_scoped(tenant_a_scope.clone(), tenant_a_observation),
+        RecordOutcome::Accepted
+    );
+    assert_eq!(
+        recorder.try_record_scoped(tenant_b_scope.clone(), tenant_b_observation),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(lifecycle.diagnostics().repository_failure_count(), 1);
+    assert_eq!(repository.scopes().len(), 1);
+    assert_eq!(repository.scopes()[0], tenant_a_scope);
+    assert_eq!(
+        repository.batches()[0].activity()[0].tenant_id().as_str(),
+        "tenant-0"
+    );
+
+    assert_eq!(
+        recorder.try_record_scoped(tenant_b_scope.clone(), completed_run(2)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    lifecycle.close_intake();
+    let diagnostics = lifecycle.shutdown().await;
+    assert_eq!(
+        diagnostics.flushed_batch_count(),
+        1,
+        "scopes={:?}",
+        repository.scopes()
+    );
+    assert_eq!(
+        repository.scopes().len(),
+        2,
+        "batches={:?}",
+        repository.batches()
+    );
+    assert_eq!(repository.scopes()[1], tenant_b_scope);
+    assert!(
+        repository.batches()[1]
+            .activity()
+            .iter()
+            .all(|row| row.tenant_id().as_str() == "tenant-1")
+    );
+    assert_eq!(
+        repository.batches()[1]
+            .collector_coverage()
+            .iter()
+            .map(|row| row.write_failed_observation_count())
+            .sum::<u64>(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn commit_then_error_does_not_replay_attempted_coverage() {
     let repository = Arc::new(FakeRepository::default());
     repository.fail_next_after_commit();
@@ -669,8 +846,22 @@ async fn pending_coverage_is_bounded_during_an_outage_and_later_drains_continue(
     );
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
-    wait_for_batches(&repository, 1).await;
-    assert!(!repository.batches()[0].activity().is_empty());
+    for _ in 0..100 {
+        if repository
+            .batches()
+            .iter()
+            .any(|batch| !batch.activity().is_empty())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        repository
+            .batches()
+            .iter()
+            .any(|batch| !batch.activity().is_empty())
+    );
     lifecycle.shutdown().await;
 }
 

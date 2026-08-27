@@ -4,14 +4,8 @@ use ironclaw_filesystem::{
     CasApply, ContentType, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     OrderedPage, OrderedQueryCursor, ScopedFilesystem, SortDirection, VersionedEntry, cas_update,
 };
-use ironclaw_host_api::{
-    ids::{InvocationId, UserId as WorkerUserId},
-    path::ScopedPath,
-    resource::ResourceScope,
-};
-use ironclaw_telemetry_contracts::observation::{
-    CanonicalTenantId as TenantId, EffectiveModelId, ProviderId,
-};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
+use ironclaw_telemetry_contracts::observation::{EffectiveModelId, ProviderId};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -116,12 +110,41 @@ impl ScopedTelemetryBatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// A repository's accounting for one already-scoped batch.
+///
+/// A successful report may account for a prefix, but only a report with no
+/// failed records and a prefix equal to the submitted row count is complete.
+/// Repository errors intentionally carry no report: a backend may have
+/// committed an unknown prefix before returning an error, so the worker treats
+/// the whole attempted batch as ambiguous and records count-only loss coverage.
 pub struct BatchApplyReport {
     applied_prefix: usize,
     failed_record_count: usize,
 }
 
 impl BatchApplyReport {
+    /// Build a report for a batch whose complete row prefix was applied.
+    pub(crate) const fn complete(applied_prefix: usize) -> Self {
+        Self {
+            applied_prefix,
+            failed_record_count: 0,
+        }
+    }
+
+    /// Build a conservative report for a batch that did not fully apply.
+    #[cfg(test)]
+    pub(crate) const fn partial(applied_prefix: usize, failed_record_count: usize) -> Self {
+        Self {
+            applied_prefix,
+            failed_record_count,
+        }
+    }
+
+    /// Reports are complete only when the repository accounted for every row.
+    pub(crate) const fn is_complete_for(self, expected_records: usize) -> bool {
+        self.failed_record_count == 0 && self.applied_prefix == expected_records
+    }
+
     pub const fn applied_prefix(self) -> usize {
         self.applied_prefix
     }
@@ -139,7 +162,7 @@ impl BatchApplyReport {
 pub(crate) trait TelemetryBatchSink: Send + Sync {
     async fn apply_batch(
         &self,
-        batch: &TelemetryBatch,
+        batch: ScopedTelemetryBatch,
     ) -> Result<BatchApplyReport, TelemetryRepositoryError>;
 }
 

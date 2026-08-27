@@ -816,4 +816,13 @@ impl TelemetryBatch {
     pub fn collector_coverage(&self) -> &[CollectorCoverage] {
         &self.collector_coverage
     }
+
+    pub const fn record_count(&self) -> usize {
+        self.activity.len()
+            + self.model_usage.len()
+            + self.run_failures.len()
+            + self.automation_usage.len()
+            + self.lifecycle_events.len()
+            + self.collector_coverage.len()
+    }
 }

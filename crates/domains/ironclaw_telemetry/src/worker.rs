@@ -1,8 +1,16 @@
 //! The single consumer that aggregates and persists telemetry drains.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId as WorkerUserId},
+    resource::ResourceScope,
+};
 use ironclaw_telemetry_contracts::observation::{
     CanonicalTenantId as TenantId, CollectorInstanceId, ScopedTelemetryObservation,
 };
@@ -10,7 +18,7 @@ use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CollectorCoverage, TelemetryBatch, aggregate_batch,
+    CollectorCoverage, ScopedTelemetryBatch, TelemetryBatch, aggregate_batch,
     buffered_recorder::{
         CoverageSideDelta, DiagnosticsState, Intake, MAX_COVERAGE_SIDE_KEYS, TelemetryClock,
         TenantHourKey, classify_aggregation_error, classify_record_error,
@@ -142,6 +150,133 @@ impl CoverageAccumulator {
             self.last_observed_at,
         )
     }
+}
+
+#[derive(Default)]
+struct TenantDrainRows {
+    representative_scope: Option<ResourceScope>,
+    observations: Vec<ScopedTelemetryObservation>,
+    activity: Vec<crate::HourlyUserActivity>,
+    model_usage: Vec<crate::HourlyModelUsage>,
+    run_failures: Vec<crate::HourlyRunFailure>,
+    automation_usage: Vec<crate::HourlyAutomationUsage>,
+    lifecycle_events: Vec<crate::LifecycleEvent>,
+    collector_coverage: Vec<CollectorCoverage>,
+}
+
+struct TenantDrain {
+    tenant_id: TenantId,
+    scope: ResourceScope,
+    observations: Vec<ScopedTelemetryObservation>,
+    batch: TelemetryBatch,
+}
+
+fn partition_drain(
+    batch: &TelemetryBatch,
+    observations: &[ScopedTelemetryObservation],
+) -> Result<Vec<TenantDrain>, crate::RecordError> {
+    let mut grouped = BTreeMap::<TenantId, TenantDrainRows>::new();
+    for observation in observations {
+        let tenant_id = observation.scope().tenant_id.clone();
+        let rows = grouped.entry(tenant_id).or_default();
+        if rows.representative_scope.is_none() {
+            rows.representative_scope = Some(observation.scope().clone());
+        }
+        rows.observations.push(observation.clone());
+    }
+    for row in batch.activity() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .activity
+            .push(row.clone());
+    }
+    for row in batch.model_usage() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .model_usage
+            .push(row.clone());
+    }
+    for row in batch.run_failures() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .run_failures
+            .push(row.clone());
+    }
+    for row in batch.automation_usage() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .automation_usage
+            .push(row.clone());
+    }
+    for row in batch.lifecycle_events() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .lifecycle_events
+            .push(row.clone());
+    }
+    for row in batch.collector_coverage() {
+        grouped
+            .entry(row.tenant_id().clone())
+            .or_default()
+            .collector_coverage
+            .push(row.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(tenant_id, rows)| {
+            let scope = rows.representative_scope.unwrap_or_else(|| ResourceScope {
+                tenant_id: tenant_id.clone(),
+                user_id: WorkerUserId::from_trusted("__telemetry_worker__".to_owned()),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            });
+            let batch = TelemetryBatch::new(
+                rows.activity,
+                rows.model_usage,
+                rows.run_failures,
+                rows.automation_usage,
+                rows.lifecycle_events,
+                rows.collector_coverage,
+            )?;
+            Ok(TenantDrain {
+                tenant_id,
+                scope,
+                observations: rows.observations,
+                batch,
+            })
+        })
+        .collect()
+}
+
+fn observations_from_drains(drains: &[TenantDrain]) -> Vec<ScopedTelemetryObservation> {
+    drains
+        .iter()
+        .flat_map(|drain| drain.observations.iter().cloned())
+        .collect()
+}
+
+fn retain_coverage_for_drains(
+    pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
+    drains: &[TenantDrain],
+) {
+    let tenants = drains
+        .iter()
+        .map(|drain| drain.tenant_id.clone())
+        .collect::<BTreeSet<_>>();
+    pending_coverage.retain(|(tenant_id, _), _| tenants.contains(tenant_id));
+}
+
+fn batch_record_count(batch: &TelemetryBatch) -> usize {
+    batch.record_count()
 }
 
 enum FirstWork {
@@ -369,14 +504,63 @@ async fn flush(
     if observations.is_empty() && pending_coverage.is_empty() {
         return;
     }
-    let started = clock.now();
-    if let Err(error) = repository.apply_batch(&batch).await {
-        let class = classify_repository_error(&error);
-        diagnostics.record_repository_failure(class);
-        diagnostics.add_write_failed(observations.len());
-        replace_with_write_failure_coverage(observations, pending_coverage, diagnostics);
+
+    let drains = match partition_drain(&batch, observations) {
+        Ok(drains) => drains,
+        Err(error) => {
+            diagnostics.add_invalid(observations.len());
+            diagnostics.record_failure(classify_record_error(&error));
+            account_observations(intake, observations, diagnostics);
+            return;
+        }
+    };
+    if drains.is_empty() {
         account_observations(intake, observations, diagnostics);
+        pending_coverage.clear();
         return;
+    }
+
+    let started = clock.now();
+    for (index, drain) in drains.iter().enumerate() {
+        let expected_records = batch_record_count(&drain.batch);
+        let result = repository
+            .apply_batch(ScopedTelemetryBatch::new(
+                drain.scope.clone(),
+                drain.batch.clone(),
+            ))
+            .await;
+        match result {
+            Ok(report) if report.is_complete_for(expected_records) => {}
+            Ok(_) => {
+                diagnostics.record_partial_batch_failure();
+                let failed_drains = &drains[index..];
+                let failed_observations = observations_from_drains(failed_drains);
+                retain_coverage_for_drains(pending_coverage, failed_drains);
+                diagnostics.add_write_failed(failed_observations.len());
+                replace_with_write_failure_coverage(
+                    &failed_observations,
+                    pending_coverage,
+                    diagnostics,
+                );
+                account_observations(intake, observations, diagnostics);
+                return;
+            }
+            Err(error) => {
+                let class = classify_repository_error(&error);
+                diagnostics.record_repository_failure(class);
+                let failed_drains = &drains[index..];
+                let failed_observations = observations_from_drains(failed_drains);
+                retain_coverage_for_drains(pending_coverage, failed_drains);
+                diagnostics.add_write_failed(failed_observations.len());
+                replace_with_write_failure_coverage(
+                    &failed_observations,
+                    pending_coverage,
+                    diagnostics,
+                );
+                account_observations(intake, observations, diagnostics);
+                return;
+            }
+        }
     }
     let elapsed_ms = clock
         .now()
@@ -396,11 +580,16 @@ fn replace_with_write_failure_coverage(
     // the error. Never retry its additive counters; carry only one fresh loss
     // marker for each tenant/hour key touched by this attempted drain.
     let mut attempted_keys =
-        BTreeMap::<(TenantId, DateTime<Utc>), (DateTime<Utc>, DateTime<Utc>)>::new();
+        BTreeMap::<(TenantId, DateTime<Utc>), (DateTime<Utc>, DateTime<Utc>, u64, u64)>::new();
     for ((tenant_id, window_start), accumulator) in pending_coverage.iter() {
         attempted_keys.insert(
             (tenant_id.clone(), *window_start),
-            (accumulator.first_observed_at, accumulator.last_observed_at),
+            (
+                accumulator.first_observed_at,
+                accumulator.last_observed_at,
+                accumulator.write_failed_observation_count.max(1),
+                0,
+            ),
         );
     }
     for observation in observations {
@@ -409,18 +598,25 @@ fn replace_with_write_failure_coverage(
             floor_utc_hour(observation.occurred_at()),
         );
         let occurred_at = observation.occurred_at();
-        if let Some(span) = attempted_keys.get_mut(&key) {
-            span.0 = span.0.min(occurred_at);
-            span.1 = span.1.max(occurred_at);
+        if let Some((first_observed_at, last_observed_at, _, current_count)) =
+            attempted_keys.get_mut(&key)
+        {
+            *first_observed_at = (*first_observed_at).min(occurred_at);
+            *last_observed_at = (*last_observed_at).max(occurred_at);
+            *current_count = current_count.saturating_add(1);
         } else if attempted_keys.len() < MAX_COVERAGE_SIDE_KEYS {
-            attempted_keys.insert(key, (occurred_at, occurred_at));
+            attempted_keys.insert(key, (occurred_at, occurred_at, 0, 1));
         } else {
             diagnostics.record_coverage_key_overflow();
         }
     }
 
     pending_coverage.clear();
-    for ((tenant_id, window_start), (first_observed_at, last_observed_at)) in attempted_keys {
+    for (
+        (tenant_id, window_start),
+        (first_observed_at, last_observed_at, prior_count, current_count),
+    ) in attempted_keys
+    {
         if pending_coverage.len() >= MAX_COVERAGE_SIDE_KEYS {
             diagnostics.record_coverage_key_overflow();
             break;
@@ -434,7 +630,11 @@ fn replace_with_write_failure_coverage(
                 queue_full_drop_count: 0,
                 closed_drop_count: 0,
                 invalid_drop_count: 0,
-                write_failed_observation_count: 1,
+                write_failed_observation_count: if current_count == 0 {
+                    prior_count
+                } else {
+                    current_count
+                },
                 first_observed_at,
                 last_observed_at,
             },

@@ -184,6 +184,7 @@ pub struct TelemetryDiagnostics {
     invalid_observation_count: u64,
     write_failed_observation_count: u64,
     repository_failure_count: u64,
+    partial_batch_failure_count: u64,
     flushed_batch_count: u64,
     flushed_observation_count: u64,
     last_batch_size: u64,
@@ -215,6 +216,9 @@ impl TelemetryDiagnostics {
     }
     pub const fn repository_failure_count(self) -> u64 {
         self.repository_failure_count
+    }
+    pub const fn partial_batch_failure_count(self) -> u64 {
+        self.partial_batch_failure_count
     }
     pub const fn flushed_batch_count(self) -> u64 {
         self.flushed_batch_count
@@ -263,6 +267,7 @@ pub(crate) struct DiagnosticsState {
     invalid_observation_count: AtomicU64,
     write_failed_observation_count: AtomicU64,
     repository_failure_count: AtomicU64,
+    partial_batch_failure_count: AtomicU64,
     flushed_batch_count: AtomicU64,
     flushed_observation_count: AtomicU64,
     last_batch_size: AtomicU64,
@@ -285,6 +290,7 @@ impl Default for DiagnosticsState {
             invalid_observation_count: AtomicU64::new(0),
             write_failed_observation_count: AtomicU64::new(0),
             repository_failure_count: AtomicU64::new(0),
+            partial_batch_failure_count: AtomicU64::new(0),
             flushed_batch_count: AtomicU64::new(0),
             flushed_observation_count: AtomicU64::new(0),
             last_batch_size: AtomicU64::new(0),
@@ -322,6 +328,7 @@ impl DiagnosticsState {
                 .write_failed_observation_count
                 .load(Ordering::Relaxed),
             repository_failure_count: self.repository_failure_count.load(Ordering::Relaxed),
+            partial_batch_failure_count: self.partial_batch_failure_count.load(Ordering::Relaxed),
             flushed_batch_count: self.flushed_batch_count.load(Ordering::Relaxed),
             flushed_observation_count: self.flushed_observation_count.load(Ordering::Relaxed),
             last_batch_size: self.last_batch_size.load(Ordering::Relaxed),
@@ -368,6 +375,11 @@ impl DiagnosticsState {
     pub(crate) fn record_repository_failure(&self, class: FailureClassCode) {
         self.add_counter(&self.repository_failure_count, 1);
         self.record_failure(class);
+    }
+
+    pub(crate) fn record_partial_batch_failure(&self) {
+        self.add_counter(&self.partial_batch_failure_count, 1);
+        self.record_failure(FailureClassCode::StorageOperation);
     }
 
     pub(crate) fn record_failure(&self, class: FailureClassCode) {

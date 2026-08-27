@@ -237,10 +237,7 @@ where
             .await?;
             applied += 1;
         }
-        Ok(BatchApplyReport {
-            applied_prefix: applied,
-            failed_record_count: 0,
-        })
+        Ok(BatchApplyReport::complete(applied))
     }
 
     async fn apply_lifecycle(
