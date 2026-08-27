@@ -64,7 +64,7 @@ Arc<dyn TelemetryRecorder>
 single lifecycle-owned worker
     │ aggregate by tenant/user/hour/family/dimensions
     ▼
-FilesystemTelemetryRepository<ScopedFilesystem<F>>
+FilesystemTelemetryRepository<F>
     │ ScopedPath + ResourceScope + bounded cas_update/query_ordered
     ▼
 existing CompositeRootFilesystem
@@ -99,9 +99,11 @@ scope; no reference escapes the call.
 
 ### Repository
 
-The domain owns a concrete typed `FilesystemTelemetryRepository<F>`; it does
-not add a backend-selection repository trait. Public methods accept a trusted
-`ResourceScope`, typed requests, and typed records only:
+The domain owns a concrete typed `FilesystemTelemetryRepository<F>` holding
+`Arc<ScopedFilesystem<F>>`; it does not add a backend-selection repository
+trait. A private `TelemetryBatchSink` behavior port is the forced worker-test
+seam and has exactly one production implementation. Public repository methods
+accept a trusted `ResourceScope`, typed requests, and typed records only:
 
 ```rust
 async fn ensure_indexes(&self, scope: &ResourceScope) -> Result<(), TelemetryStoreError>;
@@ -109,11 +111,12 @@ async fn apply_batch(
     &self,
     batch: ScopedTelemetryBatch,
 ) -> Result<BatchApplyReport, TelemetryStoreError>;
-async fn read_page(
-    &self,
-    scope: &ResourceScope,
-    request: TelemetryReadRequest,
-) -> Result<TelemetryPage, TelemetryStoreError>;
+async fn read_activity_page(...) -> Result<TelemetryPage<HourlyUserActivity>, TelemetryStoreError>;
+async fn read_model_page(...) -> Result<TelemetryPage<HourlyModelUsage>, TelemetryStoreError>;
+async fn read_failure_page(...) -> Result<TelemetryPage<HourlyRunFailure>, TelemetryStoreError>;
+async fn read_automation_page(...) -> Result<TelemetryPage<HourlyAutomationUsage>, TelemetryStoreError>;
+async fn read_lifecycle_page(...) -> Result<TelemetryPage<LifecycleEvent>, TelemetryStoreError>;
+async fn read_coverage_page(...) -> Result<TelemetryPage<CollectorCoverage>, TelemetryStoreError>;
 ```
 
 `BatchApplyReport` reports the applied prefix and failed record count. The
@@ -151,15 +154,16 @@ tie-breaker:
 
 | Read shape | Index keys |
 |---|---|
-| family by time | `record_family, window_start, tie_breaker` |
-| user and family by time | `user_id, record_family, window_start, tie_breaker` |
-| provider by time | `record_family, provider_id, window_start, tie_breaker` |
-| model by time | `record_family, effective_model_id, window_start, tie_breaker` |
-| provider + model by time | `record_family, provider_id, effective_model_id, window_start, tie_breaker` |
-| lifecycle by time | `record_family, occurred_at, event_id` |
-| lifecycle subject history | `subject_kind, subject_id, occurred_at, event_id` |
+| family by time | `tenant_id, record_family, window_start, tie_breaker` |
+| provider by time | `tenant_id, record_family, provider_id, window_start, tie_breaker` |
+| model by time | `tenant_id, record_family, effective_model_id, window_start, tie_breaker` |
+| provider + model by time | `tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker` |
+| lifecycle by time | `tenant_id, record_family, occurred_at, event_id` |
 
-The reader chooses the exact index for the supplied equality filters.
+The reader derives the leading `tenant_id` equality filter from
+`scope.tenant_id`, then chooses the exact index for the supplied family and
+dimension equality filters. Tenant remains leading even though the scoped path
+also isolates the mount because ordered projections are physically shared.
 Provider/model filters support all four combinations. It never passes
 `Filter::Range` to `query_ordered`.
 
@@ -180,10 +184,23 @@ before `from`.
 
 ## Trigger ownership change
 
-`ironclaw_triggers` extends its existing `TriggerFireSettlementObserver`
-with a closed `TriggerRunTerminalSettlement` event. The event includes
-creator `ResourceScope`, trigger/fire/run identities, owned automation kind,
-and terminal outcome.
+`ironclaw_triggers` extends `TriggerActiveRunState::Terminal` with a closed
+`TriggerTerminalOutcome`, then extends its existing
+`TriggerFireSettlementObserver` with `TriggerRunTerminalSettlement`. The
+composition lookup maps process states without losing detail:
+
+- `Completed` or `Stopped` → `Completed`;
+- `Failed` or `Killed` → `Failed`;
+- `Cancelled` → `Cancelled`; and
+- `RecoveryRequired` → `RecoveryRequired`.
+
+The trigger history status remains the existing `Ok`/`Error` projection used
+by `clear_active_fire`; the new outcome is observational detail, not a schema
+change. `active_cleanup` constructs the creator `ResourceScope` from the
+trusted persisted `TriggerRecord` tenant/user/agent/project fields with a fresh
+operation invocation ID. It never derives authority from display strings or
+transport metadata. The terminal event includes that scope, trigger/fire/run
+identities, trigger-owned automation kind, and terminal outcome.
 
 `active_cleanup` emits it exactly once for both `Ok` and failed terminal
 runs, only after trigger history and active-fire clearing are durable. Existing
@@ -206,6 +223,8 @@ that abandoned path in the same transition:
   canonical filesystem dependency;
 - update `.claude/rules/database.md`, domain guidance, telemetry README, and
   target-architecture documentation;
+- update root `AGENTS.md`, the telemetry contracts README, and
+  `docs/internal/reborn/contracts/triggers.md`;
 - delete SQL schema assertions and dual-driver repository tests; and
 - keep this file as the only executable telemetry implementation plan.
 
@@ -213,6 +232,12 @@ Developer databases may retain unreachable experimental SQL tables. They are
 not migrated, read, or dropped. This is safe because no production composition
 ever wrote telemetry. If evidence of a shipped producer or production rows is
 found, implementation stops and this assumption is revisited before deletion.
+
+Because this changes frozen storage placement and trigger settlement
+semantics, Task 1 is a contract-change request and ratification gate. It
+updates the storage-placement and trigger contracts before any production Rust
+edit; Tasks 2–6 may begin only after those docs and their architecture/guidance
+assertions agree.
 
 Rollback after the replacement lands removes producer/composition wiring.
 Filesystem records remain unread; rollback never deletes telemetry or canonical
@@ -381,13 +406,20 @@ checks. Structural deletion and behavioral additions remain separate commits.
   `ironclaw_telemetry -> ironclaw_filesystem`.
 - Add a guidance assertion that telemetry is absent from the SQL exception
   inventory and ADR 0005 is absent.
+- Add contract assertions for tenant-leading ordered indexes and terminal
+  success/failure settlement after durable active cleanup.
 
 **Implementation**
 
 - Delete the SQL adapters, SQL conformance suite, ADR 0005, dependencies, and
   allowlists listed in “SQL replacement and compatibility.”
-- Update the telemetry README, domain guidance, database rule, storage-placement
-  contract, and target architecture to name scoped filesystem persistence.
+- Ratify the contract change first by updating `storage-placement.md`,
+  `triggers.md`, and `_contract-freeze-index.md` with scoped storage, exact
+  outcome mapping, ordering, failure semantics, and caller-level acceptance
+  tests. Only then change production code in later tasks.
+- Update root `AGENTS.md`, the telemetry contracts/domain READMEs, domain
+  guidance, database rule, and target architecture to name scoped filesystem
+  persistence and terminal settlement accurately.
 - Update the same-layer dependency inventory and crate budgets.
 
 **Verify**
@@ -457,7 +489,16 @@ Replace SQL repository tests with one conformance suite over in-memory
 - Use `ScopedPath`, `Entry`, indexed projections, `ensure_index`,
   `query_ordered`, and shared bounded `cas_update`.
 - Keep domain record grammar and path encoding private and typed.
-- Return `BatchApplyReport`; do not add a backend-selection trait.
+- Delete `TelemetryRepository`, migration/admission helpers,
+  `TelemetryScanRequest`, and `TelemetryScanPageRequest`. Retain and reuse
+  `TelemetryPage<T>` plus the six typed record families behind explicit
+  per-family read methods.
+- Add only the private `TelemetryBatchSink` forced seam used by the worker and
+  its fake; return `BatchApplyReport` and do not add a backend-selection trait.
+- Declare only indexes consumed by foundation reads: tenant+family time,
+  tenant+provider time, tenant+model time, tenant+provider+model time, and
+  tenant+lifecycle time. Defer user-specific and subject-history indexes until
+  their selectors land.
 
 **Verify**
 
@@ -510,12 +551,19 @@ Extend trigger worker tests through `active_cleanup` to prove:
 - duplicate/continued cleanup does not emit twice;
 - submitted-but-nonterminal and pre-submit failures emit none; and
 - the event carries creator scope and trigger-owned automation kind.
+- process lifecycle terminal variants preserve the exact mapping listed in
+  “Trigger ownership change” through `TriggerActiveRunState`;
+- the trusted scope is constructed from persisted trigger owner fields, not
+  from run/display metadata.
 
 Extend the existing composition observer tests to capture every recorder
 argument and prove recorder loss never changes trigger settlement.
 
 **Implementation**
 
+- Add `TriggerTerminalOutcome` to `TriggerActiveRunState::Terminal`, map it in
+  `ProcessActiveRunLookup`, and keep the existing history `Ok`/`Error` mapping
+  solely for trigger persistence.
 - Add the closed event and callback to the trigger-owned observer contract.
 - Emit it from `active_cleanup` for every terminal outcome after settlement.
 - Extend the composition observer to translate the event and call

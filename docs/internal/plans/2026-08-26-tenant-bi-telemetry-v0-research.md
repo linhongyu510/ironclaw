@@ -122,7 +122,8 @@ a product invariant.
 
 ### Reads
 
-Time is the ordered index key, not a `Range` filter. The reader starts an
+Time is the ordered index key, not a `Range` filter. Every physical ordered
+index leads with tenant equality derived from the trusted scope. The reader starts an
 ascending keyset page after `(from, minimum_tie_breaker)`; that reserved value
 cannot be emitted by the tie-breaker encoder, so real rows at `from` are
 included. Reading stops before `to`. Exact equality prefixes select separate
@@ -142,8 +143,12 @@ telemetry proceeds.
 
 The trigger owner adds one terminal settlement event emitted by
 `active_cleanup` after durable history and active-fire clearing for both
-success and failure. Composition translates it to telemetry. No poller tick,
-submission callback, or parallel trigger observer guesses completion.
+success and failure. The composition lookup preserves completed, failed,
+cancelled, and recovery-required outcomes while trigger history keeps its
+existing `Ok`/`Error` projection. Active cleanup builds creator scope from the
+trusted persisted trigger record. Composition translates the event to
+telemetry. No poller tick, submission callback, or parallel trigger observer
+guesses completion.
 
 ### Deployment behavior
 

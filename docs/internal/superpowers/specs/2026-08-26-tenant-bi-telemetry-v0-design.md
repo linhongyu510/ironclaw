@@ -153,9 +153,15 @@ terminal outcome. The foundation PR emits this observation from the trigger
 poller's authoritative terminal active-run settlement path—not when a poller
 tick merely discovers or submits work.
 
-The trigger owner adds one closed `TriggerRunTerminalSettlement` event carrying
-the trusted creator `ResourceScope`, trigger identity, fire slot, run identity,
-automation kind, and terminal outcome. `active_cleanup` emits it for both
+The trigger owner adds `TriggerTerminalOutcome` to the active-run lookup and
+one closed `TriggerRunTerminalSettlement` event carrying the trusted creator
+`ResourceScope`, trigger identity, fire slot, run identity, automation kind,
+and terminal outcome. Composition maps process `Completed`/`Stopped` to
+completed, `Failed`/`Killed` to failed, `Cancelled` to cancelled, and
+`RecoveryRequired` to recovery-required without collapsing the observational
+outcome into trigger history's existing `Ok`/`Error`. `active_cleanup` builds
+the scope from trusted persisted trigger owner fields and emits the event for
+both
 successful and failed terminal runs only after trigger history and active-fire
 state are durably settled. The observer callback calls `try_record` exactly
 once, performs no filesystem I/O, and ignores the best-effort outcome except
@@ -231,16 +237,17 @@ The repository declares ordered indexes whose equality prefix, ordered key,
 and tie-breaker are:
 
 ```text
-[record_family, window_start, tie_breaker]
-[user_id, record_family, window_start, tie_breaker]
-[record_family, provider_id, window_start, tie_breaker]
-[record_family, effective_model_id, window_start, tie_breaker]
-[record_family, provider_id, effective_model_id, window_start, tie_breaker]
-[record_family, occurred_at, event_id]
-[subject_kind, subject_id, occurred_at, event_id]
+[tenant_id, record_family, window_start, tie_breaker]
+[tenant_id, record_family, provider_id, window_start, tie_breaker]
+[tenant_id, record_family, effective_model_id, window_start, tie_breaker]
+[tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker]
+[tenant_id, record_family, occurred_at, event_id]
 ```
 
-Each read selects the exact index matching its supplied equality filters.
+Each read derives the leading tenant equality from `ResourceScope` and selects
+the exact index matching its supplied equality filters. Tenant remains first
+because backend ordered projections are shared even when mount paths are
+scoped.
 Provider and effective-model filters therefore support all four combinations:
 neither, provider only, model only, or both. Reads use ascending
 `query_ordered` pages. The first page starts after
