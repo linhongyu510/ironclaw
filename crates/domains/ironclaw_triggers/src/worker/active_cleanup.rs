@@ -1,6 +1,6 @@
 use crate::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord,
-    TriggerRunHistoryStatus, TriggerSourceKind,
+    TriggerRunHistoryStatus,
 };
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
@@ -162,34 +162,42 @@ impl TriggerPollerWorker {
                             run_id,
                             status,
                         })
-                        .await?
-                        .is_some();
+                        .await?;
                     // The callback follows both durable writes. A false result
                     // means another worker already settled this fire, so it is
                     // deliberately not observable a second time.
-                    if cleared {
-                        let source = self.settled_fire_source(&record, fire_slot, run_id).await;
-                        self.deps
-                            .fire_settlement_observer
-                            .on_run_terminal_settled(TriggerRunTerminalSettlement {
-                                scope: ResourceScope {
-                                    tenant_id: record.tenant_id.clone(),
-                                    user_id: record.creator_user_id.clone(),
-                                    agent_id: record.agent_id.clone(),
-                                    project_id: record.project_id.clone(),
-                                    mission_id: None,
-                                    thread_id: None,
-                                    invocation_id: InvocationId::new(),
-                                },
-                                trigger_id: record.trigger_id,
-                                fire_slot,
-                                run_id,
-                                automation_kind: record.automation_kind_for_source(source),
-                                outcome,
-                            })
-                            .await;
+                    if let Some(cleared) = &cleared {
+                        if let Some(source) = cleared.source {
+                            self.deps
+                                .fire_settlement_observer
+                                .on_run_terminal_settled(TriggerRunTerminalSettlement {
+                                    scope: ResourceScope {
+                                        tenant_id: record.tenant_id.clone(),
+                                        user_id: record.creator_user_id.clone(),
+                                        agent_id: record.agent_id.clone(),
+                                        project_id: record.project_id.clone(),
+                                        mission_id: None,
+                                        thread_id: None,
+                                        invocation_id: InvocationId::new(),
+                                    },
+                                    trigger_id: record.trigger_id,
+                                    fire_slot,
+                                    run_id,
+                                    automation_kind: record.automation_kind_for_source(source),
+                                    outcome,
+                                })
+                                .await;
+                        } else {
+                            tracing::warn!(
+                                tenant_id = %record.tenant_id,
+                                trigger_id = %record.trigger_id,
+                                fire_slot = %fire_slot,
+                                run_id = %run_id,
+                                "terminal trigger settlement lacks durable source; suppressing observation"
+                            );
+                        }
                     }
-                    let outcome = if cleared {
+                    let outcome = if cleared.is_some() {
                         cleared_outcome
                     } else {
                         TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id }
@@ -219,43 +227,6 @@ impl TriggerPollerWorker {
         }
         self.set_active_scan_cursor(next_cursor)?;
         Ok(())
-    }
-
-    async fn settled_fire_source(
-        &self,
-        record: &TriggerRecord,
-        fire_slot: chrono::DateTime<chrono::Utc>,
-        run_id: ironclaw_host_api::turn::TurnRunId,
-    ) -> TriggerSourceKind {
-        match self
-            .deps
-            .repository
-            .list_trigger_run_history(
-                record.tenant_id.clone(),
-                record.trigger_id,
-                crate::MAX_TRIGGER_RUN_HISTORY_LIMIT,
-            )
-            .await
-        {
-            Ok(runs) => runs
-                .into_iter()
-                .find(|run| run.fire_slot == fire_slot && run.run_id == Some(run_id))
-                .map(|run| run.source)
-                .unwrap_or(record.source),
-            Err(error) => {
-                // silent-ok: telemetry attribution is best effort after the
-                // settlement itself is already durable; never undo or delay it.
-                tracing::warn!(
-                    ?error,
-                    tenant_id = %record.tenant_id,
-                    trigger_id = %record.trigger_id,
-                    fire_slot = %fire_slot,
-                    run_id = %run_id,
-                    "failed to resolve persisted trigger source for terminal observation"
-                );
-                record.source
-            }
-        }
     }
 
     async fn recover_stale_claim_only_fire(

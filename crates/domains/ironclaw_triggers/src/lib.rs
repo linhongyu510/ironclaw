@@ -1077,6 +1077,17 @@ pub struct ClearActiveFireRequest {
     pub status: TriggerRunHistoryStatus,
 }
 
+/// Durable result of clearing an accepted active fire.
+///
+/// `source` is the provenance read as part of the same repository settlement
+/// operation. It is `None` for legacy or otherwise incomplete active-fire
+/// state, and callers must not infer a source from the parent trigger record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearedActiveFire {
+    pub record: TriggerRecord,
+    pub source: Option<TriggerSourceKind>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveTriggerScanCursor {
     active_fire_slot: Timestamp,
@@ -1358,7 +1369,7 @@ pub trait TriggerRepository: Send + Sync {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError>;
+    ) -> Result<Option<ClearedActiveFire>, TriggerError>;
 
     /// Looks up the run-history row and its parent trigger by `thread_id`.
     ///

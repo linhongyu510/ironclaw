@@ -484,7 +484,7 @@ impl TriggerRepository for ScriptedRepository {
     async fn clear_active_fire(
         &self,
         _: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, TriggerError> {
         Err(Self::backend_error())
     }
 }

@@ -14,9 +14,9 @@ use ironclaw_host_api::{
 use super::*;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
-    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-    InMemoryTriggerRepository, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
+    ClaimedTriggerFire, ClearActiveFireRequest, ClearedActiveFire, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+    FireTerminalFailedRequest, InMemoryTriggerRepository, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
     TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerAutomationKind,
     TriggerError, TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
     TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
@@ -836,6 +836,8 @@ async fn terminal_cleanup_notifies_observer_with_authoritative_outcome_and_owner
     repo.upsert_trigger(record.clone())
         .await
         .expect("insert active");
+    repo.upsert_running_run_history(&tenant_id, trigger_id, fire_slot, run_id, None, fire_slot)
+        .expect("persist running source");
     let observer = Arc::new(
         RecordingSettlementObserver::with_terminal_visibility_assertion(
             repo.clone(),
@@ -912,12 +914,23 @@ async fn terminal_cleanup_emits_each_terminal_outcome_once() {
         );
         record.active_fire_slot = Some(fire_slot + chrono::Duration::seconds(index as i64));
         record.active_run_ref = Some(run_id);
-        repo.upsert_trigger(record).await.expect("insert active");
+        repo.upsert_trigger(record.clone())
+            .await
+            .expect("insert active");
+        repo.upsert_running_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot + chrono::Duration::seconds(index as i64),
+            run_id,
+            None,
+            fire_slot,
+        )
+        .expect("persist running source");
         states.push(TriggerActiveRunState::Terminal { status, outcome });
     }
     let observer = Arc::new(RecordingSettlementObserver::default());
     let worker = worker_with_observer(
-        repo,
+        repo.clone(),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
         Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
         Arc::new(RecordingActiveRunLookup::with_results(
@@ -989,6 +1002,72 @@ async fn terminal_cleanup_uses_persisted_manual_source_for_automation_kind() {
 }
 
 #[tokio::test]
+async fn terminal_cleanup_suppresses_observation_when_settled_source_is_missing() {
+    let trigger_id = TriggerId::new();
+    let tenant_id = tenant("tenant-missing-terminal-source");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::new();
+    let mut record = sample_record(trigger_id, tenant_id, fire_slot);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let repo = Arc::new(ActiveClearFailsOnceRepository::new(
+        vec![record],
+        TriggerId::new(),
+    ));
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(observer.terminal_events().is_empty());
+    assert_eq!(repo.history_lookup_calls(), 0);
+}
+
+#[tokio::test]
+async fn terminal_cleanup_suppresses_observation_when_history_lookup_fails() {
+    let trigger_id = TriggerId::new();
+    let tenant_id = tenant("tenant-failed-terminal-source-lookup");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::new();
+    let mut record = sample_record(trigger_id, tenant_id, fire_slot);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let repo = Arc::new(ActiveClearFailsOnceRepository::with_history_lookup_failure(
+        vec![record],
+        TriggerId::new(),
+    ));
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(observer.terminal_events().is_empty());
+    assert_eq!(repo.history_lookup_calls(), 0);
+}
+
+#[tokio::test]
 async fn terminal_cleanup_does_not_observe_nonterminal_active_run() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::new();
@@ -1026,7 +1105,18 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
-    repo.upsert_trigger(record).await.expect("insert active");
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert active");
+    repo.upsert_running_run_history(
+        &record.tenant_id,
+        trigger_id,
+        fire_slot,
+        run_id,
+        None,
+        fire_slot,
+    )
+    .expect("persist running source");
     let observer = Arc::new(RecordingSettlementObserver::default());
     let worker = worker_with_observer(
         repo.clone(),
@@ -1069,7 +1159,18 @@ async fn tick_surfaces_successful_terminal_active_fire_to_terminal_hook() {
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
-    repo.upsert_trigger(record).await.expect("insert active");
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert active");
+    repo.upsert_running_run_history(
+        &record.tenant_id,
+        trigger_id,
+        fire_slot,
+        run_id,
+        None,
+        fire_slot,
+    )
+    .expect("persist running source");
     let observer = Arc::new(RecordingSettlementObserver::default());
     let worker = worker_with_observer(
         repo.clone(),
@@ -3856,7 +3957,7 @@ impl TriggerRepository for TickConcurrencyRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("tick-concurrency repository should not clear active fires")
     }
 }
@@ -4003,7 +4104,7 @@ impl TriggerRepository for ActiveListErrorRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("active-list-error repository should not clear active fires")
     }
 }
@@ -4179,7 +4280,7 @@ impl TriggerRepository for ActiveWrapRefetchErrorRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("active-wrap-refetch-error repository should not clear active fires")
     }
 }
@@ -4329,7 +4430,7 @@ impl TriggerRepository for ActiveClearRaceRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         Ok(None)
     }
 }
@@ -4339,6 +4440,8 @@ struct ActiveClearFailsOnceRepository {
     clear_requests: Mutex<Vec<TriggerId>>,
     fail_once_trigger_id: TriggerId,
     failed_once: Mutex<bool>,
+    fail_history_lookup: bool,
+    history_lookup_calls: Mutex<usize>,
 }
 
 impl ActiveClearFailsOnceRepository {
@@ -4348,7 +4451,25 @@ impl ActiveClearFailsOnceRepository {
             clear_requests: Mutex::new(Vec::new()),
             fail_once_trigger_id,
             failed_once: Mutex::new(false),
+            fail_history_lookup: false,
+            history_lookup_calls: Mutex::new(0),
         }
+    }
+
+    fn with_history_lookup_failure(
+        records: Vec<TriggerRecord>,
+        fail_once_trigger_id: TriggerId,
+    ) -> Self {
+        let mut repository = Self::new(records, fail_once_trigger_id);
+        repository.fail_history_lookup = true;
+        repository
+    }
+
+    fn history_lookup_calls(&self) -> usize {
+        *self
+            .history_lookup_calls
+            .lock()
+            .expect("history lookup calls lock")
     }
 
     fn clear_requests(&self) -> Vec<TriggerId> {
@@ -4532,7 +4653,7 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         self.clear_requests
             .lock()
             .expect("clear requests lock")
@@ -4556,7 +4677,29 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
         let updated = record.clone();
         record.active_fire_slot = None;
         record.active_run_ref = None;
-        Ok(Some(updated))
+        Ok(Some(ClearedActiveFire {
+            record: updated,
+            source: None,
+        }))
+    }
+
+    async fn list_trigger_run_history(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRunRecord>, TriggerError> {
+        *self
+            .history_lookup_calls
+            .lock()
+            .expect("history lookup calls lock") += 1;
+        if self.fail_history_lookup {
+            Err(TriggerError::Backend {
+                reason: "history lookup failed".to_string(),
+            })
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -4706,7 +4849,7 @@ impl TriggerRepository for AcceptedMissingRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("accepted-missing repository should not clear active fires")
     }
 }
@@ -4857,7 +5000,7 @@ impl TriggerRepository for ReplayedMissingRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("replayed-missing repository should not clear active fires")
     }
 }
@@ -5017,7 +5160,7 @@ impl TriggerRepository for DueErrorThenSuccessRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("due-error repository should not clear active fires")
     }
 }
@@ -5191,7 +5334,7 @@ impl TriggerRepository for ClaimRaceRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("claim-race repository should not clear active fires")
     }
 }
