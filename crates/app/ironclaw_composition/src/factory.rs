@@ -185,6 +185,10 @@ use ironclaw_resources::{
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_skills::ScopedSkillManagementPort;
+use ironclaw_telemetry::{
+    BufferedTelemetryRecorder, BufferedTelemetryRecorderHandle, FilesystemTelemetryRepository,
+    SystemTelemetryClock, TelemetryRecorder,
+};
 use ironclaw_threads::FilesystemSessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
@@ -257,6 +261,28 @@ pub(crate) type ComposedToolPermissionOverrideStore =
     ToolPermissionOverrideStore<CompositeRootFilesystem>;
 
 pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
+
+/// Composition-owned lifecycle handle for the single telemetry consumer.
+///
+/// The handle deliberately carries no filesystem or database authority. The
+/// runtime may only close intake and drain the worker it owns.
+pub(crate) struct TelemetryRuntimeHandle {
+    worker: BufferedTelemetryRecorderHandle,
+}
+
+impl TelemetryRuntimeHandle {
+    pub(crate) fn new(worker: BufferedTelemetryRecorderHandle) -> Self {
+        Self { worker }
+    }
+
+    pub(crate) fn close_intake(&self) {
+        self.worker.close_intake();
+    }
+
+    pub(crate) async fn shutdown(self) -> ironclaw_telemetry::TelemetryDiagnostics {
+        self.worker.shutdown().await
+    }
+}
 
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
@@ -358,6 +384,8 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) telemetry_recorder: Arc<dyn TelemetryRecorder>,
+    pub(crate) telemetry_handle: TelemetryRuntimeHandle,
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,

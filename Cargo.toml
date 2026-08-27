@@ -211,6 +211,8 @@ ironclaw_threads = { path = "crates/domains/ironclaw_threads", version = "0.1.0"
 ironclaw_loop_contracts = { path = "crates/contracts/ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "crates/contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_product_contracts = { path = "crates/contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_telemetry = { path = "crates/domains/ironclaw_telemetry", version = "0.1.0" }
+ironclaw_telemetry_contracts = { path = "crates/contracts/ironclaw_telemetry_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "crates/kernel/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
@@ -523,6 +525,10 @@ path = "tests/integration/run_artifact_timings.rs"
 [[test]]
 name = "reborn_integration_db_write_canonical"
 path = "tests/integration/db_write_canonical.rs"
+
+[[test]]
+name = "reborn_integration_tenant_telemetry"
+path = "tests/integration/tenant_telemetry.rs"
 
 # Debug-info policy for dev and test (test inherits dev, so this one line
 # governs `cargo test` binaries and their dependencies too). CI has built

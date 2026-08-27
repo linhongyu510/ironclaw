@@ -6,12 +6,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+#[cfg(test)]
+use ironclaw_telemetry_contracts::recorder::NoopTelemetryRecorder;
 use ironclaw_telemetry_contracts::{
     observation::{
         AutomationId, AutomationKind, AutomationSettledObservation, ObservationContext, RunOutcome,
         TelemetryObservation,
     },
-    recorder::{NoopTelemetryRecorder, TelemetryRecorder},
+    recorder::TelemetryRecorder,
 };
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
@@ -112,6 +114,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     pub(crate) manual_fire_runner: Arc<LateBoundTriggerManualFireRunner>,
+    pub(crate) telemetry_recorder: Arc<dyn TelemetryRecorder>,
     /// Late-binding slot for the post-submit delivery hook.
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
@@ -125,9 +128,12 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
-        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
-    );
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
+        Arc::new(PostSubmitHookObserver::with_telemetry_recorder(
+            deps.post_submit_hook_slot,
+            cancel.clone(),
+            deps.telemetry_recorder,
+        ));
     let trusted_submitter = deps.trusted_submitter;
     let worker = Arc::new(TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -182,6 +188,7 @@ pub(crate) struct PostSubmitHookObserver {
 }
 
 impl PostSubmitHookObserver {
+    #[cfg(test)]
     fn new(
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
