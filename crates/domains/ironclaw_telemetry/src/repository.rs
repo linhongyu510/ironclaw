@@ -203,6 +203,144 @@ pub trait TelemetryRepository: Send + Sync {
     ) -> Result<TelemetryPage<CollectorCoverage>, TelemetryRepositoryError>;
 }
 
+/// Internal admission seam shared by both SQL adapters. The production
+/// implementation is a no-op; tests install a neutral counter to observe the
+/// real handle/transaction path without naming either database driver.
+pub(crate) trait AdmissionObserver: Send + Sync {
+    fn acquired(&self);
+    fn transaction_started(&self);
+    fn released(&self);
+}
+
+#[derive(Default)]
+pub(crate) struct NoopAdmissionObserver;
+
+impl AdmissionObserver for NoopAdmissionObserver {
+    fn acquired(&self) {}
+
+    fn transaction_started(&self) {}
+
+    fn released(&self) {}
+}
+
+pub(crate) struct AdmissionGuard {
+    observer: std::sync::Arc<dyn AdmissionObserver>,
+}
+
+impl AdmissionGuard {
+    pub(crate) fn transaction_started(&self) {
+        self.observer.transaction_started();
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        self.observer.released();
+    }
+}
+
+pub(crate) fn begin_admission(observer: &std::sync::Arc<dyn AdmissionObserver>) -> AdmissionGuard {
+    observer.acquired();
+    AdmissionGuard {
+        observer: std::sync::Arc::clone(observer),
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdmissionStats {
+    pub(crate) acquisitions: usize,
+    pub(crate) transaction_starts: usize,
+    pub(crate) releases: usize,
+    pub(crate) max_active: usize,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CountingAdmissionObserver {
+    acquisitions: std::sync::atomic::AtomicUsize,
+    transaction_starts: std::sync::atomic::AtomicUsize,
+    releases: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl CountingAdmissionObserver {
+    pub(crate) fn stats(&self) -> AdmissionStats {
+        AdmissionStats {
+            acquisitions: self.acquisitions.load(std::sync::atomic::Ordering::SeqCst),
+            transaction_starts: self
+                .transaction_starts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            releases: self.releases.load(std::sync::atomic::Ordering::SeqCst),
+            max_active: self.max_active.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+}
+
+#[cfg(test)]
+impl AdmissionObserver for CountingAdmissionObserver {
+    fn acquired(&self) {
+        let active = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let mut observed = self.max_active.load(std::sync::atomic::Ordering::SeqCst);
+        while active > observed {
+            match self.max_active.compare_exchange(
+                observed,
+                active,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => observed = current,
+            }
+        }
+        self.acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn transaction_started(&self) {
+        self.transaction_starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn released(&self) {
+        self.releases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_nonempty_batch_admission(stats: AdmissionStats) {
+    assert_eq!(
+        stats,
+        AdmissionStats {
+            acquisitions: 1,
+            transaction_starts: 1,
+            releases: 1,
+            max_active: 1,
+        }
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn assert_empty_batch_admission(stats: AdmissionStats) {
+    assert_eq!(
+        stats,
+        AdmissionStats {
+            acquisitions: 0,
+            transaction_starts: 0,
+            releases: 0,
+            max_active: 0,
+        }
+    );
+}
+
 pub(crate) fn timestamp_text(timestamp: DateTime<Utc>) -> String {
     normalize_timestamp(timestamp).to_rfc3339_opts(SecondsFormat::Micros, true)
 }
@@ -306,6 +444,15 @@ pub(crate) fn checked_counter_sum(
         return Err(TelemetryRepositoryError::CounterOverflow { family });
     }
     Ok(())
+}
+
+pub(crate) fn batch_is_empty(batch: &TelemetryBatch) -> bool {
+    batch.activity().is_empty()
+        && batch.model_usage().is_empty()
+        && batch.run_failures().is_empty()
+        && batch.automation_usage().is_empty()
+        && batch.lifecycle_events().is_empty()
+        && batch.collector_coverage().is_empty()
 }
 
 pub(crate) fn decode_tenant_id(value: String) -> Result<TenantId, TelemetryRepositoryError> {
@@ -454,6 +601,8 @@ pub(crate) fn parse_subject(value: &str) -> Result<LifecycleSubjectKind, Telemet
 pub(crate) fn assert_schema_v0_shape(migration: &str, postgres: bool) {
     let sql = migration.split_whitespace().collect::<Vec<_>>().join(" ");
     let timestamp_type = if postgres { "TIMESTAMPTZ" } else { "TEXT" };
+    let integer_type = if postgres { "BIGINT" } else { "INTEGER" };
+    let schema_version_type = if postgres { "SMALLINT" } else { "INTEGER" };
     let nullable_user = if postgres {
         "user_id TEXT NULL"
     } else {
@@ -463,42 +612,42 @@ pub(crate) fn assert_schema_v0_shape(migration: &str, postgres: bool) {
         (
             "telemetry_hourly_user_activity_v0",
             format!(
-                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, origin_kind TEXT NOT NULL"
+                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, origin_kind TEXT NOT NULL CHECK (origin_kind IN ('human','parent_agent','system','automation','other')), run_count {integer_type} NOT NULL CHECK (run_count >= 0), runs_with_reported_tool_calls_count {integer_type} NOT NULL CHECK (runs_with_reported_tool_calls_count >= 0), tool_count_reported_run_count {integer_type} NOT NULL CHECK (tool_count_reported_run_count >= 0), reported_tool_call_count {integer_type} NOT NULL CHECK (reported_tool_call_count >= 0), completed_count {integer_type} NOT NULL CHECK (completed_count >= 0), failed_count {integer_type} NOT NULL CHECK (failed_count >= 0), cancelled_count {integer_type} NOT NULL CHECK (cancelled_count >= 0), recovery_required_count {integer_type} NOT NULL CHECK (recovery_required_count >= 0), total_run_latency_ms {integer_type} NOT NULL CHECK (total_run_latency_ms >= 0), first_observed_at {timestamp_type} NOT NULL, last_observed_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), updated_at {timestamp_type} NOT NULL, PRIMARY KEY (tenant_id, window_start, user_id, origin_kind), CHECK (completed_count + failed_count + cancelled_count + recovery_required_count = run_count), CHECK (runs_with_reported_tool_calls_count <= tool_count_reported_run_count), CHECK (tool_count_reported_run_count <= run_count)"
             ),
             "PRIMARY KEY (tenant_id, window_start, user_id, origin_kind)",
         ),
         (
             "telemetry_hourly_model_usage_v0",
             format!(
-                "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, provider_id TEXT NOT NULL, effective_model_id TEXT NOT NULL"
+                "tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, provider_id TEXT NOT NULL, effective_model_id TEXT NOT NULL, inference_count {integer_type} NOT NULL CHECK (inference_count >= 0), usage_reported_count {integer_type} NOT NULL CHECK (usage_reported_count >= 0), input_tokens {integer_type} NOT NULL CHECK (input_tokens >= 0), output_tokens {integer_type} NOT NULL CHECK (output_tokens >= 0), cache_read_input_tokens {integer_type} NOT NULL CHECK (cache_read_input_tokens >= 0), cache_creation_input_tokens {integer_type} NOT NULL CHECK (cache_creation_input_tokens >= 0), first_observed_at {timestamp_type} NOT NULL, last_observed_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), updated_at {timestamp_type} NOT NULL, PRIMARY KEY (tenant_id, user_id, window_start, provider_id, effective_model_id), CHECK (usage_reported_count <= inference_count)"
             ),
             "PRIMARY KEY (tenant_id, user_id, window_start, provider_id, effective_model_id)",
         ),
         (
             "telemetry_hourly_run_failures_v0",
             format!(
-                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, failure_category TEXT NOT NULL"
+                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, failure_category TEXT NOT NULL, failure_count {integer_type} NOT NULL CHECK (failure_count >= 0), first_observed_at {timestamp_type} NOT NULL, last_observed_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), updated_at {timestamp_type} NOT NULL, PRIMARY KEY (tenant_id, window_start, user_id, failure_category)"
             ),
             "PRIMARY KEY (tenant_id, window_start, user_id, failure_category)",
         ),
         (
             "telemetry_hourly_automation_usage_v0",
             format!(
-                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, automation_kind TEXT NOT NULL"
+                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, user_id TEXT NOT NULL, automation_kind TEXT NOT NULL CHECK (automation_kind IN ('cron','once','manual')), run_count {integer_type} NOT NULL CHECK (run_count >= 0), completed_count {integer_type} NOT NULL CHECK (completed_count >= 0), failed_count {integer_type} NOT NULL CHECK (failed_count >= 0), cancelled_count {integer_type} NOT NULL CHECK (cancelled_count >= 0), recovery_required_count {integer_type} NOT NULL CHECK (recovery_required_count >= 0), first_observed_at {timestamp_type} NOT NULL, last_observed_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), updated_at {timestamp_type} NOT NULL, PRIMARY KEY (tenant_id, window_start, user_id, automation_kind), CHECK (completed_count + failed_count + cancelled_count + recovery_required_count = run_count)"
             ),
             "PRIMARY KEY (tenant_id, window_start, user_id, automation_kind)",
         ),
         (
             "telemetry_lifecycle_events_v0",
             format!(
-                "tenant_id TEXT NOT NULL, event_id TEXT NOT NULL, {nullable_user}, event_kind TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL, occurred_at {timestamp_type} NOT NULL"
+                "tenant_id TEXT NOT NULL, event_id TEXT NOT NULL, {nullable_user}, event_kind TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_id TEXT NOT NULL, occurred_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), PRIMARY KEY (tenant_id, event_id)"
             ),
             "PRIMARY KEY (tenant_id, event_id)",
         ),
         (
             "telemetry_collector_hourly_v0",
             format!(
-                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, collector_instance_id TEXT NOT NULL"
+                "tenant_id TEXT NOT NULL, window_start {timestamp_type} NOT NULL, collector_instance_id TEXT NOT NULL, accepted_observation_count {integer_type} NOT NULL CHECK (accepted_observation_count >= 0), queue_full_drop_count {integer_type} NOT NULL CHECK (queue_full_drop_count >= 0), closed_drop_count {integer_type} NOT NULL CHECK (closed_drop_count >= 0), invalid_drop_count {integer_type} NOT NULL CHECK (invalid_drop_count >= 0), write_failed_observation_count {integer_type} NOT NULL CHECK (write_failed_observation_count >= 0), first_observed_at {timestamp_type} NOT NULL, last_observed_at {timestamp_type} NOT NULL, schema_version {schema_version_type} NOT NULL CHECK (schema_version = 0), updated_at {timestamp_type} NOT NULL, PRIMARY KEY (tenant_id, window_start, collector_instance_id)"
             ),
             "PRIMARY KEY (tenant_id, window_start, collector_instance_id)",
         ),
@@ -507,11 +656,15 @@ pub(crate) fn assert_schema_v0_shape(migration: &str, postgres: bool) {
         let table_body = sql
             .split_once(&table_start)
             .and_then(|(_, rest)| rest.split_once(");"))
-            .map(|(body, _)| body)
+            .map(|(body, _)| body.trim())
             .unwrap_or_else(|| panic!("missing or unterminated table {table}"));
+        assert_eq!(
+            table_body, columns,
+            "table {table} must match the complete schema-v0 column, constraint, and key shape"
+        );
         assert!(
-            table_body.contains(&columns),
-            "table {table} is missing its leading columns: {columns}"
+            !table_body.contains(" DEFAULT "),
+            "table {table} must not introduce a schema-v0 default"
         );
         assert!(
             table_body.contains(primary_key),
@@ -541,28 +694,6 @@ pub(crate) fn assert_schema_v0_shape(migration: &str, postgres: bool) {
             "index {index} does not match its tenant-leading shape"
         );
     }
-}
-
-#[cfg(test)]
-pub(crate) fn assert_single_batch_admission(source: &str, function: &str, acquisition: &str) {
-    let rest = source
-        .rsplit_once(&format!("async fn {function}"))
-        .map(|(_, rest)| rest)
-        .expect("batch function body");
-    let body = if function == "transaction_batch" {
-        rest.split_once("impl TelemetryRepository")
-            .map(|(body, _)| body)
-    } else {
-        rest.split_once("async fn scan_").map(|(body, _)| body)
-    }
-    .expect("batch function body boundary");
-    assert_eq!(
-        body.matches(acquisition).count(),
-        1,
-        "batch must acquire exactly one admitted write handle"
-    );
-    assert!(!body.contains("join!"));
-    assert!(!body.contains("spawn("));
 }
 
 #[cfg(test)]

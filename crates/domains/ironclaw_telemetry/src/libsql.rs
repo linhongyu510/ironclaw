@@ -12,7 +12,8 @@ use crate::{
     HourlyUserActivity, LifecycleEvent, TelemetryBatch,
     error::TelemetryRepositoryError,
     repository::{
-        TelemetryPage, TelemetryRepository, TelemetryScanPageRequest, automation_text,
+        AdmissionObserver, NoopAdmissionObserver, TelemetryPage, TelemetryRepository,
+        TelemetryScanPageRequest, automation_text, batch_is_empty, begin_admission,
         decode_collector_id, decode_cursor, decode_event_id, decode_failure_category,
         decode_model_id, decode_provider_id, decode_subject_id, decode_tenant_id, decode_user_id,
         encode_cursor, lifecycle_event_text, lifecycle_subject_text, origin_text, page_rows,
@@ -132,11 +133,22 @@ CREATE TABLE IF NOT EXISTS telemetry_collector_hourly_v0 (
 /// never constructed or selected by this repository.
 pub(crate) struct LibSqlTelemetryRepository {
     runtime: Arc<LibSqlRuntime>,
+    admission_observer: Arc<dyn AdmissionObserver>,
 }
 
 impl LibSqlTelemetryRepository {
     pub(crate) fn from_runtime(runtime: Arc<LibSqlRuntime>) -> Self {
-        Self { runtime }
+        Self::from_runtime_with_observer(runtime, Arc::new(NoopAdmissionObserver))
+    }
+
+    pub(crate) fn from_runtime_with_observer(
+        runtime: Arc<LibSqlRuntime>,
+        admission_observer: Arc<dyn AdmissionObserver>,
+    ) -> Self {
+        Self {
+            runtime,
+            admission_observer,
+        }
     }
 
     async fn writer(
@@ -169,7 +181,11 @@ impl LibSqlTelemetryRepository {
         &self,
         batch: &TelemetryBatch,
     ) -> Result<(), TelemetryRepositoryError> {
+        if batch_is_empty(batch) {
+            return Ok(());
+        }
         let connection = self.writer("acquiring telemetry batch writer").await?;
+        let admission = begin_admission(&self.admission_observer);
         let transaction = connection
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
@@ -177,6 +193,7 @@ impl LibSqlTelemetryRepository {
                 operation: "beginning telemetry batch transaction",
                 source: Box::new(source),
             })?;
+        admission.transaction_started();
         for row in batch.activity() {
             check_activity_overflow(&transaction, row).await?;
         }
@@ -217,14 +234,6 @@ impl LibSqlTelemetryRepository {
                 operation: "committing telemetry batch transaction",
                 source: Box::new(source),
             })
-    }
-}
-
-impl From<Arc<LibSqlRuntime>> for crate::TelemetryRepositoryAdapter {
-    fn from(runtime: Arc<LibSqlRuntime>) -> Self {
-        crate::TelemetryRepositoryAdapter {
-            inner: Arc::new(LibSqlTelemetryRepository::from_runtime(runtime)),
-        }
     }
 }
 
@@ -1059,14 +1068,5 @@ mod tests {
     #[test]
     fn libsql_migration_has_shared_schema_v0_shape() {
         crate::repository::assert_schema_v0_shape(super::MIGRATION, false);
-    }
-
-    #[test]
-    fn libsql_batch_has_one_write_admission() {
-        crate::repository::assert_single_batch_admission(
-            include_str!("libsql.rs"),
-            "transaction_batch",
-            "self.writer(",
-        );
     }
 }

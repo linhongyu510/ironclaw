@@ -10,7 +10,8 @@ use crate::{
     HourlyUserActivity, LifecycleEvent, TelemetryBatch,
     error::TelemetryRepositoryError,
     repository::{
-        TelemetryPage, TelemetryRepository, TelemetryScanPageRequest, automation_text,
+        AdmissionObserver, NoopAdmissionObserver, TelemetryPage, TelemetryRepository,
+        TelemetryScanPageRequest, automation_text, batch_is_empty, begin_admission,
         decode_collector_id, decode_cursor, decode_event_id, decode_failure_category,
         decode_model_id, decode_provider_id, decode_subject_id, decode_tenant_id, decode_user_id,
         encode_cursor, lifecycle_event_text, lifecycle_subject_text, normalize_timestamp,
@@ -61,18 +62,21 @@ CREATE TABLE IF NOT EXISTS telemetry_collector_hourly_v0 (
 /// PostgreSQL telemetry adapter over a pool admitted by composition.
 pub(crate) struct PostgresTelemetryRepository {
     pool: deadpool_postgres::Pool,
+    admission_observer: Arc<dyn AdmissionObserver>,
 }
 
 impl PostgresTelemetryRepository {
     pub(crate) fn new(pool: deadpool_postgres::Pool) -> Self {
-        Self { pool }
+        Self::with_admission_observer(pool, Arc::new(NoopAdmissionObserver))
     }
-}
 
-impl From<deadpool_postgres::Pool> for crate::TelemetryRepositoryAdapter {
-    fn from(pool: deadpool_postgres::Pool) -> Self {
-        crate::TelemetryRepositoryAdapter {
-            inner: Arc::new(PostgresTelemetryRepository::new(pool)),
+    pub(crate) fn with_admission_observer(
+        pool: deadpool_postgres::Pool,
+        admission_observer: Arc<dyn AdmissionObserver>,
+    ) -> Self {
+        Self {
+            pool,
+            admission_observer,
         }
     }
 }
@@ -109,18 +113,23 @@ impl TelemetryRepository for PostgresTelemetryRepository {
     }
 
     async fn upsert_batch(&self, batch: &TelemetryBatch) -> Result<(), TelemetryRepositoryError> {
+        if batch_is_empty(batch) {
+            return Ok(());
+        }
         let mut client = self.pool.get().await.map_err(|source| {
             TelemetryRepositoryError::StoragePoolAdmission {
                 operation: "acquiring telemetry batch client",
                 source: Box::new(source),
             }
         })?;
+        let admission = begin_admission(&self.admission_observer);
         let transaction = client.transaction().await.map_err(|source| {
             TelemetryRepositoryError::StorageOperation {
                 operation: "beginning telemetry batch transaction",
                 source: Box::new(source),
             }
         })?;
+        admission.transaction_started();
         for row in batch.activity() {
             check_activity_overflow(&transaction, row).await?;
         }
@@ -1051,14 +1060,5 @@ mod tests {
     #[test]
     fn postgres_migration_has_shared_schema_v0_shape() {
         crate::repository::assert_schema_v0_shape(MIGRATION, true);
-    }
-
-    #[test]
-    fn postgres_batch_has_one_pool_admission() {
-        crate::repository::assert_single_batch_admission(
-            include_str!("postgres.rs"),
-            "upsert_batch",
-            "self.pool",
-        );
     }
 }

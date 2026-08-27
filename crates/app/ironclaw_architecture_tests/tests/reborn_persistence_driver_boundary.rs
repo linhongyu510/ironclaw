@@ -230,11 +230,13 @@ fn event_store_names_the_driver_only_inside_its_private_backend_module() {
 }
 
 /// Tenant telemetry owns private SQL adapters, but its public domain surface
-/// must remain backend-neutral. Database handles enter through the opaque
-/// admitted factory; neither the root module nor the public error contract may
-/// name a concrete driver type.
+/// must remain backend-neutral. Database handles enter through composition in
+/// a later task; no public constructor or trait implementation names a driver.
+/// Scan every production source file so a new sibling module cannot silently
+/// become a driver escape hatch. The two private backend files are the only
+/// approved driver-containing bodies; the contract test module is test-only.
 #[test]
-fn telemetry_public_surface_contains_no_driver_types() {
+fn telemetry_driver_types_stay_inside_private_backend_files() {
     let src = crate_path(&workspace_root(), "crates/domains/ironclaw_telemetry/src");
     let lib = std::fs::read_to_string(src.join("lib.rs"))
         .unwrap_or_else(|error| panic!("read telemetry lib.rs: {error}"));
@@ -243,16 +245,66 @@ fn telemetry_public_surface_contains_no_driver_types() {
     assert!(!lib.contains("pub mod libsql"));
     assert!(!lib.contains("pub mod postgres"));
 
-    for file in ["lib.rs", "repository.rs", "error.rs"] {
-        let source = std::fs::read_to_string(src.join(file))
-            .unwrap_or_else(|error| panic!("read telemetry {file}: {error}"));
-        for driver in ["deadpool_postgres::", "tokio_postgres::"] {
-            assert!(
-                !source.contains(driver),
-                "telemetry public-facing {file} names concrete driver {driver}"
-            );
+    let mut files = rust_sources_recursive(&src);
+    files.sort();
+    let production_files: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.ends_with("_tests.rs"))
+        })
+        .collect();
+    assert!(
+        production_files.len() >= 6,
+        "telemetry production source walk is unexpectedly small: {production_files:?}"
+    );
+    let mut leaks = Vec::new();
+    for path in production_files {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read telemetry {path:?}: {error}"));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?");
+        let private_backend = matches!(file_name, "libsql.rs" | "postgres.rs");
+        if private_backend {
+            continue;
+        }
+        for driver in [
+            "libsql::",
+            "deadpool::",
+            "deadpool_postgres::",
+            "tokio_postgres::",
+        ] {
+            if source.contains(driver) {
+                leaks.push(format!("  {path:?}: {driver}"));
+            }
         }
     }
+    assert!(
+        leaks.is_empty(),
+        "telemetry production source names concrete drivers outside its private backend files:\n{}",
+        leaks.join("\n")
+    );
+
+    for (file, item) in [
+        ("libsql.rs", "pub(crate) struct LibSqlTelemetryRepository"),
+        ("libsql.rs", "pub(crate) fn from_runtime"),
+        (
+            "postgres.rs",
+            "pub(crate) struct PostgresTelemetryRepository",
+        ),
+        ("postgres.rs", "pub(crate) fn new"),
+    ] {
+        let source = std::fs::read_to_string(src.join(file))
+            .unwrap_or_else(|error| panic!("read telemetry {file}: {error}"));
+        assert!(
+            source.contains(item),
+            "telemetry {file} must keep {item} private"
+        );
+    }
+    assert!(!lib.contains("TelemetryRepositoryAdapter"));
 }
 
 /// The token that declares the module the scan exempts.
