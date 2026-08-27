@@ -888,10 +888,15 @@ pub(crate) fn classify_repository_error(
         crate::TelemetryRepositoryError::CounterOverflow { .. } => {
             FailureClassCode::CounterOverflow
         }
+        crate::TelemetryRepositoryError::CounterConversion { .. } => {
+            FailureClassCode::CounterOverflow
+        }
         crate::TelemetryRepositoryError::Record(_) => FailureClassCode::InvalidRecord,
         crate::TelemetryRepositoryError::InvalidScanRequest { .. }
         | crate::TelemetryRepositoryError::InvalidPageRequest { .. }
         | crate::TelemetryRepositoryError::InvalidCursor
+        | crate::TelemetryRepositoryError::InvalidCursorEncoding { .. }
+        | crate::TelemetryRepositoryError::InvalidCursorLength { .. }
         | crate::TelemetryRepositoryError::InvalidTimestamp { .. }
         | crate::TelemetryRepositoryError::InvalidPersistedField { .. }
         | crate::TelemetryRepositoryError::UnknownEnum { .. } => FailureClassCode::InvalidData,

@@ -12,10 +12,11 @@ use crate::{
     repository::{
         AdmissionObserver, NoopAdmissionObserver, TelemetryPage, TelemetryRepository,
         TelemetryScanPageRequest, automation_text, batch_is_empty, begin_admission,
-        decode_collector_id, decode_cursor, decode_event_id, decode_failure_category,
-        decode_model_id, decode_provider_id, decode_subject_id, decode_tenant_id, decode_user_id,
-        encode_cursor, lifecycle_event_text, lifecycle_subject_text, normalize_timestamp,
-        origin_text, page_rows, parse_automation, parse_event, parse_origin, parse_subject,
+        counter_from_i64, decode_collector_id, decode_cursor, decode_event_id,
+        decode_failure_category, decode_model_id, decode_provider_id, decode_subject_id,
+        decode_tenant_id, decode_user_id, encode_cursor, lifecycle_event_text,
+        lifecycle_subject_text, normalize_timestamp, origin_text, page_rows, parse_automation,
+        parse_event, parse_origin, parse_subject,
     },
 };
 
@@ -887,9 +888,7 @@ fn number(row: &Row, index: usize) -> Result<u64, TelemetryRepositoryError> {
                 operation: "decoding telemetry counter",
                 source: Box::new(source),
             })?;
-    u64::try_from(value).map_err(|_| TelemetryRepositoryError::CounterOverflow {
-        family: "persisted",
-    })
+    counter_from_i64(value, "persisted")
 }
 fn datetime(row: &Row, index: usize) -> Result<DateTime<Utc>, TelemetryRepositoryError> {
     row.try_get(index)

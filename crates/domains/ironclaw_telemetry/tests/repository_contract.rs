@@ -35,6 +35,40 @@ fn repository_contract_normalizes_timestamp_precision() {
     assert_eq!(range.to(), timestamp("2026-08-27T00:00:00.987654Z"));
 }
 
+#[test]
+fn repository_contract_rejects_ranges_that_collapse_after_normalization() {
+    let result = TelemetryScanRequest::new(
+        TenantId::new("tenant-a").expect("test tenant"),
+        timestamp("2026-08-26T00:00:00.123456001Z"),
+        timestamp("2026-08-26T00:00:00.123456999Z"),
+        timestamp("2026-08-27T00:00:00Z"),
+    );
+
+    assert!(matches!(
+        result,
+        Err(TelemetryRepositoryError::InvalidScanRequest { .. })
+    ));
+}
+
+#[test]
+fn repository_contract_rejects_oversized_opaque_cursors() {
+    let range = TelemetryScanRequest::new(
+        TenantId::new("tenant-a").expect("test tenant"),
+        timestamp("2026-08-26T00:00:00Z"),
+        timestamp("2026-08-27T00:00:00Z"),
+        timestamp("2026-08-27T00:00:00Z"),
+    )
+    .expect("valid range");
+
+    let result =
+        ironclaw_telemetry::TelemetryScanPageRequest::new(range, 10, Some("x".repeat(4097)));
+
+    assert!(matches!(
+        result,
+        Err(TelemetryRepositoryError::InvalidPageRequest { .. })
+    ));
+}
+
 #[tokio::test]
 async fn strict_repository_contract_requires_postgres_runtime() {
     use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};

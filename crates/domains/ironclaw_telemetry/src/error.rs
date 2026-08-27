@@ -1,4 +1,7 @@
-use std::error::Error as StdError;
+use std::{
+    error::Error as StdError,
+    num::{ParseIntError, TryFromIntError},
+};
 
 use thiserror::Error;
 
@@ -13,23 +16,41 @@ pub enum TelemetryRepositoryError {
     InvalidPageRequest { reason: &'static str },
     #[error("invalid telemetry page cursor")]
     InvalidCursor,
+    #[error("invalid telemetry page cursor encoding")]
+    InvalidCursorEncoding {
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
+    #[error("invalid telemetry page cursor length")]
+    InvalidCursorLength {
+        value: String,
+        #[source]
+        source: ParseIntError,
+    },
     #[error("invalid persisted telemetry timestamp in {field}")]
     InvalidTimestamp {
         field: &'static str,
         #[source]
         source: chrono::ParseError,
     },
-    #[error("invalid persisted telemetry {field} value {value:?}")]
+    #[error("invalid persisted telemetry {field}")]
     InvalidPersistedField {
         field: &'static str,
         value: String,
         #[source]
         source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("unknown persisted telemetry {field} value {value:?}")]
+    #[error("unknown persisted telemetry {field}")]
     UnknownEnum { field: &'static str, value: String },
     #[error("telemetry counter overflow for {family} row")]
     CounterOverflow { family: &'static str },
+    #[error("telemetry counter conversion failed for {family} row")]
+    CounterConversion {
+        family: &'static str,
+        value: i64,
+        #[source]
+        source: TryFromIntError,
+    },
     #[error(transparent)]
     Record(#[from] crate::records::RecordError),
     #[error("telemetry runtime admission failed while {operation}")]
@@ -53,6 +74,31 @@ pub enum TelemetryRepositoryError {
 }
 
 impl TelemetryRepositoryError {
+    pub(crate) fn invalid_cursor_encoding<E>(source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self::InvalidCursorEncoding {
+            source: Box::new(source),
+        }
+    }
+
+    pub(crate) fn invalid_cursor_length(value: String, source: ParseIntError) -> Self {
+        Self::InvalidCursorLength { value, source }
+    }
+
+    pub(crate) fn counter_conversion(
+        family: &'static str,
+        value: i64,
+        source: TryFromIntError,
+    ) -> Self {
+        Self::CounterConversion {
+            family,
+            value,
+            source,
+        }
+    }
+
     pub(crate) fn invalid_persisted_field<E>(field: &'static str, value: String, source: E) -> Self
     where
         E: StdError + Send + Sync + 'static,

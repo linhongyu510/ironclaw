@@ -12,6 +12,12 @@ use crate::{
 };
 
 pub const MAX_TELEMETRY_PAGE_SIZE: usize = 2_000;
+/// Maximum UTF-8 byte length accepted for an opaque telemetry page cursor.
+///
+/// Cursors are parsed before they are used in backend query parameters. This
+/// bound keeps malformed input from driving unbounded parser work or scratch
+/// allocations while leaving ample room for the bounded cursor fields.
+pub const MAX_TELEMETRY_CURSOR_BYTES: usize = 4_096;
 
 /// Tenant and half-open time range shared by every export scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +38,9 @@ impl TelemetryScanRequest {
         to: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<Self, TelemetryRepositoryError> {
+        let from = normalize_timestamp(from);
+        let to = normalize_timestamp(to);
+        let now = normalize_timestamp(now);
         if from >= to {
             return Err(TelemetryRepositoryError::InvalidScanRequest {
                 reason: "from must be before to",
@@ -39,9 +48,9 @@ impl TelemetryScanRequest {
         }
         Ok(Self {
             tenant_id,
-            from: normalize_timestamp(from),
-            to: normalize_timestamp(to),
-            now: normalize_timestamp(now),
+            from,
+            to,
+            now,
             include_partial: false,
             provider_id: None,
             effective_model_id: None,
@@ -118,6 +127,14 @@ impl TelemetryScanPageRequest {
         if page_size == 0 || page_size > MAX_TELEMETRY_PAGE_SIZE {
             return Err(TelemetryRepositoryError::InvalidPageRequest {
                 reason: "page size must be between 1 and 2000",
+            });
+        }
+        if after
+            .as_deref()
+            .is_some_and(|cursor| cursor.len() > MAX_TELEMETRY_CURSOR_BYTES)
+        {
+            return Err(TelemetryRepositoryError::InvalidPageRequest {
+                reason: "cursor exceeds maximum length",
             });
         }
         Ok(Self {
@@ -382,11 +399,12 @@ pub(crate) fn decode_cursor(
     cursor: &str,
     expected_fields: usize,
 ) -> Result<(DateTime<Utc>, Vec<String>), TelemetryRepositoryError> {
+    if cursor.len() > MAX_TELEMETRY_CURSOR_BYTES {
+        return Err(TelemetryRepositoryError::InvalidCursor);
+    }
     let mut cursor = cursor.as_bytes();
     let timestamp = parse_length_prefixed_segment(&mut cursor)?;
-    let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
-        .map(|value| normalize_timestamp(value.with_timezone(&Utc)))
-        .map_err(|_| TelemetryRepositoryError::InvalidCursor)?;
+    let timestamp = parse_timestamp(&timestamp, "cursor timestamp")?;
     let mut fields = Vec::with_capacity(expected_fields);
     while !cursor.is_empty() {
         fields.push(parse_length_prefixed_segment(&mut cursor)?);
@@ -402,10 +420,11 @@ fn parse_length_prefixed_segment(cursor: &mut &[u8]) -> Result<String, Telemetry
         .iter()
         .position(|byte| *byte == b':')
         .ok_or(TelemetryRepositoryError::InvalidCursor)?;
-    let length = std::str::from_utf8(&cursor[..colon])
-        .map_err(|_| TelemetryRepositoryError::InvalidCursor)?
-        .parse::<usize>()
-        .map_err(|_| TelemetryRepositoryError::InvalidCursor)?;
+    let length_text = std::str::from_utf8(&cursor[..colon])
+        .map_err(TelemetryRepositoryError::invalid_cursor_encoding)?;
+    let length = length_text.parse::<usize>().map_err(|source| {
+        TelemetryRepositoryError::invalid_cursor_length(length_text.to_owned(), source)
+    })?;
     if length == 0 || length > MAX_TELEMETRY_IDENTIFIER_BYTES * 2 {
         return Err(TelemetryRepositoryError::InvalidCursor);
     }
@@ -417,7 +436,7 @@ fn parse_length_prefixed_segment(cursor: &mut &[u8]) -> Result<String, Telemetry
         return Err(TelemetryRepositoryError::InvalidCursor);
     }
     let value = String::from_utf8(cursor[value_start..value_end].to_vec())
-        .map_err(|_| TelemetryRepositoryError::InvalidCursor)?;
+        .map_err(TelemetryRepositoryError::invalid_cursor_encoding)?;
     *cursor = &cursor[value_end..];
     Ok(value)
 }
@@ -435,8 +454,7 @@ pub(crate) fn checked_counter_sum(
     incoming: u64,
     family: &'static str,
 ) -> Result<(), TelemetryRepositoryError> {
-    let current =
-        u64::try_from(current).map_err(|_| TelemetryRepositoryError::CounterOverflow { family })?;
+    let current = counter_from_i64(current, family)?;
     let total = current
         .checked_add(incoming)
         .ok_or(TelemetryRepositoryError::CounterOverflow { family })?;
@@ -444,6 +462,14 @@ pub(crate) fn checked_counter_sum(
         return Err(TelemetryRepositoryError::CounterOverflow { family });
     }
     Ok(())
+}
+
+pub(crate) fn counter_from_i64(
+    value: i64,
+    family: &'static str,
+) -> Result<u64, TelemetryRepositoryError> {
+    u64::try_from(value)
+        .map_err(|source| TelemetryRepositoryError::counter_conversion(family, value, source))
 }
 
 pub(crate) fn batch_is_empty(batch: &TelemetryBatch) -> bool {
@@ -738,6 +764,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(error.to_string(), "invalid persisted telemetry tenant_id");
         assert!(std::error::Error::source(&error).is_some());
 
         let error = super::parse_origin("not-a-real-origin").expect_err("unknown origin");
@@ -748,5 +775,79 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(error.to_string(), "unknown persisted telemetry origin_kind");
+    }
+
+    #[test]
+    fn cursor_timestamp_parse_preserves_source() {
+        let error = decode_cursor("3:bad", 0).expect_err("invalid cursor timestamp");
+        assert!(matches!(
+            error,
+            TelemetryRepositoryError::InvalidTimestamp {
+                field: "cursor timestamp",
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "invalid persisted telemetry timestamp in cursor timestamp"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<chrono::ParseError>())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn cursor_length_parse_preserves_source() {
+        let error = decode_cursor("x:payload", 0).expect_err("invalid cursor length");
+        assert!(matches!(
+            error,
+            TelemetryRepositoryError::InvalidCursorLength { ref value, .. } if value == "x"
+        ));
+        assert_eq!(error.to_string(), "invalid telemetry page cursor length");
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<std::num::ParseIntError>())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn cursor_payload_utf8_preserves_source() {
+        let error = decode_cursor("1:\u{e9}", 1).expect_err("invalid cursor payload");
+        assert!(matches!(
+            error,
+            TelemetryRepositoryError::InvalidCursorEncoding { .. }
+        ));
+        assert_eq!(error.to_string(), "invalid telemetry page cursor encoding");
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<std::string::FromUtf8Error>())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn persisted_counter_conversion_preserves_source_and_value() {
+        let error = super::checked_counter_sum(-1, 0, "persisted").expect_err("negative counter");
+        assert!(matches!(
+            error,
+            TelemetryRepositoryError::CounterConversion {
+                family: "persisted",
+                value: -1,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "telemetry counter conversion failed for persisted row"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<std::num::TryFromIntError>())
+                .is_some()
+        );
     }
 }
