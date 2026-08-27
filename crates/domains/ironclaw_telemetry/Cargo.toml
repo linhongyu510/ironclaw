@@ -16,12 +16,9 @@ layer = "substrates"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-deadpool-postgres = "0.14"
-ironclaw_libsql_runtime = { path = "../../substrates/ironclaw_libsql_runtime", version = "0.1.0" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_telemetry_contracts = { path = "../../contracts/ironclaw_telemetry_contracts", version = "0.1.0" }
-libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 thiserror = "2"
-tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
@@ -29,7 +26,6 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 tempfile = "3"
-testcontainers-modules = { version = "0.12", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]

@@ -3,19 +3,9 @@
 pub mod aggregate;
 mod buffered_recorder;
 mod error;
-// Composition wiring lands in the follow-up task; keep the admitted SQL
-// adapters private in this task without turning their intentionally dormant
-// production surface into a warning.
-#[allow(dead_code)]
-mod libsql;
-#[allow(dead_code)]
-mod postgres;
 pub mod records;
 pub mod repository;
 mod worker;
-
-#[cfg(test)]
-mod repository_contract_tests;
 
 pub use aggregate::{
     AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,

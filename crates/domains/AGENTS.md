@@ -35,7 +35,7 @@ no other crate in the family may acquire either property.
 | [`ironclaw_outbound`](./ironclaw_outbound) | Metadata-only outbound authority: sealed access grants, at-most-once delivery-attempt reservation, delivery resolution, preferences and subscription cursors — never a transport | Deciding *whether/where* something may be pushed, or recording a delivery attempt |
 | [`ironclaw_skills`](./ironclaw_skills) | Skill parsing, validation, deterministic selection scoring, scoped filesystem management, and the pure learning path | Changing skill grammar, selection, install records, or learning prompts |
 | [`ironclaw_threads`](./ironclaw_threads) | The canonical transcript service: `SessionThreadService` (filesystem + in-memory), message ordering/status/redaction, tool-result records, display projections | Reading or writing thread/message history or transcript-derived views |
-| [`ironclaw_telemetry`](./ironclaw_telemetry) | Tenant-scoped BI telemetry aggregation, durable hourly records, bounded worker, and export reader (ADR 0005) | Adding or changing privacy-safe tenant telemetry persistence and export grammar |
+| [`ironclaw_telemetry`](./ironclaw_telemetry) | Tenant-scoped BI telemetry aggregation, durable hourly records, bounded worker, and bounded export reader over `ScopedFilesystem` | Adding or changing privacy-safe tenant telemetry persistence and export grammar |
 | [`ironclaw_trace_commons`](./ironclaw_trace_commons) | The Trace Commons client: envelope schema, deterministic redaction, submission queue/credits, device-key onboarding, and the autonomous capture pipeline | Contributing traces to the external Trace Commons service |
 | [`ironclaw_triggers`](./ironclaw_triggers) | Scheduled-trigger records, cron/timezone validation, deterministic fire identity, the poller tick, and sealed trusted-submission minting (prompt-scanned at the mint); SQL backends held under ADR 0003 | Trigger records/schedules, or anything on the host-trusted fire path |
 | [`ironclaw_web_app`](./ironclaw_web_app) | Web Push (RFC 8030/8291/8292) subscription-document types, `aes128gcm` payload encryption, VAPID key-material generation, transport-free push request planning, and the browser channel's identity grammar | Push protocol mechanics (host-owned delivery registrations and their manifest-derived endpoint allowlist live in `ironclaw_auth`/product orchestration; delivery runs through the web-app package) |
@@ -62,10 +62,9 @@ Two boundary facts that have been gotten wrong before, stated precisely:
   (`.claude/rules/database.md`; `ScopedFilesystem` is the floor). A
   hand-written SQL backend requires its own ADR. `ironclaw_triggers` under
   [ADR 0003](../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md)
-  and `ironclaw_telemetry` under
-  [ADR 0005](../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)
-  are the domain family's narrow exceptions; each still takes admission from
-  existing substrate handles rather than owning connections. The separate
+  is the domain family's narrow SQL exception; it still takes admission from
+  an existing substrate handle rather than owning connections. Tenant telemetry
+  uses `ScopedFilesystem` and is not a SQL exception. The separate
   `ironclaw_hooks` exception is in the loop family under ADR 0004.
 - **Authority decisions.** Authorization, approvals, trust ceilings, resource
   reservation → `kernel/`. No crate here can construct a kernel-sealed witness
@@ -134,10 +133,10 @@ crate path is given.
   `only_the_sanctioned_residue_names_a_memory_provider` (shrink-only residue
   ledger; composition consumes the contract, the binary links providers).
 - **Persistence idiom:** `reborn_persistence_driver_boundary.rs` pins which
-  crates may name SQL drivers — `ironclaw_triggers` and `ironclaw_telemetry`
-  are the family's tagged ADR-held exceptions. Telemetry's driver types stay
-  private to backend adapters and its repositories receive already-admitted
-  handles.
+  crates may name SQL drivers — `ironclaw_triggers` is the family's tagged
+  ADR-held exception. Telemetry uses a typed scoped-filesystem repository below
+  `/tenant-shared/telemetry/v0`, with tenant-leading ordered projections and
+  bounded half-open reads.
 - **Module charters are contracts, not comments:** `cargo test -p
   ironclaw_auth --test module_charter` and `cargo test -p ironclaw_llm --test
   module_charter` enforce the sub-owner maps in auth's `AGENTS.md` and llm's

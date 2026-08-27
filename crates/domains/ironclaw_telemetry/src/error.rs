@@ -73,6 +73,8 @@ pub enum TelemetryRepositoryError {
     },
 }
 
+// Task 1 retains typed decode constructors for the Task 3 filesystem reader.
+#[allow(dead_code)]
 impl TelemetryRepositoryError {
     pub(crate) fn invalid_cursor_encoding<E>(source: E) -> Self
     where

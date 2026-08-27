@@ -14,11 +14,13 @@ maintain parallel backend-dispatch traits.
 This is the default, not an unconditional ban on every backend-native shape.
 A domain that needs hand-written SQL must pass the existing ADR-or-converge
 review path and carry a dedicated ADR. The current exceptions are triggers
-([ADR 0003](../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md)),
-hooks ([ADR 0004](../../docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md)),
-and tenant telemetry
-([ADR 0005](../../docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md)).
-Each exception takes admission from an existing substrate handle; it does not
+([ADR 0003](../../docs/internal/adr/0003-triggers-keeps-hand-written-sql.md))
+and hooks
+([ADR 0004](../../docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md)).
+Tenant telemetry is not a SQL exception: it uses a typed
+`ScopedFilesystem` repository below `/tenant-shared/telemetry/v0`, with
+tenant-leading ordered projections and bounded half-open reads. Each SQL
+exception takes admission from an existing substrate handle; it does not
 create a second database, pool, URL, or connection plane. The architecture
 driver allowlists are the mechanical source of truth for this narrow set.
 

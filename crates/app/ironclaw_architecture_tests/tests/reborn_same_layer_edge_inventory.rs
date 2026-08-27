@@ -670,10 +670,10 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
     },
     SameLayerEdge {
         crate_name: "ironclaw_telemetry",
-        dependency_name: "ironclaw_libsql_runtime",
+        dependency_name: "ironclaw_filesystem",
         layer: "substrates",
         owner: "domains/",
-        decided_in: "WS6 (ADR 0005 tenant telemetry persistence admission)",
+        decided_in: "tenant BI telemetry foundation (scoped filesystem placement)",
     },
     // The trusted-trigger prompt scan moved *behind* the seam: it now runs in
     // `TrustedTriggerSubmitRequest::new`, so "this prompt passed the scan" is
@@ -765,9 +765,9 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 // directly at the substrates layer and stores its grammar through the shared
 // filesystem substrate rather than coupling notification state to outbound.
 // 73 -> 75 (tenant BI telemetry foundation): the neutral telemetry contract
-// consumes host identity vocabulary, and the dormant domain consumes the
-// existing libSQL admission runtime. Both are deliberate same-layer edges;
-// neither is a layer-matrix exception.
+// consumes host identity vocabulary, and the domain consumes the shared
+// filesystem substrate for scoped persistence. Both are deliberate same-layer
+// edges; neither is a layer-matrix exception.
 const SAME_LAYER_EDGE_BASELINE: usize = 75;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never

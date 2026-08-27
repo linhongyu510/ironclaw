@@ -558,15 +558,14 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
-    // ADR 0005's durable exception is deliberately narrow: the domain owns
-    // records and private SQL adapters, but receives database admission from
-    // the existing libSQL runtime and exposes no upward/product dependency.
-    // External driver deps are pinned separately by
+    // Telemetry owns the typed record grammar and receives the existing
+    // scoped-filesystem substrate. It exposes no upward/product dependency;
+    // external driver deps are pinned separately by
     // `reborn_persistence_driver_boundary.rs`.
     let telemetry_allowed = [
         "ironclaw_telemetry",
         "ironclaw_telemetry_contracts",
-        "ironclaw_libsql_runtime",
+        "ironclaw_filesystem",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,
@@ -4656,7 +4655,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             // Telemetry producer vocabulary is a contracts-layer membrane. Its
             // only workspace dependency is the foundational host API identity
-            // vocabulary; durable records, SQL, and worker behavior belong to
+            // vocabulary; durable records and worker behavior belong to
             // the domain crate below.
             crate_name: "ironclaw_telemetry_contracts",
             forbidden: vec![
@@ -4671,10 +4670,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // The telemetry domain is an ADR-governed persistence exception,
-            // not a new authority or product layer. It may use its neutral
-            // contract and the admitted libSQL runtime, but never reaches
-            // upward or imports another domain's workflow.
+            // The telemetry domain owns its scoped-filesystem persistence, not
+            // a new authority or product layer. It may use its neutral
+            // contract and filesystem substrate, but never reaches upward or
+            // imports another domain's workflow.
             crate_name: "ironclaw_telemetry",
             forbidden: vec![
                 "ironclaw_assistant",
@@ -4685,7 +4684,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
-                "ironclaw_filesystem",
                 "ironclaw_threads",
                 "ironclaw_triggers",
                 "ironclaw_event_store",

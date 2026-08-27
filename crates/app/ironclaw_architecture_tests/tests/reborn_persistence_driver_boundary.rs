@@ -33,12 +33,11 @@ use serde_json::Value;
 const DRIVER_LINKED_CRATES: &[&str] = &[
     // Substrates that execute SQL directly.
     //
-    // Three of these are the §11.2.6 "ADR-or-converge" exceptions: `ironclaw_hooks`,
-    // `ironclaw_triggers`, and `ironclaw_telemetry`, each tagged below with its
-    // own ADR (hooks/triggers decided KEEP 2026-08-04; telemetry admitted by
-    // ADR 0005 on 2026-08-26). Their ADRs state why convergence onto the
-    // `RootFilesystem` fabric is not available and what would reopen the
-    // decision; read the one that argues for an entry before removing it.
+    // Two of these are the §11.2.6 "ADR-or-converge" exceptions:
+    // `ironclaw_hooks` and `ironclaw_triggers`, each tagged below with its own
+    // ADR. Their ADRs state why convergence onto the `RootFilesystem` fabric
+    // is not available and what would reopen the decision; read the one that
+    // argues for an entry before removing it.
     "ironclaw_auth",
     "ironclaw_filesystem",
     // ADR 0004 (`docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
@@ -46,8 +45,6 @@ const DRIVER_LINKED_CRATES: &[&str] = &[
     "ironclaw_host_runtime",
     // ADR 0003 (`docs/internal/adr/0003-triggers-keeps-hand-written-sql.md`).
     "ironclaw_triggers",
-    // ADR 0005 (`docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md`).
-    "ironclaw_telemetry",
     // Owns the TLS/driver cone for durable event/audit logs (§6.3.2).
     "ironclaw_event_store",
     // The assembly root: opens each database once and wires the shared runtime
@@ -90,10 +87,6 @@ const ADDITIONAL_DRIVER_ALLOWLISTS: &[(&str, &[&str])] = &[
             // wording.
             "ironclaw_hooks",
             "ironclaw_triggers",
-            // ADR 0005, as above — telemetry's private adapters use the
-            // existing libSQL admission lane and an already-open Postgres
-            // pool; they do not create a second connection plane.
-            "ironclaw_telemetry",
             // Measured residue the clause names explicitly as "today also
             // includes". Each is a standing §11.2.6 target, not a charter.
             "ironclaw_host_runtime",
@@ -117,7 +110,6 @@ const ADDITIONAL_DRIVER_ALLOWLISTS: &[(&str, &[&str])] = &[
             "ironclaw_hooks",
             "ironclaw_triggers",
             "ironclaw_stress",
-            "ironclaw_telemetry",
         ],
     ),
 ];
@@ -229,21 +221,25 @@ fn event_store_names_the_driver_only_inside_its_private_backend_module() {
     );
 }
 
-/// Tenant telemetry owns private SQL adapters, but its public domain surface
-/// must remain backend-neutral. Database handles enter through composition in
-/// a later task; no public constructor or trait implementation names a driver.
-/// Scan every production source file so a new sibling module cannot silently
-/// become a driver escape hatch. The two private backend files are the only
-/// approved driver-containing bodies; the contract test module is test-only.
+/// Tenant telemetry is a filesystem-backed domain. Its public and private
+/// source must remain free of concrete database drivers, and the crate must
+/// not grow a backend-specific adapter module as a side door. Composition owns
+/// the concrete root backend; the domain receives a scoped filesystem in the
+/// next implementation task.
 #[test]
-fn telemetry_driver_types_stay_inside_private_backend_files() {
+fn telemetry_is_scoped_filesystem_backed_and_driver_free() {
     let src = crate_path(&workspace_root(), "crates/domains/ironclaw_telemetry/src");
+    let manifest = std::fs::read_to_string(src.join("../Cargo.toml"))
+        .unwrap_or_else(|error| panic!("read telemetry Cargo.toml: {error}"));
     let lib = std::fs::read_to_string(src.join("lib.rs"))
         .unwrap_or_else(|error| panic!("read telemetry lib.rs: {error}"));
-    assert!(lib.contains("mod libsql;"));
-    assert!(lib.contains("mod postgres;"));
-    assert!(!lib.contains("pub mod libsql"));
-    assert!(!lib.contains("pub mod postgres"));
+    assert!(manifest.contains("ironclaw_filesystem"));
+    assert!(!manifest.contains("ironclaw_libsql_runtime"));
+    assert!(!manifest.contains("deadpool-postgres"));
+    assert!(!manifest.contains("tokio-postgres"));
+    assert!(!manifest.contains("libsql ="));
+    assert!(!lib.contains("mod libsql;"));
+    assert!(!lib.contains("mod postgres;"));
 
     let mut files = rust_sources_recursive(&src);
     files.sort();
@@ -256,21 +252,13 @@ fn telemetry_driver_types_stay_inside_private_backend_files() {
         })
         .collect();
     assert!(
-        production_files.len() >= 6,
+        production_files.len() >= 5,
         "telemetry production source walk is unexpectedly small: {production_files:?}"
     );
     let mut leaks = Vec::new();
     for path in production_files {
         let source = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("read telemetry {path:?}: {error}"));
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("?");
-        let private_backend = matches!(file_name, "libsql.rs" | "postgres.rs");
-        if private_backend {
-            continue;
-        }
         for driver in [
             "libsql::",
             "deadpool::",
@@ -284,27 +272,86 @@ fn telemetry_driver_types_stay_inside_private_backend_files() {
     }
     assert!(
         leaks.is_empty(),
-        "telemetry production source names concrete drivers outside its private backend files:\n{}",
+        "telemetry production source names concrete database drivers:\n{}",
         leaks.join("\n")
     );
 
-    for (file, item) in [
-        ("libsql.rs", "pub(crate) struct LibSqlTelemetryRepository"),
-        ("libsql.rs", "pub(crate) fn from_runtime"),
-        (
-            "postgres.rs",
-            "pub(crate) struct PostgresTelemetryRepository",
-        ),
-        ("postgres.rs", "pub(crate) fn new"),
-    ] {
-        let source = std::fs::read_to_string(src.join(file))
-            .unwrap_or_else(|error| panic!("read telemetry {file}: {error}"));
+    for retired in ["libsql.rs", "postgres.rs", "repository_contract_tests.rs"] {
         assert!(
-            source.contains(item),
-            "telemetry {file} must keep {item} private"
+            !src.join(retired).exists(),
+            "retired direct-SQL telemetry source must be absent: {retired}"
         );
     }
-    assert!(!lib.contains("TelemetryRepositoryAdapter"));
+}
+
+#[test]
+fn telemetry_sql_exception_and_adr_are_retired_from_guidance() {
+    let root = workspace_root();
+    assert!(
+        !root
+            .join("docs/internal/adr/0005-telemetry-keeps-dedicated-sql-tables.md")
+            .exists()
+    );
+
+    for relative in [
+        "AGENTS.md",
+        ".claude/rules/database.md",
+        "crates/domains/AGENTS.md",
+        "crates/domains/ironclaw_telemetry/README.md",
+        "crates/contracts/ironclaw_telemetry_contracts/README.md",
+        "docs/internal/reborn/target-architecture/families/domains.md",
+        "docs/internal/reborn/target-architecture/families/contracts.md",
+        "docs/internal/reborn/target-architecture/PROPOSAL.md",
+    ] {
+        let path = root.join(relative);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read guidance {path:?}: {error}"));
+        assert!(
+            !source.contains("ADR 0005")
+                && !source.contains("dedicated SQL tables")
+                && !source.contains("ironclaw_telemetry` under"),
+            "telemetry's retired SQL exception remains in {relative}"
+        );
+    }
+}
+
+#[test]
+fn telemetry_storage_and_terminal_settlement_contracts_are_frozen() {
+    let root = workspace_root();
+    let storage =
+        std::fs::read_to_string(root.join("docs/internal/reborn/contracts/storage-placement.md"))
+            .expect("storage placement contract must be readable");
+    for shape in [
+        "`tenant_id, record_family, window_start, tie_breaker`",
+        "`tenant_id, record_family, provider_id, window_start, tie_breaker`",
+        "`tenant_id, record_family, effective_model_id, window_start, tie_breaker`",
+        "`tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker`",
+        "`tenant_id, record_family, occurred_at, event_id`",
+        "/tenant-shared/telemetry/v0",
+        "ScopedFilesystem",
+    ] {
+        assert!(
+            storage.contains(shape),
+            "storage-placement.md must freeze telemetry index/path shape: {shape}"
+        );
+    }
+
+    let triggers = std::fs::read_to_string(root.join("docs/internal/reborn/contracts/triggers.md"))
+        .expect("triggers contract must be readable");
+    for phrase in [
+        "TriggerRunTerminalSettlement",
+        "Completed` or `Stopped` → `Completed",
+        "Failed` or `Killed` → `Failed",
+        "Cancelled` → `Cancelled",
+        "RecoveryRequired` → `RecoveryRequired",
+        "only after trigger history and active-fire clearing are durable",
+        "telemetry failure never changes trigger settlement",
+    ] {
+        assert!(
+            triggers.contains(phrase),
+            "triggers.md must freeze terminal settlement semantics: {phrase}"
+        );
+    }
 }
 
 /// The token that declares the module the scan exempts.
