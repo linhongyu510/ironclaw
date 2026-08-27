@@ -7,7 +7,10 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
-use ironclaw_host_api::ids::{TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, TenantId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_telemetry::{
     BufferedRecorderConfig, BufferedTelemetryRecorder, CollectorCoverage, HourlyAutomationUsage,
     HourlyModelUsage, HourlyRunFailure, HourlyUserActivity, LifecycleEvent, RecordError,
@@ -15,10 +18,12 @@ use ironclaw_telemetry::{
     TelemetryRepositoryError, TelemetryScanPageRequest, TelemetryWriteFailureClass,
 };
 use ironclaw_telemetry_contracts::observation::{
-    AutomationKind, AutomationSettledObservation, EffectiveModelId, ModelCallCompletedObservation,
-    ModelUsage, ObservationContext, OriginKind, ProviderId, RunOutcome, RunSettledObservation,
-    TelemetryObservation,
+    AutomationKind, AutomationSettledObservation, EffectiveModelId, LifecycleEventId,
+    LifecycleEventKind, LifecycleSubjectKind, LifecycleTransitionObservation,
+    ModelCallCompletedObservation, ModelUsage, ObservationContext, OriginKind, ProviderId,
+    RunOutcome, RunSettledObservation, TelemetryObservation,
 };
+use ironclaw_telemetry_contracts::recorder::TelemetryRecorder;
 
 const START: i64 = 1_756_200_000;
 
@@ -221,11 +226,31 @@ fn timestamp(offset_seconds: i64) -> DateTime<Utc> {
 }
 
 fn context(offset_seconds: i64) -> ObservationContext {
-    ObservationContext::new(
-        TenantId::new("tenant-a").expect("tenant"),
-        UserId::new("user-a").expect("user"),
-        timestamp(offset_seconds),
-    )
+    ObservationContext::new(timestamp(offset_seconds))
+}
+
+fn scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant-a").expect("tenant"),
+        user_id: UserId::new("user-a").expect("user"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn scope_for(index: u64) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(format!("tenant-{index}")).expect("tenant"),
+        user_id: UserId::new(format!("user-{index}")).expect("user"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
 }
 
 fn completed_run(offset_seconds: i64) -> TelemetryObservation {
@@ -242,21 +267,45 @@ fn completed_run(offset_seconds: i64) -> TelemetryObservation {
     )
 }
 
-fn completed_run_for_tenant_hour(index: u64) -> TelemetryObservation {
-    let tenant = TenantId::new(format!("tenant-{index}")).expect("tenant");
-    let user = UserId::new(format!("user-{index}")).expect("user");
+fn completed_run_for_tenant_hour(index: u64) -> (ResourceScope, TelemetryObservation) {
     let occurred_at = timestamp((index as i64) * 3_600);
-    TelemetryObservation::RunSettled(
-        RunSettledObservation::new(
-            ObservationContext::new(tenant, user, occurred_at),
-            OriginKind::Human,
-            RunOutcome::Completed,
-            1,
-            None,
-            None,
-        )
-        .expect("run"),
+    (
+        scope_for(index),
+        TelemetryObservation::RunSettled(
+            RunSettledObservation::new(
+                ObservationContext::new(occurred_at),
+                OriginKind::Human,
+                RunOutcome::Completed,
+                1,
+                None,
+                None,
+            )
+            .expect("run"),
+        ),
     )
+}
+
+trait TestRecorderCall {
+    fn try_record(&self, observation: TelemetryObservation) -> RecordOutcome;
+    fn try_record_scoped(
+        &self,
+        scope: ResourceScope,
+        observation: TelemetryObservation,
+    ) -> RecordOutcome;
+}
+
+impl TestRecorderCall for Arc<dyn TelemetryRecorder> {
+    fn try_record(&self, observation: TelemetryObservation) -> RecordOutcome {
+        self.try_record_scoped(scope(), observation)
+    }
+
+    fn try_record_scoped(
+        &self,
+        scope: ResourceScope,
+        observation: TelemetryObservation,
+    ) -> RecordOutcome {
+        TelemetryRecorder::try_record(self.as_ref(), scope, observation)
+    }
 }
 
 fn model_call(offset_seconds: i64) -> TelemetryObservation {
@@ -629,16 +678,18 @@ async fn pending_coverage_is_bounded_during_an_outage_and_later_drains_continue(
         repository.clone(),
         clock,
     );
+    let (tenant_scope, tenant_observation) = completed_run_for_tenant_hour(0);
     assert_eq!(
-        recorder.try_record(completed_run_for_tenant_hour(0)),
+        recorder.try_record_scoped(tenant_scope, tenant_observation),
         RecordOutcome::Accepted
     );
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
     started.await.expect("write started");
     for index in 1..OBSERVATIONS {
+        let (tenant_scope, tenant_observation) = completed_run_for_tenant_hour(index as u64);
         assert_eq!(
-            recorder.try_record(completed_run_for_tenant_hour(index as u64)),
+            recorder.try_record_scoped(tenant_scope, tenant_observation),
             RecordOutcome::Accepted
         );
     }
@@ -825,16 +876,18 @@ async fn coverage_attribution_overflow_does_not_hide_global_shutdown_loss_count(
         clock,
     );
     let (started, _release) = repository.block_next_write();
+    let (tenant_scope, tenant_observation) = completed_run_for_tenant_hour(0);
     assert_eq!(
-        recorder.try_record(completed_run_for_tenant_hour(0)),
+        recorder.try_record_scoped(tenant_scope, tenant_observation),
         RecordOutcome::Accepted
     );
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
     started.await.expect("write started");
     for index in 1..OBSERVATIONS {
+        let (tenant_scope, tenant_observation) = completed_run_for_tenant_hour(index as u64);
         assert_eq!(
-            recorder.try_record(completed_run_for_tenant_hour(index as u64)),
+            recorder.try_record_scoped(tenant_scope, tenant_observation),
             RecordOutcome::Accepted
         );
     }
@@ -878,11 +931,7 @@ async fn invalid_timestamp_is_rejected_synchronously_and_covered() {
         .expect("chrono supports this bounded test timestamp");
     let observation = TelemetryObservation::RunSettled(
         RunSettledObservation::new(
-            ObservationContext::new(
-                TenantId::new("tenant-a").expect("tenant"),
-                UserId::new("user-a").expect("user"),
-                future,
-            ),
+            ObservationContext::new(future),
             OriginKind::Human,
             RunOutcome::Completed,
             1,
@@ -1121,4 +1170,72 @@ async fn repository_record_failures_preserve_typed_diagnostics() {
         1
     );
     lifecycle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn system_scope_is_rejected_without_entering_a_global_bucket() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    assert_eq!(
+        recorder.try_record_scoped(ResourceScope::system(), completed_run(0)),
+        RecordOutcome::DroppedInvalid
+    );
+    assert_eq!(lifecycle.diagnostics().invalid_observation_count(), 1);
+    lifecycle.shutdown().await;
+    assert!(repository.batches().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_scope_is_the_only_usage_attribution_source() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    let mut trusted_scope = scope();
+    trusted_scope.tenant_id = TenantId::new("tenant-b").expect("tenant");
+    trusted_scope.user_id = UserId::new("user-b").expect("user");
+
+    assert_eq!(
+        recorder.try_record_scoped(trusted_scope, completed_run(0)),
+        RecordOutcome::Accepted
+    );
+    lifecycle.shutdown().await;
+
+    let batches = repository.batches();
+    let activity = &batches[0].activity()[0];
+    assert_eq!(activity.tenant_id().as_str(), "tenant-b");
+    assert_eq!(activity.user_id().as_str(), "user-b");
+}
+
+#[tokio::test(start_paused = true)]
+async fn lifecycle_subject_user_can_differ_from_scope_user() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    let observation = TelemetryObservation::LifecycleTransition(
+        LifecycleTransitionObservation::new(
+            Some(UserId::new("subject-user").expect("subject user")),
+            LifecycleEventId::new("event-a").expect("event"),
+            LifecycleEventKind::MemberAdded,
+            LifecycleSubjectKind::User,
+            "subject-user",
+            timestamp(0),
+        )
+        .expect("lifecycle observation"),
+    );
+
+    assert_eq!(
+        recorder.try_record_scoped(scope(), observation),
+        RecordOutcome::Accepted
+    );
+    lifecycle.shutdown().await;
+
+    let batches = repository.batches();
+    let event = &batches[0].lifecycle_events()[0];
+    assert_eq!(event.tenant_id().as_str(), "tenant-a");
+    assert_eq!(event.user_id().map(UserId::as_str), Some("subject-user"));
 }

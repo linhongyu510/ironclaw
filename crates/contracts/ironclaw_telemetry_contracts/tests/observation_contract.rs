@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
-    ids::{TenantId, UserId},
+    ids::{InvocationId, TenantId, UserId},
+    resource::ResourceScope,
     turn::SanitizedFailure,
 };
 use ironclaw_telemetry_contracts::observation::{
@@ -10,7 +11,9 @@ use ironclaw_telemetry_contracts::observation::{
     ObservationError, OriginKind, ProviderId, RunOutcome, RunSettledObservation,
     TelemetryObservation,
 };
-use ironclaw_telemetry_contracts::recorder::{RecordOutcome, TelemetryRecorder};
+use ironclaw_telemetry_contracts::recorder::{
+    NoopTelemetryRecorder, RecordOutcome, TelemetryRecorder,
+};
 
 fn tenant() -> TenantId {
     TenantId::new("tenant-a").expect("valid tenant")
@@ -27,7 +30,19 @@ fn occurred_at() -> chrono::DateTime<Utc> {
 }
 
 fn context() -> ObservationContext {
-    ObservationContext::new(tenant(), user(), occurred_at())
+    ObservationContext::new(occurred_at())
+}
+
+fn scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant(),
+        user_id: user(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
 }
 
 #[test]
@@ -56,7 +71,6 @@ fn all_four_observation_variants_are_typed_and_constructible() {
     )
     .expect("valid automation observation");
     let lifecycle = LifecycleTransitionObservation::new(
-        tenant(),
         Some(user()),
         LifecycleEventId::new("event-a").expect("event"),
         LifecycleEventKind::MemberAdded,
@@ -80,23 +94,30 @@ fn recorder_port_is_synchronous_and_has_distinct_loss_outcomes() {
     struct TestRecorder;
 
     impl TelemetryRecorder for TestRecorder {
-        fn try_record(&self, _observation: TelemetryObservation) -> RecordOutcome {
+        fn try_record(
+            &self,
+            _scope: ResourceScope,
+            _observation: TelemetryObservation,
+        ) -> RecordOutcome {
             RecordOutcome::Accepted
         }
     }
 
     let recorder = TestRecorder;
-    let outcome = recorder.try_record(TelemetryObservation::RunSettled(
-        RunSettledObservation::new(
-            context(),
-            OriginKind::Human,
-            RunOutcome::Completed,
-            0,
-            None,
-            None,
-        )
-        .expect("valid run observation"),
-    ));
+    let outcome = recorder.try_record(
+        scope(),
+        TelemetryObservation::RunSettled(
+            RunSettledObservation::new(
+                context(),
+                OriginKind::Human,
+                RunOutcome::Completed,
+                0,
+                None,
+                None,
+            )
+            .expect("valid run observation"),
+        ),
+    );
     assert_eq!(outcome, RecordOutcome::Accepted);
     assert_ne!(
         RecordOutcome::DroppedQueueFull,
@@ -106,18 +127,8 @@ fn recorder_port_is_synchronous_and_has_distinct_loss_outcomes() {
 }
 
 #[test]
-fn missing_tenant_or_user_attribution_is_rejected() {
-    let missing_tenant = ObservationContext::try_new(None, Some(user()), occurred_at());
-    let missing_user = ObservationContext::try_new(Some(tenant()), None, occurred_at());
-
-    assert!(matches!(
-        missing_tenant,
-        Err(ObservationError::MissingTenantId)
-    ));
-    assert!(matches!(missing_user, Err(ObservationError::MissingUserId)));
-
+fn lifecycle_subject_identity_is_optional_and_separate_from_scope() {
     let tenant_level_lifecycle = LifecycleTransitionObservation::new(
-        tenant(),
         None,
         LifecycleEventId::new("event-tenant").expect("event"),
         LifecycleEventKind::MemberAdded,
@@ -125,21 +136,82 @@ fn missing_tenant_or_user_attribution_is_rejected() {
         "tenant-a".to_owned(),
         occurred_at(),
     )
-    .expect("tenant-level lifecycle may omit user attribution");
-    assert!(tenant_level_lifecycle.user_id().is_none());
+    .expect("tenant-level lifecycle may omit a subject user");
+    assert!(tenant_level_lifecycle.subject_user_id().is_none());
 
-    assert!(matches!(
-        LifecycleTransitionObservation::new(
-            tenant(),
-            None,
-            LifecycleEventId::new("event-user").expect("event"),
-            LifecycleEventKind::MemberAdded,
-            LifecycleSubjectKind::User,
-            "user-a".to_owned(),
-            occurred_at(),
+    let subject_user = LifecycleTransitionObservation::new(
+        Some(UserId::new("subject-user").expect("subject user")),
+        LifecycleEventId::new("event-user").expect("event"),
+        LifecycleEventKind::MemberAdded,
+        LifecycleSubjectKind::User,
+        "user-a".to_owned(),
+        occurred_at(),
+    )
+    .expect("subject user is a separate bounded fact");
+    assert_eq!(
+        subject_user.subject_user_id().map(UserId::as_str),
+        Some("subject-user")
+    );
+}
+
+#[test]
+fn recorder_receives_trusted_scope_separately_from_observation_facts() {
+    struct CapturingRecorder(std::sync::Mutex<Option<ResourceScope>>);
+
+    impl TelemetryRecorder for CapturingRecorder {
+        fn try_record(
+            &self,
+            scope: ResourceScope,
+            _observation: TelemetryObservation,
+        ) -> RecordOutcome {
+            *self.0.lock().expect("capture lock") = Some(scope);
+            RecordOutcome::Accepted
+        }
+    }
+
+    let recorder = CapturingRecorder(std::sync::Mutex::new(None));
+    let expected_scope = scope();
+    let outcome = recorder.try_record(
+        expected_scope.clone(),
+        TelemetryObservation::RunSettled(
+            RunSettledObservation::new(
+                context(),
+                OriginKind::Human,
+                RunOutcome::Completed,
+                0,
+                None,
+                None,
+            )
+            .expect("valid run observation"),
         ),
-        Err(ObservationError::MissingUserId)
-    ));
+    );
+
+    assert_eq!(outcome, RecordOutcome::Accepted);
+    assert_eq!(
+        recorder.0.lock().expect("capture lock").as_ref(),
+        Some(&expected_scope)
+    );
+}
+
+#[test]
+fn no_op_recorder_drops_without_observing_payload_fields() {
+    let recorder = NoopTelemetryRecorder;
+    let outcome = recorder.try_record(
+        scope(),
+        TelemetryObservation::RunSettled(
+            RunSettledObservation::new(
+                context(),
+                OriginKind::Human,
+                RunOutcome::Completed,
+                0,
+                None,
+                None,
+            )
+            .expect("valid run observation"),
+        ),
+    );
+
+    assert_eq!(outcome, RecordOutcome::DroppedClosed);
 }
 
 #[test]

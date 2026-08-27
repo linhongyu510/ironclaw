@@ -1,6 +1,7 @@
 //! Bounded, provider-neutral facts accepted by the telemetry collector.
 
 use chrono::{DateTime, Utc};
+pub use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_host_api::{
     ids::{TenantId, UserId},
     turn::SanitizedFailure,
@@ -125,52 +126,24 @@ impl TryFrom<SanitizedFailure> for FailureCategory {
     }
 }
 
-/// A tenant/user/timestamp tuple shared by observations with user attribution.
+/// Timestamp shared by observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationContext {
-    tenant_id: TenantId,
-    user_id: UserId,
     occurred_at: DateTime<Utc>,
 }
 
 impl ObservationContext {
-    pub fn new(tenant_id: TenantId, user_id: UserId, occurred_at: DateTime<Utc>) -> Self {
-        Self {
-            tenant_id,
-            user_id,
-            occurred_at,
-        }
+    pub const fn new(occurred_at: DateTime<Utc>) -> Self {
+        Self { occurred_at }
     }
 
-    pub fn try_new(
-        tenant_id: Option<TenantId>,
-        user_id: Option<UserId>,
-        occurred_at: DateTime<Utc>,
-    ) -> Result<Self, ObservationError> {
-        let tenant_id = tenant_id.ok_or(ObservationError::MissingTenantId)?;
-        let user_id = user_id.ok_or(ObservationError::MissingUserId)?;
-        Ok(Self::new(tenant_id, user_id, occurred_at))
-    }
-
-    pub fn tenant_id(&self) -> &TenantId {
-        &self.tenant_id
-    }
-
-    pub fn user_id(&self) -> &UserId {
-        &self.user_id
-    }
-
-    pub fn occurred_at(&self) -> DateTime<Utc> {
+    pub const fn occurred_at(&self) -> DateTime<Utc> {
         self.occurred_at
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ObservationError {
-    #[error("telemetry observation requires tenant attribution")]
-    MissingTenantId,
-    #[error("telemetry observation requires user attribution")]
-    MissingUserId,
     #[error(transparent)]
     InvalidIdentifier(#[from] BoundedIdentifierError),
     #[error("failed and recovery-required runs require a sanitized failure category")]
@@ -319,14 +292,6 @@ impl RunSettledObservation {
         }
     }
 
-    pub fn tenant_id(&self) -> &TenantId {
-        self.context.tenant_id()
-    }
-
-    pub fn user_id(&self) -> &UserId {
-        self.context.user_id()
-    }
-
     pub fn occurred_at(&self) -> DateTime<Utc> {
         self.context.occurred_at()
     }
@@ -396,14 +361,6 @@ impl ModelCallCompletedObservation {
             effective_model_id,
             usage,
         })
-    }
-
-    pub fn tenant_id(&self) -> &TenantId {
-        self.context.tenant_id()
-    }
-
-    pub fn user_id(&self) -> &UserId {
-        self.context.user_id()
     }
 
     pub fn occurred_at(&self) -> DateTime<Utc> {
@@ -482,14 +439,6 @@ impl AutomationSettledObservation {
         })
     }
 
-    pub fn tenant_id(&self) -> &TenantId {
-        self.context.tenant_id()
-    }
-
-    pub fn user_id(&self) -> &UserId {
-        self.context.user_id()
-    }
-
     pub fn occurred_at(&self) -> DateTime<Utc> {
         self.context.occurred_at()
     }
@@ -509,8 +458,7 @@ impl AutomationSettledObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleTransitionObservation {
-    tenant_id: TenantId,
-    user_id: Option<UserId>,
+    subject_user_id: Option<UserId>,
     event_id: LifecycleEventId,
     event_kind: LifecycleEventKind,
     subject_kind: LifecycleSubjectKind,
@@ -520,21 +468,16 @@ pub struct LifecycleTransitionObservation {
 
 impl LifecycleTransitionObservation {
     pub fn new(
-        tenant_id: TenantId,
-        user_id: Option<UserId>,
+        subject_user_id: Option<UserId>,
         event_id: LifecycleEventId,
         event_kind: LifecycleEventKind,
         subject_kind: LifecycleSubjectKind,
         subject_id: impl Into<String>,
         occurred_at: DateTime<Utc>,
     ) -> Result<Self, ObservationError> {
-        if user_id.is_none() && subject_kind != LifecycleSubjectKind::Tenant {
-            return Err(ObservationError::MissingUserId);
-        }
         let subject_id = SubjectId::new(subject_id)?;
         Ok(Self {
-            tenant_id,
-            user_id,
+            subject_user_id,
             event_id,
             event_kind,
             subject_kind,
@@ -543,33 +486,8 @@ impl LifecycleTransitionObservation {
         })
     }
 
-    pub fn try_new(
-        tenant_id: Option<TenantId>,
-        user_id: Option<UserId>,
-        event_id: LifecycleEventId,
-        event_kind: LifecycleEventKind,
-        subject_kind: LifecycleSubjectKind,
-        subject_id: impl Into<String>,
-        occurred_at: DateTime<Utc>,
-    ) -> Result<Self, ObservationError> {
-        let tenant_id = tenant_id.ok_or(ObservationError::MissingTenantId)?;
-        Self::new(
-            tenant_id,
-            user_id,
-            event_id,
-            event_kind,
-            subject_kind,
-            subject_id,
-            occurred_at,
-        )
-    }
-
-    pub fn tenant_id(&self) -> &TenantId {
-        &self.tenant_id
-    }
-
-    pub fn user_id(&self) -> Option<&UserId> {
-        self.user_id.as_ref()
+    pub fn subject_user_id(&self) -> Option<&UserId> {
+        self.subject_user_id.as_ref()
     }
 
     pub fn event_id(&self) -> &LifecycleEventId {
@@ -602,24 +520,6 @@ pub enum TelemetryObservation {
 }
 
 impl TelemetryObservation {
-    pub fn tenant_id(&self) -> &TenantId {
-        match self {
-            Self::RunSettled(observation) => observation.tenant_id(),
-            Self::ModelCallCompleted(observation) => observation.tenant_id(),
-            Self::AutomationSettled(observation) => observation.tenant_id(),
-            Self::LifecycleTransition(observation) => observation.tenant_id(),
-        }
-    }
-
-    pub fn user_id(&self) -> Option<&UserId> {
-        match self {
-            Self::RunSettled(observation) => Some(observation.user_id()),
-            Self::ModelCallCompleted(observation) => Some(observation.user_id()),
-            Self::AutomationSettled(observation) => Some(observation.user_id()),
-            Self::LifecycleTransition(observation) => observation.user_id(),
-        }
-    }
-
     pub fn occurred_at(&self) -> DateTime<Utc> {
         match self {
             Self::RunSettled(observation) => observation.occurred_at(),
@@ -627,5 +527,38 @@ impl TelemetryObservation {
             Self::AutomationSettled(observation) => observation.occurred_at(),
             Self::LifecycleTransition(observation) => observation.occurred_at(),
         }
+    }
+}
+
+/// A trusted resource scope carried with one observation until aggregation.
+///
+/// The scope is intentionally owned by this envelope. Observation payloads
+/// contain event facts only; tenant and usage attribution always come from the
+/// trusted scope supplied by the recorder caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedTelemetryObservation {
+    scope: ResourceScope,
+    observation: TelemetryObservation,
+}
+
+impl ScopedTelemetryObservation {
+    pub fn new(scope: ResourceScope, observation: TelemetryObservation) -> Self {
+        Self { scope, observation }
+    }
+
+    pub fn scope(&self) -> &ResourceScope {
+        &self.scope
+    }
+
+    pub fn observation(&self) -> &TelemetryObservation {
+        &self.observation
+    }
+
+    pub fn into_parts(self) -> (ResourceScope, TelemetryObservation) {
+        (self.scope, self.observation)
+    }
+
+    pub fn occurred_at(&self) -> DateTime<Utc> {
+        self.observation.occurred_at()
     }
 }

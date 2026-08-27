@@ -5,7 +5,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use ironclaw_telemetry_contracts::observation::{
     CanonicalTenantId as TenantId, CanonicalUserId as UserId, FailureCategory, LifecycleEventId,
-    MAX_DURABLE_COUNTER, RunOutcome, TelemetryObservation,
+    MAX_DURABLE_COUNTER, RunOutcome, ScopedTelemetryObservation, TelemetryObservation,
 };
 
 use crate::records::{
@@ -243,7 +243,7 @@ pub fn floor_utc_year(timestamp: DateTime<Utc>) -> DateTime<Utc> {
 pub fn aggregate_batch<I, B>(observations: I) -> Result<TelemetryBatch, AggregationError>
 where
     I: IntoIterator<Item = B>,
-    B: Borrow<TelemetryObservation>,
+    B: Borrow<ScopedTelemetryObservation>,
 {
     let mut activity = BTreeMap::<ActivityKey, ActivityAccumulator>::new();
     let mut model_usage = BTreeMap::<ModelKey, ModelAccumulator>::new();
@@ -251,8 +251,10 @@ where
     let mut automation_usage = BTreeMap::<AutomationKey, AutomationAccumulator>::new();
     let mut lifecycle_events = BTreeMap::<(TenantId, LifecycleEventId), LifecycleEvent>::new();
 
-    for observation in observations {
-        match observation.borrow() {
+    for scoped_observation in observations {
+        let scoped_observation = scoped_observation.borrow();
+        let scope = scoped_observation.scope();
+        match scoped_observation.observation() {
             TelemetryObservation::RunSettled(observation) => {
                 checked_value(observation.duration_ms(), "total_run_latency_ms")?;
                 if let Some(count) = observation.reported_tool_call_count() {
@@ -260,9 +262,9 @@ where
                 }
                 let window_start = floor_utc_hour(observation.occurred_at());
                 let key = ActivityKey(
-                    observation.tenant_id().clone(),
+                    scope.tenant_id.clone(),
                     window_start,
-                    observation.user_id().clone(),
+                    scope.user_id.clone(),
                     observation.origin(),
                 );
                 if let Some(accumulator) = activity.get_mut(&key) {
@@ -306,9 +308,9 @@ where
                     if let Some(failure) = observation.failure() {
                         let failure_category = (*failure).clone();
                         let failure_key = FailureKey(
-                            observation.tenant_id().clone(),
+                            scope.tenant_id.clone(),
                             window_start,
-                            observation.user_id().clone(),
+                            scope.user_id.clone(),
                             failure_category.clone(),
                         );
                         if let Some(failure_accumulator) = run_failures.get_mut(&failure_key) {
@@ -326,9 +328,9 @@ where
                             run_failures.insert(
                                 failure_key,
                                 FailureAccumulator {
-                                    tenant_id: observation.tenant_id().clone(),
+                                    tenant_id: scope.tenant_id.clone(),
                                     window_start,
-                                    user_id: observation.user_id().clone(),
+                                    user_id: scope.user_id.clone(),
                                     failure_category,
                                     failure_count: 1,
                                     first_observed_at: observation.occurred_at(),
@@ -339,9 +341,9 @@ where
                     }
                 } else {
                     let mut accumulator = ActivityAccumulator {
-                        tenant_id: observation.tenant_id().clone(),
+                        tenant_id: scope.tenant_id.clone(),
                         window_start,
-                        user_id: observation.user_id().clone(),
+                        user_id: scope.user_id.clone(),
                         origin_kind: observation.origin(),
                         run_count: 1,
                         runs_with_reported_tool_calls_count: 0,
@@ -373,15 +375,15 @@ where
                         let failure_category = (*failure).clone();
                         run_failures.insert(
                             FailureKey(
-                                observation.tenant_id().clone(),
+                                scope.tenant_id.clone(),
                                 window_start,
-                                observation.user_id().clone(),
+                                scope.user_id.clone(),
                                 failure_category.clone(),
                             ),
                             FailureAccumulator {
-                                tenant_id: observation.tenant_id().clone(),
+                                tenant_id: scope.tenant_id.clone(),
                                 window_start,
-                                user_id: observation.user_id().clone(),
+                                user_id: scope.user_id.clone(),
                                 failure_category,
                                 failure_count: 1,
                                 first_observed_at: observation.occurred_at(),
@@ -404,8 +406,8 @@ where
                 )?;
                 let window_start = floor_utc_hour(observation.occurred_at());
                 let key = ModelKey(
-                    observation.tenant_id().clone(),
-                    observation.user_id().clone(),
+                    scope.tenant_id.clone(),
+                    scope.user_id.clone(),
                     window_start,
                     observation.provider_id().clone(),
                     observation.effective_model_id().clone(),
@@ -448,8 +450,8 @@ where
                     model_usage.insert(
                         key,
                         ModelAccumulator {
-                            tenant_id: observation.tenant_id().clone(),
-                            user_id: observation.user_id().clone(),
+                            tenant_id: scope.tenant_id.clone(),
+                            user_id: scope.user_id.clone(),
                             window_start,
                             provider_id: observation.provider_id().clone(),
                             effective_model_id: observation.effective_model_id().clone(),
@@ -468,9 +470,9 @@ where
             TelemetryObservation::AutomationSettled(observation) => {
                 let window_start = floor_utc_hour(observation.occurred_at());
                 let key = AutomationKey(
-                    observation.tenant_id().clone(),
+                    scope.tenant_id.clone(),
                     window_start,
-                    observation.user_id().clone(),
+                    scope.user_id.clone(),
                     observation.automation_kind(),
                 );
                 if let Some(accumulator) = automation_usage.get_mut(&key) {
@@ -489,9 +491,9 @@ where
                     );
                 } else {
                     let mut accumulator = AutomationAccumulator {
-                        tenant_id: observation.tenant_id().clone(),
+                        tenant_id: scope.tenant_id.clone(),
                         window_start,
-                        user_id: observation.user_id().clone(),
+                        user_id: scope.user_id.clone(),
                         automation_kind: observation.automation_kind(),
                         run_count: 1,
                         completed_count: 0,
@@ -512,14 +514,11 @@ where
                 }
             }
             TelemetryObservation::LifecycleTransition(observation) => {
-                let key = (
-                    observation.tenant_id().clone(),
-                    observation.event_id().clone(),
-                );
+                let key = (scope.tenant_id.clone(), observation.event_id().clone());
                 let candidate = LifecycleEvent::new(
-                    observation.tenant_id().clone(),
+                    scope.tenant_id.clone(),
                     observation.event_id().clone(),
-                    observation.user_id().cloned(),
+                    observation.subject_user_id().cloned(),
                     observation.event_kind(),
                     observation.subject_kind(),
                     observation.subject_id().clone(),

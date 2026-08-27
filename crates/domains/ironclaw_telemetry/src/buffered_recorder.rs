@@ -12,7 +12,10 @@ use std::{
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use ironclaw_telemetry_contracts::{
-    observation::{CollectorInstanceId, MAX_DURABLE_COUNTER, TelemetryObservation},
+    observation::{
+        CollectorInstanceId, MAX_DURABLE_COUNTER, ResourceScope, ScopedTelemetryObservation,
+        TelemetryObservation,
+    },
     recorder::{RecordOutcome, TelemetryRecorder},
 };
 use tokio::sync::Notify;
@@ -151,16 +154,16 @@ pub(crate) enum FailureClassCode {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PreflightError {
+    SystemScope,
     InvalidTimestamp,
     InvalidWindowStart,
     CounterOutOfRange,
-    MissingUserAttribution,
 }
 
 impl PreflightError {
     pub(crate) const fn failure_class(self) -> FailureClassCode {
         match self {
-            Self::InvalidTimestamp | Self::InvalidWindowStart | Self::MissingUserAttribution => {
+            Self::SystemScope | Self::InvalidTimestamp | Self::InvalidWindowStart => {
                 FailureClassCode::InvalidRecord
             }
             Self::CounterOutOfRange => FailureClassCode::CounterOverflow,
@@ -561,7 +564,7 @@ impl CoverageSideDelta {
 }
 
 struct IntakeState {
-    sender: mpsc::Sender<TelemetryObservation>,
+    sender: mpsc::Sender<ScopedTelemetryObservation>,
     closed: bool,
     coverage: CoverageSideAccumulator,
 }
@@ -617,7 +620,7 @@ fn record_coverage_event(
 }
 
 impl Intake {
-    fn new(sender: mpsc::Sender<TelemetryObservation>) -> Self {
+    fn new(sender: mpsc::Sender<ScopedTelemetryObservation>) -> Self {
         Self {
             state: Mutex::new(IntakeState {
                 sender,
@@ -688,7 +691,7 @@ impl Intake {
 
     pub(crate) fn try_record(
         &self,
-        observation: TelemetryObservation,
+        observation: ScopedTelemetryObservation,
         key: TenantHourKey,
         diagnostics: &DiagnosticsState,
         preflight: Result<(), PreflightError>,
@@ -838,18 +841,34 @@ struct Recorder {
 }
 
 impl TelemetryRecorder for Recorder {
-    fn try_record(&self, observation: TelemetryObservation) -> RecordOutcome {
+    fn try_record(&self, scope: ResourceScope, observation: TelemetryObservation) -> RecordOutcome {
+        let preflight = preflight_observation(&scope, &observation);
+        if matches!(preflight, Err(PreflightError::SystemScope)) {
+            let error = PreflightError::SystemScope;
+            self.diagnostics.add_invalid(1);
+            self.diagnostics.record_failure(error.failure_class());
+            return RecordOutcome::DroppedInvalid;
+        }
         let key = TenantHourKey {
-            tenant_id: observation.tenant_id().clone(),
+            tenant_id: scope.tenant_id.clone(),
             window_start: floor_utc_hour(observation.occurred_at()),
         };
-        let preflight = preflight_observation(&observation);
-        self.intake
-            .try_record(observation, key, self.diagnostics.as_ref(), preflight)
+        self.intake.try_record(
+            ScopedTelemetryObservation::new(scope, observation),
+            key,
+            self.diagnostics.as_ref(),
+            preflight,
+        )
     }
 }
 
-fn preflight_observation(observation: &TelemetryObservation) -> Result<(), PreflightError> {
+fn preflight_observation(
+    scope: &ResourceScope,
+    observation: &TelemetryObservation,
+) -> Result<(), PreflightError> {
+    if scope.is_system() {
+        return Err(PreflightError::SystemScope);
+    }
     let occurred_at = observation.occurred_at();
     if !(1..=MAX_TELEMETRY_TIMESTAMP_YEAR).contains(&occurred_at.year()) {
         return Err(PreflightError::InvalidTimestamp);
@@ -886,14 +905,7 @@ fn preflight_observation(observation: &TelemetryObservation) -> Result<(), Prefl
             }
         }
         TelemetryObservation::AutomationSettled(_) => {}
-        TelemetryObservation::LifecycleTransition(observation) => {
-            if observation.user_id().is_none()
-                && observation.subject_kind()
-                    != ironclaw_telemetry_contracts::observation::LifecycleSubjectKind::Tenant
-            {
-                return Err(PreflightError::MissingUserAttribution);
-            }
-        }
+        TelemetryObservation::LifecycleTransition(_) => {}
     }
     Ok(())
 }

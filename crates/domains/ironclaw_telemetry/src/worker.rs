@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use ironclaw_telemetry_contracts::observation::{
-    CanonicalTenantId as TenantId, CollectorInstanceId, TelemetryObservation,
+    CanonicalTenantId as TenantId, CollectorInstanceId, ScopedTelemetryObservation,
 };
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
@@ -53,10 +53,10 @@ impl CoverageAccumulator {
         }
     }
 
-    fn from_observation(observation: &TelemetryObservation) -> Self {
+    fn from_observation(observation: &ScopedTelemetryObservation) -> Self {
         let occurred_at = observation.occurred_at();
         Self {
-            tenant_id: observation.tenant_id().clone(),
+            tenant_id: observation.scope().tenant_id.clone(),
             window_start: floor_utc_hour(occurred_at),
             accepted_observation_count: 1,
             queue_full_drop_count: 0,
@@ -68,7 +68,7 @@ impl CoverageAccumulator {
         }
     }
 
-    fn add_observation(&mut self, observation: &TelemetryObservation) -> Result<(), ()> {
+    fn add_observation(&mut self, observation: &ScopedTelemetryObservation) -> Result<(), ()> {
         self.accepted_observation_count =
             self.accepted_observation_count.checked_add(1).ok_or(())?;
         self.first_observed_at = self.first_observed_at.min(observation.occurred_at());
@@ -144,14 +144,14 @@ impl CoverageAccumulator {
 }
 
 enum FirstWork {
-    Observation(TelemetryObservation),
+    Observation(Box<ScopedTelemetryObservation>),
     CoverageNotice,
     Shutdown,
 }
 
 pub(crate) async fn run(
     config: WorkerConfig,
-    mut receiver: mpsc::Receiver<TelemetryObservation>,
+    mut receiver: mpsc::Receiver<ScopedTelemetryObservation>,
     intake: Arc<Intake>,
     repository: Arc<dyn TelemetryRepository>,
     clock: Arc<dyn TelemetryClock>,
@@ -184,7 +184,7 @@ pub(crate) async fn run(
             }
             continue;
         };
-        let mut observations = vec![first];
+        let mut observations = vec![*first];
         if !shutting_down {
             let deadline = tokio::time::sleep(config.max_wait);
             tokio::pin!(deadline);
@@ -247,31 +247,31 @@ pub(crate) async fn run(
 }
 
 async fn receive_first(
-    receiver: &mut mpsc::Receiver<TelemetryObservation>,
+    receiver: &mut mpsc::Receiver<ScopedTelemetryObservation>,
     intake: &Intake,
     cancellation: &CancellationToken,
     shutting_down: bool,
 ) -> Option<FirstWork> {
     if shutting_down {
         return match receiver.try_recv() {
-            Ok(observation) => Some(FirstWork::Observation(observation)),
+            Ok(observation) => Some(FirstWork::Observation(Box::new(observation))),
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => None,
         };
     }
     select! {
         biased;
         _ = cancellation.cancelled() => match receiver.try_recv() {
-            Ok(observation) => Some(FirstWork::Observation(observation)),
+            Ok(observation) => Some(FirstWork::Observation(Box::new(observation))),
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) =>
                 Some(FirstWork::Shutdown),
         },
-        observation = receiver.recv() => observation.map(FirstWork::Observation),
+        observation = receiver.recv() => observation.map(|observation| FirstWork::Observation(Box::new(observation))),
         _ = intake.notified() => Some(FirstWork::CoverageNotice),
     }
 }
 
 async fn flush(
-    observations: &[TelemetryObservation],
+    observations: &[ScopedTelemetryObservation],
     pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
     intake: &Intake,
     collector_instance_id: Option<&CollectorInstanceId>,
@@ -291,7 +291,7 @@ async fn flush(
     }
     for observation in observations {
         let key = (
-            observation.tenant_id().clone(),
+            observation.scope().tenant_id.clone(),
             floor_utc_hour(observation.occurred_at()),
         );
         if let Some(accumulator) = pending_coverage.get_mut(&key) {
@@ -317,7 +317,7 @@ async fn flush(
             diagnostics.record_failure(classify_aggregation_error(&error));
             for observation in observations {
                 let key = (
-                    observation.tenant_id().clone(),
+                    observation.scope().tenant_id.clone(),
                     floor_utc_hour(observation.occurred_at()),
                 );
                 if let Some(accumulator) = pending_coverage.get_mut(&key)
@@ -387,7 +387,7 @@ async fn flush(
 }
 
 fn replace_with_write_failure_coverage(
-    observations: &[TelemetryObservation],
+    observations: &[ScopedTelemetryObservation],
     pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
     diagnostics: &DiagnosticsState,
 ) {
@@ -404,7 +404,7 @@ fn replace_with_write_failure_coverage(
     }
     for observation in observations {
         let key = (
-            observation.tenant_id().clone(),
+            observation.scope().tenant_id.clone(),
             floor_utc_hour(observation.occurred_at()),
         );
         let occurred_at = observation.occurred_at();
@@ -441,11 +441,11 @@ fn replace_with_write_failure_coverage(
     }
 }
 
-fn observation_keys(observations: &[TelemetryObservation]) -> Vec<TenantHourKey> {
+fn observation_keys(observations: &[ScopedTelemetryObservation]) -> Vec<TenantHourKey> {
     observations
         .iter()
         .map(|observation| TenantHourKey {
-            tenant_id: observation.tenant_id().clone(),
+            tenant_id: observation.scope().tenant_id.clone(),
             window_start: floor_utc_hour(observation.occurred_at()),
         })
         .collect()
@@ -469,7 +469,7 @@ fn ensure_coverage_entry<'a>(
 
 fn account_observations(
     intake: &Intake,
-    observations: &[TelemetryObservation],
+    observations: &[ScopedTelemetryObservation],
     diagnostics: &DiagnosticsState,
 ) {
     if let Err(error) = intake.account_observations(observation_keys(observations)) {

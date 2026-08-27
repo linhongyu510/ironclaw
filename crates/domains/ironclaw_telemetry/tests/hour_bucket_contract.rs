@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_host_api::{
-    ids::{TenantId, UserId},
+    ids::{InvocationId, TenantId, UserId},
+    resource::ResourceScope,
     turn::SanitizedFailure,
 };
 use ironclaw_telemetry::records::{
@@ -15,7 +16,7 @@ use ironclaw_telemetry_contracts::observation::{
     AutomationId, AutomationKind, AutomationSettledObservation, EffectiveModelId, LifecycleEventId,
     LifecycleEventKind, LifecycleSubjectKind, LifecycleTransitionObservation,
     ModelCallCompletedObservation, ObservationContext, OriginKind, ProviderId, RunOutcome,
-    RunSettledObservation, TelemetryObservation,
+    RunSettledObservation, ScopedTelemetryObservation, TelemetryObservation,
 };
 
 fn tenant() -> TenantId {
@@ -33,7 +34,23 @@ fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> D
 }
 
 fn context(timestamp: DateTime<Utc>) -> ObservationContext {
-    ObservationContext::new(tenant(), user(), timestamp)
+    ObservationContext::new(timestamp)
+}
+
+fn scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant(),
+        user_id: user(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn scoped(observation: TelemetryObservation) -> ScopedTelemetryObservation {
+    ScopedTelemetryObservation::new(scope(), observation)
 }
 
 fn window() -> DateTime<Utc> {
@@ -141,8 +158,8 @@ fn coverage_row(collector_id: &str) -> CollectorCoverage {
     .expect("coverage row")
 }
 
-fn completed_run(timestamp: DateTime<Utc>, duration_ms: u64) -> TelemetryObservation {
-    TelemetryObservation::RunSettled(
+fn completed_run(timestamp: DateTime<Utc>, duration_ms: u64) -> ScopedTelemetryObservation {
+    scoped(TelemetryObservation::RunSettled(
         RunSettledObservation::new(
             context(timestamp),
             OriginKind::Human,
@@ -152,7 +169,7 @@ fn completed_run(timestamp: DateTime<Utc>, duration_ms: u64) -> TelemetryObserva
             None,
         )
         .expect("valid run observation"),
-    )
+    ))
 }
 
 #[test]
@@ -181,7 +198,7 @@ fn utc_floor_does_not_reinterpret_dst_transitions() {
 #[test]
 fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
     let failure = SanitizedFailure::new("model_unavailable").expect("sanitized category");
-    let failed = TelemetryObservation::RunSettled(
+    let failed = scoped(TelemetryObservation::RunSettled(
         RunSettledObservation::new(
             context(at(2026, 8, 26, 10, 24, 0)),
             OriginKind::Human,
@@ -191,8 +208,8 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
             Some(failure),
         )
         .expect("valid failed run"),
-    );
-    let model = TelemetryObservation::ModelCallCompleted(
+    ));
+    let model = scoped(TelemetryObservation::ModelCallCompleted(
         ModelCallCompletedObservation::new(
             context(at(2026, 8, 26, 10, 25, 0)),
             ProviderId::new("provider-a").expect("provider"),
@@ -200,8 +217,8 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
             None,
         )
         .expect("valid model call"),
-    );
-    let automation = TelemetryObservation::AutomationSettled(
+    ));
+    let automation = scoped(TelemetryObservation::AutomationSettled(
         AutomationSettledObservation::new(
             context(at(2026, 8, 26, 10, 26, 0)),
             AutomationId::new("automation-a").expect("automation"),
@@ -209,10 +226,9 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
             RunOutcome::Cancelled,
         )
         .expect("valid automation"),
-    );
-    let lifecycle = TelemetryObservation::LifecycleTransition(
+    ));
+    let lifecycle = scoped(TelemetryObservation::LifecycleTransition(
         LifecycleTransitionObservation::new(
-            tenant(),
             Some(user()),
             LifecycleEventId::new("event-a").expect("event"),
             LifecycleEventKind::RoutineCreated,
@@ -221,11 +237,10 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
             at(2026, 8, 26, 10, 27, 0),
         )
         .expect("valid lifecycle"),
-    );
+    ));
     let duplicate_lifecycle = lifecycle.clone();
-    let conflicting_lifecycle = TelemetryObservation::LifecycleTransition(
+    let conflicting_lifecycle = scoped(TelemetryObservation::LifecycleTransition(
         LifecycleTransitionObservation::new(
-            tenant(),
             Some(user()),
             LifecycleEventId::new("event-a").expect("event"),
             LifecycleEventKind::RoutineDeleted,
@@ -234,7 +249,7 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
             at(2026, 8, 26, 10, 27, 1),
         )
         .expect("valid conflicting lifecycle"),
-    );
+    ));
 
     let ordered = vec![
         completed_run(at(2026, 8, 26, 10, 23, 0), 10),
@@ -307,7 +322,7 @@ fn aggregate_accepts_signed_bigint_maximum_on_first_observation() {
 #[test]
 fn model_usage_sum_above_signed_bigint_maximum_is_rejected() {
     let make_model = |timestamp, input_tokens| {
-        TelemetryObservation::ModelCallCompleted(
+        scoped(TelemetryObservation::ModelCallCompleted(
             ModelCallCompletedObservation::new(
                 context(timestamp),
                 ProviderId::new("provider-a").expect("provider"),
@@ -320,7 +335,7 @@ fn model_usage_sum_above_signed_bigint_maximum_is_rejected() {
                 )),
             )
             .expect("valid model observation"),
-        )
+        ))
     };
     let observations = [
         make_model(at(2026, 8, 26, 10, 0, 0), i64::MAX as u64),
