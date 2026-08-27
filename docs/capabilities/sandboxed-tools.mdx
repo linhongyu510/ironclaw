@@ -1,6 +1,5 @@
 ---
 title: WASM Tools
-sidebarTitle: Sandboxed Tools
 description: Sandboxed tool execution via WebAssembly (wasmtime)
 ---
 
@@ -8,13 +7,15 @@ WASM tools run inside a WebAssembly sandbox powered by [wasmtime](https://wasmti
 
 This is IronClaw's recommended approach for custom integrations that need stronger isolation than a built-in Rust tool provides.
 
+This page is the build reference: the manifest, the limits, the host functions, and how to install a module. For *why* the design keeps credentials out of the sandbox — and what it does not defend against — read [Credential Protection](/security/secrets-and-sandboxing).
+
 ---
 
 ## How It Works
 
 When the model selects a tool, authorization reads its manifest and plans obligations for the call — network policy, credential staging, resource ceilings. The host then loads the module and instantiates it with a fuel and memory budget. The tool's only way out is a host function: it calls `http-request` with an unauthenticated request, and the host egress boundary rejects any tool-supplied credential headers, leak-scans the URL, headers, and body, injects the staged credential, and matches the destination against the tool's `network_targets` and credential audiences before any connection opens. The response passes back through the host — sensitive headers stripped, the credential redacted, body leak-scanned — into the sandbox, and the tool's output returns to the model.
 
-The credential never enters the sandbox. See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for that flow in detail.
+The credential never enters the sandbox. See [Credential Protection](/security/secrets-and-sandboxing) for that flow in detail.
 
 ---
 

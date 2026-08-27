@@ -43,7 +43,7 @@ On the way out, the host egress boundary rejects any credential the tool supplie
 
 Secrets are separated from ordinary data at every point. They are encrypted at rest, never enter the sandbox, and are attached at the host boundary — after the request has been validated, and only for the one call that was authorized.
 
-See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for the step-by-step walkthrough.
+See [Credential Protection](/security/secrets-and-sandboxing) for the step-by-step walkthrough.
 
 ---
 
@@ -93,7 +93,7 @@ What each field controls:
 
 Note what is *absent*: there is no field a tool can set to read a secret. Credential material is only ever attached by the host, to a request the host has already validated.
 
-For the full picture, see [Sandboxed Tools](/capabilities/sandboxed-tools).
+For the full picture, see [WASM Tools](/capabilities/sandboxed-tools).
 
 ---
 
@@ -121,7 +121,7 @@ Each pattern carries a severity and an action:
 | **Redact** | The matched span is replaced before the content moves on. | Shapes that are often legitimate in context — bearer tokens, `Authorization` headers, bare JWTs. |
 | **Warn** | Logged at debug level; the content passes this boundary. (Compaction and trace contribution redact these matches too.) | Ambiguous shapes such as 64-character hex, which is as often a hash as a secret. |
 
-See [Secrets & Sandboxing](/security/secrets-and-sandboxing#where-the-scan-runs) for exactly which boundaries run this scan.
+See [Credential Protection](/security/secrets-and-sandboxing#where-the-scan-runs) for exactly which boundaries run this scan.
 
 ---
 
@@ -136,7 +136,7 @@ IronClaw's honest position on this is that **structural containment, not pattern
 3. **Capabilities are gated by origin.** `origin_gate_matrix` means a tool the model can reach during an agent turn can be `forbidden` to routine/heartbeat automation. Scheduled trigger runs are agent turns and follow the `loop_run` policy — so an injected trigger payload still meets the same approval gates as an interactive turn.
 4. **Effects can require approval.** Tools carrying `financial`, `modify_approval`, or `modify_budget` effects always stop and wait for you, as does any tool you set to *ask each time* or whose manifest gates an origin `ask_always`. For everything else, note the default: global auto-approve is **on** for new users, so an `ask` tool such as Gmail send runs without a prompt until you turn auto-approve off or set a per-tool override. An injection that convinces the model to send an email only has to convince *you* if you have made that choice.
 
-And underneath all of that, the sandbox is the boundary that does not depend on detecting anything: a fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for that structural mitigation.
+And underneath all of that, the sandbox is the boundary that does not depend on detecting anything: a fully hijacked tool still cannot read a secret it wasn't granted, reach a host outside its declared targets, or touch your filesystem. See [Credential Protection](/security/secrets-and-sandboxing) for that structural mitigation.
 
 ---
 
