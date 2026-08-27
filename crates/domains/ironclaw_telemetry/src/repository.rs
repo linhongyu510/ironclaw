@@ -1,19 +1,28 @@
-// Task 1 removes the backend adapters but leaves this backend-neutral scan,
-// cursor, and decode grammar for the scoped-filesystem repository in Task 3.
-#![allow(dead_code)]
-
 use async_trait::async_trait;
-use chrono::{DateTime, SecondsFormat, Timelike, Utc};
-use ironclaw_telemetry_contracts::observation::{
-    AutomationKind, CanonicalTenantId as TenantId, CanonicalUserId as UserId, CollectorInstanceId,
-    EffectiveModelId, FailureCategory, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
-    MAX_TELEMETRY_IDENTIFIER_BYTES, OriginKind, ProviderId, SubjectId,
+use chrono::{DateTime, Utc};
+use ironclaw_filesystem::{
+    CasApply, ContentType, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
+    OrderedPage, OrderedQueryCursor, ScopedFilesystem, SortDirection, VersionedEntry, cas_update,
 };
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId as WorkerUserId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
+use ironclaw_telemetry_contracts::observation::{
+    CanonicalTenantId as TenantId, EffectiveModelId, ProviderId,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
     HourlyUserActivity, LifecycleEvent, TelemetryBatch, error::TelemetryRepositoryError,
 };
+mod batch_sink;
+mod repository_codec;
+mod store;
+use repository_codec::*;
 
 pub const MAX_TELEMETRY_PAGE_SIZE: usize = 2_000;
 /// Maximum UTF-8 byte length accepted for an opaque telemetry page cursor.
@@ -23,111 +32,145 @@ pub const MAX_TELEMETRY_PAGE_SIZE: usize = 2_000;
 /// allocations while leaving ample room for the bounded cursor fields.
 pub const MAX_TELEMETRY_CURSOR_BYTES: usize = 4_096;
 
-/// Tenant and half-open time range shared by every export scan.
+const TELEMETRY_PREFIX: &str = "/tenant-shared/telemetry/v0";
+const RECORD_SCHEMA_VERSION: u16 = 0;
+const MAX_TELEMETRY_RANGE: chrono::Duration = chrono::Duration::days(366);
+
+const FAMILY_ACTIVITY: &str = "activity";
+const FAMILY_MODEL: &str = "model";
+const FAMILY_FAILURE: &str = "failure";
+const FAMILY_AUTOMATION: &str = "automation";
+const FAMILY_LIFECYCLE: &str = "lifecycle";
+const FAMILY_COVERAGE: &str = "coverage";
+
+const INDEX_FAMILY_TIME: &str = "telemetry_family_time_v0";
+const INDEX_PROVIDER_TIME: &str = "telemetry_provider_time_v0";
+const INDEX_MODEL_TIME: &str = "telemetry_model_time_v0";
+const INDEX_PROVIDER_MODEL_TIME: &str = "telemetry_provider_model_time_v0";
+const INDEX_LIFECYCLE_TIME: &str = "telemetry_lifecycle_time_v0";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TelemetryScanRequest {
-    tenant_id: TenantId,
+pub struct ScopedTelemetryBatch {
+    scope: ResourceScope,
+    batch: TelemetryBatch,
+}
+
+impl ScopedTelemetryBatch {
+    pub fn new(scope: ResourceScope, batch: TelemetryBatch) -> Self {
+        Self { scope, batch }
+    }
+
+    fn validate(&self) -> Result<(), TelemetryRepositoryError> {
+        let tenant = self.scope.tenant_id.as_str();
+        let tenants = self
+            .batch
+            .activity()
+            .iter()
+            .map(|row| row.tenant_id().as_str())
+            .chain(
+                self.batch
+                    .model_usage()
+                    .iter()
+                    .map(|row| row.tenant_id().as_str()),
+            )
+            .chain(
+                self.batch
+                    .run_failures()
+                    .iter()
+                    .map(|row| row.tenant_id().as_str()),
+            )
+            .chain(
+                self.batch
+                    .automation_usage()
+                    .iter()
+                    .map(|row| row.tenant_id().as_str()),
+            )
+            .chain(
+                self.batch
+                    .lifecycle_events()
+                    .iter()
+                    .map(|row| row.tenant_id().as_str()),
+            )
+            .chain(
+                self.batch
+                    .collector_coverage()
+                    .iter()
+                    .map(|row| row.tenant_id().as_str()),
+            );
+        if tenants.into_iter().any(|row_tenant| row_tenant != tenant) {
+            Err(TelemetryRepositoryError::ScopeMismatch)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn scope(&self) -> &ResourceScope {
+        &self.scope
+    }
+    pub fn batch(&self) -> &TelemetryBatch {
+        &self.batch
+    }
+    pub fn into_parts(self) -> (ResourceScope, TelemetryBatch) {
+        (self.scope, self.batch)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BatchApplyReport {
+    applied_prefix: usize,
+    failed_record_count: usize,
+}
+
+impl BatchApplyReport {
+    pub const fn applied_prefix(self) -> usize {
+        self.applied_prefix
+    }
+    pub const fn applied_record_count(self) -> usize {
+        self.applied_prefix
+    }
+    pub const fn failed_record_count(self) -> usize {
+        self.failed_record_count
+    }
+}
+
+/// The worker needs only this behavior port. It is private so backend choice
+/// cannot become a second repository contract.
+#[async_trait]
+pub(crate) trait TelemetryBatchSink: Send + Sync {
+    async fn apply_batch(
+        &self,
+        batch: &TelemetryBatch,
+    ) -> Result<BatchApplyReport, TelemetryRepositoryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryPageRequest {
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     now: DateTime<Utc>,
+    page_size: usize,
+    after: Option<String>,
     include_partial: bool,
     provider_id: Option<ProviderId>,
     effective_model_id: Option<EffectiveModelId>,
 }
 
-impl TelemetryScanRequest {
+impl TelemetryPageRequest {
     pub fn new(
-        tenant_id: TenantId,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         now: DateTime<Utc>,
+        page_size: usize,
+        after: Option<String>,
     ) -> Result<Self, TelemetryRepositoryError> {
         let from = normalize_timestamp(from);
         let to = normalize_timestamp(to);
         let now = normalize_timestamp(now);
-        if from >= to {
+        if from >= to || to.signed_duration_since(from) > MAX_TELEMETRY_RANGE {
             return Err(TelemetryRepositoryError::InvalidScanRequest {
-                reason: "from must be before to",
+                reason: "range must be non-empty and at most 366 days",
             });
         }
-        Ok(Self {
-            tenant_id,
-            from,
-            to,
-            now,
-            include_partial: false,
-            provider_id: None,
-            effective_model_id: None,
-        })
-    }
-
-    pub fn with_include_partial(mut self, include_partial: bool) -> Self {
-        self.include_partial = include_partial;
-        self
-    }
-
-    pub fn with_provider_id(mut self, provider_id: Option<ProviderId>) -> Self {
-        self.provider_id = provider_id;
-        self
-    }
-
-    pub fn with_effective_model_id(mut self, model_id: Option<EffectiveModelId>) -> Self {
-        self.effective_model_id = model_id;
-        self
-    }
-
-    pub fn tenant_id(&self) -> &TenantId {
-        &self.tenant_id
-    }
-
-    pub fn from(&self) -> DateTime<Utc> {
-        self.from
-    }
-
-    pub fn to(&self) -> DateTime<Utc> {
-        self.to
-    }
-
-    pub fn now(&self) -> DateTime<Utc> {
-        self.now
-    }
-
-    pub fn include_partial(&self) -> bool {
-        self.include_partial
-    }
-
-    pub fn provider_id(&self) -> Option<&ProviderId> {
-        self.provider_id.as_ref()
-    }
-
-    pub fn effective_model_id(&self) -> Option<&EffectiveModelId> {
-        self.effective_model_id.as_ref()
-    }
-
-    /// Return the effective upper bound. The open hour is excluded unless the
-    /// caller explicitly opted into partial-hour data.
-    pub fn effective_to(&self) -> DateTime<Utc> {
-        if self.include_partial {
-            self.to
-        } else {
-            self.to.min(crate::floor_utc_hour(self.now))
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TelemetryScanPageRequest {
-    range: TelemetryScanRequest,
-    page_size: usize,
-    after: Option<String>,
-}
-
-impl TelemetryScanPageRequest {
-    pub fn new(
-        range: TelemetryScanRequest,
-        page_size: usize,
-        after: Option<String>,
-    ) -> Result<Self, TelemetryRepositoryError> {
         if page_size == 0 || page_size > MAX_TELEMETRY_PAGE_SIZE {
             return Err(TelemetryRepositoryError::InvalidPageRequest {
                 reason: "page size must be between 1 and 2000",
@@ -142,23 +185,347 @@ impl TelemetryScanPageRequest {
             });
         }
         Ok(Self {
-            range,
+            from,
+            to,
+            now,
             page_size,
             after,
+            include_partial: false,
+            provider_id: None,
+            effective_model_id: None,
         })
     }
 
-    pub fn range(&self) -> &TelemetryScanRequest {
-        &self.range
+    pub fn with_include_partial(mut self, include_partial: bool) -> Self {
+        self.include_partial = include_partial;
+        self
     }
-
+    pub fn with_provider_id(mut self, provider_id: Option<ProviderId>) -> Self {
+        self.provider_id = provider_id;
+        self
+    }
+    pub fn with_effective_model_id(mut self, model_id: Option<EffectiveModelId>) -> Self {
+        self.effective_model_id = model_id;
+        self
+    }
+    pub fn from(&self) -> DateTime<Utc> {
+        self.from
+    }
+    pub fn to(&self) -> DateTime<Utc> {
+        self.to
+    }
+    pub fn now(&self) -> DateTime<Utc> {
+        self.now
+    }
     pub fn page_size(&self) -> usize {
         self.page_size
     }
-
     pub fn after(&self) -> Option<&str> {
         self.after.as_deref()
     }
+    pub fn include_partial(&self) -> bool {
+        self.include_partial
+    }
+    pub fn provider_id(&self) -> Option<&ProviderId> {
+        self.provider_id.as_ref()
+    }
+    pub fn effective_model_id(&self) -> Option<&EffectiveModelId> {
+        self.effective_model_id.as_ref()
+    }
+    pub fn effective_to(&self) -> DateTime<Utc> {
+        if self.include_partial {
+            self.to
+        } else {
+            self.to.min(crate::floor_utc_hour(self.now))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireActivity {
+    schema_version: u16,
+    tenant_id: String,
+    window_start: String,
+    user_id: String,
+    origin_kind: String,
+    run_count: u64,
+    runs_with_reported_tool_calls_count: u64,
+    tool_count_reported_run_count: u64,
+    reported_tool_call_count: u64,
+    completed_count: u64,
+    failed_count: u64,
+    cancelled_count: u64,
+    recovery_required_count: u64,
+    total_run_latency_ms: u64,
+    first_observed_at: String,
+    last_observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireModel {
+    schema_version: u16,
+    tenant_id: String,
+    user_id: String,
+    window_start: String,
+    provider_id: String,
+    effective_model_id: String,
+    inference_count: u64,
+    usage_reported_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    first_observed_at: String,
+    last_observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireFailure {
+    schema_version: u16,
+    tenant_id: String,
+    window_start: String,
+    user_id: String,
+    failure_category: String,
+    failure_count: u64,
+    first_observed_at: String,
+    last_observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireAutomation {
+    schema_version: u16,
+    tenant_id: String,
+    window_start: String,
+    user_id: String,
+    automation_kind: String,
+    run_count: u64,
+    completed_count: u64,
+    failed_count: u64,
+    cancelled_count: u64,
+    recovery_required_count: u64,
+    first_observed_at: String,
+    last_observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireLifecycle {
+    schema_version: u16,
+    tenant_id: String,
+    event_id: String,
+    user_id: Option<String>,
+    event_kind: String,
+    subject_kind: String,
+    subject_id: String,
+    occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WireCoverage {
+    schema_version: u16,
+    tenant_id: String,
+    window_start: String,
+    collector_instance_id: String,
+    accepted_observation_count: u64,
+    queue_full_drop_count: u64,
+    closed_drop_count: u64,
+    invalid_drop_count: u64,
+    write_failed_observation_count: u64,
+    first_observed_at: String,
+    last_observed_at: String,
+}
+
+fn json_error(operation: &'static str, source: serde_json::Error) -> TelemetryRepositoryError {
+    TelemetryRepositoryError::Serialization { operation, source }
+}
+
+fn checked_add(
+    left: u64,
+    right: u64,
+    family: &'static str,
+) -> Result<u64, TelemetryRepositoryError> {
+    left.checked_add(right)
+        .filter(|value| *value <= ironclaw_telemetry_contracts::observation::MAX_DURABLE_COUNTER)
+        .ok_or(TelemetryRepositoryError::CounterOverflow { family })
+}
+
+fn checked_counter(value: u64, family: &'static str) -> Result<u64, TelemetryRepositoryError> {
+    if value <= ironclaw_telemetry_contracts::observation::MAX_DURABLE_COUNTER {
+        Ok(value)
+    } else {
+        Err(TelemetryRepositoryError::CounterOverflow { family })
+    }
+}
+
+fn parse_version(version: u16) -> Result<(), TelemetryRepositoryError> {
+    if version == RECORD_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(TelemetryRepositoryError::UnknownEnum {
+            field: "schema_version",
+            value: version.to_string(),
+        })
+    }
+}
+
+fn scoped_path(raw: String) -> Result<ScopedPath, TelemetryRepositoryError> {
+    ScopedPath::new(raw).map_err(|source| TelemetryRepositoryError::StorageOperation {
+        operation: "constructing telemetry scoped path",
+        source: Box::new(source),
+    })
+}
+
+fn escape_component(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push('%');
+            escaped.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+            escaped.push(char::from(b"0123456789ABCDEF"[(byte & 0x0f) as usize]));
+        }
+    }
+    escaped
+}
+
+fn path_for(
+    family: &str,
+    hour: DateTime<Utc>,
+    parts: &[&str],
+) -> Result<ScopedPath, TelemetryRepositoryError> {
+    let mut raw = format!(
+        "{TELEMETRY_PREFIX}/hourly/{family}/{}",
+        timestamp_text(hour)
+    );
+    for part in parts {
+        raw.push('/');
+        raw.push_str(&escape_component(part));
+    }
+    raw.push_str(".json");
+    scoped_path(raw)
+}
+
+fn lifecycle_path(event_id: &str) -> Result<ScopedPath, TelemetryRepositoryError> {
+    scoped_path(format!(
+        "{TELEMETRY_PREFIX}/lifecycle/{}.json",
+        escape_component(event_id)
+    ))
+}
+
+fn coverage_path(row: &CollectorCoverage) -> Result<ScopedPath, TelemetryRepositoryError> {
+    path_for(
+        FAMILY_COVERAGE,
+        row.window_start(),
+        &[row.collector_instance_id().as_str()],
+    )
+}
+
+fn index_key(value: &'static str) -> Result<IndexKey, TelemetryRepositoryError> {
+    IndexKey::new(value).map_err(|source| TelemetryRepositoryError::StorageOperation {
+        operation: "constructing telemetry index key",
+        source: Box::new(source),
+    })
+}
+
+fn index_name(value: &'static str) -> Result<IndexName, TelemetryRepositoryError> {
+    IndexName::new(value).map_err(|source| TelemetryRepositoryError::StorageOperation {
+        operation: "constructing telemetry index name",
+        source: Box::new(source),
+    })
+}
+
+fn exact_index(
+    name: &'static str,
+    keys: &[&'static str],
+) -> Result<IndexSpec, TelemetryRepositoryError> {
+    Ok(IndexSpec::new(
+        index_name(name)?,
+        keys.iter()
+            .map(|key| index_key(key))
+            .collect::<Result<Vec<_>, _>>()?,
+        IndexKind::Exact,
+    ))
+}
+
+fn projection(
+    family: &str,
+    tenant: &str,
+    window: Option<DateTime<Utc>>,
+    tie: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<BTreeMap<IndexKey, IndexValue>, TelemetryRepositoryError> {
+    let mut values = BTreeMap::new();
+    values.insert(index_key("tenant_id")?, IndexValue::Text(tenant.to_owned()));
+    values.insert(
+        index_key("record_family")?,
+        IndexValue::Text(family.to_owned()),
+    );
+    if let Some(window) = window {
+        values.insert(
+            index_key("window_start")?,
+            IndexValue::Text(timestamp_text(window)),
+        );
+    } else {
+        values.insert(
+            index_key("occurred_at")?,
+            IndexValue::Text(timestamp_text(Utc::now())),
+        );
+    }
+    values.insert(index_key("tie_breaker")?, IndexValue::Text(tie.to_owned()));
+    if let Some(provider) = provider {
+        values.insert(
+            index_key("provider_id")?,
+            IndexValue::Text(provider.to_owned()),
+        );
+    }
+    if let Some(model) = model {
+        values.insert(
+            index_key("effective_model_id")?,
+            IndexValue::Text(model.to_owned()),
+        );
+    }
+    Ok(values)
+}
+
+fn lifecycle_projection(
+    tenant: &str,
+    occurred_at: DateTime<Utc>,
+    tie: &str,
+) -> Result<BTreeMap<IndexKey, IndexValue>, TelemetryRepositoryError> {
+    let mut values = BTreeMap::new();
+    values.insert(index_key("tenant_id")?, IndexValue::Text(tenant.to_owned()));
+    values.insert(
+        index_key("record_family")?,
+        IndexValue::Text(FAMILY_LIFECYCLE.to_owned()),
+    );
+    values.insert(
+        index_key("occurred_at")?,
+        IndexValue::Text(timestamp_text(occurred_at)),
+    );
+    values.insert(index_key("tie_breaker")?, IndexValue::Text(tie.to_owned()));
+    Ok(values)
+}
+
+fn entry<W: Serialize>(
+    kind: &'static str,
+    wire: &W,
+    indexed: BTreeMap<IndexKey, IndexValue>,
+) -> Result<Entry, TelemetryRepositoryError> {
+    let body = serde_json::to_vec(wire)
+        .map_err(|source| json_error("encoding telemetry record", source))?;
+    let kind = ironclaw_filesystem::RecordKind::new(kind).map_err(|source| {
+        TelemetryRepositoryError::StorageOperation {
+            operation: "constructing telemetry record kind",
+            source: Box::new(source),
+        }
+    })?;
+    Ok(Entry {
+        body,
+        content_type: ContentType::json(),
+        kind: Some(kind),
+        indexed,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,308 +552,8 @@ impl<T> TelemetryPage<T> {
     }
 }
 
-/// Temporary backend-neutral repository surface retained while Task 3 replaces
-/// it with the concrete scoped-filesystem repository and typed read methods.
-#[async_trait]
-pub trait TelemetryRepository: Send + Sync {
-    async fn migrate(&self) -> Result<(), TelemetryRepositoryError>;
-
-    async fn upsert_batch(&self, batch: &TelemetryBatch) -> Result<(), TelemetryRepositoryError>;
-
-    async fn scan_activity_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyUserActivity>, TelemetryRepositoryError>;
-
-    async fn scan_model_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyModelUsage>, TelemetryRepositoryError>;
-
-    async fn scan_failure_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyRunFailure>, TelemetryRepositoryError>;
-
-    async fn scan_automation_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyAutomationUsage>, TelemetryRepositoryError>;
-
-    async fn scan_lifecycle_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<LifecycleEvent>, TelemetryRepositoryError>;
-
-    async fn scan_coverage_page(
-        &self,
-        request: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<CollectorCoverage>, TelemetryRepositoryError>;
-}
-
-pub(crate) fn timestamp_text(timestamp: DateTime<Utc>) -> String {
-    normalize_timestamp(timestamp).to_rfc3339_opts(SecondsFormat::Micros, true)
-}
-
-pub(crate) fn normalize_timestamp(timestamp: DateTime<Utc>) -> DateTime<Utc> {
-    let micros = timestamp.nanosecond() / 1_000;
-    match timestamp.with_nanosecond(micros * 1_000) {
-        Some(normalized) => normalized,
-        None => timestamp,
-    }
-}
-
-pub(crate) fn parse_timestamp(
-    value: &str,
-    field: &'static str,
-) -> Result<DateTime<Utc>, TelemetryRepositoryError> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| normalize_timestamp(timestamp.with_timezone(&Utc)))
-        .map_err(|source| TelemetryRepositoryError::InvalidTimestamp { field, source })
-}
-
-pub(crate) fn encode_cursor(timestamp: DateTime<Utc>, fields: &[&str]) -> String {
-    let timestamp = timestamp_text(timestamp);
-    let mut cursor = String::new();
-    append_length_prefixed_segment(&mut cursor, &timestamp);
-    for field in fields {
-        append_length_prefixed_segment(&mut cursor, field);
-    }
-    cursor
-}
-
-fn append_length_prefixed_segment(cursor: &mut String, value: &str) {
-    cursor.push_str(&value.len().to_string());
-    cursor.push(':');
-    cursor.push_str(value);
-}
-
-pub(crate) fn decode_cursor(
-    cursor: &str,
-    expected_fields: usize,
-) -> Result<(DateTime<Utc>, Vec<String>), TelemetryRepositoryError> {
-    if cursor.len() > MAX_TELEMETRY_CURSOR_BYTES {
-        return Err(TelemetryRepositoryError::InvalidCursor);
-    }
-    let mut cursor = cursor.as_bytes();
-    let timestamp = parse_length_prefixed_segment(&mut cursor)?;
-    let timestamp = parse_timestamp(&timestamp, "cursor timestamp")?;
-    let mut fields = Vec::with_capacity(expected_fields);
-    while !cursor.is_empty() {
-        fields.push(parse_length_prefixed_segment(&mut cursor)?);
-    }
-    if fields.len() != expected_fields {
-        return Err(TelemetryRepositoryError::InvalidCursor);
-    }
-    Ok((timestamp, fields))
-}
-
-fn parse_length_prefixed_segment(cursor: &mut &[u8]) -> Result<String, TelemetryRepositoryError> {
-    let colon = cursor
-        .iter()
-        .position(|byte| *byte == b':')
-        .ok_or(TelemetryRepositoryError::InvalidCursor)?;
-    let length_text = std::str::from_utf8(&cursor[..colon])
-        .map_err(TelemetryRepositoryError::invalid_cursor_encoding)?;
-    let length = length_text.parse::<usize>().map_err(|source| {
-        TelemetryRepositoryError::invalid_cursor_length(length_text.to_owned(), source)
-    })?;
-    if length == 0 || length > MAX_TELEMETRY_IDENTIFIER_BYTES * 2 {
-        return Err(TelemetryRepositoryError::InvalidCursor);
-    }
-    let value_start = colon + 1;
-    let value_end = value_start
-        .checked_add(length)
-        .ok_or(TelemetryRepositoryError::InvalidCursor)?;
-    if value_end > cursor.len() {
-        return Err(TelemetryRepositoryError::InvalidCursor);
-    }
-    let value = String::from_utf8(cursor[value_start..value_end].to_vec())
-        .map_err(TelemetryRepositoryError::invalid_cursor_encoding)?;
-    *cursor = &cursor[value_end..];
-    Ok(value)
-}
-
-pub(crate) fn page_rows<T>(mut rows: Vec<T>, page_size: usize) -> (Vec<T>, bool) {
-    let has_more = rows.len() > page_size;
-    if has_more {
-        rows.truncate(page_size);
-    }
-    (rows, has_more)
-}
-
-pub(crate) fn checked_counter_sum(
-    current: i64,
-    incoming: u64,
-    family: &'static str,
-) -> Result<(), TelemetryRepositoryError> {
-    let current = counter_from_i64(current, family)?;
-    let total = current
-        .checked_add(incoming)
-        .ok_or(TelemetryRepositoryError::CounterOverflow { family })?;
-    if total > ironclaw_telemetry_contracts::observation::MAX_DURABLE_COUNTER {
-        return Err(TelemetryRepositoryError::CounterOverflow { family });
-    }
-    Ok(())
-}
-
-pub(crate) fn counter_from_i64(
-    value: i64,
-    family: &'static str,
-) -> Result<u64, TelemetryRepositoryError> {
-    u64::try_from(value)
-        .map_err(|source| TelemetryRepositoryError::counter_conversion(family, value, source))
-}
-
-pub(crate) fn batch_is_empty(batch: &TelemetryBatch) -> bool {
-    batch.activity().is_empty()
-        && batch.model_usage().is_empty()
-        && batch.run_failures().is_empty()
-        && batch.automation_usage().is_empty()
-        && batch.lifecycle_events().is_empty()
-        && batch.collector_coverage().is_empty()
-}
-
-pub(crate) fn decode_tenant_id(value: String) -> Result<TenantId, TelemetryRepositoryError> {
-    TenantId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("tenant_id", value, source)
-    })
-}
-
-pub(crate) fn decode_user_id(value: String) -> Result<UserId, TelemetryRepositoryError> {
-    UserId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("user_id", value, source)
-    })
-}
-
-pub(crate) fn decode_provider_id(value: String) -> Result<ProviderId, TelemetryRepositoryError> {
-    ProviderId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("provider_id", value, source)
-    })
-}
-
-pub(crate) fn decode_model_id(value: String) -> Result<EffectiveModelId, TelemetryRepositoryError> {
-    EffectiveModelId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("effective_model_id", value, source)
-    })
-}
-
-pub(crate) fn decode_failure_category(
-    value: String,
-) -> Result<FailureCategory, TelemetryRepositoryError> {
-    FailureCategory::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("failure_category", value, source)
-    })
-}
-
-pub(crate) fn decode_event_id(value: String) -> Result<LifecycleEventId, TelemetryRepositoryError> {
-    LifecycleEventId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("event_id", value, source)
-    })
-}
-
-pub(crate) fn decode_subject_id(value: String) -> Result<SubjectId, TelemetryRepositoryError> {
-    SubjectId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("subject_id", value, source)
-    })
-}
-
-pub(crate) fn decode_collector_id(
-    value: String,
-) -> Result<CollectorInstanceId, TelemetryRepositoryError> {
-    CollectorInstanceId::new(value.clone()).map_err(|source| {
-        TelemetryRepositoryError::invalid_persisted_field("collector_instance_id", value, source)
-    })
-}
-
-pub(crate) fn origin_text(value: OriginKind) -> &'static str {
-    match value {
-        OriginKind::Human => "human",
-        OriginKind::ParentAgent => "parent_agent",
-        OriginKind::System => "system",
-        OriginKind::Automation => "automation",
-        OriginKind::Other => "other",
-    }
-}
-
-pub(crate) fn parse_origin(value: &str) -> Result<OriginKind, TelemetryRepositoryError> {
-    match value {
-        "human" => Ok(OriginKind::Human),
-        "parent_agent" => Ok(OriginKind::ParentAgent),
-        "system" => Ok(OriginKind::System),
-        "automation" => Ok(OriginKind::Automation),
-        "other" => Ok(OriginKind::Other),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "origin_kind",
-            value: value.to_owned(),
-        }),
-    }
-}
-
-pub(crate) fn automation_text(value: AutomationKind) -> &'static str {
-    match value {
-        AutomationKind::Cron => "cron",
-        AutomationKind::Once => "once",
-        AutomationKind::Manual => "manual",
-    }
-}
-
-pub(crate) fn parse_automation(value: &str) -> Result<AutomationKind, TelemetryRepositoryError> {
-    match value {
-        "cron" => Ok(AutomationKind::Cron),
-        "once" => Ok(AutomationKind::Once),
-        "manual" => Ok(AutomationKind::Manual),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "automation_kind",
-            value: value.to_owned(),
-        }),
-    }
-}
-
-pub(crate) fn lifecycle_event_text(value: LifecycleEventKind) -> &'static str {
-    match value {
-        LifecycleEventKind::MemberAdded => "member_added",
-        LifecycleEventKind::MemberRemoved => "member_removed",
-        LifecycleEventKind::RoutineCreated => "routine_created",
-        LifecycleEventKind::RoutineEnabled => "routine_enabled",
-        LifecycleEventKind::RoutineDisabled => "routine_disabled",
-        LifecycleEventKind::RoutineDeleted => "routine_deleted",
-    }
-}
-
-pub(crate) fn parse_event(value: &str) -> Result<LifecycleEventKind, TelemetryRepositoryError> {
-    match value {
-        "member_added" => Ok(LifecycleEventKind::MemberAdded),
-        "member_removed" => Ok(LifecycleEventKind::MemberRemoved),
-        "routine_created" => Ok(LifecycleEventKind::RoutineCreated),
-        "routine_enabled" => Ok(LifecycleEventKind::RoutineEnabled),
-        "routine_disabled" => Ok(LifecycleEventKind::RoutineDisabled),
-        "routine_deleted" => Ok(LifecycleEventKind::RoutineDeleted),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "event_kind",
-            value: value.to_owned(),
-        }),
-    }
-}
-
-pub(crate) fn lifecycle_subject_text(value: LifecycleSubjectKind) -> &'static str {
-    match value {
-        LifecycleSubjectKind::Tenant => "tenant",
-        LifecycleSubjectKind::User => "user",
-        LifecycleSubjectKind::Routine => "routine",
-    }
-}
-
-pub(crate) fn parse_subject(value: &str) -> Result<LifecycleSubjectKind, TelemetryRepositoryError> {
-    match value {
-        "tenant" => Ok(LifecycleSubjectKind::Tenant),
-        "user" => Ok(LifecycleSubjectKind::User),
-        "routine" => Ok(LifecycleSubjectKind::Routine),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "subject_kind",
-            value: value.to_owned(),
-        }),
-    }
+pub struct FilesystemTelemetryRepository<F: ?Sized> {
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
 #[cfg(test)]

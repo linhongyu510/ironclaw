@@ -6,16 +6,16 @@ use std::{
     time::Duration,
 };
 
+use crate::repository::TelemetryBatchSink;
+use crate::{
+    BatchApplyReport, BufferedRecorderConfig, BufferedTelemetryRecorder, RecordError,
+    RecordOutcome, TelemetryBatch, TelemetryClock, TelemetryRepositoryError,
+    TelemetryWriteFailureClass,
+};
 use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_host_api::{
     ids::{InvocationId, TenantId, UserId},
     resource::ResourceScope,
-};
-use ironclaw_telemetry::{
-    BufferedRecorderConfig, BufferedTelemetryRecorder, CollectorCoverage, HourlyAutomationUsage,
-    HourlyModelUsage, HourlyRunFailure, HourlyUserActivity, LifecycleEvent, RecordError,
-    RecordOutcome, TelemetryBatch, TelemetryClock, TelemetryPage, TelemetryRepository,
-    TelemetryRepositoryError, TelemetryScanPageRequest, TelemetryWriteFailureClass,
 };
 use ironclaw_telemetry_contracts::observation::{
     AutomationKind, AutomationSettledObservation, EffectiveModelId, LifecycleEventId,
@@ -113,12 +113,11 @@ impl FakeRepository {
 }
 
 #[async_trait::async_trait]
-impl TelemetryRepository for FakeRepository {
-    async fn migrate(&self) -> Result<(), TelemetryRepositoryError> {
-        Ok(())
-    }
-
-    async fn upsert_batch(&self, batch: &TelemetryBatch) -> Result<(), TelemetryRepositoryError> {
+impl TelemetryBatchSink for FakeRepository {
+    async fn apply_batch(
+        &self,
+        batch: &TelemetryBatch,
+    ) -> Result<BatchApplyReport, TelemetryRepositoryError> {
         let (started, release, fail, committed_before_error, injected_error) = {
             let mut state = self.state.lock().expect("repository lock");
             state.active_writes += 1;
@@ -165,57 +164,8 @@ impl TelemetryRepository for FakeRepository {
                 }),
             )
         } else {
-            Ok(())
+            Ok(BatchApplyReport::default())
         }
-    }
-
-    async fn scan_activity_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyUserActivity>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-
-    async fn scan_model_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyModelUsage>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-
-    async fn scan_failure_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyRunFailure>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-
-    async fn scan_automation_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<HourlyAutomationUsage>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-
-    async fn scan_lifecycle_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<LifecycleEvent>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-
-    async fn scan_coverage_page(
-        &self,
-        _: &TelemetryScanPageRequest,
-    ) -> Result<TelemetryPage<CollectorCoverage>, TelemetryRepositoryError> {
-        Err(fake_scan_error())
-    }
-}
-
-fn fake_scan_error() -> TelemetryRepositoryError {
-    TelemetryRepositoryError::StorageOperation {
-        operation: "fake scan",
-        source: "not used by recorder contract".to_owned().into(),
     }
 }
 

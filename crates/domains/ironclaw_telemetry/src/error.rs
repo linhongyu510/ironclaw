@@ -10,6 +10,8 @@ use thiserror::Error;
 /// data without exposing driver types in the repository contract.
 #[derive(Debug, Error)]
 pub enum TelemetryRepositoryError {
+    #[error("telemetry scope does not match persisted record tenant")]
+    ScopeMismatch,
     #[error("invalid telemetry scan request: {reason}")]
     InvalidScanRequest { reason: &'static str },
     #[error("invalid telemetry page request: {reason}")]
@@ -42,6 +44,8 @@ pub enum TelemetryRepositoryError {
     },
     #[error("unknown persisted telemetry {field}")]
     UnknownEnum { field: &'static str, value: String },
+    #[error("invalid persisted telemetry index projection")]
+    InvalidProjection,
     #[error("telemetry counter overflow for {family} row")]
     CounterOverflow { family: &'static str },
     #[error("telemetry counter conversion failed for {family} row")]
@@ -70,6 +74,12 @@ pub enum TelemetryRepositoryError {
         operation: &'static str,
         #[source]
         source: Box<dyn StdError + Send + Sync>,
+    },
+    #[error("telemetry JSON serialization failed while {operation}")]
+    Serialization {
+        operation: &'static str,
+        #[source]
+        source: serde_json::Error,
     },
 }
 

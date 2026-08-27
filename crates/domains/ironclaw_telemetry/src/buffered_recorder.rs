@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{floor_utc_hour, repository::TelemetryRepository, worker};
+#[cfg(not(test))]
+use crate::repository::FilesystemTelemetryRepository;
+use crate::{floor_utc_hour, repository::TelemetryBatchSink, worker};
 
 pub const DEFAULT_TELEMETRY_QUEUE_CAPACITY: usize = 8_192;
 pub(crate) const MAX_TELEMETRY_QUEUE_CAPACITY: usize = DEFAULT_TELEMETRY_QUEUE_CAPACITY;
@@ -763,9 +765,30 @@ impl Intake {
 pub struct BufferedTelemetryRecorder;
 
 impl BufferedTelemetryRecorder {
-    pub fn spawn(
+    #[cfg(not(test))]
+    pub fn spawn<F>(
         config: BufferedRecorderConfig,
-        repository: Arc<dyn TelemetryRepository>,
+        repository: Arc<FilesystemTelemetryRepository<F>>,
+        clock: Arc<dyn TelemetryClock>,
+    ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle)
+    where
+        F: ironclaw_filesystem::RootFilesystem + ?Sized + 'static,
+    {
+        Self::spawn_with_sink(config, repository, clock)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn(
+        config: BufferedRecorderConfig,
+        repository: Arc<dyn TelemetryBatchSink>,
+        clock: Arc<dyn TelemetryClock>,
+    ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle) {
+        Self::spawn_with_sink(config, repository, clock)
+    }
+
+    fn spawn_with_sink(
+        config: BufferedRecorderConfig,
+        repository: Arc<dyn TelemetryBatchSink>,
         clock: Arc<dyn TelemetryClock>,
     ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle) {
         let (sender, receiver) = mpsc::channel(config.effective_queue_capacity());
@@ -1026,6 +1049,9 @@ pub(crate) fn classify_repository_error(
         | crate::TelemetryRepositoryError::InvalidTimestamp { .. }
         | crate::TelemetryRepositoryError::InvalidPersistedField { .. }
         | crate::TelemetryRepositoryError::UnknownEnum { .. } => FailureClassCode::InvalidData,
+        crate::TelemetryRepositoryError::ScopeMismatch
+        | crate::TelemetryRepositoryError::InvalidProjection
+        | crate::TelemetryRepositoryError::Serialization { .. } => FailureClassCode::InvalidData,
     }
 }
 
@@ -1072,3 +1098,10 @@ mod tests {
         );
     }
 }
+
+// Keep worker fakes behind the crate-private sink seam. They need to observe
+// the worker's exact call shape, but that seam is intentionally not a public
+// repository selector.
+#[cfg(test)]
+#[path = "buffered_recorder_contract.rs"]
+mod buffered_recorder_contract;

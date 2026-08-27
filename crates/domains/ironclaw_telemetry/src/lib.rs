@@ -26,6 +26,6 @@ pub use records::{
 };
 
 pub use repository::{
-    MAX_TELEMETRY_PAGE_SIZE, TelemetryPage, TelemetryRepository, TelemetryScanPageRequest,
-    TelemetryScanRequest,
+    BatchApplyReport, FilesystemTelemetryRepository, MAX_TELEMETRY_PAGE_SIZE, ScopedTelemetryBatch,
+    TelemetryPage, TelemetryPageRequest,
 };

@@ -10,13 +10,14 @@ use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CollectorCoverage, TelemetryBatch, TelemetryRepository, aggregate_batch,
+    CollectorCoverage, TelemetryBatch, aggregate_batch,
     buffered_recorder::{
         CoverageSideDelta, DiagnosticsState, Intake, MAX_COVERAGE_SIDE_KEYS, TelemetryClock,
         TenantHourKey, classify_aggregation_error, classify_record_error,
         classify_repository_error,
     },
     floor_utc_hour,
+    repository::TelemetryBatchSink,
 };
 
 pub(crate) struct WorkerConfig {
@@ -153,7 +154,7 @@ pub(crate) async fn run(
     config: WorkerConfig,
     mut receiver: mpsc::Receiver<ScopedTelemetryObservation>,
     intake: Arc<Intake>,
-    repository: Arc<dyn TelemetryRepository>,
+    repository: Arc<dyn TelemetryBatchSink>,
     clock: Arc<dyn TelemetryClock>,
     diagnostics: Arc<DiagnosticsState>,
     cancellation: CancellationToken,
@@ -275,7 +276,7 @@ async fn flush(
     pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
     intake: &Intake,
     collector_instance_id: Option<&CollectorInstanceId>,
-    repository: &dyn TelemetryRepository,
+    repository: &dyn TelemetryBatchSink,
     clock: &dyn TelemetryClock,
     diagnostics: &DiagnosticsState,
 ) {
@@ -369,7 +370,7 @@ async fn flush(
         return;
     }
     let started = clock.now();
-    if let Err(error) = repository.upsert_batch(&batch).await {
+    if let Err(error) = repository.apply_batch(&batch).await {
         let class = classify_repository_error(&error);
         diagnostics.record_repository_failure(class);
         diagnostics.add_write_failed(observations.len());

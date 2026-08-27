@@ -231,13 +231,16 @@ fn telemetry_is_scoped_filesystem_backed_and_driver_free() {
     let src = crate_path(&workspace_root(), "crates/domains/ironclaw_telemetry/src");
     let manifest = std::fs::read_to_string(src.join("../Cargo.toml"))
         .unwrap_or_else(|error| panic!("read telemetry Cargo.toml: {error}"));
+    let normal_manifest = manifest
+        .split_once("[dev-dependencies]")
+        .map_or(manifest.as_str(), |(normal, _)| normal);
     let lib = std::fs::read_to_string(src.join("lib.rs"))
         .unwrap_or_else(|error| panic!("read telemetry lib.rs: {error}"));
     assert!(manifest.contains("ironclaw_filesystem"));
-    assert!(!manifest.contains("ironclaw_libsql_runtime"));
-    assert!(!manifest.contains("deadpool-postgres"));
-    assert!(!manifest.contains("tokio-postgres"));
-    assert!(!manifest.contains("libsql ="));
+    assert!(!normal_manifest.contains("ironclaw_libsql_runtime"));
+    assert!(!normal_manifest.contains("deadpool-postgres"));
+    assert!(!normal_manifest.contains("tokio-postgres"));
+    assert!(!normal_manifest.contains("libsql ="));
     assert!(!lib.contains("mod libsql;"));
     assert!(!lib.contains("mod postgres;"));
 

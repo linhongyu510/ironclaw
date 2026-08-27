@@ -566,6 +566,7 @@ fn reborn_crate_dependency_boundaries_hold() {
         "ironclaw_telemetry",
         "ironclaw_telemetry_contracts",
         "ironclaw_filesystem",
+        "ironclaw_host_api",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,
