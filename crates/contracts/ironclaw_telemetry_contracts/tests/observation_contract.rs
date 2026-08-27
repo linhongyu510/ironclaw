@@ -215,3 +215,26 @@ fn missing_model_usage_keeps_inference_but_marks_usage_unreported() {
     assert_eq!(observation.cache_read_input_tokens(), 0);
     assert_eq!(observation.cache_creation_input_tokens(), 0);
 }
+
+#[test]
+fn durable_counter_values_above_signed_bigint_are_rejected() {
+    let too_large = i64::MAX as u64 + 1;
+
+    let run = RunSettledObservation::new(
+        context(),
+        OriginKind::Human,
+        RunOutcome::Completed,
+        too_large,
+        None,
+        None,
+    );
+    assert!(run.is_err());
+
+    let model = ModelCallCompletedObservation::new(
+        context(),
+        ProviderId::new("provider-a").expect("provider"),
+        EffectiveModelId::new("model-a").expect("model"),
+        Some(ModelUsage::new(too_large, 0, 0, 0)),
+    );
+    assert!(model.is_err());
+}

@@ -12,6 +12,9 @@ pub type CanonicalUserId = UserId;
 /// Maximum UTF-8 byte length for identifiers introduced by telemetry.
 pub const MAX_TELEMETRY_IDENTIFIER_BYTES: usize = 128;
 
+/// Maximum value representable by a signed BIGINT-backed durable counter.
+pub const MAX_DURABLE_COUNTER: u64 = i64::MAX as u64;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BoundedIdentifierError {
     #[error("{field} must not be empty")]
@@ -170,6 +173,8 @@ pub enum ObservationError {
     FailureRequired,
     #[error("only failed and recovery-required runs may carry a failure category")]
     UnexpectedFailure,
+    #[error("{field} value {value} exceeds signed BIGINT range")]
+    CounterOutOfRange { field: &'static str, value: u64 },
 }
 
 /// The origin vocabulary intentionally contains no transport or vendor names.
@@ -276,6 +281,20 @@ impl RunSettledObservation {
         reported_tool_call_count: Option<u64>,
         failure: Option<SanitizedFailure>,
     ) -> Result<Self, ObservationError> {
+        if duration_ms > MAX_DURABLE_COUNTER {
+            return Err(ObservationError::CounterOutOfRange {
+                field: "duration_ms",
+                value: duration_ms,
+            });
+        }
+        if let Some(count) = reported_tool_call_count
+            && count > MAX_DURABLE_COUNTER
+        {
+            return Err(ObservationError::CounterOutOfRange {
+                field: "reported_tool_call_count",
+                value: count,
+            });
+        }
         let failure_is_required =
             matches!(outcome, RunOutcome::Failed | RunOutcome::RecoveryRequired);
         let failure = failure
@@ -351,6 +370,21 @@ impl ModelCallCompletedObservation {
         effective_model_id: EffectiveModelId,
         usage: Option<ModelUsage>,
     ) -> Result<Self, ObservationError> {
+        if let Some(usage) = usage {
+            for (field, value) in [
+                ("input_tokens", usage.input_tokens()),
+                ("output_tokens", usage.output_tokens()),
+                ("cache_read_input_tokens", usage.cache_read_input_tokens()),
+                (
+                    "cache_creation_input_tokens",
+                    usage.cache_creation_input_tokens(),
+                ),
+            ] {
+                if value > MAX_DURABLE_COUNTER {
+                    return Err(ObservationError::CounterOutOfRange { field, value });
+                }
+            }
+        }
         Ok(Self {
             context,
             provider_id,

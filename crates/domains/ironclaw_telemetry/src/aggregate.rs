@@ -5,7 +5,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use ironclaw_telemetry_contracts::observation::{
     CanonicalTenantId as TenantId, CanonicalUserId as UserId, FailureCategory, LifecycleEventId,
-    TelemetryObservation,
+    MAX_DURABLE_COUNTER, RunOutcome, TelemetryObservation,
 };
 
 use crate::records::{
@@ -17,10 +17,10 @@ use crate::records::{
 pub enum AggregationError {
     #[error("counter overflow while aggregating {field}")]
     CounterOverflow { field: &'static str },
+    #[error("{field} value {value} exceeds signed BIGINT range")]
+    CounterOutOfRange { field: &'static str, value: u64 },
     #[error(transparent)]
     InvalidRecord(#[from] RecordError),
-    #[error("lifecycle event has conflicting duplicate content")]
-    ConflictingLifecycleEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,9 +118,32 @@ fn checked_add(
     amount: u64,
     field: &'static str,
 ) -> Result<(), AggregationError> {
-    *destination = destination
+    if *destination > MAX_DURABLE_COUNTER {
+        return Err(AggregationError::CounterOutOfRange {
+            field,
+            value: *destination,
+        });
+    }
+    if amount > MAX_DURABLE_COUNTER {
+        return Err(AggregationError::CounterOutOfRange {
+            field,
+            value: amount,
+        });
+    }
+    let value = destination
         .checked_add(amount)
         .ok_or(AggregationError::CounterOverflow { field })?;
+    if value > MAX_DURABLE_COUNTER {
+        return Err(AggregationError::CounterOutOfRange { field, value });
+    }
+    *destination = value;
+    Ok(())
+}
+
+fn checked_value(value: u64, field: &'static str) -> Result<(), AggregationError> {
+    if value > MAX_DURABLE_COUNTER {
+        return Err(AggregationError::CounterOutOfRange { field, value });
+    }
     Ok(())
 }
 
@@ -137,47 +160,20 @@ fn update_range(
     }
 }
 
-fn run_counter(
-    accumulator: &mut ActivityAccumulator,
-    outcome: ironclaw_telemetry_contracts::observation::RunOutcome,
+fn add_terminal_counter(
+    outcome: RunOutcome,
+    completed_count: &mut u64,
+    failed_count: &mut u64,
+    cancelled_count: &mut u64,
+    recovery_required_count: &mut u64,
 ) -> Result<(), AggregationError> {
     match outcome {
-        ironclaw_telemetry_contracts::observation::RunOutcome::Completed => {
-            checked_add(&mut accumulator.completed_count, 1, "completed_count")
+        RunOutcome::Completed => checked_add(completed_count, 1, "completed_count"),
+        RunOutcome::Failed => checked_add(failed_count, 1, "failed_count"),
+        RunOutcome::Cancelled => checked_add(cancelled_count, 1, "cancelled_count"),
+        RunOutcome::RecoveryRequired => {
+            checked_add(recovery_required_count, 1, "recovery_required_count")
         }
-        ironclaw_telemetry_contracts::observation::RunOutcome::Failed => {
-            checked_add(&mut accumulator.failed_count, 1, "failed_count")
-        }
-        ironclaw_telemetry_contracts::observation::RunOutcome::Cancelled => {
-            checked_add(&mut accumulator.cancelled_count, 1, "cancelled_count")
-        }
-        ironclaw_telemetry_contracts::observation::RunOutcome::RecoveryRequired => checked_add(
-            &mut accumulator.recovery_required_count,
-            1,
-            "recovery_required_count",
-        ),
-    }
-}
-
-fn automation_counter(
-    accumulator: &mut AutomationAccumulator,
-    outcome: ironclaw_telemetry_contracts::observation::RunOutcome,
-) -> Result<(), AggregationError> {
-    match outcome {
-        ironclaw_telemetry_contracts::observation::RunOutcome::Completed => {
-            checked_add(&mut accumulator.completed_count, 1, "completed_count")
-        }
-        ironclaw_telemetry_contracts::observation::RunOutcome::Failed => {
-            checked_add(&mut accumulator.failed_count, 1, "failed_count")
-        }
-        ironclaw_telemetry_contracts::observation::RunOutcome::Cancelled => {
-            checked_add(&mut accumulator.cancelled_count, 1, "cancelled_count")
-        }
-        ironclaw_telemetry_contracts::observation::RunOutcome::RecoveryRequired => checked_add(
-            &mut accumulator.recovery_required_count,
-            1,
-            "recovery_required_count",
-        ),
     }
 }
 
@@ -258,6 +254,10 @@ where
     for observation in observations {
         match observation.borrow() {
             TelemetryObservation::RunSettled(observation) => {
+                checked_value(observation.duration_ms(), "total_run_latency_ms")?;
+                if let Some(count) = observation.reported_tool_call_count() {
+                    checked_value(count, "reported_tool_call_count")?;
+                }
                 let window_start = floor_utc_hour(observation.occurred_at());
                 let key = ActivityKey(
                     observation.tenant_id().clone(),
@@ -267,7 +267,13 @@ where
                 );
                 if let Some(accumulator) = activity.get_mut(&key) {
                     checked_add(&mut accumulator.run_count, 1, "run_count")?;
-                    run_counter(accumulator, observation.outcome())?;
+                    add_terminal_counter(
+                        observation.outcome(),
+                        &mut accumulator.completed_count,
+                        &mut accumulator.failed_count,
+                        &mut accumulator.cancelled_count,
+                        &mut accumulator.recovery_required_count,
+                    )?;
                     checked_add(
                         &mut accumulator.total_run_latency_ms,
                         observation.duration_ms(),
@@ -349,7 +355,13 @@ where
                         first_observed_at: observation.occurred_at(),
                         last_observed_at: observation.occurred_at(),
                     };
-                    run_counter(&mut accumulator, observation.outcome())?;
+                    add_terminal_counter(
+                        observation.outcome(),
+                        &mut accumulator.completed_count,
+                        &mut accumulator.failed_count,
+                        &mut accumulator.cancelled_count,
+                        &mut accumulator.recovery_required_count,
+                    )?;
                     if let Some(count) = observation.reported_tool_call_count() {
                         accumulator.tool_count_reported_run_count = 1;
                         accumulator.reported_tool_call_count = count;
@@ -380,6 +392,16 @@ where
                 }
             }
             TelemetryObservation::ModelCallCompleted(observation) => {
+                checked_value(observation.input_tokens(), "input_tokens")?;
+                checked_value(observation.output_tokens(), "output_tokens")?;
+                checked_value(
+                    observation.cache_read_input_tokens(),
+                    "cache_read_input_tokens",
+                )?;
+                checked_value(
+                    observation.cache_creation_input_tokens(),
+                    "cache_creation_input_tokens",
+                )?;
                 let window_start = floor_utc_hour(observation.occurred_at());
                 let key = ModelKey(
                     observation.tenant_id().clone(),
@@ -453,7 +475,13 @@ where
                 );
                 if let Some(accumulator) = automation_usage.get_mut(&key) {
                     checked_add(&mut accumulator.run_count, 1, "run_count")?;
-                    automation_counter(accumulator, observation.outcome())?;
+                    add_terminal_counter(
+                        observation.outcome(),
+                        &mut accumulator.completed_count,
+                        &mut accumulator.failed_count,
+                        &mut accumulator.cancelled_count,
+                        &mut accumulator.recovery_required_count,
+                    )?;
                     update_range(
                         &mut accumulator.first_observed_at,
                         &mut accumulator.last_observed_at,
@@ -473,7 +501,13 @@ where
                         first_observed_at: observation.occurred_at(),
                         last_observed_at: observation.occurred_at(),
                     };
-                    automation_counter(&mut accumulator, observation.outcome())?;
+                    add_terminal_counter(
+                        observation.outcome(),
+                        &mut accumulator.completed_count,
+                        &mut accumulator.failed_count,
+                        &mut accumulator.cancelled_count,
+                        &mut accumulator.recovery_required_count,
+                    )?;
                     automation_usage.insert(key, accumulator);
                 }
             }
@@ -490,10 +524,10 @@ where
                     observation.subject_kind(),
                     observation.subject_id().clone(),
                     observation.occurred_at(),
-                );
+                )?;
                 if let Some(existing) = lifecycle_events.get(&key) {
-                    if existing != &candidate {
-                        return Err(AggregationError::ConflictingLifecycleEvent);
+                    if candidate < *existing {
+                        lifecycle_events.insert(key, candidate);
                     }
                 } else {
                     lifecycle_events.insert(key, candidate);
@@ -588,5 +622,5 @@ where
         automation_usage,
         lifecycle_events.into_values().collect(),
         Vec::new(),
-    ))
+    )?)
 }

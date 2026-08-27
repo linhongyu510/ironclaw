@@ -3,7 +3,9 @@ use ironclaw_host_api::{
     ids::{TenantId, UserId},
     turn::SanitizedFailure,
 };
-use ironclaw_telemetry::records::{HourlyUserActivity, RecordError};
+use ironclaw_telemetry::records::{
+    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch,
+};
 use ironclaw_telemetry::{
     AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,
     floor_utc_year,
@@ -115,6 +117,18 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
         .expect("valid lifecycle"),
     );
     let duplicate_lifecycle = lifecycle.clone();
+    let conflicting_lifecycle = TelemetryObservation::LifecycleTransition(
+        LifecycleTransitionObservation::new(
+            tenant(),
+            Some(user()),
+            LifecycleEventId::new("event-a").expect("event"),
+            LifecycleEventKind::RoutineDeleted,
+            LifecycleSubjectKind::Routine,
+            "routine-a".to_owned(),
+            at(2026, 8, 26, 10, 27, 1),
+        )
+        .expect("valid conflicting lifecycle"),
+    );
 
     let ordered = vec![
         completed_run(at(2026, 8, 26, 10, 23, 0), 10),
@@ -123,6 +137,7 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
         automation.clone(),
         lifecycle.clone(),
         duplicate_lifecycle.clone(),
+        conflicting_lifecycle.clone(),
     ];
     let reversed = vec![
         duplicate_lifecycle,
@@ -131,6 +146,7 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
         lifecycle,
         failed,
         completed_run(at(2026, 8, 26, 10, 23, 0), 10),
+        conflicting_lifecycle,
     ];
 
     let first = aggregate_batch(&ordered).expect("ordered aggregate");
@@ -154,18 +170,60 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
     assert_eq!(first.model_usage()[0].inference_count(), 1);
     assert_eq!(first.model_usage()[0].usage_reported_count(), 0);
     assert_eq!(first.lifecycle_events().len(), 1);
+    assert_eq!(
+        first.lifecycle_events()[0].event_kind(),
+        LifecycleEventKind::RoutineCreated
+    );
 }
 
 #[test]
-fn aggregate_reports_checked_counter_overflow() {
+fn aggregate_rejects_sum_above_signed_bigint_maximum() {
     let observations = [
-        completed_run(at(2026, 8, 26, 10, 0, 0), u64::MAX),
+        completed_run(at(2026, 8, 26, 10, 0, 0), i64::MAX as u64),
         completed_run(at(2026, 8, 26, 10, 1, 0), 1),
     ];
 
     assert!(matches!(
         aggregate_batch(&observations),
-        Err(AggregationError::CounterOverflow { .. })
+        Err(AggregationError::CounterOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn aggregate_accepts_signed_bigint_maximum_on_first_observation() {
+    let observation = completed_run(at(2026, 8, 26, 10, 0, 0), i64::MAX as u64);
+
+    let batch = aggregate_batch([observation]).expect("signed BIGINT maximum is valid");
+
+    assert_eq!(batch.activity()[0].total_run_latency_ms(), i64::MAX as u64);
+}
+
+#[test]
+fn model_usage_sum_above_signed_bigint_maximum_is_rejected() {
+    let make_model = |timestamp, input_tokens| {
+        TelemetryObservation::ModelCallCompleted(
+            ModelCallCompletedObservation::new(
+                context(timestamp),
+                ProviderId::new("provider-a").expect("provider"),
+                EffectiveModelId::new("model-a").expect("model"),
+                Some(ironclaw_telemetry_contracts::observation::ModelUsage::new(
+                    input_tokens,
+                    0,
+                    0,
+                    0,
+                )),
+            )
+            .expect("valid model observation"),
+        )
+    };
+    let observations = [
+        make_model(at(2026, 8, 26, 10, 0, 0), i64::MAX as u64),
+        make_model(at(2026, 8, 26, 10, 1, 0), 1),
+    ];
+
+    assert!(matches!(
+        aggregate_batch(&observations),
+        Err(AggregationError::CounterOutOfRange { .. })
     ));
 }
 
@@ -191,4 +249,46 @@ fn hourly_activity_constructor_rejects_unreconciled_terminal_counts() {
     );
 
     assert!(matches!(result, Err(RecordError::TerminalCountMismatch)));
+}
+
+#[test]
+fn lifecycle_event_constructor_rejects_non_tenant_without_user() {
+    let timestamp = at(2026, 8, 26, 10, 0, 0);
+    let result = LifecycleEvent::new(
+        tenant(),
+        LifecycleEventId::new("event-user").expect("event"),
+        None,
+        LifecycleEventKind::RoutineCreated,
+        LifecycleSubjectKind::Routine,
+        ironclaw_telemetry_contracts::observation::SubjectId::new("routine-a").expect("subject"),
+        timestamp,
+    );
+
+    assert!(matches!(result, Err(RecordError::MissingUserAttribution)));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_lifecycle_keys() {
+    let timestamp = at(2026, 8, 26, 10, 0, 0);
+    let event = LifecycleEvent::new(
+        tenant(),
+        LifecycleEventId::new("event-a").expect("event"),
+        Some(user()),
+        LifecycleEventKind::RoutineCreated,
+        LifecycleSubjectKind::Routine,
+        ironclaw_telemetry_contracts::observation::SubjectId::new("routine-a").expect("subject"),
+        timestamp,
+    )
+    .expect("valid lifecycle event");
+
+    let result = TelemetryBatch::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![event.clone(), event],
+        Vec::new(),
+    );
+
+    assert!(matches!(result, Err(RecordError::DuplicateLifecycleEvent)));
 }

@@ -1,10 +1,12 @@
 //! Typed hourly records produced by telemetry aggregation.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Timelike, Utc};
 use ironclaw_telemetry_contracts::observation::{
     AutomationKind, CanonicalTenantId as TenantId, CanonicalUserId as UserId, CollectorInstanceId,
-    EffectiveModelId, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind, OriginKind,
-    ProviderId, SubjectId,
+    EffectiveModelId, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
+    MAX_DURABLE_COUNTER, OriginKind, ProviderId, SubjectId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -21,6 +23,19 @@ pub enum RecordError {
     ReportedToolCountExceedsRuns,
     #[error("reported usage count must not exceed inference_count")]
     ReportedUsageExceedsInferences,
+    #[error("{field} value {value} exceeds signed BIGINT range")]
+    CounterOutOfRange { field: &'static str, value: u64 },
+    #[error("lifecycle event keys must be unique within a telemetry batch")]
+    DuplicateLifecycleEvent,
+    #[error("non-tenant lifecycle events require user attribution")]
+    MissingUserAttribution,
+}
+
+fn validate_counter(value: u64, field: &'static str) -> Result<(), RecordError> {
+    if value > MAX_DURABLE_COUNTER {
+        return Err(RecordError::CounterOutOfRange { field, value });
+    }
+    Ok(())
 }
 
 fn validate_hour(window_start: DateTime<Utc>) -> Result<(), RecordError> {
@@ -52,6 +67,7 @@ fn validate_terminal_counts(
         .and_then(|count| count.checked_add(cancelled_count))
         .and_then(|count| count.checked_add(recovery_required_count))
         .ok_or(RecordError::TerminalCountOverflow)?;
+    validate_counter(terminal_count, "terminal_count")?;
     if terminal_count != run_count {
         return Err(RecordError::TerminalCountMismatch);
     }
@@ -98,6 +114,25 @@ impl HourlyUserActivity {
     ) -> Result<Self, RecordError> {
         validate_hour(window_start)?;
         validate_range(first_observed_at, last_observed_at)?;
+        for (field, value) in [
+            ("run_count", run_count),
+            (
+                "runs_with_reported_tool_calls_count",
+                runs_with_reported_tool_calls_count,
+            ),
+            (
+                "tool_count_reported_run_count",
+                tool_count_reported_run_count,
+            ),
+            ("reported_tool_call_count", reported_tool_call_count),
+            ("completed_count", completed_count),
+            ("failed_count", failed_count),
+            ("cancelled_count", cancelled_count),
+            ("recovery_required_count", recovery_required_count),
+            ("total_run_latency_ms", total_run_latency_ms),
+        ] {
+            validate_counter(value, field)?;
+        }
         validate_terminal_counts(
             run_count,
             completed_count,
@@ -226,6 +261,16 @@ impl HourlyModelUsage {
     ) -> Result<Self, RecordError> {
         validate_hour(window_start)?;
         validate_range(first_observed_at, last_observed_at)?;
+        for (field, value) in [
+            ("inference_count", inference_count),
+            ("usage_reported_count", usage_reported_count),
+            ("input_tokens", input_tokens),
+            ("output_tokens", output_tokens),
+            ("cache_read_input_tokens", cache_read_input_tokens),
+            ("cache_creation_input_tokens", cache_creation_input_tokens),
+        ] {
+            validate_counter(value, field)?;
+        }
         if usage_reported_count > inference_count {
             return Err(RecordError::ReportedUsageExceedsInferences);
         }
@@ -322,6 +367,7 @@ impl HourlyRunFailure {
     ) -> Result<Self, RecordError> {
         validate_hour(window_start)?;
         validate_range(first_observed_at, last_observed_at)?;
+        validate_counter(failure_count, "failure_count")?;
         Ok(Self {
             tenant_id,
             window_start,
@@ -394,6 +440,15 @@ impl HourlyAutomationUsage {
     ) -> Result<Self, RecordError> {
         validate_hour(window_start)?;
         validate_range(first_observed_at, last_observed_at)?;
+        for (field, value) in [
+            ("run_count", run_count),
+            ("completed_count", completed_count),
+            ("failed_count", failed_count),
+            ("cancelled_count", cancelled_count),
+            ("recovery_required_count", recovery_required_count),
+        ] {
+            validate_counter(value, field)?;
+        }
         validate_terminal_counts(
             run_count,
             completed_count,
@@ -461,7 +516,7 @@ impl HourlyAutomationUsage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LifecycleEvent {
     tenant_id: TenantId,
     event_id: LifecycleEventId,
@@ -481,8 +536,11 @@ impl LifecycleEvent {
         subject_kind: LifecycleSubjectKind,
         subject_id: SubjectId,
         occurred_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RecordError> {
+        if user_id.is_none() && subject_kind != LifecycleSubjectKind::Tenant {
+            return Err(RecordError::MissingUserAttribution);
+        }
+        Ok(Self {
             tenant_id,
             event_id,
             user_id,
@@ -490,7 +548,7 @@ impl LifecycleEvent {
             subject_kind,
             subject_id,
             occurred_at,
-        }
+        })
     }
 
     pub fn tenant_id(&self) -> &TenantId {
@@ -552,6 +610,18 @@ impl CollectorCoverage {
     ) -> Result<Self, RecordError> {
         validate_hour(window_start)?;
         validate_range(first_observed_at, last_observed_at)?;
+        for (field, value) in [
+            ("accepted_observation_count", accepted_observation_count),
+            ("queue_full_drop_count", queue_full_drop_count),
+            ("closed_drop_count", closed_drop_count),
+            ("invalid_drop_count", invalid_drop_count),
+            (
+                "write_failed_observation_count",
+                write_failed_observation_count,
+            ),
+        ] {
+            validate_counter(value, field)?;
+        }
         Ok(Self {
             tenant_id,
             window_start,
@@ -625,15 +695,21 @@ impl TelemetryBatch {
         automation_usage: Vec<HourlyAutomationUsage>,
         lifecycle_events: Vec<LifecycleEvent>,
         collector_coverage: Vec<CollectorCoverage>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RecordError> {
+        let mut lifecycle_keys = BTreeSet::new();
+        for event in &lifecycle_events {
+            if !lifecycle_keys.insert((event.tenant_id().clone(), event.event_id().clone())) {
+                return Err(RecordError::DuplicateLifecycleEvent);
+            }
+        }
+        Ok(Self {
             activity,
             model_usage,
             run_failures,
             automation_usage,
             lifecycle_events,
             collector_coverage,
-        }
+        })
     }
 
     pub fn activity(&self) -> &[HourlyUserActivity] {
