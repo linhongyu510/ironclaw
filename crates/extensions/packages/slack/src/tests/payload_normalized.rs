@@ -180,6 +180,24 @@ fn the_subtype_gate_admits_human_messages_and_drops_only_non_messages() {
             false,
         ),
         (
+            "message_replied",
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "replied", "subtype": "message_replied",
+                "thread_ts": "1710000000.000010", "ts": "1710000000.000015"
+            }),
+            false,
+        ),
+        (
+            "assistant_app_thread",
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "D1", "channel_type": "im",
+                "text": "assistant thread", "subtype": "assistant_app_thread",
+                "ts": "1710000000.000016"
+            }),
+            false,
+        ),
+        (
             "ambient channel chatter",
             serde_json::json!({
                 "type": "message", "user": "U1", "channel": "C1", "text": "ambient",

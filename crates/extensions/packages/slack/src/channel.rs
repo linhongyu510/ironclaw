@@ -686,6 +686,7 @@ fn flatten_self_rooted_topic(message: &mut NormalizedInboundMessage) -> Result<(
 #[cfg(test)]
 mod tests {
     use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+    use tracing_test::traced_test;
 
     use super::*;
 
@@ -966,6 +967,78 @@ mod tests {
                 matches!(inbound(body).await, Ok(InboundOutcome::Ignore)),
                 "expected Ignore for {}",
                 String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// A dropped event is answered with a bare 200 that satisfies Slack's
+    /// retry machinery, so this log line is the only evidence it ever
+    /// happened. `thread_broadcast` was discarded for months precisely
+    /// because nothing recorded the reason — assert it, do not assume it.
+    #[tokio::test]
+    #[traced_test]
+    async fn every_ignored_event_records_why_it_was_dropped() {
+        for (body, expected_reason) in [
+            (
+                br#"{
+                    "type": "event_callback",
+                    "event_id": "EvReasonBot",
+                    "event": {
+                        "type": "message",
+                        "bot_id": "B123",
+                        "channel": "D123",
+                        "channel_type": "im",
+                        "text": "echo",
+                        "ts": "1710000000.000400"
+                    }
+                }"#
+                .as_slice(),
+                "BotAuthored",
+            ),
+            (
+                br#"{
+                    "type": "event_callback",
+                    "event_id": "EvReasonSubtype",
+                    "event": {
+                        "type": "message",
+                        "user": "U123",
+                        "channel": "D123",
+                        "channel_type": "im",
+                        "subtype": "message_changed",
+                        "text": "edited",
+                        "ts": "1710000000.000500"
+                    }
+                }"#
+                .as_slice(),
+                "message_changed",
+            ),
+            (
+                br#"{
+                    "type": "event_callback",
+                    "event_id": "EvReasonAmbient",
+                    "event": {
+                        "type": "message",
+                        "user": "U123",
+                        "channel": "C123",
+                        "text": "ambient chatter",
+                        "ts": "1710000000.000600"
+                    }
+                }"#
+                .as_slice(),
+                "AmbientChannelMessage",
+            ),
+        ] {
+            assert!(
+                matches!(inbound(body).await, Ok(InboundOutcome::Ignore)),
+                "expected Ignore for {expected_reason}"
+            );
+            assert!(
+                logs_contain("slack inbound event produced no message"),
+                "the drop must be logged for {expected_reason}"
+            );
+            assert!(
+                logs_contain(expected_reason),
+                "the log must name why it dropped: {expected_reason}"
             );
         }
     }
