@@ -1,95 +1,111 @@
-# Task 4 report — bounded recorder and single batch worker
+# Task 4 report — bounded asynchronous tenant telemetry recorder
 
 ## Scope
 
-Implemented the domain-owned asynchronous telemetry recorder only. The change
-does not wire producers, composition, `ProductSurface`, WebUI, SQL migrations,
-or an export endpoint.
-
-The public shape is:
+Task 4 is implemented in the telemetry domain only. The public construction
+shape is:
 
 ```text
 BufferedTelemetryRecorder::spawn(config, repository, clock)
   -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle)
 ```
 
-The recorder owns one bounded Tokio MPSC queue and calls `try_send` exactly once
-per producer call. The lifecycle handle owns one consumer task. The consumer
-aggregates each drain with the existing `aggregate_batch` contract, performs a
-single sequential `upsert_batch`, and never holds a lock across repository I/O.
+The implementation does not add producers, composition wiring, `ProductSurface`,
+WebUI routes, SQL migrations, or an export endpoint.
 
 ## Test-first evidence
 
-### RED
+The original contract tests were written before the recorder and worker existed.
+The first run of the focused command failed because the recorder types and
+clock were missing; enabling Tokio's test-time support was also required for
+the paused-clock tests.
 
-Before adding production recorder/worker code, the new contract test was run:
+For the review-fix round, the new coverage, shutdown accounting, invalid
+preflight, and concurrent close/send tests were run before the corresponding
+production changes. The focused run initially failed at compilation because
+`BufferedTelemetryRecorderHandle::close_intake` was not yet present. After the
+implementation, the final focused run passed all 14 tests.
 
-```text
-cargo test -p ironclaw_telemetry --test buffered_recorder_contract
-```
+## Queue and worker semantics
 
-It failed because `BufferedRecorderConfig`, `BufferedTelemetryRecorder`,
-`RecordOutcome`, and `TelemetryClock` did not yet exist. Tokio test-time
-advancement was also initially unavailable until the test-only `test-util`
-feature was added. This was the expected missing-behavior failure, not a typo in
-the fake repository.
+- There is one bounded Tokio MPSC queue, with an 8,192-observation default.
+- An open producer call performs one synchronous `try_send`; it never awaits,
+  acquires a repository handle, or holds a lock across I/O.
+- Intake closure and `try_send` are linearized under one narrow synchronous
+  state lock. Once closure wins, the observation is never passed to
+  `try_send`, so `DroppedClosed` cannot describe an enqueued observation.
+- Outcomes are `Accepted`, `DroppedQueueFull`, `DroppedClosed`, and
+  `DroppedInvalid`.
+- The single worker drains at most 512 observations or waits at most one
+  second, aggregates before persistence, and performs sequential repository
+  upserts with no overlapping workers.
+- A repository failure drops only the ambiguous drain, records its typed
+  failure class, carries count-only write-failure coverage forward, and lets
+  later drains continue without retrying the failed drain.
 
-### GREEN
+## Count-only coverage and invalid handling
 
-The final focused run passes 9 tests:
+Queue-full, closed, and invalid producer outcomes enter a bounded side
+accumulator keyed only by `(tenant_id, UTC hour)`. It retains at most 8,192
+distinct keys; once full, the global overflow diagnostic records that
+attribution was unavailable rather than allowing producer-side memory to grow.
+The worker merges these deltas into `CollectorCoverage` rows. Contract tests
+verify durable queue-full, closed, invalid-preflight, and invalid-aggregate
+coverage values.
 
-```text
-cargo test -p ironclaw_telemetry --test buffered_recorder_contract
-```
+`DroppedInvalid` is synchronous. A bounded pure preflight checks supported UTC
+timestamp years/hour conversion, signed durable counter ranges, and lifecycle
+user attribution before queue admission. A validly constructed run at year
+10,000 exercises the timestamp path. Aggregate-only overflow remains an
+`Accepted` drain fact and is recorded in coverage as an invalid aggregate
+without a repository write for that drain.
 
-The tests cover synchronous producer behavior and typed queue pressure, the
-512-observation threshold, one-second virtual-time flushing, non-overlapping
-repository writes, one failed drain followed by a successful drain, coverage
-counter carry-forward, invalid aggregate handling, graceful tail flushing,
-five-second stalled-write abort, and a fresh worker after shutdown.
+Collector instance ID resolution now handles construction errors explicitly,
+records a typed diagnostic, and attempts the valid count-only fallback ID;
+coverage is not silently disabled by an ignored constructor error.
 
-All timing tests use `#[tokio::test(start_paused = true)]` and
-`tokio::time::advance`; no real sleeps are used. `FixedClock` supplies the
-injected wall-clock value, and flush latency is derived from that injected
-clock, making diagnostics deterministic.
+## Shutdown and loss accounting
 
-## Failure and coverage semantics
+Shutdown closes intake, cancels the worker, and allows a bounded tail flush for
+no more than five seconds. If a repository write remains stalled, the worker is
+aborted at the timeout and diagnostics report `ShutdownTimeout`, typed write
+loss, and the exact number of accepted observations still queued or in flight.
+The paused-time stalled-write test proves two observations (one in flight and
+one queued) are accounted exactly and that shutdown completes at the five
+second budget boundary. It also verifies that no batch is claimed persisted
+when the stalled repository produced none. Losses whose database write could
+not complete are therefore reported as abandoned/write-loss facts, not as
+successful durable coverage; known durable coverage is retained for successful
+later drains.
 
-- Producer outcomes are `Accepted`, `DroppedQueueFull`, and `DroppedClosed`;
-  typed observations are validated by the contracts crate before they reach
-  this port.
-- Aggregation failures drop that drain, increment the invalid count, and do not
-  call the repository.
-- Repository errors drop only the ambiguous drain, increment write-loss and a
-  typed repository failure class, and do not retry it. Later drains continue.
-- Successful coverage rows include accepted observations and carry forward
-  invalid/write-failed facts from prior failed or invalid drains. Coverage is
-  grouped by tenant and UTC hour and remains count-only.
-- Queue and lifecycle pressure are retained as count-only diagnostics; no
-  observation fields are logged or included in diagnostics.
+## Privacy and diagnostics
 
-## Shutdown
-
-Shutdown closes intake, cancels the consumer, synchronously drains the bounded
-tail through sequential repository writes, and waits no longer than the typed
-five-second budget. A stalled repository call is aborted at the budget boundary;
-the product path is never made to await telemetry.
+Operational state contains only counts, timings, typed failure classes, and the
+tenant/hour key needed for count-only coverage. No observation payload,
+provider/model content, identifiers beyond the approved tenant/hour key, or
+raw repository error text is logged or placed in diagnostics.
 
 ## Validation
 
-Passing checks:
+The following checks passed after the review fixes:
 
 ```text
-cargo test -p ironclaw_telemetry --test buffered_recorder_contract  # 9 passed
-cargo test -p ironclaw_telemetry --all-targets --all-features      # 37 passed
-cargo clippy -p ironclaw_telemetry --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
-cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
-```
+cargo test -p ironclaw_telemetry --test buffered_recorder_contract
+14 passed; 0 failed
 
-The architecture dependency-boundary suite passed all 42 tests. The only
-lockfile change is the telemetry package's direct `tokio-util` dependency.
+cargo test -p ironclaw_telemetry --all-targets --all-features
+42 passed; 0 failed (10 unit + 14 recorder + 15 hour-bucket + 3 repository)
+
+cargo clippy -p ironclaw_telemetry --all-targets --all-features -- -D warnings
+finished with no warnings
+
+cargo fmt --all -- --check
+passed
+
+cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
+42 passed; 0 failed
+```
 
 ## Commit
 
-`1932c536f1 feat(telemetry): batch best-effort observations asynchronously`
+Implementation and review-fix commit: `1c0c4ba1c6`
