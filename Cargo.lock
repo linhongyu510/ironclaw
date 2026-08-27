@@ -4231,6 +4231,7 @@ dependencies = [
  "ironclaw_loop_contracts",
  "ironclaw_loop_host",
  "ironclaw_mcp",
+ "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",

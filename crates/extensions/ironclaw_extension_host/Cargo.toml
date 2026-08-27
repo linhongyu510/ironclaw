@@ -51,6 +51,7 @@ ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_extension_support = { path = "../ironclaw_extension_support" }
 ironclaw_host_runtime = { path = "../../kernel/ironclaw_host_runtime" }
 ironclaw_llm = { path = "../../domains/ironclaw_llm", default-features = false }
+ironclaw_memory = { path = "../../domains/ironclaw_memory" }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host" }
 ironclaw_mcp = { path = "../../lanes/ironclaw_mcp" }
 ironclaw_network = { path = "../../substrates/ironclaw_network" }

@@ -126,8 +126,8 @@ use ironclaw_product_contracts::notification_inbox::{
     ProductNotificationMutationResponse, ProductNotificationSeverity,
 };
 use ironclaw_product_contracts::operator_llm::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    CodexLoginStart, LearningSnapshot, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
@@ -2315,7 +2315,6 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         active_hold: None,
     }
 }
-
 fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
     LlmConfigSnapshot {
         providers: vec![LlmProviderView {
@@ -2337,6 +2336,7 @@ fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
             model: Some("model-a".to_string()),
         }),
         user_model_policy: None,
+        learning: LearningSnapshot::disabled(),
     }
 }
 
@@ -7492,6 +7492,11 @@ async fn llm_provider_routes_require_operator_capability() {
         ("POST", "/api/webchat/v2/llm/providers", Some(upsert_body)),
         ("POST", "/api/webchat/v2/llm/providers/acme/delete", None),
         ("POST", "/api/webchat/v2/llm/active", Some(active_body)),
+        (
+            "PUT",
+            "/api/webchat/v2/llm/learning",
+            Some(r#"{"enabled":true,"model":"gpt-5","memory_write_policy":"automatic"}"#),
+        ),
         (
             "POST",
             "/api/webchat/v2/llm/test-connection",

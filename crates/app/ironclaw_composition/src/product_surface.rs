@@ -17,7 +17,7 @@ use ironclaw_auth::ChannelConnectionService;
 use ironclaw_extension_registry::SharedExtensionRegistry;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
-use ironclaw_product_contracts::operator_llm::LlmConfigService;
+use ironclaw_product_contracts::operator_llm::{LearningSettingsStore, LlmConfigService};
 use ironclaw_product_contracts::operator_service::OperatorStatusService;
 use ironclaw_product_contracts::product_wire::{
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
@@ -335,35 +335,94 @@ pub(crate) fn build_llm_config_service(
         .map(|service| service as _)
 }
 
-pub(crate) fn compose_llm_config_service(
+pub(crate) async fn compose_llm_config_service(
     boot: Option<&RebornBootConfig>,
     keys: ironclaw_operator::LlmKeyStore,
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     llm_reload: Option<&RebornLlmReloadParts>,
-) -> Option<Arc<ironclaw_operator::RebornLlmConfigService>> {
+    learning_scope: ResourceScope,
+) -> Option<(
+    Arc<ironclaw_operator::RebornLlmConfigService>,
+    Arc<ironclaw_extension_host::learning_review::LearningRuntimeControllerImpl>,
+)> {
     let boot = boot?;
+    let learning_store = Arc::new(ironclaw_operator::FilesystemLearningSettingsStore::new(
+        Arc::clone(&scoped_filesystem),
+        learning_scope,
+    ));
+    let controller = Arc::new(
+        ironclaw_extension_host::learning_review::LearningRuntimeControllerImpl::default(),
+    );
+    match learning_store.read().await {
+        Ok(Some(settings)) if settings.enabled => {
+            let valid = match (llm_reload, settings.model.as_deref()) {
+                (Some(parts), Some(model)) => {
+                    match ironclaw_llm::LlmProvider::list_models(parts.provider.as_ref()).await {
+                        Ok(models) if !models.is_empty() => {
+                            models.iter().any(|available| available == model)
+                        }
+                        Ok(_) => {
+                            ironclaw_llm::LlmProvider::model_name(parts.provider.as_ref()) == model
+                        }
+                        Err(_) => false,
+                    }
+                }
+                _ => false,
+            };
+            if valid {
+                ironclaw_product_contracts::operator_llm::LearningRuntimeController::apply(
+                    controller.as_ref(),
+                    settings,
+                );
+            } else {
+                tracing::warn!(
+                    "persisted learning model is not available from the active provider; \
+                     keeping learning disabled"
+                );
+            }
+        }
+        Ok(Some(settings)) => {
+            ironclaw_product_contracts::operator_llm::LearningRuntimeController::apply(
+                controller.as_ref(),
+                settings,
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "learning settings unavailable; keeping learning disabled"
+            );
+        }
+    }
     let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
     let user_model_preference_store = Arc::new(
         ironclaw_operator::FilesystemUserModelPreferenceStore::new(scoped_filesystem),
     );
+    let controller_port: Arc<
+        dyn ironclaw_product_contracts::operator_llm::LearningRuntimeController,
+    > = controller.clone();
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys.clone())
         .with_model_policy_store(model_policy_store)
-        .with_user_model_preference_store(user_model_preference_store);
+        .with_user_model_preference_store(user_model_preference_store)
+        .with_learning_store(learning_store)
+        .with_learning_controller(controller_port);
     if let Some(parts) = llm_reload {
         let reload = Arc::new(ironclaw_operator::RebornLlmReloadAdapter::new(
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
             keys.clone(),
+            Arc::clone(&parts.provider),
         ));
         llm_config = llm_config
             .with_reload_trigger(reload)
             .with_nearai_session(Arc::clone(&parts.session))
             .with_nearai_login_states(Arc::clone(&parts.nearai_login_states));
     }
-    Some(Arc::new(llm_config))
+    Some((Arc::new(llm_config), controller))
 }
 
 struct ReadinessOperatorStatusService {

@@ -45,6 +45,10 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   admission, manifest synthesis for user-registered servers, the
   preparation/discovery lifecycle, and remote-catalog safety screening.
   Deliberately separate from the shared install→activate→remove path.
+- **Shared learning review** — `learning_review.rs`: the disabled-by-default,
+  bounded post-run router, supervised task set, and durable candidate adapter.
+  It records memory proposals and a skill decision; it does not promote either.
+
 
 ## Depends on / consumed by
 
@@ -53,8 +57,9 @@ Depends on the kernel crates it hosts activity for (`capabilities`,
 `host_runtime`), the registry and `extension_support`, contracts
 (`host_api`, `extension_contracts`, `product_contracts`, `loop_contracts`,
 `common`), domain crates (`auth`, `attachments`, `conversations`, `llm`,
-`outbound`, `skills`, `threads`, `triggers`), substrates, `ironclaw_mcp`,
-`ironclaw_loop_host`, `ironclaw_host_ingress`, and `ironclaw_config` — the full
+`memory`, `outbound`, `skills`, `threads`, `triggers`), substrates,
+`ironclaw_mcp`, `ironclaw_loop_host`, `ironclaw_host_ingress`, and
+`ironclaw_config` — the full
 list is the `Cargo.toml`. It never depends on `ironclaw_assistant` as a normal
 dependency (dev-only fixture edge exists; see the gate below) and never on
 `ironclaw_extension_manager` in any dependency kind.
