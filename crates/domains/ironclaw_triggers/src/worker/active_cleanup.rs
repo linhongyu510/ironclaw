@@ -1,12 +1,14 @@
 use crate::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord,
-    TriggerRunHistoryStatus,
+    TriggerRunHistoryStatus, TriggerSourceKind,
 };
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
-    TriggerPollerWorker, TriggerRunFailureSettlement, failure::classify_failure,
+    TriggerPollerWorker, TriggerRunTerminalSettlement, TriggerTerminalOutcome,
+    failure::classify_failure,
 };
 
 struct ActiveLookupItem {
@@ -132,10 +134,15 @@ impl TriggerPollerWorker {
             // resume after a failed trigger-history entry has already been
             // recorded. Terminal runs clear with whatever status they reached.
             // Exhaustive (no wildcard) so a new variant forces a compile error.
-            let clear: Option<(TriggerPollerFireOutcome, TriggerRunHistoryStatus)> = match state {
-                TriggerActiveRunState::Terminal { status } => Some((
+            let clear: Option<(
+                TriggerPollerFireOutcome,
+                TriggerRunHistoryStatus,
+                TriggerTerminalOutcome,
+            )> = match state {
+                TriggerActiveRunState::Terminal { status, outcome } => Some((
                     TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
                     status,
+                    outcome,
                 )),
                 // Missing remains conservative until recovery can prove the
                 // active run lookup is not merely stale or temporarily empty.
@@ -144,7 +151,7 @@ impl TriggerPollerWorker {
                 | TriggerActiveRunState::Nonterminal => None,
             };
             match clear {
-                Some((cleared_outcome, status)) => {
+                Some((cleared_outcome, status, outcome)) => {
                     let cleared = self
                         .deps
                         .repository
@@ -157,26 +164,28 @@ impl TriggerPollerWorker {
                         })
                         .await?
                         .is_some();
-                    // A terminal failure (run ended `Failed` / `Cancelled` /
-                    // `RecoveryRequired`, cleared as `Error`) previously had no
-                    // settlement failure hook — the active-cleanup sweep cleared
-                    // the slot with no observability. Surface it to the
-                    // settlement observer so automation-health telemetry can see
-                    // post-accept failures (#6896). `Ok`/`Running` and
-                    // already-cleared fires do not fire the hook — the former
-                    // are not failures, and the latter already did (or never
-                    // reached terminal here). The observer is invoked inline
-                    // per the `TriggerFireSettlementObserver` contract: it
-                    // must be cheap and non-blocking, detaching any heavy
-                    // work internally.
-                    if cleared && status == TriggerRunHistoryStatus::Error {
+                    // The callback follows both durable writes. A false result
+                    // means another worker already settled this fire, so it is
+                    // deliberately not observable a second time.
+                    if cleared {
+                        let source = self.settled_fire_source(&record, fire_slot, run_id).await;
                         self.deps
                             .fire_settlement_observer
-                            .on_run_failure_settled(TriggerRunFailureSettlement {
-                                tenant_id: record.tenant_id.clone(),
+                            .on_run_terminal_settled(TriggerRunTerminalSettlement {
+                                scope: ResourceScope {
+                                    tenant_id: record.tenant_id.clone(),
+                                    user_id: record.creator_user_id.clone(),
+                                    agent_id: record.agent_id.clone(),
+                                    project_id: record.project_id.clone(),
+                                    mission_id: None,
+                                    thread_id: None,
+                                    invocation_id: InvocationId::new(),
+                                },
                                 trigger_id: record.trigger_id,
                                 fire_slot,
                                 run_id,
+                                automation_kind: record.automation_kind_for_source(source),
+                                outcome,
                             })
                             .await;
                     }
@@ -210,6 +219,43 @@ impl TriggerPollerWorker {
         }
         self.set_active_scan_cursor(next_cursor)?;
         Ok(())
+    }
+
+    async fn settled_fire_source(
+        &self,
+        record: &TriggerRecord,
+        fire_slot: chrono::DateTime<chrono::Utc>,
+        run_id: ironclaw_host_api::turn::TurnRunId,
+    ) -> TriggerSourceKind {
+        match self
+            .deps
+            .repository
+            .list_trigger_run_history(
+                record.tenant_id.clone(),
+                record.trigger_id,
+                crate::MAX_TRIGGER_RUN_HISTORY_LIMIT,
+            )
+            .await
+        {
+            Ok(runs) => runs
+                .into_iter()
+                .find(|run| run.fire_slot == fire_slot && run.run_id == Some(run_id))
+                .map(|run| run.source)
+                .unwrap_or(record.source),
+            Err(error) => {
+                // silent-ok: telemetry attribution is best effort after the
+                // settlement itself is already durable; never undo or delay it.
+                tracing::warn!(
+                    ?error,
+                    tenant_id = %record.tenant_id,
+                    trigger_id = %record.trigger_id,
+                    fire_slot = %fire_slot,
+                    run_id = %run_id,
+                    "failed to resolve persisted trigger source for terminal observation"
+                );
+                record.source
+            }
+        }
     }
 
     async fn recover_stale_claim_only_fire(

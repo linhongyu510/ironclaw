@@ -685,6 +685,29 @@ pub enum TriggerSourceKind {
     Manual,
 }
 
+/// Stable automation vocabulary used when a trigger-owned run is reported to
+/// observers. The source is resolved from the persisted run-history row so a
+/// manual fire cannot be mistaken for the schedule that owns its trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerAutomationKind {
+    Cron,
+    Once,
+    Manual,
+}
+
+impl TriggerRecord {
+    pub fn automation_kind_for_source(&self, source: TriggerSourceKind) -> TriggerAutomationKind {
+        match source {
+            TriggerSourceKind::Manual => TriggerAutomationKind::Manual,
+            TriggerSourceKind::Schedule => match self.schedule {
+                TriggerSchedule::Cron { .. } => TriggerAutomationKind::Cron,
+                TriggerSchedule::Once { .. } => TriggerAutomationKind::Once,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerState {
@@ -1425,8 +1448,9 @@ pub use worker::{
     TriggerManualFireOutcome, TriggerManualFireRunner, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
     TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
-    TriggerRunFailureSettlement, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
+    TriggerRunTerminalSettlement, TriggerTerminalOutcome, TrustedTriggerFireSubmitOutcome,
+    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
+    active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

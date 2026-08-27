@@ -4023,6 +4023,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_extension",
+ "ironclaw_telemetry_contracts",
  "ironclaw_threads",
  "ironclaw_trace_commons",
  "ironclaw_triggers",

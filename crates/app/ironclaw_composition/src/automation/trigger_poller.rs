@@ -6,14 +6,21 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_telemetry_contracts::{
+    observation::{
+        AutomationId, AutomationKind, AutomationSettledObservation, ObservationContext, RunOutcome,
+        TelemetryObservation,
+    },
+    recorder::{NoopTelemetryRecorder, TelemetryRecorder},
+};
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
     TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
 use ironclaw_triggers::{
-    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
-    TriggerRunFailureSettlement,
+    TriggerAcceptedFireSettlement, TriggerAutomationKind, TriggerFailedFireSettlement,
+    TriggerFireSettlementObserver, TriggerRunTerminalSettlement, TriggerTerminalOutcome,
 };
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -168,6 +175,7 @@ fn spawn_post_submit_delivery(hook: Arc<dyn PostSubmitDeliveryHook>, event: Trig
 /// permanent pre-submit failure.
 pub(crate) struct PostSubmitHookObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+    telemetry_recorder: Arc<dyn TelemetryRecorder>,
     pending: Arc<Mutex<VecDeque<TriggerFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
@@ -178,8 +186,17 @@ impl PostSubmitHookObserver {
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
     ) -> Self {
+        Self::with_telemetry_recorder(hook_slot, drain_cancel, Arc::new(NoopTelemetryRecorder))
+    }
+
+    fn with_telemetry_recorder(
+        hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+        drain_cancel: CancellationToken,
+        telemetry_recorder: Arc<dyn TelemetryRecorder>,
+    ) -> Self {
         Self {
             hook_slot,
+            telemetry_recorder,
             pending: Arc::new(Mutex::new(VecDeque::new())),
             drain_scheduled: Arc::new(AtomicBool::new(false)),
             drain_cancel,
@@ -271,19 +288,66 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         spawn_post_submit_delivery(hook, TriggerFireSettlement::Failed(event));
     }
 
-    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
-        // The accepted fire's run reached a terminal failure state. The
-        // canonical delivery watcher owns the creator-facing notice; this
-        // observer only emits structured automation-health telemetry and
-        // must never mint a replacement run or bypass the delivery path.
-        tracing::warn!(
-            target: "ironclaw::reborn::trigger_poller",
-            tenant_id = %event.tenant_id,
-            trigger_id = %event.trigger_id,
-            fire_slot = %event.fire_slot,
-            run_id = %event.run_id,
-            "accepted trigger fire settled with a failed run"
+    async fn on_run_terminal_settled(&self, event: TriggerRunTerminalSettlement) {
+        let automation_id = match AutomationId::new(event.trigger_id.to_string()) {
+            Ok(automation_id) => automation_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::trigger_poller",
+                    ?error,
+                    trigger_id = %event.trigger_id,
+                    "discarding invalid trigger terminal telemetry identity"
+                );
+                return;
+            }
+        };
+        let observation = match AutomationSettledObservation::new(
+            ObservationContext::new(event.fire_slot),
+            automation_id,
+            map_automation_kind(event.automation_kind),
+            map_run_outcome(event.outcome),
+        ) {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ironclaw::reborn::trigger_poller",
+                    ?error,
+                    trigger_id = %event.trigger_id,
+                    "discarding invalid trigger terminal telemetry observation"
+                );
+                return;
+            }
+        };
+        let result = self.telemetry_recorder.try_record(
+            event.scope,
+            TelemetryObservation::AutomationSettled(observation),
         );
+        if result != ironclaw_telemetry_contracts::recorder::RecordOutcome::Accepted {
+            tracing::debug!(
+                target: "ironclaw::reborn::trigger_poller",
+                ?result,
+                trigger_id = %event.trigger_id,
+                run_id = %event.run_id,
+                "trigger terminal telemetry recorder did not accept observation"
+            );
+        }
+    }
+}
+
+fn map_automation_kind(kind: TriggerAutomationKind) -> AutomationKind {
+    match kind {
+        TriggerAutomationKind::Cron => AutomationKind::Cron,
+        TriggerAutomationKind::Once => AutomationKind::Once,
+        TriggerAutomationKind::Manual => AutomationKind::Manual,
+    }
+}
+
+fn map_run_outcome(outcome: TriggerTerminalOutcome) -> RunOutcome {
+    match outcome {
+        TriggerTerminalOutcome::Completed => RunOutcome::Completed,
+        TriggerTerminalOutcome::Failed => RunOutcome::Failed,
+        TriggerTerminalOutcome::Cancelled => RunOutcome::Cancelled,
+        TriggerTerminalOutcome::RecoveryRequired => RunOutcome::RecoveryRequired,
     }
 }
 
@@ -397,18 +461,43 @@ mod tests {
         use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
-        use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+        use ironclaw_host_api::{
+            ids::{AgentId, InvocationId, TenantId, ThreadId, UserId},
+            resource::ResourceScope,
+        };
+        use ironclaw_telemetry_contracts::{
+            observation::{AutomationKind, RunOutcome, TelemetryObservation},
+            recorder::{RecordOutcome, TelemetryRecorder},
+        };
         use ironclaw_triggers::{
-            TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFire,
-            TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
-            TriggerPollerFailureReason, TriggerRunFailureSettlement,
+            TriggerAcceptedFireSettlement, TriggerAutomationKind, TriggerFailedFireSettlement,
+            TriggerFire, TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
+            TriggerPollerFailureReason, TriggerRunTerminalSettlement, TriggerTerminalOutcome,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
         use tokio_util::sync::CancellationToken;
-        use tracing_test::traced_test;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
+
+        struct RecordingTelemetryRecorder {
+            calls: Mutex<Vec<(ResourceScope, TelemetryObservation)>>,
+            outcome: RecordOutcome,
+        }
+
+        impl TelemetryRecorder for RecordingTelemetryRecorder {
+            fn try_record(
+                &self,
+                scope: ResourceScope,
+                observation: TelemetryObservation,
+            ) -> RecordOutcome {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((scope, observation));
+                self.outcome
+            }
+        }
 
         #[derive(Default)]
         struct RecordingHook {
@@ -537,46 +626,79 @@ mod tests {
             }
         }
 
-        fn run_failure_settlement_event(run_id: TurnRunId) -> TriggerRunFailureSettlement {
-            TriggerRunFailureSettlement {
-                tenant_id: observer_tenant(),
+        fn terminal_settlement_event(run_id: TurnRunId) -> TriggerRunTerminalSettlement {
+            TriggerRunTerminalSettlement {
+                scope: ResourceScope {
+                    tenant_id: observer_tenant(),
+                    user_id: UserId::new("terminal-observer-user").expect("user"),
+                    agent_id: Some(AgentId::new("terminal-observer-agent").expect("agent")),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
                 trigger_id: TriggerId::new(),
                 fire_slot: Utc::now(),
                 run_id,
+                automation_kind: TriggerAutomationKind::Once,
+                outcome: TriggerTerminalOutcome::RecoveryRequired,
             }
         }
 
         #[tokio::test]
-        #[traced_test]
-        async fn run_failure_settlement_emits_health_warning_without_delivery() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let recording = Arc::new(RecordingHook::default());
-            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
-            hook_slot.set(recording.clone()).ok().expect("hook install");
+        async fn terminal_settlement_records_all_event_fields_once() {
+            let recorder = Arc::new(RecordingTelemetryRecorder {
+                calls: Mutex::new(Vec::new()),
+                outcome: RecordOutcome::Accepted,
+            });
+            let observer = PostSubmitHookObserver::with_telemetry_recorder(
+                Arc::new(std::sync::OnceLock::new()),
+                CancellationToken::new(),
+                recorder.clone(),
+            );
+            let event = terminal_settlement_event(TurnRunId::new());
+
+            observer.on_run_terminal_settled(event.clone()).await;
+
+            let calls = recorder.calls.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, event.scope);
+            let TelemetryObservation::AutomationSettled(observation) = &calls[0].1 else {
+                panic!("expected automation settled observation");
+            };
+            assert_eq!(observation.occurred_at(), event.fire_slot);
+            assert_eq!(
+                observation.automation_id().as_str(),
+                &event.trigger_id.to_string()
+            );
+            assert_eq!(observation.automation_kind(), AutomationKind::Once);
+            assert_eq!(observation.outcome(), RunOutcome::RecoveryRequired);
+        }
+
+        #[tokio::test]
+        async fn terminal_settlement_recorder_loss_is_observational_only() {
+            let recorder = Arc::new(RecordingTelemetryRecorder {
+                calls: Mutex::new(Vec::new()),
+                outcome: RecordOutcome::DroppedClosed,
+            });
+            let observer = PostSubmitHookObserver::with_telemetry_recorder(
+                Arc::new(std::sync::OnceLock::new()),
+                CancellationToken::new(),
+                recorder.clone(),
+            );
 
             observer
-                .on_run_failure_settled(run_failure_settlement_event(TurnRunId::new()))
+                .on_run_terminal_settled(terminal_settlement_event(TurnRunId::new()))
                 .await;
 
-            assert!(
-                logs_contain("accepted trigger fire settled with a failed run"),
-                "production observer must emit the automation-health signal; buffer: {:?}",
-                String::from_utf8(
-                    tracing_test::internal::global_buf()
-                        .lock()
-                        .expect("buf")
-                        .to_vec()
-                )
-                .expect("utf8")
-            );
-            assert!(
-                recording.calls().is_empty()
-                    && recording
-                        .failed_calls
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .is_empty(),
-                "run-failure observation must not bypass the canonical delivery watcher"
+            assert_eq!(
+                recorder
+                    .calls
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .len(),
+                1,
+                "recorder loss must not cause retries or duplicate settlement work"
             );
         }
 
