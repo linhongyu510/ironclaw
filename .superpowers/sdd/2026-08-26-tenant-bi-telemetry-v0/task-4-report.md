@@ -123,4 +123,4 @@ cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
 
 ## Commit
 
-Final review-fix commit: `fc2af80318`
+Final review-fix implementation commit: `d0685c7af2`
