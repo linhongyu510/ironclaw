@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    num::TryFromIntError,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU8, AtomicU64, Ordering},
@@ -565,22 +566,29 @@ struct IntakeState {
     coverage: CoverageSideAccumulator,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) enum IntakeAccountingError {
-    KeyCountOverflow { count: usize },
-    PendingCountUnderflow { pending: u64, requested: u64 },
+    KeyCountOverflow {
+        count: usize,
+        source: TryFromIntError,
+    },
+    PendingCountUnderflow {
+        pending: u64,
+        requested: u64,
+    },
     CoveragePendingUnderflow,
 }
 
 impl IntakeAccountingError {
-    pub(crate) const fn failure_class(self) -> FailureClassCode {
+    pub(crate) const fn failure_class(&self) -> FailureClassCode {
         match self {
-            Self::KeyCountOverflow { count } => {
-                debug_assert!(count > u64::MAX as usize);
+            Self::KeyCountOverflow { count, source } => {
+                debug_assert!(*count > u64::MAX as usize);
+                let _ = source;
                 FailureClassCode::CounterOverflow
             }
             Self::PendingCountUnderflow { pending, requested } => {
-                debug_assert!(pending < requested);
+                debug_assert!(*pending < *requested);
                 FailureClassCode::CounterOverflow
             }
             Self::CoveragePendingUnderflow => FailureClassCode::CounterOverflow,
@@ -648,8 +656,12 @@ impl Intake {
         keys: impl IntoIterator<Item = TenantHourKey>,
     ) -> Result<(), IntakeAccountingError> {
         let keys: Vec<_> = keys.into_iter().collect();
-        let count = u64::try_from(keys.len())
-            .map_err(|_| IntakeAccountingError::KeyCountOverflow { count: keys.len() })?;
+        let count = u64::try_from(keys.len()).map_err(|source| {
+            IntakeAccountingError::KeyCountOverflow {
+                count: keys.len(),
+                source,
+            }
+        })?;
         let mut state = self.lock();
         if state.coverage.account_observations(keys.clone()).is_err() {
             return Err(IntakeAccountingError::CoveragePendingUnderflow);
