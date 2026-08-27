@@ -26,6 +26,11 @@ corresponding production changes. The RED run failed at compilation because
 the new `failure_class_count` diagnostic accessor was not yet present. After
 the implementation, the final focused run passed all 18 tests.
 
+For the final ambiguous-write fix, a commit-then-error repository regression
+was added before changing the worker. The RED run observed the retry coverage
+row replaying the first attempted accepted count (`2` instead of `1`). The
+final focused run passes all 19 tests.
+
 ## Queue and worker semantics
 
 - There is one bounded Tokio MPSC queue, with an 8,192-observation default.
@@ -43,8 +48,10 @@ the implementation, the final focused run passed all 18 tests.
   observations are preferred when the receiver and notification are both
   ready.
 - A repository failure drops only the ambiguous drain, records its typed
-  failure class, carries count-only write-failure coverage forward, and lets
-  later drains continue without retrying the failed drain.
+  failure class, clears every attempted coverage row, and carries only fresh
+  count-only write-failure markers forward. Accepted and drop counters from an
+  ambiguously applied drain are never replayed; later drains continue without
+  retrying it.
 
 ## Count-only coverage and invalid handling
 
@@ -74,6 +81,13 @@ Aggregation, coverage-record construction, batch construction, repository
 record failures, and intake accounting retain typed failure classes in
 count-only diagnostics, including per-class counts and `last_failure_class`.
 No raw error causes enter the diagnostics surface.
+
+When a repository returns an error after an additive upsert may already have
+committed, the worker treats the entire attempted batch as ambiguous. It
+discards all attempted coverage counters and retains only a new
+`write_failed_observation_count` marker for the current observations, keyed by
+tenant and UTC hour. A later successful upsert therefore cannot double-count
+the ambiguous batch.
 
 Collector instance ID resolution now handles construction errors explicitly,
 records a typed diagnostic, and attempts the valid count-only fallback ID;
@@ -106,10 +120,10 @@ The following checks passed after the review fixes:
 
 ```text
 cargo test -p ironclaw_telemetry --test buffered_recorder_contract
-18 passed; 0 failed
+19 passed; 0 failed
 
 cargo test -p ironclaw_telemetry --all-targets --all-features
-46 passed; 0 failed (10 unit + 18 recorder + 15 hour-bucket + 3 repository)
+47 passed; 0 failed (10 unit + 19 recorder + 15 hour-bucket + 3 repository)
 
 cargo clippy -p ironclaw_telemetry --all-targets --all-features -- -D warnings
 finished with no warnings
@@ -123,4 +137,4 @@ cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
 
 ## Commit
 
-Final review-fix implementation commit: `d0685c7af2`
+Final ambiguous-write fix implementation commit: `1bfce5039e`
