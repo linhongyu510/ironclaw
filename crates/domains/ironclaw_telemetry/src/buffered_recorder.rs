@@ -30,6 +30,7 @@ pub const DEFAULT_TELEMETRY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// but no unbounded producer-side state is allocated for a new key.
 pub(crate) const MAX_COVERAGE_SIDE_KEYS: usize = 8_192;
 const MAX_TELEMETRY_TIMESTAMP_YEAR: i32 = 9_999;
+const FAILURE_CLASS_COUNT: usize = 8;
 
 /// Configuration for the bounded telemetry collector.
 #[derive(Debug, Clone)]
@@ -108,15 +109,16 @@ impl TelemetryClock for SystemTelemetryClock {
 
 /// Typed class for operational repository failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum TelemetryWriteFailureClass {
-    StorageAdmission,
-    StoragePoolAdmission,
-    StorageOperation,
-    CounterOverflow,
-    InvalidRecord,
-    InvalidData,
-    ShutdownTimeout,
-    CollectorIdResolution,
+    StorageAdmission = 1,
+    StoragePoolAdmission = 2,
+    StorageOperation = 3,
+    CounterOverflow = 4,
+    InvalidRecord = 5,
+    InvalidData = 6,
+    ShutdownTimeout = 7,
+    CollectorIdResolution = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +132,25 @@ pub(crate) enum FailureClassCode {
     InvalidData = 6,
     ShutdownTimeout = 7,
     CollectorIdResolution = 8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PreflightError {
+    InvalidTimestamp,
+    InvalidWindowStart,
+    CounterOutOfRange,
+    MissingUserAttribution,
+}
+
+impl PreflightError {
+    pub(crate) const fn failure_class(self) -> FailureClassCode {
+        match self {
+            Self::InvalidTimestamp | Self::InvalidWindowStart | Self::MissingUserAttribution => {
+                FailureClassCode::InvalidRecord
+            }
+            Self::CounterOutOfRange => FailureClassCode::CounterOverflow,
+        }
+    }
 }
 
 /// Count-only worker and queue diagnostics.
@@ -146,6 +167,7 @@ pub struct TelemetryDiagnostics {
     last_batch_size: u64,
     last_flush_latency_ms: u64,
     last_failure_class: Option<TelemetryWriteFailureClass>,
+    failure_class_counts: [u64; FAILURE_CLASS_COUNT],
     shutdown_timeout_count: u64,
     shutdown_write_loss_count: u64,
     shutdown_abandoned_observation_count: u64,
@@ -187,6 +209,14 @@ impl TelemetryDiagnostics {
     pub const fn last_failure_class(self) -> Option<TelemetryWriteFailureClass> {
         self.last_failure_class
     }
+    pub const fn failure_class_count(self, class: TelemetryWriteFailureClass) -> u64 {
+        let index = class as usize;
+        if index == 0 || index > FAILURE_CLASS_COUNT {
+            0
+        } else {
+            self.failure_class_counts[index - 1]
+        }
+    }
     pub const fn shutdown_timeout_count(self) -> u64 {
         self.shutdown_timeout_count
     }
@@ -216,6 +246,7 @@ pub(crate) struct DiagnosticsState {
     last_batch_size: AtomicU64,
     last_flush_latency_ms: AtomicU64,
     last_failure_class: AtomicU8,
+    failure_class_counts: [AtomicU64; FAILURE_CLASS_COUNT],
     shutdown_timeout_count: AtomicU64,
     shutdown_write_loss_count: AtomicU64,
     shutdown_abandoned_observation_count: AtomicU64,
@@ -237,6 +268,7 @@ impl Default for DiagnosticsState {
             last_batch_size: AtomicU64::new(0),
             last_flush_latency_ms: AtomicU64::new(0),
             last_failure_class: AtomicU8::new(0),
+            failure_class_counts: std::array::from_fn(|_| AtomicU64::new(0)),
             shutdown_timeout_count: AtomicU64::new(0),
             shutdown_write_loss_count: AtomicU64::new(0),
             shutdown_abandoned_observation_count: AtomicU64::new(0),
@@ -273,6 +305,9 @@ impl DiagnosticsState {
             last_batch_size: self.last_batch_size.load(Ordering::Relaxed),
             last_flush_latency_ms: self.last_flush_latency_ms.load(Ordering::Relaxed),
             last_failure_class,
+            failure_class_counts: std::array::from_fn(|index| {
+                self.failure_class_counts[index].load(Ordering::Relaxed)
+            }),
             shutdown_timeout_count: self.shutdown_timeout_count.load(Ordering::Relaxed),
             shutdown_write_loss_count: self.shutdown_write_loss_count.load(Ordering::Relaxed),
             shutdown_abandoned_observation_count: self
@@ -306,6 +341,12 @@ impl DiagnosticsState {
     pub(crate) fn record_repository_failure(&self, class: FailureClassCode) {
         self.repository_failure_count
             .fetch_add(1, Ordering::Relaxed);
+        self.record_failure(class);
+    }
+
+    pub(crate) fn record_failure(&self, class: FailureClassCode) {
+        let index = class as usize - 1;
+        self.failure_class_counts[index].fetch_add(1, Ordering::Relaxed);
         self.last_failure_class
             .store(class as u8, Ordering::Relaxed);
     }
@@ -327,8 +368,7 @@ impl DiagnosticsState {
             .fetch_add(abandoned, Ordering::Relaxed);
         self.write_failed_observation_count
             .fetch_add(abandoned, Ordering::Relaxed);
-        self.last_failure_class
-            .store(FailureClassCode::ShutdownTimeout as u8, Ordering::Relaxed);
+        self.record_failure(FailureClassCode::ShutdownTimeout);
     }
 
     pub(crate) fn record_coverage_key_overflow(&self) {
@@ -336,13 +376,13 @@ impl DiagnosticsState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_collector_id_resolution_failure(&self) {
+    pub(crate) fn record_collector_id_resolution_failure(
+        &self,
+        error: &ironclaw_telemetry_contracts::observation::BoundedIdentifierError,
+    ) {
         self.collector_id_resolution_failure_count
             .fetch_add(1, Ordering::Relaxed);
-        self.last_failure_class.store(
-            FailureClassCode::CollectorIdResolution as u8,
-            Ordering::Relaxed,
-        );
+        self.record_failure(classify_collector_id_error(error));
     }
 }
 
@@ -445,9 +485,31 @@ struct IntakeState {
     coverage: CoverageSideAccumulator,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IntakeAccountingError {
+    KeyCountOverflow { count: usize },
+    PendingCountUnderflow { pending: u64, requested: u64 },
+}
+
+impl IntakeAccountingError {
+    pub(crate) const fn failure_class(self) -> FailureClassCode {
+        match self {
+            Self::KeyCountOverflow { count } => {
+                debug_assert!(count > u64::MAX as usize);
+                FailureClassCode::CounterOverflow
+            }
+            Self::PendingCountUnderflow { pending, requested } => {
+                debug_assert!(pending < requested);
+                FailureClassCode::CounterOverflow
+            }
+        }
+    }
+}
+
 pub(crate) struct Intake {
     state: Mutex<IntakeState>,
     notify: Notify,
+    pending_observation_count: AtomicU64,
 }
 
 impl Intake {
@@ -459,6 +521,7 @@ impl Intake {
                 coverage: CoverageSideAccumulator::default(),
             }),
             notify: Notify::new(),
+            pending_observation_count: AtomicU64::new(0),
         }
     }
 
@@ -484,12 +547,36 @@ impl Intake {
         self.lock().coverage.take_drop_deltas()
     }
 
-    pub(crate) fn account_observations(&self, keys: impl IntoIterator<Item = TenantHourKey>) {
-        self.lock().coverage.account_observations(keys);
+    pub(crate) fn account_observations(
+        &self,
+        keys: impl IntoIterator<Item = TenantHourKey>,
+    ) -> Result<(), IntakeAccountingError> {
+        let keys: Vec<_> = keys.into_iter().collect();
+        let count = if keys.len() > u64::MAX as usize {
+            return Err(IntakeAccountingError::KeyCountOverflow { count: keys.len() });
+        } else {
+            keys.len() as u64
+        };
+        let mut state = self.lock();
+        state.coverage.account_observations(keys);
+        match self.pending_observation_count.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |pending| pending.checked_sub(count),
+        ) {
+            Ok(_) => Ok(()),
+            Err(pending) => Err(IntakeAccountingError::PendingCountUnderflow {
+                pending,
+                requested: count,
+            }),
+        }
     }
 
-    pub(crate) fn take_unpersisted(&self) -> BTreeMap<TenantHourKey, u64> {
-        self.lock().coverage.take_unpersisted()
+    pub(crate) fn take_unpersisted(&self) -> (BTreeMap<TenantHourKey, u64>, u64) {
+        let mut state = self.lock();
+        let unpersisted = state.coverage.take_unpersisted();
+        let pending = self.pending_observation_count.swap(0, Ordering::AcqRel);
+        (unpersisted, pending)
     }
 
     pub(crate) fn try_record(
@@ -497,7 +584,7 @@ impl Intake {
         observation: TelemetryObservation,
         key: TenantHourKey,
         diagnostics: &DiagnosticsState,
-        preflight: Result<(), ()>,
+        preflight: Result<(), PreflightError>,
     ) -> RecordOutcome {
         let mut state = self.lock();
         if state.closed {
@@ -511,13 +598,14 @@ impl Intake {
             self.notify.notify_one();
             return RecordOutcome::DroppedClosed;
         }
-        if preflight.is_err() {
+        if let Err(error) = preflight {
             if !state.coverage.record(key, |delta| {
                 delta.invalid_drop_count = delta.invalid_drop_count.saturating_add(1)
             }) {
                 diagnostics.record_coverage_key_overflow();
             }
             diagnostics.add_invalid(1);
+            diagnostics.record_failure(error.failure_class());
             drop(state);
             self.notify.notify_one();
             return RecordOutcome::DroppedInvalid;
@@ -530,6 +618,8 @@ impl Intake {
                 }) {
                     diagnostics.record_coverage_key_overflow();
                 }
+                self.pending_observation_count
+                    .fetch_add(1, Ordering::AcqRel);
                 diagnostics.increment_accepted();
                 RecordOutcome::Accepted
             }
@@ -624,12 +714,12 @@ fn resolve_collector_instance_id(
     };
     match candidate {
         Ok(collector_instance_id) => Some(collector_instance_id),
-        Err(_error) => {
-            diagnostics.record_collector_id_resolution_failure();
+        Err(error) => {
+            diagnostics.record_collector_id_resolution_failure(&error);
             match CollectorInstanceId::new("collector-fallback") {
                 Ok(collector_instance_id) => Some(collector_instance_id),
-                Err(_fallback_error) => {
-                    diagnostics.record_collector_id_resolution_failure();
+                Err(fallback_error) => {
+                    diagnostics.record_collector_id_resolution_failure(&fallback_error);
                     None
                 }
             }
@@ -654,10 +744,10 @@ impl TelemetryRecorder for Recorder {
     }
 }
 
-fn preflight_observation(observation: &TelemetryObservation) -> Result<(), ()> {
+fn preflight_observation(observation: &TelemetryObservation) -> Result<(), PreflightError> {
     let occurred_at = observation.occurred_at();
     if !(1..=MAX_TELEMETRY_TIMESTAMP_YEAR).contains(&occurred_at.year()) {
-        return Err(());
+        return Err(PreflightError::InvalidTimestamp);
     }
     let window_start = floor_utc_hour(occurred_at);
     if window_start > occurred_at
@@ -665,7 +755,7 @@ fn preflight_observation(observation: &TelemetryObservation) -> Result<(), ()> {
         || window_start.second() != 0
         || window_start.nanosecond() != 0
     {
-        return Err(());
+        return Err(PreflightError::InvalidWindowStart);
     }
     match observation {
         TelemetryObservation::RunSettled(observation) => {
@@ -674,7 +764,7 @@ fn preflight_observation(observation: &TelemetryObservation) -> Result<(), ()> {
                     .reported_tool_call_count()
                     .is_some_and(|count| count > MAX_DURABLE_COUNTER)
             {
-                return Err(());
+                return Err(PreflightError::CounterOutOfRange);
             }
         }
         TelemetryObservation::ModelCallCompleted(observation) => {
@@ -687,7 +777,7 @@ fn preflight_observation(observation: &TelemetryObservation) -> Result<(), ()> {
             .into_iter()
             .any(|value| value > MAX_DURABLE_COUNTER)
             {
-                return Err(());
+                return Err(PreflightError::CounterOutOfRange);
             }
         }
         TelemetryObservation::AutomationSettled(_) => {}
@@ -696,7 +786,7 @@ fn preflight_observation(observation: &TelemetryObservation) -> Result<(), ()> {
                 && observation.subject_kind()
                     != ironclaw_telemetry_contracts::observation::LifecycleSubjectKind::Tenant
             {
-                return Err(());
+                return Err(PreflightError::MissingUserAttribution);
             }
         }
     }
@@ -731,7 +821,7 @@ impl BufferedTelemetryRecorderHandle {
         {
             join.abort();
             let _ = join.await;
-            let abandoned = self.intake.take_unpersisted().values().copied().sum();
+            let (_, abandoned) = self.intake.take_unpersisted();
             self.diagnostics.record_shutdown_timeout(abandoned);
         }
         self.diagnostics.snapshot()
@@ -745,6 +835,40 @@ impl Drop for BufferedTelemetryRecorderHandle {
         if let Some(join) = self.join.take() {
             join.abort();
         }
+    }
+}
+
+pub(crate) fn classify_aggregation_error(error: &crate::AggregationError) -> FailureClassCode {
+    match error {
+        crate::AggregationError::CounterOverflow { .. }
+        | crate::AggregationError::CounterOutOfRange { .. } => FailureClassCode::CounterOverflow,
+        crate::AggregationError::InvalidRecord(error) => classify_record_error(error),
+    }
+}
+
+pub(crate) fn classify_record_error(error: &crate::RecordError) -> FailureClassCode {
+    match error {
+        crate::RecordError::CounterOutOfRange { .. }
+        | crate::RecordError::TerminalCountOverflow => FailureClassCode::CounterOverflow,
+        crate::RecordError::InvalidWindowStart
+        | crate::RecordError::InvalidObservationRange
+        | crate::RecordError::TerminalCountMismatch
+        | crate::RecordError::ReportedToolCountExceedsRuns
+        | crate::RecordError::ReportedUsageExceedsInferences
+        | crate::RecordError::DuplicateRow { .. }
+        | crate::RecordError::MissingUserAttribution => FailureClassCode::InvalidRecord,
+    }
+}
+
+fn classify_collector_id_error(
+    error: &ironclaw_telemetry_contracts::observation::BoundedIdentifierError,
+) -> FailureClassCode {
+    match error {
+        ironclaw_telemetry_contracts::observation::BoundedIdentifierError::Empty { .. }
+        | ironclaw_telemetry_contracts::observation::BoundedIdentifierError::TooLong { .. }
+        | ironclaw_telemetry_contracts::observation::BoundedIdentifierError::ControlCharacters {
+            ..
+        } => FailureClassCode::CollectorIdResolution,
     }
 }
 

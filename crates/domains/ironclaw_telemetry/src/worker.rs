@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     CollectorCoverage, TelemetryBatch, TelemetryRepository, aggregate_batch,
     buffered_recorder::{
-        CoverageSideDelta, DiagnosticsState, Intake, TelemetryClock, TenantHourKey,
+        CoverageSideDelta, DiagnosticsState, Intake, MAX_COVERAGE_SIDE_KEYS, TelemetryClock,
+        TenantHourKey, classify_aggregation_error, classify_record_error,
         classify_repository_error,
     },
     floor_utc_hour,
@@ -179,7 +180,6 @@ pub(crate) async fn run(
                         shutting_down = true;
                         break;
                     }
-                    _ = intake.notified() => {}
                     _ = &mut deadline => break,
                     next = receiver.recv() => match next {
                         Some(observation) => observations.push(observation),
@@ -250,8 +250,8 @@ async fn receive_first(
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) =>
                 Some(FirstWork::Shutdown),
         },
-        _ = intake.notified() => Some(FirstWork::CoverageNotice),
         observation = receiver.recv() => observation.map(FirstWork::Observation),
+        _ = intake.notified() => Some(FirstWork::CoverageNotice),
     }
 }
 
@@ -265,11 +265,12 @@ async fn flush(
     diagnostics: &DiagnosticsState,
 ) {
     for (key, delta) in intake.take_drop_deltas() {
-        let accumulator = pending_coverage
-            .entry((key.tenant_id.clone(), key.window_start))
-            .or_insert_with(|| CoverageAccumulator::from_key(&key));
+        let Some(accumulator) = ensure_coverage_entry(&key, pending_coverage, diagnostics) else {
+            continue;
+        };
         if accumulator.add_side_delta(delta).is_err() {
             diagnostics.add_invalid(1);
+            diagnostics.record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
             return;
         }
     }
@@ -281,19 +282,24 @@ async fn flush(
         if let Some(accumulator) = pending_coverage.get_mut(&key) {
             if accumulator.add_observation(observation).is_err() {
                 diagnostics.add_invalid(1);
-                intake.account_observations(observation_keys(observations));
+                diagnostics
+                    .record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
+                account_observations(intake, observations, diagnostics);
                 return;
             }
-        } else {
+        } else if pending_coverage.len() < MAX_COVERAGE_SIDE_KEYS {
             pending_coverage.insert(key, CoverageAccumulator::from_observation(observation));
+        } else {
+            diagnostics.record_coverage_key_overflow();
         }
     }
 
     let aggregate = aggregate_batch(observations);
     let mut batch = match aggregate {
         Ok(batch) => batch,
-        Err(_) => {
+        Err(error) => {
             diagnostics.add_invalid(observations.len());
+            diagnostics.record_failure(classify_aggregation_error(&error));
             for observation in observations {
                 let key = (
                     observation.tenant_id().clone(),
@@ -302,10 +308,13 @@ async fn flush(
                 if let Some(accumulator) = pending_coverage.get_mut(&key)
                     && accumulator.add_invalid(1).is_err()
                 {
+                    diagnostics.record_failure(
+                        crate::buffered_recorder::FailureClassCode::CounterOverflow,
+                    );
                     return;
                 }
             }
-            intake.account_observations(observation_keys(observations));
+            account_observations(intake, observations, diagnostics);
             return;
         }
     };
@@ -315,9 +324,10 @@ async fn flush(
         for accumulator in pending_coverage.values() {
             match accumulator.to_record(collector_instance_id) {
                 Ok(row) => coverage.push(row),
-                Err(_) => {
+                Err(error) => {
                     diagnostics.add_invalid(observations.len());
-                    intake.account_observations(observation_keys(observations));
+                    diagnostics.record_failure(classify_record_error(&error));
+                    account_observations(intake, observations, diagnostics);
                     return;
                 }
             }
@@ -331,9 +341,10 @@ async fn flush(
             coverage,
         ) {
             Ok(batch) => batch,
-            Err(_) => {
+            Err(error) => {
                 diagnostics.add_invalid(observations.len());
-                intake.account_observations(observation_keys(observations));
+                diagnostics.record_failure(classify_record_error(&error));
+                account_observations(intake, observations, diagnostics);
                 return;
             }
         };
@@ -355,10 +366,12 @@ async fn flush(
             if let Some(accumulator) = pending_coverage.get_mut(&key)
                 && accumulator.add_write_failed(1).is_err()
             {
+                diagnostics
+                    .record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
                 return;
             }
         }
-        intake.account_observations(observation_keys(observations));
+        account_observations(intake, observations, diagnostics);
         return;
     }
     let elapsed_ms = clock
@@ -366,7 +379,7 @@ async fn flush(
         .signed_duration_since(started)
         .num_milliseconds();
     diagnostics.record_flush(observations.len(), elapsed_ms.max(0) as u64);
-    intake.account_observations(observation_keys(observations));
+    account_observations(intake, observations, diagnostics);
     pending_coverage.clear();
 }
 
@@ -378,4 +391,30 @@ fn observation_keys(observations: &[TelemetryObservation]) -> Vec<TenantHourKey>
             window_start: floor_utc_hour(observation.occurred_at()),
         })
         .collect()
+}
+
+fn ensure_coverage_entry<'a>(
+    key: &TenantHourKey,
+    pending_coverage: &'a mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
+    diagnostics: &DiagnosticsState,
+) -> Option<&'a mut CoverageAccumulator> {
+    let pending_key = (key.tenant_id.clone(), key.window_start);
+    if !pending_coverage.contains_key(&pending_key) {
+        if pending_coverage.len() >= MAX_COVERAGE_SIDE_KEYS {
+            diagnostics.record_coverage_key_overflow();
+            return None;
+        }
+        pending_coverage.insert(pending_key.clone(), CoverageAccumulator::from_key(key));
+    }
+    pending_coverage.get_mut(&pending_key)
+}
+
+fn account_observations(
+    intake: &Intake,
+    observations: &[TelemetryObservation],
+    diagnostics: &DiagnosticsState,
+) {
+    if let Err(error) = intake.account_observations(observation_keys(observations)) {
+        diagnostics.record_failure(error.failure_class());
+    }
 }

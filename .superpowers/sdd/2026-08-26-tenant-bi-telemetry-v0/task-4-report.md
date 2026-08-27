@@ -20,11 +20,11 @@ The first run of the focused command failed because the recorder types and
 clock were missing; enabling Tokio's test-time support was also required for
 the paused-clock tests.
 
-For the review-fix round, the new coverage, shutdown accounting, invalid
-preflight, and concurrent close/send tests were run before the corresponding
-production changes. The focused run initially failed at compilation because
-`BufferedTelemetryRecorderHandle::close_intake` was not yet present. After the
-implementation, the final focused run passed all 14 tests.
+For the final review-fix round, the new notification-flood, outage-bound,
+global pending-count, and typed-failure tests were added before the
+corresponding production changes. The RED run failed at compilation because
+the new `failure_class_count` diagnostic accessor was not yet present. After
+the implementation, the final focused run passed all 18 tests.
 
 ## Queue and worker semantics
 
@@ -39,6 +39,9 @@ implementation, the final focused run passed all 14 tests.
 - The single worker drains at most 512 observations or waits at most one
   second, aggregates before persistence, and performs sequential repository
   upserts with no overlapping workers.
+- Queue-drop notifications cannot postpone a nonempty batch deadline; queued
+  observations are preferred when the receiver and notification are both
+  ready.
 - A repository failure drops only the ambiguous drain, records its typed
   failure class, carries count-only write-failure coverage forward, and lets
   later drains continue without retrying the failed drain.
@@ -53,12 +56,24 @@ The worker merges these deltas into `CollectorCoverage` rows. Contract tests
 verify durable queue-full, closed, invalid-preflight, and invalid-aggregate
 coverage values.
 
+Worker-side pending coverage uses the same 8,192-key bound as the producer-side
+accumulator. During a repository outage, additional tenant/hour keys are
+counted as attribution-overflow diagnostics while drains continue; no
+unbounded key state is retained. A separate global pending-observation counter
+tracks every accepted enqueue even when per-key attribution is full, so a
+stalled shutdown reports queued/in-flight loss exactly.
+
 `DroppedInvalid` is synchronous. A bounded pure preflight checks supported UTC
 timestamp years/hour conversion, signed durable counter ranges, and lifecycle
 user attribution before queue admission. A validly constructed run at year
 10,000 exercises the timestamp path. Aggregate-only overflow remains an
 `Accepted` drain fact and is recorded in coverage as an invalid aggregate
 without a repository write for that drain.
+
+Aggregation, coverage-record construction, batch construction, repository
+record failures, and intake accounting retain typed failure classes in
+count-only diagnostics, including per-class counts and `last_failure_class`.
+No raw error causes enter the diagnostics surface.
 
 Collector instance ID resolution now handles construction errors explicitly,
 records a typed diagnostic, and attempts the valid count-only fallback ID;
@@ -91,10 +106,10 @@ The following checks passed after the review fixes:
 
 ```text
 cargo test -p ironclaw_telemetry --test buffered_recorder_contract
-14 passed; 0 failed
+18 passed; 0 failed
 
 cargo test -p ironclaw_telemetry --all-targets --all-features
-42 passed; 0 failed (10 unit + 14 recorder + 15 hour-bucket + 3 repository)
+46 passed; 0 failed (10 unit + 18 recorder + 15 hour-bucket + 3 repository)
 
 cargo clippy -p ironclaw_telemetry --all-targets --all-features -- -D warnings
 finished with no warnings
@@ -108,4 +123,4 @@ cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries
 
 ## Commit
 
-Implementation and review-fix commit: `1c0c4ba1c6`
+Final review-fix commit: `fc2af80318`
