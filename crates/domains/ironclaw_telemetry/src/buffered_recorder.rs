@@ -155,6 +155,7 @@ pub(crate) enum FailureClassCode {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PreflightError {
     SystemScope,
+    MissingSubjectUserAttribution,
     InvalidTimestamp,
     InvalidWindowStart,
     CounterOutOfRange,
@@ -163,9 +164,10 @@ pub(crate) enum PreflightError {
 impl PreflightError {
     pub(crate) const fn failure_class(self) -> FailureClassCode {
         match self {
-            Self::SystemScope | Self::InvalidTimestamp | Self::InvalidWindowStart => {
-                FailureClassCode::InvalidRecord
-            }
+            Self::SystemScope
+            | Self::MissingSubjectUserAttribution
+            | Self::InvalidTimestamp
+            | Self::InvalidWindowStart => FailureClassCode::InvalidRecord,
             Self::CounterOutOfRange => FailureClassCode::CounterOverflow,
         }
     }
@@ -905,7 +907,14 @@ fn preflight_observation(
             }
         }
         TelemetryObservation::AutomationSettled(_) => {}
-        TelemetryObservation::LifecycleTransition(_) => {}
+        TelemetryObservation::LifecycleTransition(observation) => {
+            if observation.subject_kind()
+                != ironclaw_telemetry_contracts::observation::LifecycleSubjectKind::Tenant
+                && observation.subject_user_id().is_none()
+            {
+                return Err(PreflightError::MissingSubjectUserAttribution);
+            }
+        }
     }
     Ok(())
 }

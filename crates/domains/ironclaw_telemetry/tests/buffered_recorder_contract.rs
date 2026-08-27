@@ -1239,3 +1239,37 @@ async fn lifecycle_subject_user_can_differ_from_scope_user() {
     assert_eq!(event.tenant_id().as_str(), "tenant-a");
     assert_eq!(event.user_id().map(UserId::as_str), Some("subject-user"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn malformed_lifecycle_observation_does_not_poison_valid_usage() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    let malformed = TelemetryObservation::LifecycleTransition(
+        LifecycleTransitionObservation::new(
+            None,
+            LifecycleEventId::new("event-without-owner").expect("event"),
+            LifecycleEventKind::RoutineCreated,
+            LifecycleSubjectKind::Routine,
+            "routine-a",
+            timestamp(0),
+        )
+        .expect("structurally valid lifecycle observation"),
+    );
+
+    assert_eq!(
+        recorder.try_record_scoped(scope(), malformed),
+        RecordOutcome::DroppedInvalid
+    );
+    assert_eq!(
+        recorder.try_record_scoped(scope(), completed_run(0)),
+        RecordOutcome::Accepted
+    );
+    lifecycle.shutdown().await;
+
+    let batches = repository.batches();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].activity().len(), 1);
+    assert!(batches[0].lifecycle_events().is_empty());
+}
