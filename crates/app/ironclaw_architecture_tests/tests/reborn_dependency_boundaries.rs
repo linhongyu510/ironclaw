@@ -1110,9 +1110,10 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
         ("ironclaw_prompt_envelope", 432),
-        // 0 -> 5 (2026-08-26, WS6 tenant BI telemetry foundation): documented
-        // contract shell only; observation behavior remains a later slice.
-        ("ironclaw_telemetry_contracts", 5),
+        // 5 -> 613 (2026-08-26, Task 2 tenant BI telemetry behavior): bounded
+        // observation/recorder vocabulary and validation live in this contracts
+        // crate; aggregation and durable record behavior remain in the domain.
+        ("ironclaw_telemetry_contracts", 613),
     ];
 
     let root = workspace_root();
