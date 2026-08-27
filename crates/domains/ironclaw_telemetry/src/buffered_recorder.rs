@@ -17,10 +17,12 @@ use ironclaw_telemetry_contracts::{
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{floor_utc_hour, repository::TelemetryRepository, worker};
 
 pub const DEFAULT_TELEMETRY_QUEUE_CAPACITY: usize = 8_192;
+pub(crate) const MAX_TELEMETRY_QUEUE_CAPACITY: usize = DEFAULT_TELEMETRY_QUEUE_CAPACITY;
 pub const DEFAULT_TELEMETRY_MAX_BATCH_SIZE: usize = 512;
 pub const DEFAULT_TELEMETRY_MAX_WAIT: Duration = Duration::from_secs(1);
 pub const DEFAULT_TELEMETRY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,8 +58,20 @@ impl Default for BufferedRecorderConfig {
 
 impl BufferedRecorderConfig {
     pub fn with_queue_capacity(mut self, queue_capacity: usize) -> Self {
-        self.queue_capacity = queue_capacity.max(1);
+        self.queue_capacity = queue_capacity.clamp(1, MAX_TELEMETRY_QUEUE_CAPACITY);
         self
+    }
+
+    /// Returns the queue capacity that `spawn` will use, including for callers
+    /// that construct this public config by setting fields directly.
+    pub const fn effective_queue_capacity(&self) -> usize {
+        if self.queue_capacity == 0 {
+            1
+        } else if self.queue_capacity > MAX_TELEMETRY_QUEUE_CAPACITY {
+            MAX_TELEMETRY_QUEUE_CAPACITY
+        } else {
+            self.queue_capacity
+        }
     }
 
     pub fn with_max_batch_size(mut self, max_batch_size: usize) -> Self {
@@ -321,69 +335,93 @@ impl DiagnosticsState {
     }
 
     pub(crate) fn increment_accepted(&self) {
-        self.accepted_observation_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.accepted_observation_count, 1);
     }
     pub(crate) fn increment_queue_full(&self) {
-        self.queue_full_drop_count.fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.queue_full_drop_count, 1);
     }
     pub(crate) fn increment_closed(&self) {
-        self.closed_drop_count.fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.closed_drop_count, 1);
     }
     pub(crate) fn add_invalid(&self, count: usize) {
-        self.invalid_observation_count
-            .fetch_add(count as u64, Ordering::Relaxed);
+        let Ok(count) = u64::try_from(count) else {
+            self.record_counter_overflow();
+            return;
+        };
+        self.add_counter(&self.invalid_observation_count, count);
     }
     pub(crate) fn add_write_failed(&self, count: usize) {
-        self.write_failed_observation_count
-            .fetch_add(count as u64, Ordering::Relaxed);
+        let Ok(count) = u64::try_from(count) else {
+            self.record_counter_overflow();
+            return;
+        };
+        self.add_counter(&self.write_failed_observation_count, count);
     }
     pub(crate) fn record_repository_failure(&self, class: FailureClassCode) {
-        self.repository_failure_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.repository_failure_count, 1);
         self.record_failure(class);
     }
 
     pub(crate) fn record_failure(&self, class: FailureClassCode) {
         let index = class as usize - 1;
-        self.failure_class_counts[index].fetch_add(1, Ordering::Relaxed);
+        if checked_atomic_add(&self.failure_class_counts[index], 1).is_err()
+            && class != FailureClassCode::CounterOverflow
+        {
+            self.record_counter_overflow();
+        }
         self.last_failure_class
             .store(class as u8, Ordering::Relaxed);
     }
     pub(crate) fn record_flush(&self, batch_size: usize, latency_ms: u64) {
-        self.flushed_batch_count.fetch_add(1, Ordering::Relaxed);
-        self.flushed_observation_count
-            .fetch_add(batch_size as u64, Ordering::Relaxed);
-        self.last_batch_size
-            .store(batch_size as u64, Ordering::Relaxed);
+        self.add_counter(&self.flushed_batch_count, 1);
+        let Ok(batch_size) = u64::try_from(batch_size) else {
+            self.record_counter_overflow();
+            return;
+        };
+        self.add_counter(&self.flushed_observation_count, batch_size);
+        self.last_batch_size.store(batch_size, Ordering::Relaxed);
         self.last_flush_latency_ms
             .store(latency_ms, Ordering::Relaxed);
     }
 
     pub(crate) fn record_shutdown_timeout(&self, abandoned: u64) {
-        self.shutdown_timeout_count.fetch_add(1, Ordering::Relaxed);
-        self.shutdown_write_loss_count
-            .fetch_add(abandoned, Ordering::Relaxed);
-        self.shutdown_abandoned_observation_count
-            .fetch_add(abandoned, Ordering::Relaxed);
-        self.write_failed_observation_count
-            .fetch_add(abandoned, Ordering::Relaxed);
+        self.add_counter(&self.shutdown_timeout_count, 1);
+        self.add_counter(&self.shutdown_write_loss_count, abandoned);
+        self.add_counter(&self.shutdown_abandoned_observation_count, abandoned);
+        self.add_counter(&self.write_failed_observation_count, abandoned);
         self.record_failure(FailureClassCode::ShutdownTimeout);
     }
 
     pub(crate) fn record_coverage_key_overflow(&self) {
-        self.coverage_key_overflow_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.coverage_key_overflow_count, 1);
     }
 
     pub(crate) fn record_collector_id_resolution_failure(
         &self,
         error: &ironclaw_telemetry_contracts::observation::BoundedIdentifierError,
     ) {
-        self.collector_id_resolution_failure_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&self.collector_id_resolution_failure_count, 1);
         self.record_failure(classify_collector_id_error(error));
     }
+
+    fn add_counter(&self, counter: &AtomicU64, amount: u64) {
+        if checked_atomic_add(counter, amount).is_err() {
+            self.record_counter_overflow();
+        }
+    }
+
+    pub(crate) fn record_counter_overflow(&self) {
+        let index = FailureClassCode::CounterOverflow as usize - 1;
+        let _ = checked_atomic_add(&self.failure_class_counts[index], 1);
+        self.last_failure_class
+            .store(FailureClassCode::CounterOverflow as u8, Ordering::Relaxed);
+    }
+}
+
+fn checked_atomic_add(counter: &AtomicU64, amount: u64) -> Result<u64, u64> {
+    counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_add(amount)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -398,6 +436,8 @@ pub(crate) struct CoverageSideDelta {
     pub(crate) queue_full_drop_count: u64,
     pub(crate) closed_drop_count: u64,
     pub(crate) invalid_drop_count: u64,
+    pub(crate) first_observed_at: Option<DateTime<Utc>>,
+    pub(crate) last_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default)]
@@ -406,18 +446,25 @@ pub(crate) struct CoverageSideAccumulator {
 }
 
 impl CoverageSideAccumulator {
-    fn record(&mut self, key: TenantHourKey, update: impl FnOnce(&mut CoverageSideDelta)) -> bool {
+    fn record(
+        &mut self,
+        key: TenantHourKey,
+        occurred_at: DateTime<Utc>,
+        update: impl FnOnce(&mut CoverageSideDelta) -> Result<(), ()>,
+    ) -> Result<bool, ()> {
         if let Some(delta) = self.entries.get_mut(&key) {
-            update(delta);
-            return true;
+            update(delta)?;
+            delta.record_timestamp(occurred_at);
+            return Ok(true);
         }
         if self.entries.len() >= MAX_COVERAGE_SIDE_KEYS {
-            return false;
+            return Ok(false);
         }
         let mut delta = CoverageSideDelta::default();
-        update(&mut delta);
+        update(&mut delta)?;
+        delta.record_timestamp(occurred_at);
         self.entries.insert(key, delta);
-        true
+        Ok(true)
     }
 
     fn take_drop_deltas(&mut self) -> BTreeMap<TenantHourKey, CoverageSideDelta> {
@@ -428,6 +475,8 @@ impl CoverageSideAccumulator {
                 queue_full_drop_count: delta.queue_full_drop_count,
                 closed_drop_count: delta.closed_drop_count,
                 invalid_drop_count: delta.invalid_drop_count,
+                first_observed_at: delta.first_observed_at,
+                last_observed_at: delta.last_observed_at,
             };
             if drop_delta.queue_full_drop_count != 0
                 || drop_delta.closed_drop_count != 0
@@ -437,6 +486,8 @@ impl CoverageSideAccumulator {
                 delta.queue_full_drop_count = 0;
                 delta.closed_drop_count = 0;
                 delta.invalid_drop_count = 0;
+                delta.first_observed_at = None;
+                delta.last_observed_at = None;
             }
             delta.accepted_pending != 0
                 || delta.queue_full_drop_count != 0
@@ -446,10 +497,25 @@ impl CoverageSideAccumulator {
         drops
     }
 
-    fn account_observations(&mut self, keys: impl IntoIterator<Item = TenantHourKey>) {
+    fn account_observations(
+        &mut self,
+        keys: impl IntoIterator<Item = TenantHourKey>,
+    ) -> Result<(), ()> {
+        let mut requested = BTreeMap::<TenantHourKey, u64>::new();
         for key in keys {
+            let entry = requested.entry(key).or_default();
+            *entry = entry.checked_add(1).ok_or(())?;
+        }
+        for (key, count) in &requested {
+            if let Some(delta) = self.entries.get(key)
+                && delta.accepted_pending < *count
+            {
+                return Err(());
+            }
+        }
+        for (key, count) in requested {
             if let Some(delta) = self.entries.get_mut(&key) {
-                delta.accepted_pending = delta.accepted_pending.saturating_sub(1);
+                delta.accepted_pending -= count;
             }
         }
         self.entries.retain(|_, delta| {
@@ -458,6 +524,7 @@ impl CoverageSideAccumulator {
                 || delta.closed_drop_count != 0
                 || delta.invalid_drop_count != 0
         });
+        Ok(())
     }
 
     fn take_unpersisted(&mut self) -> BTreeMap<TenantHourKey, u64> {
@@ -479,6 +546,19 @@ impl CoverageSideAccumulator {
     }
 }
 
+impl CoverageSideDelta {
+    fn record_timestamp(&mut self, occurred_at: DateTime<Utc>) {
+        self.first_observed_at = Some(match self.first_observed_at {
+            Some(first) => first.min(occurred_at),
+            None => occurred_at,
+        });
+        self.last_observed_at = Some(match self.last_observed_at {
+            Some(last) => last.max(occurred_at),
+            None => occurred_at,
+        });
+    }
+}
+
 struct IntakeState {
     sender: mpsc::Sender<TelemetryObservation>,
     closed: bool,
@@ -489,6 +569,7 @@ struct IntakeState {
 pub(crate) enum IntakeAccountingError {
     KeyCountOverflow { count: usize },
     PendingCountUnderflow { pending: u64, requested: u64 },
+    CoveragePendingUnderflow,
 }
 
 impl IntakeAccountingError {
@@ -502,6 +583,7 @@ impl IntakeAccountingError {
                 debug_assert!(pending < requested);
                 FailureClassCode::CounterOverflow
             }
+            Self::CoveragePendingUnderflow => FailureClassCode::CounterOverflow,
         }
     }
 }
@@ -510,6 +592,20 @@ pub(crate) struct Intake {
     state: Mutex<IntakeState>,
     notify: Notify,
     pending_observation_count: AtomicU64,
+}
+
+fn record_coverage_event(
+    state: &mut IntakeState,
+    key: TenantHourKey,
+    occurred_at: DateTime<Utc>,
+    diagnostics: &DiagnosticsState,
+    update: impl FnOnce(&mut CoverageSideDelta) -> Result<(), ()>,
+) {
+    match state.coverage.record(key, occurred_at, update) {
+        Ok(true) => {}
+        Ok(false) => diagnostics.record_coverage_key_overflow(),
+        Err(()) => diagnostics.record_counter_overflow(),
+    }
 }
 
 impl Intake {
@@ -552,13 +648,12 @@ impl Intake {
         keys: impl IntoIterator<Item = TenantHourKey>,
     ) -> Result<(), IntakeAccountingError> {
         let keys: Vec<_> = keys.into_iter().collect();
-        let count = if keys.len() > u64::MAX as usize {
-            return Err(IntakeAccountingError::KeyCountOverflow { count: keys.len() });
-        } else {
-            keys.len() as u64
-        };
+        let count = u64::try_from(keys.len())
+            .map_err(|_| IntakeAccountingError::KeyCountOverflow { count: keys.len() })?;
         let mut state = self.lock();
-        state.coverage.account_observations(keys);
+        if state.coverage.account_observations(keys.clone()).is_err() {
+            return Err(IntakeAccountingError::CoveragePendingUnderflow);
+        }
         match self.pending_observation_count.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -586,24 +681,23 @@ impl Intake {
         diagnostics: &DiagnosticsState,
         preflight: Result<(), PreflightError>,
     ) -> RecordOutcome {
+        let occurred_at = observation.occurred_at();
         let mut state = self.lock();
         if state.closed {
-            if !state.coverage.record(key, |delta| {
-                delta.closed_drop_count = delta.closed_drop_count.saturating_add(1)
-            }) {
-                diagnostics.record_coverage_key_overflow();
-            }
+            record_coverage_event(&mut state, key, occurred_at, diagnostics, |delta| {
+                delta.closed_drop_count = delta.closed_drop_count.checked_add(1).ok_or(())?;
+                Ok(())
+            });
             diagnostics.increment_closed();
             drop(state);
             self.notify.notify_one();
             return RecordOutcome::DroppedClosed;
         }
         if let Err(error) = preflight {
-            if !state.coverage.record(key, |delta| {
-                delta.invalid_drop_count = delta.invalid_drop_count.saturating_add(1)
-            }) {
-                diagnostics.record_coverage_key_overflow();
-            }
+            record_coverage_event(&mut state, key, occurred_at, diagnostics, |delta| {
+                delta.invalid_drop_count = delta.invalid_drop_count.checked_add(1).ok_or(())?;
+                Ok(())
+            });
             diagnostics.add_invalid(1);
             diagnostics.record_failure(error.failure_class());
             drop(state);
@@ -613,33 +707,32 @@ impl Intake {
         let outcome = state.sender.try_send(observation);
         match outcome {
             Ok(()) => {
-                if !state.coverage.record(key, |delta| {
-                    delta.accepted_pending = delta.accepted_pending.saturating_add(1)
-                }) {
-                    diagnostics.record_coverage_key_overflow();
+                record_coverage_event(&mut state, key, occurred_at, diagnostics, |delta| {
+                    delta.accepted_pending = delta.accepted_pending.checked_add(1).ok_or(())?;
+                    Ok(())
+                });
+                if checked_atomic_add(&self.pending_observation_count, 1).is_err() {
+                    diagnostics.record_counter_overflow();
                 }
-                self.pending_observation_count
-                    .fetch_add(1, Ordering::AcqRel);
                 diagnostics.increment_accepted();
                 RecordOutcome::Accepted
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                if !state.coverage.record(key, |delta| {
-                    delta.queue_full_drop_count = delta.queue_full_drop_count.saturating_add(1)
-                }) {
-                    diagnostics.record_coverage_key_overflow();
-                }
+                record_coverage_event(&mut state, key, occurred_at, diagnostics, |delta| {
+                    delta.queue_full_drop_count =
+                        delta.queue_full_drop_count.checked_add(1).ok_or(())?;
+                    Ok(())
+                });
                 diagnostics.increment_queue_full();
                 drop(state);
                 self.notify.notify_one();
                 RecordOutcome::DroppedQueueFull
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                if !state.coverage.record(key, |delta| {
-                    delta.closed_drop_count = delta.closed_drop_count.saturating_add(1)
-                }) {
-                    diagnostics.record_coverage_key_overflow();
-                }
+                record_coverage_event(&mut state, key, occurred_at, diagnostics, |delta| {
+                    delta.closed_drop_count = delta.closed_drop_count.checked_add(1).ok_or(())?;
+                    Ok(())
+                });
                 diagnostics.increment_closed();
                 drop(state);
                 self.notify.notify_one();
@@ -658,7 +751,7 @@ impl BufferedTelemetryRecorder {
         repository: Arc<dyn TelemetryRepository>,
         clock: Arc<dyn TelemetryClock>,
     ) -> (Arc<dyn TelemetryRecorder>, BufferedTelemetryRecorderHandle) {
-        let (sender, receiver) = mpsc::channel(config.queue_capacity.max(1));
+        let (sender, receiver) = mpsc::channel(config.effective_queue_capacity());
         let cancellation = CancellationToken::new();
         let diagnostics = Arc::new(DiagnosticsState::default());
         let collector_instance_id =
@@ -710,7 +803,7 @@ fn resolve_collector_instance_id(
 ) -> Option<CollectorInstanceId> {
     let candidate = match configured {
         Some(collector_instance_id) => Ok(collector_instance_id),
-        None => CollectorInstanceId::new(format!("collector-{}", std::process::id())),
+        None => CollectorInstanceId::new(format!("collector-{}", Uuid::new_v4())),
     };
     match candidate {
         Ok(collector_instance_id) => Some(collector_instance_id),
@@ -900,5 +993,49 @@ pub(crate) fn classify_repository_error(
         | crate::TelemetryRepositoryError::InvalidTimestamp { .. }
         | crate::TelemetryRepositoryError::InvalidPersistedField { .. }
         | crate::TelemetryRepositoryError::UnknownEnum { .. } => FailureClassCode::InvalidData,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_atomic_add_rejects_overflow_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX);
+
+        assert!(checked_atomic_add(&counter, 1).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn diagnostic_counter_overflow_is_typed_and_loss_safe() {
+        let diagnostics = DiagnosticsState::default();
+        diagnostics
+            .accepted_observation_count
+            .store(u64::MAX, Ordering::Relaxed);
+
+        diagnostics.increment_accepted();
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.accepted_observation_count(), u64::MAX);
+        assert_eq!(
+            snapshot.failure_class_count(TelemetryWriteFailureClass::CounterOverflow),
+            1
+        );
+        assert_eq!(
+            snapshot.last_failure_class(),
+            Some(TelemetryWriteFailureClass::CounterOverflow)
+        );
+
+        diagnostics.failure_class_counts[FailureClassCode::CounterOverflow as usize - 1]
+            .store(u64::MAX, Ordering::Relaxed);
+        diagnostics.record_counter_overflow();
+        assert_eq!(
+            diagnostics
+                .snapshot()
+                .failure_class_count(TelemetryWriteFailureClass::CounterOverflow),
+            u64::MAX
+        );
     }
 }

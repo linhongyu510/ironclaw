@@ -346,6 +346,91 @@ async fn queue_full_drop_is_written_to_tenant_hour_coverage() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn coverage_only_commit_then_error_retains_a_loss_marker() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.fail_next_after_commit();
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    lifecycle.close_intake();
+    assert_eq!(
+        recorder.try_record(completed_run(3599)),
+        RecordOutcome::DroppedClosed
+    );
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let attempted = repository.batches();
+    assert_eq!(attempted.len(), 1);
+    assert_eq!(attempted[0].collector_coverage()[0].closed_drop_count(), 1);
+    assert_eq!(
+        attempted[0].collector_coverage()[0].write_failed_observation_count(),
+        0
+    );
+
+    lifecycle.shutdown().await;
+    let batches = repository.batches();
+    assert_eq!(batches.len(), 2);
+    let marker = &batches[1].collector_coverage()[0];
+    assert_eq!(marker.accepted_observation_count(), 0);
+    assert_eq!(marker.queue_full_drop_count(), 0);
+    assert_eq!(marker.closed_drop_count(), 0);
+    assert_eq!(marker.invalid_drop_count(), 0);
+    assert_eq!(marker.write_failed_observation_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_marker_failure_retains_a_fresh_marker_for_retry() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.fail_next_after_commit();
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    lifecycle.close_intake();
+    assert_eq!(
+        recorder.try_record(completed_run(3599)),
+        RecordOutcome::DroppedClosed
+    );
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    repository.fail_next_after_commit();
+    lifecycle.close_intake();
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let failed_markers = repository.batches();
+    assert_eq!(failed_markers.len(), 2);
+    let first_attempt = &failed_markers[0].collector_coverage()[0];
+    assert_eq!(first_attempt.accepted_observation_count(), 0);
+    assert_eq!(first_attempt.queue_full_drop_count(), 0);
+    assert_eq!(first_attempt.closed_drop_count(), 1);
+    assert_eq!(first_attempt.invalid_drop_count(), 0);
+    assert_eq!(first_attempt.write_failed_observation_count(), 0);
+    let second_attempt = &failed_markers[1].collector_coverage()[0];
+    assert_eq!(second_attempt.accepted_observation_count(), 0);
+    assert_eq!(second_attempt.queue_full_drop_count(), 0);
+    assert_eq!(second_attempt.closed_drop_count(), 0);
+    assert_eq!(second_attempt.invalid_drop_count(), 0);
+    assert_eq!(second_attempt.write_failed_observation_count(), 1);
+
+    lifecycle.shutdown().await;
+    assert_eq!(repository.batches().len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
 async fn closed_drop_is_written_to_tenant_hour_coverage() {
     let repository = Arc::new(FakeRepository::default());
     let clock = Arc::new(FixedClock::new(timestamp(0)));
@@ -537,18 +622,27 @@ async fn pending_coverage_is_bounded_during_an_outage_and_later_drains_continue(
     const OBSERVATIONS: usize = 8_193;
     let repository = Arc::new(FakeRepository::default());
     repository.set_fail_all(true);
+    let (started, release) = repository.block_next_write();
     let clock = Arc::new(FixedClock::new(timestamp(0)));
     let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(
-        config().with_queue_capacity(OBSERVATIONS + 1),
+        config().with_queue_capacity(OBSERVATIONS),
         repository.clone(),
         clock,
     );
-    for index in 0..OBSERVATIONS {
+    assert_eq!(
+        recorder.try_record(completed_run_for_tenant_hour(0)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    started.await.expect("write started");
+    for index in 1..OBSERVATIONS {
         assert_eq!(
             recorder.try_record(completed_run_for_tenant_hour(index as u64)),
             RecordOutcome::Accepted
         );
     }
+    let _ = release.send(());
     for _ in 0..100 {
         if lifecycle.diagnostics().repository_failure_count() >= 17 {
             break;
@@ -860,6 +954,90 @@ async fn a_new_recorder_after_shutdown_has_an_independent_worker() {
         1
     );
     lifecycle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_collector_ids_are_unique_per_recorder_instance() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+
+    let (first_recorder, first_lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock.clone());
+    first_lifecycle.close_intake();
+    assert_eq!(
+        first_recorder.try_record(completed_run(3599)),
+        RecordOutcome::DroppedClosed
+    );
+    first_lifecycle.shutdown().await;
+
+    let (second_recorder, second_lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    second_lifecycle.close_intake();
+    assert_eq!(
+        second_recorder.try_record(completed_run(3599)),
+        RecordOutcome::DroppedClosed
+    );
+    second_lifecycle.shutdown().await;
+
+    let batches = repository.batches();
+    assert_eq!(batches.len(), 2);
+    let first_id = batches[0].collector_coverage()[0]
+        .collector_instance_id()
+        .as_str();
+    let second_id = batches[1].collector_coverage()[0]
+        .collector_instance_id()
+        .as_str();
+    assert_ne!(first_id, second_id);
+    assert!(first_id.len() <= 128);
+    assert!(second_id.len() <= 128);
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_oversized_queue_configuration_is_clamped_at_spawn() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let direct_config = BufferedRecorderConfig {
+        queue_capacity: 8_193,
+        ..BufferedRecorderConfig::default()
+    };
+    assert_eq!(direct_config.effective_queue_capacity(), 8_192);
+    let zero_config = BufferedRecorderConfig {
+        queue_capacity: 0,
+        ..BufferedRecorderConfig::default()
+    };
+    assert_eq!(zero_config.effective_queue_capacity(), 1);
+    let (recorder, lifecycle) = BufferedTelemetryRecorder::spawn(direct_config, repository, clock);
+
+    for offset in 0..8_192 {
+        assert_eq!(
+            recorder.try_record(completed_run(offset)),
+            RecordOutcome::Accepted
+        );
+    }
+    assert_eq!(
+        recorder.try_record(completed_run(8_192)),
+        RecordOutcome::DroppedQueueFull
+    );
+    lifecycle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn drop_only_coverage_uses_the_drop_timestamp_for_its_span() {
+    let repository = Arc::new(FakeRepository::default());
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+    lifecycle.close_intake();
+    let dropped_at = timestamp(3_599);
+    assert_eq!(
+        recorder.try_record(completed_run(3_599)),
+        RecordOutcome::DroppedClosed
+    );
+    lifecycle.shutdown().await;
+    let batches = repository.batches();
+    let coverage = &batches[0].collector_coverage()[0];
+    assert_eq!(coverage.first_observed_at(), dropped_at);
+    assert_eq!(coverage.last_observed_at(), dropped_at);
 }
 
 #[tokio::test(start_paused = true)]

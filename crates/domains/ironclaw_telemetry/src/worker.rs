@@ -53,21 +53,6 @@ impl CoverageAccumulator {
         }
     }
 
-    fn from_write_failure(observation: &TelemetryObservation) -> Self {
-        let occurred_at = observation.occurred_at();
-        Self {
-            tenant_id: observation.tenant_id().clone(),
-            window_start: floor_utc_hour(occurred_at),
-            accepted_observation_count: 0,
-            queue_full_drop_count: 0,
-            closed_drop_count: 0,
-            invalid_drop_count: 0,
-            write_failed_observation_count: 1,
-            first_observed_at: occurred_at,
-            last_observed_at: occurred_at,
-        }
-    }
-
     fn from_observation(observation: &TelemetryObservation) -> Self {
         let occurred_at = observation.occurred_at();
         Self {
@@ -92,35 +77,50 @@ impl CoverageAccumulator {
     }
 
     fn add_side_delta(&mut self, delta: CoverageSideDelta) -> Result<(), ()> {
-        self.accepted_observation_count = self
+        let was_empty = self.accepted_observation_count == 0
+            && self.queue_full_drop_count == 0
+            && self.closed_drop_count == 0
+            && self.invalid_drop_count == 0
+            && self.write_failed_observation_count == 0;
+        let accepted_observation_count = self
             .accepted_observation_count
             .checked_add(delta.accepted_pending)
             .ok_or(())?;
-        self.queue_full_drop_count = self
+        let queue_full_drop_count = self
             .queue_full_drop_count
             .checked_add(delta.queue_full_drop_count)
             .ok_or(())?;
-        self.closed_drop_count = self
+        let closed_drop_count = self
             .closed_drop_count
             .checked_add(delta.closed_drop_count)
             .ok_or(())?;
-        self.invalid_drop_count = self
+        let invalid_drop_count = self
             .invalid_drop_count
             .checked_add(delta.invalid_drop_count)
             .ok_or(())?;
+        self.accepted_observation_count = accepted_observation_count;
+        self.queue_full_drop_count = queue_full_drop_count;
+        self.closed_drop_count = closed_drop_count;
+        self.invalid_drop_count = invalid_drop_count;
+        if let Some(first) = delta.first_observed_at {
+            self.first_observed_at = if was_empty {
+                first
+            } else {
+                self.first_observed_at.min(first)
+            };
+        }
+        if let Some(last) = delta.last_observed_at {
+            self.last_observed_at = if was_empty {
+                last
+            } else {
+                self.last_observed_at.max(last)
+            };
+        }
         Ok(())
     }
 
     fn add_invalid(&mut self, count: u64) -> Result<(), ()> {
         self.invalid_drop_count = self.invalid_drop_count.checked_add(count).ok_or(())?;
-        Ok(())
-    }
-
-    fn add_write_failed(&mut self, count: u64) -> Result<(), ()> {
-        self.write_failed_observation_count = self
-            .write_failed_observation_count
-            .checked_add(count)
-            .ok_or(())?;
         Ok(())
     }
 
@@ -392,24 +392,52 @@ fn replace_with_write_failure_coverage(
     diagnostics: &DiagnosticsState,
 ) {
     // The repository may have applied any part of the batch before returning
-    // the error. Never retry its additive counters; carry only a fresh marker
-    // for observations from this attempted drain.
-    pending_coverage.clear();
+    // the error. Never retry its additive counters; carry only one fresh loss
+    // marker for each tenant/hour key touched by this attempted drain.
+    let mut attempted_keys =
+        BTreeMap::<(TenantId, DateTime<Utc>), (DateTime<Utc>, DateTime<Utc>)>::new();
+    for ((tenant_id, window_start), accumulator) in pending_coverage.iter() {
+        attempted_keys.insert(
+            (tenant_id.clone(), *window_start),
+            (accumulator.first_observed_at, accumulator.last_observed_at),
+        );
+    }
     for observation in observations {
         let key = (
             observation.tenant_id().clone(),
             floor_utc_hour(observation.occurred_at()),
         );
-        if let Some(accumulator) = pending_coverage.get_mut(&key) {
-            if accumulator.add_write_failed(1).is_err() {
-                diagnostics
-                    .record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
-            }
-        } else if pending_coverage.len() < MAX_COVERAGE_SIDE_KEYS {
-            pending_coverage.insert(key, CoverageAccumulator::from_write_failure(observation));
+        let occurred_at = observation.occurred_at();
+        if let Some(span) = attempted_keys.get_mut(&key) {
+            span.0 = span.0.min(occurred_at);
+            span.1 = span.1.max(occurred_at);
+        } else if attempted_keys.len() < MAX_COVERAGE_SIDE_KEYS {
+            attempted_keys.insert(key, (occurred_at, occurred_at));
         } else {
             diagnostics.record_coverage_key_overflow();
         }
+    }
+
+    pending_coverage.clear();
+    for ((tenant_id, window_start), (first_observed_at, last_observed_at)) in attempted_keys {
+        if pending_coverage.len() >= MAX_COVERAGE_SIDE_KEYS {
+            diagnostics.record_coverage_key_overflow();
+            break;
+        }
+        pending_coverage.insert(
+            (tenant_id.clone(), window_start),
+            CoverageAccumulator {
+                tenant_id,
+                window_start,
+                accepted_observation_count: 0,
+                queue_full_drop_count: 0,
+                closed_drop_count: 0,
+                invalid_drop_count: 0,
+                write_failed_observation_count: 1,
+                first_observed_at,
+                last_observed_at,
+            },
+        );
     }
 }
 
@@ -446,5 +474,33 @@ fn account_observations(
 ) {
     if let Err(error) = intake.account_observations(observation_keys(observations)) {
         diagnostics.record_failure(error.failure_class());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn coverage_accumulator_rejects_counter_overflow_without_mutation() {
+        let window_start = Utc
+            .with_ymd_and_hms(2025, 8, 26, 9, 0, 0)
+            .single()
+            .expect("valid test timestamp");
+        let key = TenantHourKey {
+            tenant_id: TenantId::new("tenant-a").expect("valid tenant"),
+            window_start,
+        };
+        let mut accumulator = CoverageAccumulator::from_key(&key);
+        accumulator.accepted_observation_count = u64::MAX;
+
+        let delta = CoverageSideDelta {
+            accepted_pending: 1,
+            ..CoverageSideDelta::default()
+        };
+        assert!(accumulator.add_side_delta(delta).is_err());
+        assert_eq!(accumulator.accepted_observation_count, u64::MAX);
     }
 }
