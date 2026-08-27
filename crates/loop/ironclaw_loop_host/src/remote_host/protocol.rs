@@ -11,11 +11,18 @@ pub enum LoopWorkerInvocation {
     Resume(AgentLoopDriverResumeRequest),
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LoopWorkerSettings {
+    pub default_iteration_limit: Option<u32>,
+    pub model_availability_attempts: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopWorkerBootstrap {
     pub wire_version: u16,
     pub run_context: LoopRunContext,
     pub invocation: LoopWorkerInvocation,
+    pub settings: LoopWorkerSettings,
     pub tool_definitions: Vec<ProviderToolDefinition>,
     pub current_visible_capabilities: Option<serde_json::Value>,
 }

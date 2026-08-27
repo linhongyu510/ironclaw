@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use super::{
+use crate::sandbox_process::{
     ca::SandboxCertificateAuthority, registry, user_key::RebornSandboxUserKey, worker_spec,
 };
 use bollard::{

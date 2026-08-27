@@ -915,8 +915,13 @@ fn build_sandboxed_local_runtime_services_input(
     let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
             let workspace_root = runtime_workspace_root(config, profile)?;
+            let legacy_workspace_root =
+                local_runtime_storage_root(config, profile).join("sandbox-workspaces");
             block_on_cli(
-                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+                ironclaw_composition::build_local_docker_user_sandbox_binding(
+                    workspace_root,
+                    Some(legacy_workspace_root),
+                ),
             )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
                 profile,

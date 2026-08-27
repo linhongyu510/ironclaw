@@ -18,12 +18,18 @@ use crate::{RebornBuildError, RebornRuntimeProcessBinding};
 /// receives an unsandboxed fallback or a provider assembly handle.
 pub async fn build_local_docker_user_sandbox_binding(
     workspace_root: PathBuf,
+    legacy_workspace_root: Option<PathBuf>,
 ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
-    let config = RebornSandboxConfig::new(workspace_root)
-        .with_managed_egress_proxy()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("user-sandbox managed egress configuration is invalid: {error}"),
-        })?;
+    let mut config = RebornSandboxConfig::new(workspace_root);
+    if let Some(legacy_workspace_root) = legacy_workspace_root {
+        config = config.with_legacy_workspace_root(legacy_workspace_root);
+    }
+    let config =
+        config
+            .with_managed_egress_proxy()
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("user-sandbox managed egress configuration is invalid: {error}"),
+            })?;
     let transport = Arc::new(
         RebornScopedSandboxCommandTransport::connect(config)
             .await

@@ -7,12 +7,13 @@ use ironclaw_turns::LoopMessageRef;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::protocol::*;
-use super::server::wire_error_to_host_error;
+use crate::remote_host::protocol::*;
+use crate::remote_host::server::wire_error_to_host_error;
 
 struct StdioRpcClient<R, W> {
     reader: tokio::sync::Mutex<R>,
     writer: tokio::sync::Mutex<W>,
+    exchange: tokio::sync::Mutex<()>,
     next_id: std::sync::atomic::AtomicU64,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
     tool_definitions: Vec<ProviderToolDefinition>,
@@ -33,6 +34,7 @@ where
         Self {
             reader: tokio::sync::Mutex::new(reader),
             writer: tokio::sync::Mutex::new(writer),
+            exchange: tokio::sync::Mutex::new(()),
             next_id: std::sync::atomic::AtomicU64::new(1),
             cancellation: Mutex::new(None),
             tool_definitions,
@@ -41,6 +43,10 @@ where
     }
 
     async fn call_raw(&self, call: HostCall) -> Result<serde_json::Value, WireError> {
+        // One reader carries responses for every request. Serialize the full
+        // exchange so concurrent canonical batch calls cannot consume each
+        // other's response frame.
+        let _exchange = self.exchange.lock().await;
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -545,4 +551,58 @@ async fn read_framed<R: AsyncRead + Unpin>(
         )
     })?;
     Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_calls_cannot_consume_each_others_responses() {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_io);
+        let (mut server_read, mut server_write) = tokio::io::split(server_io);
+        let rpc = Arc::new(StdioRpcClient::new(
+            client_read,
+            client_write,
+            Vec::new(),
+            None,
+        ));
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let bytes = read_framed(&mut server_read)
+                    .await
+                    .expect("request frame reads")
+                    .expect("request frame exists");
+                let WorkerFrame::HostRequest(request) =
+                    decode::<WorkerFrame>(&bytes).expect("request decodes")
+                else {
+                    panic!("expected host request");
+                };
+                let response = encode(&HostFrame::HostResponse(HostResponseFrame {
+                    id: request.id,
+                    result: Ok(serde_json::json!(request.id)),
+                }))
+                .expect("response encodes");
+                write_framed(&mut server_write, &response)
+                    .await
+                    .expect("response writes");
+            }
+        });
+
+        let (first, second) = tokio::join!(
+            rpc.call_raw(HostCall::AckInputs(Vec::new())),
+            rpc.call_raw(HostCall::AckInputs(Vec::new())),
+        );
+        server.await.expect("server task");
+        let mut ids = vec![
+            first.expect("first response").as_u64().expect("first id"),
+            second
+                .expect("second response")
+                .as_u64()
+                .expect("second id"),
+        ];
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+    }
 }

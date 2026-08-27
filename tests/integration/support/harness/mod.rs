@@ -865,6 +865,7 @@ impl HostRuntimeCapabilityHarness {
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
                 workspace_root.clone(),
+                None,
             )
             .await?;
             sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();
@@ -1452,7 +1453,7 @@ impl HostRuntimeCapabilityHarness {
             }
             other => return Err(format!("unsupported approval action: {other:?}").into()),
         };
-        let approval = self.lease_approval_for(&capability);
+        let approval = self.lease_approval_for(&capability, &scope)?;
         let resolver = ApprovalResolver::new(
             approval_parts.approval_requests.as_ref(),
             approval_parts.capability_leases.as_ref(),
@@ -1867,33 +1868,8 @@ impl HostRuntimeCapabilityHarness {
         // resolved user) is captured once for the lifetime of the returned
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
-        let workspace_mounts = if self.workspace_scoped_per_caller {
-            let permissions = self
-                .mounts
-                .mounts
-                .iter()
-                .find(|mount| mount.alias.as_str() == "/workspace")
-                .map(|mount| mount.permissions.clone())
-                .ok_or_else(|| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "per-caller workspace harness requires a /workspace mount",
-                    )
-                })?;
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/workspace").map_err(host_runtime_harness_error)?,
-                VirtualPath::new(format!(
-                    "/projects/workspace/tenants/{}/users/{}",
-                    run_context.scope.tenant_id.as_str(),
-                    dispatch_user.as_str()
-                ))
-                .map_err(host_runtime_harness_error)?,
-                permissions,
-            )])
-            .map_err(host_runtime_harness_error)?
-        } else {
-            self.mounts.clone()
-        };
+        let workspace_mounts =
+            self.workspace_mounts_for_scope(&run_context.scope.tenant_id, &dispatch_user)?;
         // ONE shared io, both roles: production assigns a single
         // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
@@ -2228,14 +2204,53 @@ impl HostRuntimeCapabilityHarness {
         }
     }
 
-    fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
-        let mounts = self
+    fn workspace_mounts_for_scope(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<MountView, AgentLoopHostError> {
+        if !self.workspace_scoped_per_caller {
+            return Ok(self.mounts.clone());
+        }
+        let permissions = self
+            .mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/workspace")
+            .map(|mount| mount.permissions.clone())
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "per-caller workspace harness requires a /workspace mount",
+                )
+            })?;
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").map_err(host_runtime_harness_error)?,
+            VirtualPath::new(format!(
+                "/projects/workspace/tenants/{}/users/{}",
+                tenant_id.as_str(),
+                user_id.as_str()
+            ))
+            .map_err(host_runtime_harness_error)?,
+            permissions,
+        )])
+        .map_err(host_runtime_harness_error)
+    }
+
+    fn lease_approval_for(
+        &self,
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+    ) -> Result<LeaseApproval, AgentLoopHostError> {
+        let mounts = match self
             .capability_mount_overrides
             .iter()
             .find(|(override_capability, _)| override_capability == capability_id)
-            .map(|(_, mounts)| mounts.clone())
-            .unwrap_or_else(|| self.mounts.clone());
-        LeaseApproval {
+        {
+            Some((_, mounts)) => mounts.clone(),
+            None => self.workspace_mounts_for_scope(&scope.tenant_id, &scope.user_id)?,
+        };
+        Ok(LeaseApproval {
             issued_by: Principal::HostRuntime,
             constraints: GrantConstraints {
                 allowed_effects: self.effect_kinds.clone(),
@@ -2246,7 +2261,7 @@ impl HostRuntimeCapabilityHarness {
                 expires_at: None,
                 max_invocations: Some(1),
             },
-        }
+        })
     }
 
     /// Builds the composition-facing `additional_provider_trust` map this

@@ -41,9 +41,9 @@ impl DockerLoopWorkerSession {
         if self.terminated {
             return Ok(());
         }
-        self.terminated = true;
         self.input.take();
         terminate_process(&self.docker, &self.container_name, self.process_id).await?;
+        self.terminated = true;
         Ok(())
     }
 }
@@ -60,8 +60,11 @@ impl Drop for DockerLoopWorkerSession {
         let container_name = self.container_name.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = terminate_process(&docker, &container_name, process_id).await {
-                    tracing::warn!(?error, "failed to terminate dropped sandbox loop worker");
+                if terminate_process(&docker, &container_name, process_id)
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("failed to terminate dropped sandbox loop worker");
                 }
             });
         }
@@ -118,10 +121,7 @@ impl SandboxLoopWorkerSession for DockerLoopWorkerSession {
                     ));
                 }
                 if !self.diagnostic.is_empty() {
-                    return Err(RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox loop worker exited: {}",
-                        self.diagnostic.trim()
-                    )));
+                    return Err(worker_diagnostic_exit_error(self.diagnostic.len()));
                 }
                 let exit_code = self
                     .docker
@@ -295,6 +295,16 @@ fn pipe_write_error(error: std::io::Error) -> RuntimeProcessError {
     RuntimeProcessError::ExecutionFailed(format!("sandbox loop worker input failed: {error}"))
 }
 
+fn worker_diagnostic_exit_error(diagnostic_bytes: usize) -> RuntimeProcessError {
+    tracing::debug!(
+        diagnostic_bytes,
+        "sandbox loop worker exited with diagnostics"
+    );
+    RuntimeProcessError::ExecutionFailed(
+        "sandbox loop worker exited with internal diagnostics".to_string(),
+    )
+}
+
 async fn wait_for_exec_pid(
     docker: &bollard::Docker,
     exec_id: &str,
@@ -363,4 +373,21 @@ async fn terminate_process(
             ))
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_diagnostic_exit_error_never_contains_worker_output() {
+        let secret = "api_key=sk-worker-secret";
+        let error = worker_diagnostic_exit_error(secret.len());
+
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(
+            error.to_string(),
+            "process execution failed: sandbox loop worker exited with internal diagnostics"
+        );
+    }
 }

@@ -55,6 +55,12 @@ impl RebornSandboxUserKey {
             .join(self.user_id.as_str())
     }
 
+    /// Pre-#7903 local-Docker workspace location. Used only by the one-time
+    /// forward migration into the canonical tenant/user layout.
+    pub(crate) fn legacy_workspace_path(&self, root: &Path) -> PathBuf {
+        root.join("users").join(&self.digest)
+    }
+
     pub fn container_name(&self) -> String {
         format!("{USER_CONTAINER_NAME_PREFIX}{}", self.digest_prefix())
     }

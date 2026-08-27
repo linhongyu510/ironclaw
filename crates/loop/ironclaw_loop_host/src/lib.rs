@@ -130,8 +130,8 @@ pub use model_routes::{
 pub use model_visible_scrub::scrub_model_visible_detail;
 pub use remote_host::{
     LOOP_WORKER_MAX_FRAME_BYTES, LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure,
-    LoopWorkerInvocation, LoopWorkerOutcome, RemoteAgentLoopDriverHost, read_worker_bootstrap,
-    remote_host_from_stdio, serve_loop_worker,
+    LoopWorkerInvocation, LoopWorkerOutcome, LoopWorkerSettings, RemoteAgentLoopDriverHost,
+    read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
 };
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]

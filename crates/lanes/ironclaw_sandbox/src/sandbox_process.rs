@@ -132,6 +132,7 @@ impl ContainerWorkdir {
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
     runtime_state_root: PathBuf,
+    legacy_workspace_roots: Vec<PathBuf>,
     mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
@@ -153,6 +154,7 @@ impl RebornSandboxConfig {
         Self {
             workspace_root,
             runtime_state_root,
+            legacy_workspace_roots: Vec::new(),
             mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
@@ -170,6 +172,10 @@ impl RebornSandboxConfig {
         }
     }
 
+    pub fn with_legacy_workspace_root(mut self, root: PathBuf) -> Self {
+        self.legacy_workspace_roots.push(root);
+        self
+    }
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();
         self
@@ -593,6 +599,8 @@ impl RebornScopedSandboxCommandTransport {
     ) -> Result<PathBuf, RuntimeProcessError> {
         let key = RebornSandboxUserKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
+        Self::migrate_legacy_workspace(&key, &self.config.legacy_workspace_roots, &workspace)
+            .await?;
         tokio::fs::create_dir_all(&workspace)
             .await
             .map_err(|error| {
@@ -619,6 +627,71 @@ impl RebornScopedSandboxCommandTransport {
                 "sandbox workspace could not be resolved: {error}"
             ))
         })
+    }
+
+    async fn migrate_legacy_workspace(
+        key: &RebornSandboxUserKey,
+        legacy_roots: &[PathBuf],
+        workspace: &Path,
+    ) -> Result<(), RuntimeProcessError> {
+        let mut existing = Vec::new();
+        for root in legacy_roots {
+            let candidate = key.legacy_workspace_path(root);
+            match tokio::fs::symlink_metadata(&candidate).await {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "legacy sandbox workspace is not a safe directory".to_string(),
+                    ));
+                }
+                Ok(_) => existing.push(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "legacy sandbox workspace could not be inspected: {error}"
+                    )));
+                }
+            }
+        }
+        if existing.is_empty() {
+            return Ok(());
+        }
+        match tokio::fs::symlink_metadata(workspace).await {
+            Ok(_) => {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "legacy and canonical sandbox workspaces both exist; manual reconciliation is required"
+                        .to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "canonical sandbox workspace could not be inspected: {error}"
+                )));
+            }
+        }
+        if existing.len() > 1 {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "multiple legacy sandbox workspaces exist; manual reconciliation is required"
+                    .to_string(),
+            ));
+        }
+        let parent = workspace.parent().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "canonical sandbox workspace has no parent directory".to_string(),
+            )
+        })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "canonical sandbox workspace parent could not be initialized: {error}"
+            ))
+        })?;
+        tokio::fs::rename(&existing[0], workspace)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "legacy sandbox workspace migration failed: {error}"
+                ))
+            })
     }
 
     fn resolve_container_workdir(
@@ -1129,6 +1202,7 @@ mod tests {
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
         action::{NetworkPolicy, NetworkTargetPattern},
+        ids::{TenantId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
@@ -1328,6 +1402,64 @@ mod tests {
                 .runtime_state_root
                 .starts_with(config.workspace_root.join("tenants"))
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_workspace_is_moved_once_without_copying_user_data() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let key = RebornSandboxUserKey::from_tenant_user(
+            &TenantId::new("tenant").expect("tenant"),
+            &UserId::new("user").expect("user"),
+        );
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::write(legacy.join("proof.txt"), "preserved").expect("legacy file");
+        let canonical = key.workspace_path(&canonical_root);
+
+        RebornScopedSandboxCommandTransport::migrate_legacy_workspace(
+            &key,
+            &[legacy_root],
+            &canonical,
+        )
+        .await
+        .expect("legacy workspace migrates");
+
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("proof.txt")).expect("migrated file"),
+            "preserved"
+        );
+        assert!(!legacy.exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_workspace_conflict_fails_without_modifying_either_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let key = RebornSandboxUserKey::from_tenant_user(
+            &TenantId::new("tenant").expect("tenant"),
+            &UserId::new("user").expect("user"),
+        );
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        let canonical = key.workspace_path(&canonical_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::create_dir_all(&canonical).expect("canonical workspace");
+        std::fs::write(legacy.join("legacy.txt"), "legacy").expect("legacy file");
+        std::fs::write(canonical.join("canonical.txt"), "canonical").expect("canonical file");
+
+        let error = RebornScopedSandboxCommandTransport::migrate_legacy_workspace(
+            &key,
+            &[legacy_root],
+            &canonical,
+        )
+        .await
+        .expect_err("conflicting workspace trees fail closed");
+
+        assert!(error.to_string().contains("manual reconciliation"));
+        assert!(legacy.join("legacy.txt").is_file());
+        assert!(canonical.join("canonical.txt").is_file());
     }
 
     #[test]

@@ -732,7 +732,12 @@ where
         )
     })?;
     if let Some(transport) = parts.sandbox_loop_worker_transport.clone() {
-        register_sandboxed_default_planned_driver(&mut registry, transport)?;
+        register_sandboxed_default_planned_driver(
+            &mut registry,
+            transport,
+            parts.config.planned_default_iteration_limit,
+            parts.config.planned_model_availability_retry_attempts,
+        )?;
     } else {
         register_default_planned_driver(&mut registry, Arc::clone(&family_registry))?;
     }
