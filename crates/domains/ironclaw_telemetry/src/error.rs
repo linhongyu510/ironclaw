@@ -1,3 +1,5 @@
+use std::error::Error as StdError;
+
 use thiserror::Error;
 
 /// Errors returned by the telemetry repositories. Backend sources remain
@@ -12,35 +14,53 @@ pub enum TelemetryRepositoryError {
     #[error("invalid telemetry page cursor")]
     InvalidCursor,
     #[error("invalid persisted telemetry timestamp in {field}")]
-    InvalidTimestamp { field: &'static str },
+    InvalidTimestamp {
+        field: &'static str,
+        #[source]
+        source: chrono::ParseError,
+    },
+    #[error("invalid persisted telemetry {field} value {value:?}")]
+    InvalidPersistedField {
+        field: &'static str,
+        value: String,
+        #[source]
+        source: Box<dyn StdError + Send + Sync>,
+    },
     #[error("unknown persisted telemetry {field} value {value:?}")]
     UnknownEnum { field: &'static str, value: String },
     #[error("telemetry counter overflow for {family} row")]
     CounterOverflow { family: &'static str },
     #[error(transparent)]
     Record(#[from] crate::records::RecordError),
-    #[error("libSQL runtime admission failed while {operation}")]
-    LibSqlRuntime {
+    #[error("telemetry runtime admission failed while {operation}")]
+    StorageAdmission {
         operation: &'static str,
         #[source]
-        source: ironclaw_libsql_runtime::LibSqlRuntimeError,
+        source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("libSQL operation failed while {operation}")]
-    LibSql {
+    #[error("telemetry storage operation failed while {operation}")]
+    StorageOperation {
         operation: &'static str,
         #[source]
-        source: libsql::Error,
+        source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("PostgreSQL pool admission failed while {operation}")]
-    PostgresPool {
+    #[error("telemetry pool admission failed while {operation}")]
+    StoragePoolAdmission {
         operation: &'static str,
         #[source]
-        source: deadpool_postgres::PoolError,
+        source: Box<dyn StdError + Send + Sync>,
     },
-    #[error("PostgreSQL operation failed while {operation}")]
-    Postgres {
-        operation: &'static str,
-        #[source]
-        source: tokio_postgres::Error,
-    },
+}
+
+impl TelemetryRepositoryError {
+    pub(crate) fn invalid_persisted_field<E>(field: &'static str, value: String, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self::InvalidPersistedField {
+            field,
+            value,
+            source: Box::new(source),
+        }
+    }
 }

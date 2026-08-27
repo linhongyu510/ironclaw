@@ -1,10 +1,8 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::GenericClient;
-use ironclaw_telemetry_contracts::observation::{
-    AutomationKind, CanonicalTenantId, CanonicalUserId, LifecycleEventKind, LifecycleSubjectKind,
-    OriginKind,
-};
 use tokio_postgres::Row;
 
 use crate::{
@@ -12,8 +10,11 @@ use crate::{
     HourlyUserActivity, LifecycleEvent, TelemetryBatch,
     error::TelemetryRepositoryError,
     repository::{
-        TelemetryPage, TelemetryRepository, TelemetryScanPageRequest, decode_cursor, encode_cursor,
-        page_rows,
+        TelemetryPage, TelemetryRepository, TelemetryScanPageRequest, automation_text,
+        decode_collector_id, decode_cursor, decode_event_id, decode_failure_category,
+        decode_model_id, decode_provider_id, decode_subject_id, decode_tenant_id, decode_user_id,
+        encode_cursor, lifecycle_event_text, lifecycle_subject_text, normalize_timestamp,
+        origin_text, page_rows, parse_automation, parse_event, parse_origin, parse_subject,
     },
 };
 
@@ -58,68 +59,68 @@ CREATE TABLE IF NOT EXISTS telemetry_collector_hourly_v0 (
 "#;
 
 /// PostgreSQL telemetry adapter over a pool admitted by composition.
-pub struct PostgresTelemetryRepository {
+pub(crate) struct PostgresTelemetryRepository {
     pool: deadpool_postgres::Pool,
 }
 
 impl PostgresTelemetryRepository {
-    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+    pub(crate) fn new(pool: deadpool_postgres::Pool) -> Self {
         Self { pool }
+    }
+}
+
+impl From<deadpool_postgres::Pool> for crate::TelemetryRepositoryAdapter {
+    fn from(pool: deadpool_postgres::Pool) -> Self {
+        crate::TelemetryRepositoryAdapter {
+            inner: Arc::new(PostgresTelemetryRepository::new(pool)),
+        }
     }
 }
 
 #[async_trait]
 impl TelemetryRepository for PostgresTelemetryRepository {
     async fn migrate(&self) -> Result<(), TelemetryRepositoryError> {
-        let mut client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry migration client",
-                    source,
-                })?;
-        let transaction =
-            client
-                .transaction()
-                .await
-                .map_err(|source| TelemetryRepositoryError::Postgres {
-                    operation: "beginning telemetry migration transaction",
-                    source,
-                })?;
+        let mut client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry migration client",
+                source: Box::new(source),
+            }
+        })?;
+        let transaction = client.transaction().await.map_err(|source| {
+            TelemetryRepositoryError::StorageOperation {
+                operation: "beginning telemetry migration transaction",
+                source: Box::new(source),
+            }
+        })?;
         transaction
             .batch_execute(MIGRATION)
             .await
-            .map_err(|source| TelemetryRepositoryError::Postgres {
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
                 operation: "running telemetry migration",
-                source,
+                source: Box::new(source),
             })?;
         transaction
             .commit()
             .await
-            .map_err(|source| TelemetryRepositoryError::Postgres {
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
                 operation: "committing telemetry migration",
-                source,
+                source: Box::new(source),
             })
     }
 
     async fn upsert_batch(&self, batch: &TelemetryBatch) -> Result<(), TelemetryRepositoryError> {
-        let mut client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry batch client",
-                    source,
-                })?;
-        let transaction =
-            client
-                .transaction()
-                .await
-                .map_err(|source| TelemetryRepositoryError::Postgres {
-                    operation: "beginning telemetry batch transaction",
-                    source,
-                })?;
+        let mut client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry batch client",
+                source: Box::new(source),
+            }
+        })?;
+        let transaction = client.transaction().await.map_err(|source| {
+            TelemetryRepositoryError::StorageOperation {
+                operation: "beginning telemetry batch transaction",
+                source: Box::new(source),
+            }
+        })?;
         for row in batch.activity() {
             check_activity_overflow(&transaction, row).await?;
         }
@@ -156,9 +157,9 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         transaction
             .commit()
             .await
-            .map_err(|source| TelemetryRepositoryError::Postgres {
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
                 operation: "committing telemetry batch transaction",
-                source,
+                source: Box::new(source),
             })
     }
 
@@ -171,23 +172,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry activity reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry activity reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = activity_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry activity",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -217,23 +216,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry model reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry model reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = model_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry model usage",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -267,23 +264,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry failure reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry failure reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = failure_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry failures",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -313,23 +308,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry automation reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry automation reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = automation_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry automation",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -362,23 +355,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry lifecycle reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry lifecycle reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = lifecycle_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry lifecycle",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -405,23 +396,21 @@ impl TelemetryRepository for PostgresTelemetryRepository {
         if range.from() >= to {
             return Ok(TelemetryPage::new(Vec::new(), None));
         }
-        let client =
-            self.pool
-                .get()
-                .await
-                .map_err(|source| TelemetryRepositoryError::PostgresPool {
-                    operation: "acquiring telemetry coverage reader",
-                    source,
-                })?;
+        let client = self.pool.get().await.map_err(|source| {
+            TelemetryRepositoryError::StoragePoolAdmission {
+                operation: "acquiring telemetry coverage reader",
+                source: Box::new(source),
+            }
+        })?;
         let (sql, boxed) = coverage_query(request, to)?;
         let params = boxed
             .iter()
             .map(|value| value.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
             .collect::<Vec<_>>();
         let rows = client.query(&sql, &params).await.map_err(|source| {
-            TelemetryRepositoryError::Postgres {
+            TelemetryRepositoryError::StorageOperation {
                 operation: "scanning telemetry coverage",
-                source,
+                source: Box::new(source),
             }
         })?;
         let values = rows
@@ -444,23 +433,10 @@ async fn upsert_activity<C: GenericClient + Sync>(
     tx: &C,
     row: &HourlyUserActivity,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_hourly_user_activity_v0 (tenant_id,window_start,user_id,origin_kind,run_count,runs_with_reported_tool_calls_count,tool_count_reported_run_count,reported_tool_call_count,completed_count,failed_count,cancelled_count,recovery_required_count,total_run_latency_ms,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,0,$15) ON CONFLICT (tenant_id,window_start,user_id,origin_kind) DO UPDATE SET run_count=telemetry_hourly_user_activity_v0.run_count+EXCLUDED.run_count,runs_with_reported_tool_calls_count=telemetry_hourly_user_activity_v0.runs_with_reported_tool_calls_count+EXCLUDED.runs_with_reported_tool_calls_count,tool_count_reported_run_count=telemetry_hourly_user_activity_v0.tool_count_reported_run_count+EXCLUDED.tool_count_reported_run_count,reported_tool_call_count=telemetry_hourly_user_activity_v0.reported_tool_call_count+EXCLUDED.reported_tool_call_count,completed_count=telemetry_hourly_user_activity_v0.completed_count+EXCLUDED.completed_count,failed_count=telemetry_hourly_user_activity_v0.failed_count+EXCLUDED.failed_count,cancelled_count=telemetry_hourly_user_activity_v0.cancelled_count+EXCLUDED.cancelled_count,recovery_required_count=telemetry_hourly_user_activity_v0.recovery_required_count+EXCLUDED.recovery_required_count,total_run_latency_ms=telemetry_hourly_user_activity_v0.total_run_latency_ms+EXCLUDED.total_run_latency_ms,first_observed_at=LEAST(telemetry_hourly_user_activity_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_user_activity_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(), &row.window_start(), &row.user_id().as_str(), &origin_text(row.origin_kind()), &(row.run_count() as i64), &(row.runs_with_reported_tool_calls_count() as i64), &(row.tool_count_reported_run_count() as i64), &(row.reported_tool_call_count() as i64), &(row.completed_count() as i64), &(row.failed_count() as i64), &(row.cancelled_count() as i64), &(row.recovery_required_count() as i64), &(row.total_run_latency_ms() as i64), &row.last_observed_at()]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry activity",source}).map(|_|())
-}
-
-fn checked_counter_sum(
-    current: i64,
-    incoming: u64,
-    family: &'static str,
-) -> Result<(), TelemetryRepositoryError> {
-    let current =
-        u64::try_from(current).map_err(|_| TelemetryRepositoryError::CounterOverflow { family })?;
-    let total = current
-        .checked_add(incoming)
-        .ok_or(TelemetryRepositoryError::CounterOverflow { family })?;
-    if total > ironclaw_telemetry_contracts::observation::MAX_DURABLE_COUNTER {
-        return Err(TelemetryRepositoryError::CounterOverflow { family });
-    }
-    Ok(())
+    let first_observed_at = normalize_timestamp(row.first_observed_at());
+    let last_observed_at = normalize_timestamp(row.last_observed_at());
+    let window_start = normalize_timestamp(row.window_start());
+    tx.execute("INSERT INTO telemetry_hourly_user_activity_v0 (tenant_id,window_start,user_id,origin_kind,run_count,runs_with_reported_tool_calls_count,tool_count_reported_run_count,reported_tool_call_count,completed_count,failed_count,cancelled_count,recovery_required_count,total_run_latency_ms,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,0,$15) ON CONFLICT (tenant_id,window_start,user_id,origin_kind) DO UPDATE SET run_count=telemetry_hourly_user_activity_v0.run_count+EXCLUDED.run_count,runs_with_reported_tool_calls_count=telemetry_hourly_user_activity_v0.runs_with_reported_tool_calls_count+EXCLUDED.runs_with_reported_tool_calls_count,tool_count_reported_run_count=telemetry_hourly_user_activity_v0.tool_count_reported_run_count+EXCLUDED.tool_count_reported_run_count,reported_tool_call_count=telemetry_hourly_user_activity_v0.reported_tool_call_count+EXCLUDED.reported_tool_call_count,completed_count=telemetry_hourly_user_activity_v0.completed_count+EXCLUDED.completed_count,failed_count=telemetry_hourly_user_activity_v0.failed_count+EXCLUDED.failed_count,cancelled_count=telemetry_hourly_user_activity_v0.cancelled_count+EXCLUDED.cancelled_count,recovery_required_count=telemetry_hourly_user_activity_v0.recovery_required_count+EXCLUDED.recovery_required_count,total_run_latency_ms=telemetry_hourly_user_activity_v0.total_run_latency_ms+EXCLUDED.total_run_latency_ms,first_observed_at=LEAST(telemetry_hourly_user_activity_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_user_activity_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(), &window_start, &row.user_id().as_str(), &origin_text(row.origin_kind()), &(row.run_count() as i64), &(row.runs_with_reported_tool_calls_count() as i64), &(row.tool_count_reported_run_count() as i64), &(row.reported_tool_call_count() as i64), &(row.completed_count() as i64), &(row.failed_count() as i64), &(row.cancelled_count() as i64), &(row.recovery_required_count() as i64), &(row.total_run_latency_ms() as i64), &first_observed_at, &last_observed_at]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry activity",source: Box::new(source)}).map(|_|())
 }
 
 async fn check_activity_overflow<C: GenericClient + Sync>(
@@ -473,12 +449,12 @@ async fn check_activity_overflow<C: GenericClient + Sync>(
     let existing = tx
         .query_opt(
             "SELECT run_count,runs_with_reported_tool_calls_count,tool_count_reported_run_count,reported_tool_call_count,completed_count,failed_count,cancelled_count,recovery_required_count,total_run_latency_ms FROM telemetry_hourly_user_activity_v0 WHERE tenant_id=$1 AND window_start=$2 AND user_id=$3 AND origin_kind=$4",
-            &[&tenant, &row.window_start(), &user, &origin],
+            &[&tenant, &normalize_timestamp(row.window_start()), &user, &origin],
         )
         .await
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "checking telemetry activity overflow",
-            source,
+            source: Box::new(source),
         })?;
     if let Some(existing) = existing {
         for (index, incoming) in [
@@ -512,12 +488,12 @@ async fn check_model_overflow<C: GenericClient + Sync>(
     let existing = tx
         .query_opt(
             "SELECT inference_count,usage_reported_count,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens FROM telemetry_hourly_model_usage_v0 WHERE tenant_id=$1 AND user_id=$2 AND window_start=$3 AND provider_id=$4 AND effective_model_id=$5",
-            &[&tenant, &user, &row.window_start(), &provider, &model],
+            &[&tenant, &user, &normalize_timestamp(row.window_start()), &provider, &model],
         )
         .await
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "checking telemetry model overflow",
-            source,
+            source: Box::new(source),
         })?;
     if let Some(existing) = existing {
         for (index, incoming) in [
@@ -547,12 +523,12 @@ async fn check_failure_overflow<C: GenericClient + Sync>(
     let existing = tx
         .query_opt(
             "SELECT failure_count FROM telemetry_hourly_run_failures_v0 WHERE tenant_id=$1 AND window_start=$2 AND user_id=$3 AND failure_category=$4",
-            &[&tenant, &row.window_start(), &user, &category],
+            &[&tenant, &normalize_timestamp(row.window_start()), &user, &category],
         )
         .await
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "checking telemetry failure overflow",
-            source,
+            source: Box::new(source),
         })?;
     if let Some(existing) = existing {
         check_postgres_counter(&existing, 0, row.failure_count(), "failure")?;
@@ -570,12 +546,12 @@ async fn check_automation_overflow<C: GenericClient + Sync>(
     let existing = tx
         .query_opt(
             "SELECT run_count,completed_count,failed_count,cancelled_count,recovery_required_count FROM telemetry_hourly_automation_usage_v0 WHERE tenant_id=$1 AND window_start=$2 AND user_id=$3 AND automation_kind=$4",
-            &[&tenant, &row.window_start(), &user, &kind],
+            &[&tenant, &normalize_timestamp(row.window_start()), &user, &kind],
         )
         .await
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "checking telemetry automation overflow",
-            source,
+            source: Box::new(source),
         })?;
     if let Some(existing) = existing {
         for (index, incoming) in [
@@ -603,12 +579,12 @@ async fn check_coverage_overflow<C: GenericClient + Sync>(
     let existing = tx
         .query_opt(
             "SELECT accepted_observation_count,queue_full_drop_count,closed_drop_count,invalid_drop_count,write_failed_observation_count FROM telemetry_collector_hourly_v0 WHERE tenant_id=$1 AND window_start=$2 AND collector_instance_id=$3",
-            &[&tenant, &row.window_start(), &collector],
+            &[&tenant, &normalize_timestamp(row.window_start()), &collector],
         )
         .await
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "checking telemetry coverage overflow",
-            source,
+            source: Box::new(source),
         })?;
     if let Some(existing) = existing {
         for (index, incoming) in [
@@ -633,44 +609,47 @@ fn check_postgres_counter(
     incoming: u64,
     family: &'static str,
 ) -> Result<(), TelemetryRepositoryError> {
-    let current: i64 = row
-        .try_get(index)
-        .map_err(|source| TelemetryRepositoryError::Postgres {
-            operation: "decoding telemetry overflow counter",
-            source,
-        })?;
-    checked_counter_sum(current, incoming, family)
+    let current: i64 =
+        row.try_get(index)
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
+                operation: "decoding telemetry overflow counter",
+                source: Box::new(source),
+            })?;
+    crate::repository::checked_counter_sum(current, incoming, family)
 }
 
 async fn upsert_model<C: GenericClient + Sync>(
     tx: &C,
     row: &HourlyModelUsage,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_hourly_model_usage_v0 (tenant_id,user_id,window_start,provider_id,effective_model_id,inference_count,usage_reported_count,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,$13) ON CONFLICT (tenant_id,user_id,window_start,provider_id,effective_model_id) DO UPDATE SET inference_count=telemetry_hourly_model_usage_v0.inference_count+EXCLUDED.inference_count,usage_reported_count=telemetry_hourly_model_usage_v0.usage_reported_count+EXCLUDED.usage_reported_count,input_tokens=telemetry_hourly_model_usage_v0.input_tokens+EXCLUDED.input_tokens,output_tokens=telemetry_hourly_model_usage_v0.output_tokens+EXCLUDED.output_tokens,cache_read_input_tokens=telemetry_hourly_model_usage_v0.cache_read_input_tokens+EXCLUDED.cache_read_input_tokens,cache_creation_input_tokens=telemetry_hourly_model_usage_v0.cache_creation_input_tokens+EXCLUDED.cache_creation_input_tokens,first_observed_at=LEAST(telemetry_hourly_model_usage_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_model_usage_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&row.user_id().as_str(),&row.window_start(),&row.provider_id().as_str(),&row.effective_model_id().as_str(),&(row.inference_count() as i64),&(row.usage_reported_count() as i64),&(row.input_tokens() as i64),&(row.output_tokens() as i64),&(row.cache_read_input_tokens() as i64),&(row.cache_creation_input_tokens() as i64),&row.last_observed_at(),]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry model usage",source}).map(|_|())
+    let first_observed_at = normalize_timestamp(row.first_observed_at());
+    let last_observed_at = normalize_timestamp(row.last_observed_at());
+    let window_start = normalize_timestamp(row.window_start());
+    tx.execute("INSERT INTO telemetry_hourly_model_usage_v0 (tenant_id,user_id,window_start,provider_id,effective_model_id,inference_count,usage_reported_count,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,$13) ON CONFLICT (tenant_id,user_id,window_start,provider_id,effective_model_id) DO UPDATE SET inference_count=telemetry_hourly_model_usage_v0.inference_count+EXCLUDED.inference_count,usage_reported_count=telemetry_hourly_model_usage_v0.usage_reported_count+EXCLUDED.usage_reported_count,input_tokens=telemetry_hourly_model_usage_v0.input_tokens+EXCLUDED.input_tokens,output_tokens=telemetry_hourly_model_usage_v0.output_tokens+EXCLUDED.output_tokens,cache_read_input_tokens=telemetry_hourly_model_usage_v0.cache_read_input_tokens+EXCLUDED.cache_read_input_tokens,cache_creation_input_tokens=telemetry_hourly_model_usage_v0.cache_creation_input_tokens+EXCLUDED.cache_creation_input_tokens,first_observed_at=LEAST(telemetry_hourly_model_usage_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_model_usage_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&row.user_id().as_str(),&window_start,&row.provider_id().as_str(),&row.effective_model_id().as_str(),&(row.inference_count() as i64),&(row.usage_reported_count() as i64),&(row.input_tokens() as i64),&(row.output_tokens() as i64),&(row.cache_read_input_tokens() as i64),&(row.cache_creation_input_tokens() as i64),&first_observed_at,&last_observed_at]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry model usage",source: Box::new(source)}).map(|_|())
 }
 async fn upsert_failure<C: GenericClient + Sync>(
     tx: &C,
     row: &HourlyRunFailure,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_hourly_run_failures_v0 (tenant_id,window_start,user_id,failure_category,failure_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,0,$7) ON CONFLICT (tenant_id,window_start,user_id,failure_category) DO UPDATE SET failure_count=telemetry_hourly_run_failures_v0.failure_count+EXCLUDED.failure_count,first_observed_at=LEAST(telemetry_hourly_run_failures_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_run_failures_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&row.window_start(),&row.user_id().as_str(),&row.failure_category().as_str(),&(row.failure_count() as i64),&row.first_observed_at(),&row.last_observed_at()]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry failure",source}).map(|_|())
+    tx.execute("INSERT INTO telemetry_hourly_run_failures_v0 (tenant_id,window_start,user_id,failure_category,failure_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,0,$7) ON CONFLICT (tenant_id,window_start,user_id,failure_category) DO UPDATE SET failure_count=telemetry_hourly_run_failures_v0.failure_count+EXCLUDED.failure_count,first_observed_at=LEAST(telemetry_hourly_run_failures_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_run_failures_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&normalize_timestamp(row.window_start()),&row.user_id().as_str(),&row.failure_category().as_str(),&(row.failure_count() as i64),&normalize_timestamp(row.first_observed_at()),&normalize_timestamp(row.last_observed_at())]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry failure",source: Box::new(source)}).map(|_|())
 }
 async fn upsert_automation<C: GenericClient + Sync>(
     tx: &C,
     row: &HourlyAutomationUsage,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_hourly_automation_usage_v0 (tenant_id,window_start,user_id,automation_kind,run_count,completed_count,failed_count,cancelled_count,recovery_required_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$11) ON CONFLICT (tenant_id,window_start,user_id,automation_kind) DO UPDATE SET run_count=telemetry_hourly_automation_usage_v0.run_count+EXCLUDED.run_count,completed_count=telemetry_hourly_automation_usage_v0.completed_count+EXCLUDED.completed_count,failed_count=telemetry_hourly_automation_usage_v0.failed_count+EXCLUDED.failed_count,cancelled_count=telemetry_hourly_automation_usage_v0.cancelled_count+EXCLUDED.cancelled_count,recovery_required_count=telemetry_hourly_automation_usage_v0.recovery_required_count+EXCLUDED.recovery_required_count,first_observed_at=LEAST(telemetry_hourly_automation_usage_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_automation_usage_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&row.window_start(),&row.user_id().as_str(),&automation_text(row.automation_kind()),&(row.run_count() as i64),&(row.completed_count() as i64),&(row.failed_count() as i64),&(row.cancelled_count() as i64),&(row.recovery_required_count() as i64),&row.first_observed_at(),&row.last_observed_at()]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry automation",source}).map(|_|())
+    tx.execute("INSERT INTO telemetry_hourly_automation_usage_v0 (tenant_id,window_start,user_id,automation_kind,run_count,completed_count,failed_count,cancelled_count,recovery_required_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$11) ON CONFLICT (tenant_id,window_start,user_id,automation_kind) DO UPDATE SET run_count=telemetry_hourly_automation_usage_v0.run_count+EXCLUDED.run_count,completed_count=telemetry_hourly_automation_usage_v0.completed_count+EXCLUDED.completed_count,failed_count=telemetry_hourly_automation_usage_v0.failed_count+EXCLUDED.failed_count,cancelled_count=telemetry_hourly_automation_usage_v0.cancelled_count+EXCLUDED.cancelled_count,recovery_required_count=telemetry_hourly_automation_usage_v0.recovery_required_count+EXCLUDED.recovery_required_count,first_observed_at=LEAST(telemetry_hourly_automation_usage_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_hourly_automation_usage_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&normalize_timestamp(row.window_start()),&row.user_id().as_str(),&automation_text(row.automation_kind()),&(row.run_count() as i64),&(row.completed_count() as i64),&(row.failed_count() as i64),&(row.cancelled_count() as i64),&(row.recovery_required_count() as i64),&normalize_timestamp(row.first_observed_at()),&normalize_timestamp(row.last_observed_at())]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry automation",source: Box::new(source)}).map(|_|())
 }
 async fn upsert_lifecycle<C: GenericClient + Sync>(
     tx: &C,
     row: &LifecycleEvent,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_lifecycle_events_v0 (tenant_id,event_id,user_id,event_kind,subject_kind,subject_id,occurred_at,schema_version) VALUES ($1,$2,$3,$4,$5,$6,$7,0) ON CONFLICT (tenant_id,event_id) DO NOTHING", &[&row.tenant_id().as_str(),&row.event_id().as_str(),&row.user_id().map(|id|id.as_str()),&lifecycle_event_text(row.event_kind()),&lifecycle_subject_text(row.subject_kind()),&row.subject_id().as_str(),&row.occurred_at()]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry lifecycle",source}).map(|_|())
+    tx.execute("INSERT INTO telemetry_lifecycle_events_v0 (tenant_id,event_id,user_id,event_kind,subject_kind,subject_id,occurred_at,schema_version) VALUES ($1,$2,$3,$4,$5,$6,$7,0) ON CONFLICT (tenant_id,event_id) DO NOTHING", &[&row.tenant_id().as_str(),&row.event_id().as_str(),&row.user_id().map(|id|id.as_str()),&lifecycle_event_text(row.event_kind()),&lifecycle_subject_text(row.subject_kind()),&row.subject_id().as_str(),&normalize_timestamp(row.occurred_at())]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry lifecycle",source: Box::new(source)}).map(|_|())
 }
 async fn upsert_coverage<C: GenericClient + Sync>(
     tx: &C,
     row: &CollectorCoverage,
 ) -> Result<(), TelemetryRepositoryError> {
-    tx.execute("INSERT INTO telemetry_collector_hourly_v0 (tenant_id,window_start,collector_instance_id,accepted_observation_count,queue_full_drop_count,closed_drop_count,invalid_drop_count,write_failed_observation_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$11) ON CONFLICT (tenant_id,window_start,collector_instance_id) DO UPDATE SET accepted_observation_count=telemetry_collector_hourly_v0.accepted_observation_count+EXCLUDED.accepted_observation_count,queue_full_drop_count=telemetry_collector_hourly_v0.queue_full_drop_count+EXCLUDED.queue_full_drop_count,closed_drop_count=telemetry_collector_hourly_v0.closed_drop_count+EXCLUDED.closed_drop_count,invalid_drop_count=telemetry_collector_hourly_v0.invalid_drop_count+EXCLUDED.invalid_drop_count,write_failed_observation_count=telemetry_collector_hourly_v0.write_failed_observation_count+EXCLUDED.write_failed_observation_count,first_observed_at=LEAST(telemetry_collector_hourly_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_collector_hourly_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&row.window_start(),&row.collector_instance_id().as_str(),&(row.accepted_observation_count() as i64),&(row.queue_full_drop_count() as i64),&(row.closed_drop_count() as i64),&(row.invalid_drop_count() as i64),&(row.write_failed_observation_count() as i64),&row.first_observed_at(),&row.last_observed_at()]).await.map_err(|source|TelemetryRepositoryError::Postgres{operation:"upserting telemetry coverage",source}).map(|_|())
+    tx.execute("INSERT INTO telemetry_collector_hourly_v0 (tenant_id,window_start,collector_instance_id,accepted_observation_count,queue_full_drop_count,closed_drop_count,invalid_drop_count,write_failed_observation_count,first_observed_at,last_observed_at,schema_version,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$11) ON CONFLICT (tenant_id,window_start,collector_instance_id) DO UPDATE SET accepted_observation_count=telemetry_collector_hourly_v0.accepted_observation_count+EXCLUDED.accepted_observation_count,queue_full_drop_count=telemetry_collector_hourly_v0.queue_full_drop_count+EXCLUDED.queue_full_drop_count,closed_drop_count=telemetry_collector_hourly_v0.closed_drop_count+EXCLUDED.closed_drop_count,invalid_drop_count=telemetry_collector_hourly_v0.invalid_drop_count+EXCLUDED.invalid_drop_count,write_failed_observation_count=telemetry_collector_hourly_v0.write_failed_observation_count+EXCLUDED.write_failed_observation_count,first_observed_at=LEAST(telemetry_collector_hourly_v0.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(telemetry_collector_hourly_v0.last_observed_at,EXCLUDED.last_observed_at),updated_at=EXCLUDED.updated_at", &[&row.tenant_id().as_str(),&normalize_timestamp(row.window_start()),&row.collector_instance_id().as_str(),&(row.accepted_observation_count() as i64),&(row.queue_full_drop_count() as i64),&(row.closed_drop_count() as i64),&(row.invalid_drop_count() as i64),&(row.write_failed_observation_count() as i64),&normalize_timestamp(row.first_observed_at()),&normalize_timestamp(row.last_observed_at())]).await.map_err(|source|TelemetryRepositoryError::StorageOperation {operation:"upserting telemetry coverage",source: Box::new(source)}).map(|_|())
 }
 
 type PgValue = Box<dyn tokio_postgres::types::ToSql + Sync + Send>;
@@ -748,7 +727,7 @@ fn model_query(
     values.push(pg_value(limit));
     Ok((
         format!(
-            "SELECT tenant_id,user_id,window_start,provider_id,effective_model_id,inference_count,usage_reported_count,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,first_observed_at,last_observed_at FROM telemetry_hourly_model_usage_v0 WHERE tenant_id=$1 AND window_start>=$2 AND window_start<$3 AND ($4 IS NULL OR provider_id=$5) AND ($6 IS NULL OR effective_model_id=$7){predicate} ORDER BY window_start,user_id,provider_id,effective_model_id LIMIT ${}",
+            "SELECT tenant_id,user_id,window_start,provider_id,effective_model_id,inference_count,usage_reported_count,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,first_observed_at,last_observed_at FROM telemetry_hourly_model_usage_v0 WHERE tenant_id=$1 AND window_start>=$2 AND window_start<$3 AND ($4::text IS NULL OR provider_id=$5::text) AND ($6::text IS NULL OR effective_model_id=$7::text){predicate} ORDER BY window_start,user_id,provider_id,effective_model_id LIMIT ${}",
             values.len()
         ),
         values,
@@ -887,40 +866,35 @@ fn coverage_query(
 
 fn text(row: &Row, index: usize) -> Result<String, TelemetryRepositoryError> {
     row.try_get(index)
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "decoding telemetry text",
-            source,
+            source: Box::new(source),
         })
 }
 fn number(row: &Row, index: usize) -> Result<u64, TelemetryRepositoryError> {
-    let value: i64 = row
-        .try_get(index)
-        .map_err(|source| TelemetryRepositoryError::Postgres {
-            operation: "decoding telemetry counter",
-            source,
-        })?;
+    let value: i64 =
+        row.try_get(index)
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
+                operation: "decoding telemetry counter",
+                source: Box::new(source),
+            })?;
     u64::try_from(value).map_err(|_| TelemetryRepositoryError::CounterOverflow {
         family: "persisted",
     })
 }
 fn datetime(row: &Row, index: usize) -> Result<DateTime<Utc>, TelemetryRepositoryError> {
     row.try_get(index)
-        .map_err(|source| TelemetryRepositoryError::Postgres {
+        .map_err(|source| TelemetryRepositoryError::StorageOperation {
             operation: "decoding telemetry timestamp",
-            source,
+            source: Box::new(source),
         })
-}
-fn tenant(value: String) -> Result<CanonicalTenantId, TelemetryRepositoryError> {
-    CanonicalTenantId::new(value).map_err(|_| TelemetryRepositoryError::InvalidCursor)
-}
-fn user(value: String) -> Result<CanonicalUserId, TelemetryRepositoryError> {
-    CanonicalUserId::new(value).map_err(|_| TelemetryRepositoryError::InvalidCursor)
+        .map(normalize_timestamp)
 }
 fn activity_from_row(row: &Row) -> Result<HourlyUserActivity, TelemetryRepositoryError> {
     Ok(HourlyUserActivity::new(
-        tenant(text(row, 0)?)?,
+        decode_tenant_id(text(row, 0)?)?,
         datetime(row, 1)?,
-        user(text(row, 2)?)?,
+        decode_user_id(text(row, 2)?)?,
         parse_origin(&text(row, 3)?)?,
         number(row, 4)?,
         number(row, 5)?,
@@ -937,13 +911,11 @@ fn activity_from_row(row: &Row) -> Result<HourlyUserActivity, TelemetryRepositor
 }
 fn model_from_row(row: &Row) -> Result<HourlyModelUsage, TelemetryRepositoryError> {
     Ok(HourlyModelUsage::new(
-        tenant(text(row, 0)?)?,
-        user(text(row, 1)?)?,
+        decode_tenant_id(text(row, 0)?)?,
+        decode_user_id(text(row, 1)?)?,
         datetime(row, 2)?,
-        ironclaw_telemetry_contracts::observation::ProviderId::new(text(row, 3)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
-        ironclaw_telemetry_contracts::observation::EffectiveModelId::new(text(row, 4)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
+        decode_provider_id(text(row, 3)?)?,
+        decode_model_id(text(row, 4)?)?,
         number(row, 5)?,
         number(row, 6)?,
         number(row, 7)?,
@@ -956,11 +928,10 @@ fn model_from_row(row: &Row) -> Result<HourlyModelUsage, TelemetryRepositoryErro
 }
 fn failure_from_row(row: &Row) -> Result<HourlyRunFailure, TelemetryRepositoryError> {
     Ok(HourlyRunFailure::new(
-        tenant(text(row, 0)?)?,
+        decode_tenant_id(text(row, 0)?)?,
         datetime(row, 1)?,
-        user(text(row, 2)?)?,
-        ironclaw_telemetry_contracts::observation::FailureCategory::new(text(row, 3)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
+        decode_user_id(text(row, 2)?)?,
+        decode_failure_category(text(row, 3)?)?,
         number(row, 4)?,
         datetime(row, 5)?,
         datetime(row, 6)?,
@@ -968,9 +939,9 @@ fn failure_from_row(row: &Row) -> Result<HourlyRunFailure, TelemetryRepositoryEr
 }
 fn automation_from_row(row: &Row) -> Result<HourlyAutomationUsage, TelemetryRepositoryError> {
     Ok(HourlyAutomationUsage::new(
-        tenant(text(row, 0)?)?,
+        decode_tenant_id(text(row, 0)?)?,
         datetime(row, 1)?,
-        user(text(row, 2)?)?,
+        decode_user_id(text(row, 2)?)?,
         parse_automation(&text(row, 3)?)?,
         number(row, 4)?,
         number(row, 5)?,
@@ -984,29 +955,26 @@ fn automation_from_row(row: &Row) -> Result<HourlyAutomationUsage, TelemetryRepo
 fn lifecycle_from_row(row: &Row) -> Result<LifecycleEvent, TelemetryRepositoryError> {
     let user_id: Option<String> =
         row.try_get(2)
-            .map_err(|source| TelemetryRepositoryError::Postgres {
+            .map_err(|source| TelemetryRepositoryError::StorageOperation {
                 operation: "decoding lifecycle user",
-                source,
+                source: Box::new(source),
             })?;
-    let user_id = user_id.map(user).transpose()?;
+    let user_id = user_id.map(decode_user_id).transpose()?;
     Ok(LifecycleEvent::new(
-        tenant(text(row, 0)?)?,
-        ironclaw_telemetry_contracts::observation::LifecycleEventId::new(text(row, 1)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
+        decode_tenant_id(text(row, 0)?)?,
+        decode_event_id(text(row, 1)?)?,
         user_id,
         parse_event(&text(row, 3)?)?,
         parse_subject(&text(row, 4)?)?,
-        ironclaw_telemetry_contracts::observation::SubjectId::new(text(row, 5)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
+        decode_subject_id(text(row, 5)?)?,
         datetime(row, 6)?,
     )?)
 }
 fn coverage_from_row(row: &Row) -> Result<CollectorCoverage, TelemetryRepositoryError> {
     Ok(CollectorCoverage::new(
-        tenant(text(row, 0)?)?,
+        decode_tenant_id(text(row, 0)?)?,
         datetime(row, 1)?,
-        ironclaw_telemetry_contracts::observation::CollectorInstanceId::new(text(row, 2)?)
-            .map_err(|_| TelemetryRepositoryError::InvalidCursor)?,
+        decode_collector_id(text(row, 2)?)?,
         number(row, 3)?,
         number(row, 4)?,
         number(row, 5)?,
@@ -1016,85 +984,81 @@ fn coverage_from_row(row: &Row) -> Result<CollectorCoverage, TelemetryRepository
         datetime(row, 9)?,
     )?)
 }
-fn origin_text(value: OriginKind) -> &'static str {
-    match value {
-        OriginKind::Human => "human",
-        OriginKind::ParentAgent => "parent_agent",
-        OriginKind::System => "system",
-        OriginKind::Automation => "automation",
-        OriginKind::Other => "other",
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+
+    use super::{MIGRATION, model_query};
+    use crate::repository::{TelemetryScanPageRequest, TelemetryScanRequest};
+    use ironclaw_telemetry_contracts::observation::{CanonicalTenantId, ProviderId};
+
+    #[test]
+    fn postgres_upserts_bind_both_activity_observation_timestamps() {
+        let source = include_str!("postgres.rs");
+        let activity = source
+            .split_once("async fn upsert_activity")
+            .and_then(|(_, rest)| rest.split_once("async fn check_activity_overflow"))
+            .map(|(body, _)| body)
+            .expect("activity upsert body");
+
+        assert!(activity.contains("row.first_observed_at()"));
+        assert!(activity.contains("row.last_observed_at()"));
     }
-}
-fn parse_origin(value: &str) -> Result<OriginKind, TelemetryRepositoryError> {
-    match value {
-        "human" => Ok(OriginKind::Human),
-        "parent_agent" => Ok(OriginKind::ParentAgent),
-        "system" => Ok(OriginKind::System),
-        "automation" => Ok(OriginKind::Automation),
-        "other" => Ok(OriginKind::Other),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "origin_kind",
-            value: value.to_owned(),
-        }),
+
+    #[test]
+    fn postgres_upserts_bind_both_model_observation_timestamps() {
+        let source = include_str!("postgres.rs");
+        let model = source
+            .split_once("async fn upsert_model")
+            .and_then(|(_, rest)| rest.split_once("async fn upsert_failure"))
+            .map(|(body, _)| body)
+            .expect("model upsert body");
+
+        assert!(model.contains("row.first_observed_at()"));
+        assert!(model.contains("row.last_observed_at()"));
     }
-}
-fn automation_text(value: AutomationKind) -> &'static str {
-    match value {
-        AutomationKind::Cron => "cron",
-        AutomationKind::Once => "once",
-        AutomationKind::Manual => "manual",
+
+    #[test]
+    fn postgres_model_scan_types_nullable_filter_parameters() {
+        let tenant = CanonicalTenantId::new("tenant-a".to_owned()).expect("test tenant");
+        let from = DateTime::parse_from_rfc3339("2026-08-26T00:00:00Z")
+            .expect("test from")
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339("2026-08-27T00:00:00Z")
+            .expect("test to")
+            .with_timezone(&Utc);
+        let range = TelemetryScanRequest::new(tenant, from, to, to).expect("test range");
+        let request = TelemetryScanPageRequest::new(range, 10, None).expect("test page");
+
+        let (sql, values) = model_query(&request, to).expect("unfiltered model query");
+        assert!(sql.contains("$4::text IS NULL"));
+        assert!(sql.contains("$6::text IS NULL"));
+        assert_eq!(values.len(), 8);
+
+        let filtered_range = request
+            .range()
+            .clone()
+            .with_provider_id(Some(ProviderId::new("provider-a").expect("test provider")));
+        let filtered_request =
+            TelemetryScanPageRequest::new(filtered_range, 10, None).expect("filtered page");
+        let (filtered_sql, filtered_values) =
+            model_query(&filtered_request, to).expect("filtered model query");
+        assert!(filtered_sql.contains("$4::text IS NULL"));
+        assert!(filtered_sql.contains("$6::text IS NULL"));
+        assert_eq!(filtered_values.len(), 8);
     }
-}
-fn parse_automation(value: &str) -> Result<AutomationKind, TelemetryRepositoryError> {
-    match value {
-        "cron" => Ok(AutomationKind::Cron),
-        "once" => Ok(AutomationKind::Once),
-        "manual" => Ok(AutomationKind::Manual),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "automation_kind",
-            value: value.to_owned(),
-        }),
+
+    #[test]
+    fn postgres_migration_has_shared_schema_v0_shape() {
+        crate::repository::assert_schema_v0_shape(MIGRATION, true);
     }
-}
-fn lifecycle_event_text(value: LifecycleEventKind) -> &'static str {
-    match value {
-        LifecycleEventKind::MemberAdded => "member_added",
-        LifecycleEventKind::MemberRemoved => "member_removed",
-        LifecycleEventKind::RoutineCreated => "routine_created",
-        LifecycleEventKind::RoutineEnabled => "routine_enabled",
-        LifecycleEventKind::RoutineDisabled => "routine_disabled",
-        LifecycleEventKind::RoutineDeleted => "routine_deleted",
-    }
-}
-fn parse_event(value: &str) -> Result<LifecycleEventKind, TelemetryRepositoryError> {
-    match value {
-        "member_added" => Ok(LifecycleEventKind::MemberAdded),
-        "member_removed" => Ok(LifecycleEventKind::MemberRemoved),
-        "routine_created" => Ok(LifecycleEventKind::RoutineCreated),
-        "routine_enabled" => Ok(LifecycleEventKind::RoutineEnabled),
-        "routine_disabled" => Ok(LifecycleEventKind::RoutineDisabled),
-        "routine_deleted" => Ok(LifecycleEventKind::RoutineDeleted),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "event_kind",
-            value: value.to_owned(),
-        }),
-    }
-}
-fn lifecycle_subject_text(value: LifecycleSubjectKind) -> &'static str {
-    match value {
-        LifecycleSubjectKind::Tenant => "tenant",
-        LifecycleSubjectKind::User => "user",
-        LifecycleSubjectKind::Routine => "routine",
-    }
-}
-fn parse_subject(value: &str) -> Result<LifecycleSubjectKind, TelemetryRepositoryError> {
-    match value {
-        "tenant" => Ok(LifecycleSubjectKind::Tenant),
-        "user" => Ok(LifecycleSubjectKind::User),
-        "routine" => Ok(LifecycleSubjectKind::Routine),
-        value => Err(TelemetryRepositoryError::UnknownEnum {
-            field: "subject_kind",
-            value: value.to_owned(),
-        }),
+
+    #[test]
+    fn postgres_batch_has_one_pool_admission() {
+        crate::repository::assert_single_batch_admission(
+            include_str!("postgres.rs"),
+            "upsert_batch",
+            "self.pool",
+        );
     }
 }

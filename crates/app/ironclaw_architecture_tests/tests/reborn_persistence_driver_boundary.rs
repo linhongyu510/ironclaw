@@ -229,6 +229,32 @@ fn event_store_names_the_driver_only_inside_its_private_backend_module() {
     );
 }
 
+/// Tenant telemetry owns private SQL adapters, but its public domain surface
+/// must remain backend-neutral. Database handles enter through the opaque
+/// admitted factory; neither the root module nor the public error contract may
+/// name a concrete driver type.
+#[test]
+fn telemetry_public_surface_contains_no_driver_types() {
+    let src = crate_path(&workspace_root(), "crates/domains/ironclaw_telemetry/src");
+    let lib = std::fs::read_to_string(src.join("lib.rs"))
+        .unwrap_or_else(|error| panic!("read telemetry lib.rs: {error}"));
+    assert!(lib.contains("mod libsql;"));
+    assert!(lib.contains("mod postgres;"));
+    assert!(!lib.contains("pub mod libsql"));
+    assert!(!lib.contains("pub mod postgres"));
+
+    for file in ["lib.rs", "repository.rs", "error.rs"] {
+        let source = std::fs::read_to_string(src.join(file))
+            .unwrap_or_else(|error| panic!("read telemetry {file}: {error}"));
+        for driver in ["deadpool_postgres::", "tokio_postgres::"] {
+            assert!(
+                !source.contains(driver),
+                "telemetry public-facing {file} names concrete driver {driver}"
+            );
+        }
+    }
+}
+
 /// The token that declares the module the scan exempts.
 const MODULE_HEADER: &str = "mod postgres_backed {";
 

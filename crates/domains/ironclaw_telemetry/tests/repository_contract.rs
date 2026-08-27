@@ -5,14 +5,102 @@ use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_telemetry::{
     CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
-    HourlyUserActivity, LibSqlTelemetryRepository, LifecycleEvent, PostgresTelemetryRepository,
-    TelemetryBatch, TelemetryRepository, TelemetryScanPageRequest, TelemetryScanRequest,
+    HourlyUserActivity, LifecycleEvent, TelemetryBatch, TelemetryRepository,
+    TelemetryRepositoryAdapter, TelemetryScanPageRequest, TelemetryScanRequest,
 };
 use ironclaw_telemetry_contracts::observation::{
     AutomationKind, CollectorInstanceId, EffectiveModelId, FailureCategory, LifecycleEventId,
     LifecycleEventKind, LifecycleSubjectKind, MAX_DURABLE_COUNTER, OriginKind, ProviderId,
     SubjectId,
 };
+
+#[async_trait::async_trait]
+trait MidTransactionFailureInjector: Send + Sync {
+    async fn drop_lifecycle_table(&self);
+    async fn corrupt_activity_user_id(&self);
+    async fn corrupt_lifecycle_event_kind(&self);
+}
+
+#[async_trait::async_trait]
+impl MidTransactionFailureInjector for Arc<libsql::Database> {
+    async fn drop_lifecycle_table(&self) {
+        let connection = self
+            .connect()
+            .unwrap_or_else(|error| panic!("libSQL fault-injection connection: {error}"));
+        connection
+            .execute("DROP TABLE telemetry_lifecycle_events_v0", ())
+            .await
+            .unwrap_or_else(|error| panic!("drop libSQL lifecycle table: {error}"));
+    }
+
+    async fn corrupt_activity_user_id(&self) {
+        let connection = self
+            .connect()
+            .unwrap_or_else(|error| panic!("libSQL corruption connection: {error}"));
+        connection
+            .execute(
+                "UPDATE telemetry_hourly_user_activity_v0 SET user_id='' WHERE tenant_id='tenant-a' AND user_id='user-a' AND origin_kind='human'",
+                (),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("corrupt libSQL activity identifier: {error}"));
+    }
+
+    async fn corrupt_lifecycle_event_kind(&self) {
+        let connection = self
+            .connect()
+            .unwrap_or_else(|error| panic!("libSQL enum corruption connection: {error}"));
+        connection
+            .execute(
+                "UPDATE telemetry_lifecycle_events_v0 SET event_kind='not-a-real-event' WHERE tenant_id='tenant-a' AND event_id='event-a'",
+                (),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("corrupt libSQL lifecycle enum: {error}"));
+    }
+}
+
+#[async_trait::async_trait]
+impl MidTransactionFailureInjector for deadpool_postgres::Pool {
+    async fn drop_lifecycle_table(&self) {
+        let client = self
+            .get()
+            .await
+            .unwrap_or_else(|error| panic!("PostgreSQL fault-injection connection: {error}"));
+        client
+            .batch_execute("DROP TABLE telemetry_lifecycle_events_v0")
+            .await
+            .unwrap_or_else(|error| panic!("drop PostgreSQL lifecycle table: {error}"));
+    }
+
+    async fn corrupt_activity_user_id(&self) {
+        let client = self
+            .get()
+            .await
+            .unwrap_or_else(|error| panic!("PostgreSQL corruption connection: {error}"));
+        client
+            .execute(
+                "UPDATE telemetry_hourly_user_activity_v0 SET user_id='' WHERE tenant_id='tenant-a' AND user_id='user-a' AND origin_kind='human'",
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("corrupt PostgreSQL activity identifier: {error}"));
+    }
+
+    async fn corrupt_lifecycle_event_kind(&self) {
+        let client = self
+            .get()
+            .await
+            .unwrap_or_else(|error| panic!("PostgreSQL enum corruption connection: {error}"));
+        client
+            .execute(
+                "UPDATE telemetry_lifecycle_events_v0 SET event_kind='not-a-real-event' WHERE tenant_id='tenant-a' AND event_id='event-a'",
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("corrupt PostgreSQL lifecycle enum: {error}"));
+    }
+}
 
 fn timestamp(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0)
@@ -43,8 +131,8 @@ fn batch_at(tenant_id: &str, user_id: &str, hour: DateTime<Utc>) -> TelemetryBat
         0,
         0,
         25,
-        hour + Duration::minutes(1),
-        hour + Duration::minutes(2),
+        hour + Duration::minutes(1) + Duration::nanoseconds(999),
+        hour + Duration::minutes(2) + Duration::nanoseconds(999),
     )
     .unwrap_or_else(|error| panic!("valid activity row: {error}"));
     let model = HourlyModelUsage::new(
@@ -59,8 +147,8 @@ fn batch_at(tenant_id: &str, user_id: &str, hour: DateTime<Utc>) -> TelemetryBat
         4,
         5,
         6,
-        hour + Duration::minutes(1),
-        hour + Duration::minutes(2),
+        hour + Duration::minutes(1) + Duration::nanoseconds(999),
+        hour + Duration::minutes(2) + Duration::nanoseconds(999),
     )
     .unwrap_or_else(|error| panic!("valid model row: {error}"));
     let failure = HourlyRunFailure::new(
@@ -156,7 +244,78 @@ fn model_only_batch(
     .unwrap_or_else(|error| panic!("valid model-only batch: {error}"))
 }
 
-async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
+fn activity_only_batch(
+    tenant_id: &str,
+    user_id: &str,
+    hour: DateTime<Utc>,
+    origin: OriginKind,
+) -> TelemetryBatch {
+    let row = HourlyUserActivity::new(
+        tenant(tenant_id),
+        hour,
+        user(user_id),
+        origin,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        hour + Duration::minutes(1),
+        hour + Duration::minutes(2),
+    )
+    .unwrap_or_else(|error| panic!("valid activity-only row: {error}"));
+    TelemetryBatch::new(
+        vec![row],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap_or_else(|error| panic!("valid activity-only batch: {error}"))
+}
+
+fn automation_only_batch(
+    tenant_id: &str,
+    user_id: &str,
+    hour: DateTime<Utc>,
+    kind: AutomationKind,
+) -> TelemetryBatch {
+    let row = HourlyAutomationUsage::new(
+        tenant(tenant_id),
+        hour,
+        user(user_id),
+        kind,
+        1,
+        1,
+        0,
+        0,
+        0,
+        hour + Duration::minutes(1),
+        hour + Duration::minutes(2),
+    )
+    .unwrap_or_else(|error| panic!("valid automation-only row: {error}"));
+    TelemetryBatch::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![row],
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap_or_else(|error| panic!("valid automation-only batch: {error}"))
+}
+
+async fn assert_repository_contract<I>(
+    repository: Arc<dyn TelemetryRepository>,
+    failure_injector: &I,
+) where
+    I: MidTransactionFailureInjector,
+{
     repository
         .migrate()
         .await
@@ -210,6 +369,14 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
     assert_eq!(model_page.rows()[0].inference_count(), 2);
     assert_eq!(model_page.rows()[0].input_tokens(), 6);
     assert_eq!(
+        model_page.rows()[0].first_observed_at(),
+        hour + Duration::minutes(1)
+    );
+    assert_eq!(
+        model_page.rows()[0].last_observed_at(),
+        hour + Duration::minutes(2)
+    );
+    assert_eq!(
         repository
             .scan_failure_page(&page)
             .await
@@ -244,6 +411,44 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
             .rows()
             .len(),
         1
+    );
+
+    repository
+        .upsert_batch(&activity_only_batch(
+            "tenant-a",
+            "user-a",
+            hour,
+            OriginKind::Automation,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("second activity origin: {error}"));
+    assert_eq!(
+        repository
+            .scan_activity_page(&page)
+            .await
+            .unwrap_or_else(|error| panic!("activity origin isolation: {error}"))
+            .rows()
+            .len(),
+        2
+    );
+
+    repository
+        .upsert_batch(&automation_only_batch(
+            "tenant-a",
+            "user-a",
+            hour,
+            AutomationKind::Once,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("second automation kind: {error}"));
+    assert_eq!(
+        repository
+            .scan_automation_page(&page)
+            .await
+            .unwrap_or_else(|error| panic!("automation kind isolation: {error}"))
+            .rows()
+            .len(),
+        2
     );
 
     repository
@@ -290,13 +495,21 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
         1
     );
 
-    for user_id in ["user-cursor-a", "user-cursor-b", "user-cursor-c"] {
+    for user_id in ["user|cursor-a", "user|cursor-b", "user|cursor-c"] {
         repository
             .upsert_batch(&batch_at("tenant-a", user_id, hour + Duration::hours(1)))
             .await
             .unwrap_or_else(|error| panic!("pagination fixture: {error}"));
     }
-    let pagination_request = TelemetryScanPageRequest::new(request.clone(), 1, None)
+    let cursor_range = TelemetryScanRequest::new(
+        tenant("tenant-a"),
+        hour + Duration::hours(1),
+        hour + Duration::hours(2),
+        hour + Duration::hours(2),
+    )
+    .unwrap_or_else(|error| panic!("cursor range: {error}"))
+    .with_include_partial(true);
+    let pagination_request = TelemetryScanPageRequest::new(cursor_range.clone(), 1, None)
         .unwrap_or_else(|error| panic!("pagination request: {error}"));
     let first = repository
         .scan_activity_page(&pagination_request)
@@ -315,7 +528,17 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
         .await
         .unwrap_or_else(|error| panic!("second page: {error}"));
     assert_eq!(second.rows().len(), 1);
-    assert_ne!(first.rows()[0].user_id(), second.rows()[0].user_id());
+    assert_eq!(first.rows()[0].user_id().as_str(), "user|cursor-a");
+    assert_eq!(second.rows()[0].user_id().as_str(), "user|cursor-b");
+    let third_request =
+        TelemetryScanPageRequest::new(cursor_range, 1, second.next_cursor().map(ToOwned::to_owned))
+            .unwrap_or_else(|error| panic!("third pagination request: {error}"));
+    let third = repository
+        .scan_activity_page(&third_request)
+        .await
+        .unwrap_or_else(|error| panic!("third page: {error}"));
+    assert_eq!(third.rows().len(), 1);
+    assert_eq!(third.rows()[0].user_id().as_str(), "user|cursor-c");
 
     let other = batch_at("tenant-b", "user-a", hour);
     repository
@@ -360,7 +583,7 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
             .unwrap_or_else(|error| panic!("included current-hour scan: {error}"))
             .rows()
             .len(),
-        1
+        2
     );
 
     let invalid_batch = batch_at("tenant-a", "user-b", hour);
@@ -460,6 +683,110 @@ async fn assert_repository_contract(repository: Arc<dyn TelemetryRepository>) {
         1,
         "lifecycle write must roll back"
     );
+
+    assert_database_error_rolls_back(Arc::clone(&repository), failure_injector).await;
+
+    // The database-error injector drops and recreates the lifecycle table, so
+    // restore a known row before exercising persisted-field decode failures.
+    repository
+        .upsert_batch(&batch_at("tenant-a", "user-a", timestamp(1_735_689_600)))
+        .await
+        .unwrap_or_else(|error| panic!("restore persisted corruption fixture: {error}"));
+    failure_injector.corrupt_activity_user_id().await;
+    let corrupted = repository
+        .scan_activity_page(&page)
+        .await
+        .expect_err("corrupt persisted identifier must fail");
+    assert!(matches!(
+        corrupted,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidPersistedField {
+            field: "user_id",
+            ..
+        }
+    ));
+
+    failure_injector.corrupt_lifecycle_event_kind().await;
+    let corrupted = repository
+        .scan_lifecycle_page(&page)
+        .await
+        .expect_err("corrupt persisted enum must fail");
+    assert!(matches!(
+        corrupted,
+        ironclaw_telemetry::TelemetryRepositoryError::UnknownEnum {
+            field: "event_kind",
+            ..
+        }
+    ));
+}
+
+async fn assert_database_error_rolls_back<I>(
+    repository: Arc<dyn TelemetryRepository>,
+    failure_injector: &I,
+) where
+    I: MidTransactionFailureInjector,
+{
+    let before = repository
+        .scan_activity_page(
+            &TelemetryScanPageRequest::new(
+                TelemetryScanRequest::new(
+                    tenant("tenant-a"),
+                    timestamp(1_735_689_600),
+                    timestamp(1_735_693_200),
+                    timestamp(1_735_693_200),
+                )
+                .unwrap_or_else(|error| panic!("fault-injection range: {error}"))
+                .with_include_partial(true),
+                100,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("fault-injection page: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fault-injection baseline scan: {error}"))
+        .rows()
+        .len();
+
+    failure_injector.drop_lifecycle_table().await;
+    let result = repository
+        .upsert_batch(&batch_at(
+            "tenant-a",
+            "user-database-error",
+            timestamp(1_735_689_600),
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "missing lifecycle table must fail the batch"
+    );
+
+    repository
+        .migrate()
+        .await
+        .unwrap_or_else(|error| panic!("recreate lifecycle table: {error}"));
+    let after = repository
+        .scan_activity_page(
+            &TelemetryScanPageRequest::new(
+                TelemetryScanRequest::new(
+                    tenant("tenant-a"),
+                    timestamp(1_735_689_600),
+                    timestamp(1_735_693_200),
+                    timestamp(1_735_693_200),
+                )
+                .unwrap_or_else(|error| panic!("fault-injection post-range: {error}"))
+                .with_include_partial(true),
+                100,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("fault-injection post-page: {error}")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fault-injection post-scan: {error}"))
+        .rows()
+        .len();
+    assert_eq!(
+        before, after,
+        "database failure must roll back earlier writes"
+    );
 }
 
 #[tokio::test]
@@ -469,12 +796,15 @@ async fn libsql_repository_contract() {
         .build()
         .await
         .unwrap_or_else(|error| panic!("libSQL database: {error}"));
+    let database = Arc::new(database);
     let runtime = Arc::new(
-        LibSqlRuntime::new(Arc::new(database))
+        LibSqlRuntime::new(Arc::clone(&database))
             .unwrap_or_else(|error| panic!("libSQL runtime: {error}")),
     );
-    let repository = Arc::new(LibSqlTelemetryRepository::from_runtime(runtime));
-    assert_repository_contract(repository).await;
+    let repository = Arc::new(TelemetryRepositoryAdapter::from_admitted(Arc::clone(
+        &runtime,
+    )));
+    assert_repository_contract(repository, &database).await;
 }
 
 #[tokio::test]
@@ -482,8 +812,8 @@ async fn postgres_repository_contract() {
     let Some((container, pool)) = postgres_pool_or_skip().await else {
         return;
     };
-    let repository = Arc::new(PostgresTelemetryRepository::new(pool));
-    assert_repository_contract(repository).await;
+    let repository = Arc::new(TelemetryRepositoryAdapter::from_admitted(pool.clone()));
+    assert_repository_contract(repository, &pool).await;
     drop(container);
 }
 
