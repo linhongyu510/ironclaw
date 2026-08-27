@@ -51,6 +51,7 @@ struct FakeRepositoryState {
     batches: Vec<TelemetryBatch>,
     failures_remaining: usize,
     always_fail: bool,
+    commit_then_error: bool,
     next_error: Option<TelemetryRepositoryError>,
     active_writes: usize,
     max_active_writes: usize,
@@ -76,6 +77,12 @@ impl FakeRepository {
 
     fn fail_next_with(&self, error: TelemetryRepositoryError) {
         self.state.lock().expect("repository lock").next_error = Some(error);
+    }
+
+    fn fail_next_after_commit(&self) {
+        let mut state = self.state.lock().expect("repository lock");
+        state.failures_remaining += 1;
+        state.commit_then_error = true;
     }
 
     fn max_active_writes(&self) -> usize {
@@ -107,22 +114,28 @@ impl TelemetryRepository for FakeRepository {
     }
 
     async fn upsert_batch(&self, batch: &TelemetryBatch) -> Result<(), TelemetryRepositoryError> {
-        let (started, release, fail, injected_error) = {
+        let (started, release, fail, committed_before_error, injected_error) = {
             let mut state = self.state.lock().expect("repository lock");
             state.active_writes += 1;
             state.max_active_writes = state.max_active_writes.max(state.active_writes);
+            let fail = state.next_error.is_some()
+                || if state.always_fail {
+                    true
+                } else if state.failures_remaining > 0 {
+                    state.failures_remaining -= 1;
+                    true
+                } else {
+                    false
+                };
+            let committed_before_error = fail && state.commit_then_error;
+            if committed_before_error {
+                state.commit_then_error = false;
+            }
             (
                 state.write_started.take(),
                 state.release_write.take(),
-                state.next_error.is_some()
-                    || if state.always_fail {
-                        true
-                    } else if state.failures_remaining > 0 {
-                        state.failures_remaining -= 1;
-                        true
-                    } else {
-                        false
-                    },
+                fail,
+                committed_before_error,
                 state.next_error.take(),
             )
         };
@@ -135,7 +148,7 @@ impl TelemetryRepository for FakeRepository {
         {
             let mut state = self.state.lock().expect("repository lock");
             state.active_writes -= 1;
-            if !fail {
+            if !fail || committed_before_error {
                 state.batches.push(batch.clone());
             }
         }
@@ -464,8 +477,58 @@ async fn repository_failure_drops_only_that_drain_and_later_drain_continues() {
     let batches = repository.batches();
     let coverage = batches[0].collector_coverage();
     assert_eq!(coverage.len(), 1);
-    assert_eq!(coverage[0].accepted_observation_count(), 2);
+    assert_eq!(coverage[0].accepted_observation_count(), 1);
     assert_eq!(coverage[0].write_failed_observation_count(), 1);
+    lifecycle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn commit_then_error_does_not_replay_attempted_coverage() {
+    let repository = Arc::new(FakeRepository::default());
+    repository.fail_next_after_commit();
+    let clock = Arc::new(FixedClock::new(timestamp(0)));
+    let (recorder, lifecycle) =
+        BufferedTelemetryRecorder::spawn(config(), repository.clone(), clock);
+
+    assert_eq!(
+        recorder.try_record(completed_run(0)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..100 {
+        if lifecycle.diagnostics().repository_failure_count() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(repository.batches().len(), 1);
+    let attempted_batches = repository.batches();
+    assert_eq!(
+        attempted_batches[0].collector_coverage()[0].accepted_observation_count(),
+        1
+    );
+    assert_eq!(
+        attempted_batches[0].collector_coverage()[0].write_failed_observation_count(),
+        0
+    );
+
+    assert_eq!(
+        recorder.try_record(completed_run(1)),
+        RecordOutcome::Accepted
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    wait_for_batches(&repository, 2).await;
+
+    let batches = repository.batches();
+    let retry_coverage = batches[1].collector_coverage();
+    assert_eq!(retry_coverage.len(), 1);
+    assert_eq!(retry_coverage[0].accepted_observation_count(), 1);
+    assert_eq!(retry_coverage[0].queue_full_drop_count(), 0);
+    assert_eq!(retry_coverage[0].closed_drop_count(), 0);
+    assert_eq!(retry_coverage[0].invalid_drop_count(), 0);
+    assert_eq!(retry_coverage[0].write_failed_observation_count(), 1);
     lifecycle.shutdown().await;
 }
 

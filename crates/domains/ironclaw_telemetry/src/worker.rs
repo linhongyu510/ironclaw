@@ -53,6 +53,21 @@ impl CoverageAccumulator {
         }
     }
 
+    fn from_write_failure(observation: &TelemetryObservation) -> Self {
+        let occurred_at = observation.occurred_at();
+        Self {
+            tenant_id: observation.tenant_id().clone(),
+            window_start: floor_utc_hour(occurred_at),
+            accepted_observation_count: 0,
+            queue_full_drop_count: 0,
+            closed_drop_count: 0,
+            invalid_drop_count: 0,
+            write_failed_observation_count: 1,
+            first_observed_at: occurred_at,
+            last_observed_at: occurred_at,
+        }
+    }
+
     fn from_observation(observation: &TelemetryObservation) -> Self {
         let occurred_at = observation.occurred_at();
         Self {
@@ -358,19 +373,7 @@ async fn flush(
         let class = classify_repository_error(&error);
         diagnostics.record_repository_failure(class);
         diagnostics.add_write_failed(observations.len());
-        for observation in observations {
-            let key = (
-                observation.tenant_id().clone(),
-                floor_utc_hour(observation.occurred_at()),
-            );
-            if let Some(accumulator) = pending_coverage.get_mut(&key)
-                && accumulator.add_write_failed(1).is_err()
-            {
-                diagnostics
-                    .record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
-                return;
-            }
-        }
+        replace_with_write_failure_coverage(observations, pending_coverage, diagnostics);
         account_observations(intake, observations, diagnostics);
         return;
     }
@@ -381,6 +384,33 @@ async fn flush(
     diagnostics.record_flush(observations.len(), elapsed_ms.max(0) as u64);
     account_observations(intake, observations, diagnostics);
     pending_coverage.clear();
+}
+
+fn replace_with_write_failure_coverage(
+    observations: &[TelemetryObservation],
+    pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
+    diagnostics: &DiagnosticsState,
+) {
+    // The repository may have applied any part of the batch before returning
+    // the error. Never retry its additive counters; carry only a fresh marker
+    // for observations from this attempted drain.
+    pending_coverage.clear();
+    for observation in observations {
+        let key = (
+            observation.tenant_id().clone(),
+            floor_utc_hour(observation.occurred_at()),
+        );
+        if let Some(accumulator) = pending_coverage.get_mut(&key) {
+            if accumulator.add_write_failed(1).is_err() {
+                diagnostics
+                    .record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
+            }
+        } else if pending_coverage.len() < MAX_COVERAGE_SIDE_KEYS {
+            pending_coverage.insert(key, CoverageAccumulator::from_write_failure(observation));
+        } else {
+            diagnostics.record_coverage_key_overflow();
+        }
+    }
 }
 
 fn observation_keys(observations: &[TelemetryObservation]) -> Vec<TenantHourKey> {
