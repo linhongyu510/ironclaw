@@ -412,10 +412,34 @@ fn an_explicit_mention_in_a_channel_message_starts_a_run_without_app_mention() {
         "event_id": "EvPiped",
         "event": {
             "type": "message", "user": "U1", "channel": "C1",
-            "text": "hey <@UBOT|ironclaw> look", "ts": "1710000000.000021"
+            "subtype": "thread_broadcast", "text": "hey <@UBOT|ironclaw> look",
+            "thread_ts": "1710000000.000010", "ts": "1710000000.000021"
         }
     }));
     assert_eq!(piped.trigger, ProductTriggerReason::BotMention);
+
+    // A PLAIN mention is deliberately NOT promoted. `app_mention` demonstrably
+    // arrives for it, and promoting it would make both events perform the
+    // adapter's per-delivery vendor reads for one message — the enrichment
+    // runs before the admission dedupe can collapse them.
+    let plain_top_level = normalize(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvPlainTopLevel",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@UBOT> plain mention", "ts": "1710000000.000024"
+        }
+    }));
+    assert!(
+        matches!(
+            plain_top_level,
+            SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AmbientChannelMessage
+            }
+        ),
+        "got {plain_top_level:?}"
+    );
 
     // A thread reply that names nobody stays bystander chatter.
     let bystander = message(serde_json::json!({

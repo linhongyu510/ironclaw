@@ -181,16 +181,31 @@ pub fn normalize_slack_event(
     } else {
         match event.event_type.as_str() {
             "app_mention" => SlackMessageKind::Mention,
+            // Recognizing the mention in the text makes the two events
+            // redundant rather than making one of them load-bearing:
+            // `BotMention` is the only channel trigger that starts a run, so
+            // depending solely on `app_mention` arriving is one vendor quirk
+            // away from silence — which is how a `thread_broadcast` mention
+            // went unanswered.
+            //
+            // It is deliberately limited to messages carrying a `subtype`,
+            // which is exactly where that delivery is unestablished. A plain
+            // message needs no fallback — `app_mention` demonstrably arrives
+            // for it, that being the path in use today — and promoting it too
+            // would make BOTH events do the adapter's per-delivery vendor
+            // reads (attachment transfer, conversation context) for one
+            // message, since that enrichment happens before the admission
+            // dedupe can collapse them. Doubling Slack API calls on the most
+            // common interaction is too high a price for redundancy on a path
+            // that is not in doubt.
+            "message"
+                if event.subtype.is_some()
+                    && mentions_bot(event.text.as_deref().unwrap_or_default(), bot_user_id) =>
+            {
+                SlackMessageKind::Mention
+            }
             "message" => {
-                if mentions_bot(event.text.as_deref().unwrap_or_default(), bot_user_id) {
-                    // Recognizing the mention in the text makes the two events
-                    // redundant rather than making one of them load-bearing.
-                    // `BotMention` is the only channel trigger that starts a
-                    // run, so depending solely on `app_mention` arriving is one
-                    // vendor quirk away from silence — which is exactly how a
-                    // `thread_broadcast` mention went unanswered.
-                    SlackMessageKind::Mention
-                } else if event.thread_ts.is_some() {
+                if event.thread_ts.is_some() {
                     SlackMessageKind::ThreadReply
                 } else {
                     return Ok(SlackInboundEvent::Ignore {
@@ -348,10 +363,11 @@ fn build_slash_event_id(
     installation_id: &AdapterInstallationId,
     trigger_id: &str,
 ) -> Result<ExternalEventId, SlackPayloadParseError> {
-    // Namespaced separately from the Events API's `event_callback` id space
-    // (same defensive rationale as build_event_id's own `-noop-` namespace):
-    // a slash invocation and an Events API callback must never collide on
-    // dedup key even if some future id happened to coincide.
+    // Namespaced separately from the Events API's message id space (see
+    // [`build_message_event_id`]): a slash invocation and an Events API
+    // message must never collide on dedup key even if some future id happened
+    // to coincide. A slash command is an invocation rather than a message, so
+    // it is keyed per invocation and not by message identity.
     ExternalEventId::new(format!(
         "slack-{}-slash-{trigger_id}",
         installation_id.as_str()
@@ -363,7 +379,9 @@ fn build_slash_event_id(
 }
 
 /// Fixed user-message routing strategies in this first slice.
-/// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
+/// `Mention`: public channel, strip leading `@mention`, thread fallback to
+/// `ts`. Reached from the `app_mention` event, or from a subtyped channel
+/// message naming the bot.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
 /// `ThreadReply`: channel thread reply, strip an optional leading `@mention`,
 /// require `thread_ts`.

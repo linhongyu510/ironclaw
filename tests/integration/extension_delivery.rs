@@ -1526,6 +1526,138 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     assert_eq!(authorization.1, format!("Bearer {SLACK_BOT_TOKEN}"));
 }
 
+/// Slack announces one person's message as up to two events, and since this
+/// channel now recognizes a mention from either, both can start a run. The
+/// durable admission dedupe is the only thing stopping one mention from
+/// running twice, and it keys on `ExternalEventId` — so this drives BOTH
+/// signed events for one message through the real ingress route and pins that
+/// exactly one run is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_two_slack_events_for_one_message_admit_exactly_one_run() {
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds");
+    activate_slack(&group).await;
+    let services = reborn_services(&group);
+    assert!(
+        services.register_static_channel_egress_credentials_for_test(vec![(
+            "slack".to_string(),
+            "slack_bot_token".to_string(),
+            ironclaw_secrets::SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+        )]),
+        "the composed runtime must expose channel-egress credential bridging"
+    );
+
+    let inbound = group
+        .thread("conv-slack-twin-collapse")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let delivery_services = delivery_run_services(&inbound, services, "slack");
+    let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
+        RunDeliveryObserver::new(delivery_services),
+    )));
+    let adapter_config = [(
+        "slack_bot_user_id".to_string(),
+        SLACK_BOT_USER_ID.to_string(),
+    )];
+    let ingress = VendorIngress::register(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+        "slack",
+        SLACK_INSTALLATION,
+        SLACK_SIGNING_SECRET,
+        VerifiedEvidenceMint::RequestSignature {
+            signature_header: "X-Slack-Signature".to_string(),
+            timestamp_header: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        &inbound,
+        Arc::clone(&observer),
+        adapter_config.to_vec(),
+    );
+
+    // The same message, as Slack announces it: two event types, two distinct
+    // `event_id`s, one `(team, channel, ts)`.
+    let twin = |event_type: &str, event_id: &str| {
+        json!({
+            "type": "event_callback",
+            "event_id": event_id,
+            "team_id": "T-A",
+            "event": {
+                "type": event_type,
+                "subtype": "thread_broadcast",
+                "user": "U777",
+                "channel": "C777",
+                "text": "<@U-BOT> broadcast asked once",
+                "thread_ts": "1710000200.000050",
+                "ts": "1710000300.000777"
+            }
+        })
+        .to_string()
+    };
+    let app_mention_body = twin("app_mention", "Ev-twin-app-mention");
+    let channel_message_body = twin("message", "Ev-twin-message-channels");
+
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        SLACK_INSTALLATION,
+    );
+    let slack_binding_service = inbound
+        .binding_service_for_test()
+        .expect("group binding service");
+    let (vendor_scope, _) = preresolve_vendor_turn_scope(
+        &slack_binding_service,
+        &ironclaw_slack_extension::SlackChannelAdapter,
+        "slack",
+        SLACK_INSTALLATION,
+        &adapter_config,
+        &evidence,
+        &app_mention_body,
+        true,
+    )
+    .await;
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(StaticReplyGateway(SLACK_REPLY)),
+    );
+
+    for body in [&app_mention_body, &channel_message_body] {
+        let timestamp = now_unix().to_string();
+        let signature = slack_signature(&timestamp, body);
+        let status = ingress
+            .post(
+                SLACK_ROUTE,
+                body,
+                vec![
+                    ("X-Slack-Signature", signature),
+                    ("X-Slack-Request-Timestamp", timestamp),
+                ],
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "both announcements of one message must be acknowledged"
+        );
+        ingress.drain().await;
+    }
+
+    assert_eq!(
+        observer.accepted_count(),
+        1,
+        "one message must admit exactly one run however many events announced \
+         it (errors: {:?})",
+        observer.errors()
+    );
+}
+
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter
 /// crate, zero bespoke host code — installs through the production
 /// lifecycle tool, consumes the authorized manifest-driven administrator
