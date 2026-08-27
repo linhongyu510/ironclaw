@@ -1,6 +1,6 @@
 # Tenant BI Telemetry V0 Design
 
-**Status:** Accepted for implementation; revised 2026-08-27 after persistence review
+**Status:** Accepted for implementation; revised 2026-08-27 after scoped-authority audit
 **Date:** 2026-08-26
 **Shape research:** [Tenant BI Telemetry V0 — Shape Research](../../plans/2026-08-26-tenant-bi-telemetry-v0-research.md)
 
@@ -40,7 +40,8 @@ a centrally hosted analytics service.
 The replacement foundation PR is independently useful and testable. It includes:
 
 1. typed observations and the non-blocking recorder;
-2. hourly aggregation and a typed `RootFilesystem` repository;
+2. hourly aggregation and a typed repository over the existing production
+   `ScopedFilesystem`;
 3. lifecycle-owned composition over the existing mounted root filesystem;
 4. one authoritative producer for terminal trigger executions; and
 5. an in-process integration test that drives the real trigger path into a
@@ -60,7 +61,11 @@ provider-neutral observation types and this injection port:
 
 ```rust
 pub trait TelemetryRecorder: Send + Sync {
-    fn try_record(&self, observation: TelemetryObservation) -> RecordOutcome;
+    fn try_record(
+        &self,
+        scope: ResourceScope,
+        observation: TelemetryObservation,
+    ) -> RecordOutcome;
 }
 
 pub enum RecordOutcome {
@@ -71,9 +76,11 @@ pub enum RecordOutcome {
 }
 ```
 
-Observation construction validates maximum identifier lengths and admits no
-open metadata map. The contract crate contains no filesystem, SQL, runtime,
-queue, or product dependencies.
+`ResourceScope` is the existing trusted host authority and attribution source;
+the recorder does not introduce a mirror tenant/user context type. Observation
+construction validates maximum identifier lengths and admits no open metadata
+map. The contract crate contains no filesystem, SQL, runtime, queue, or product
+dependencies beyond its existing neutral `ironclaw_host_api` dependency.
 
 ### Durable telemetry domain
 
@@ -82,7 +89,8 @@ queue, or product dependencies.
 - UTC-hour bucketing and checked additive aggregation;
 - the bounded recorder queue and one worker;
 - typed durable record grammar and path/index construction;
-- a `FilesystemTelemetryRepository` over `Arc<dyn RootFilesystem>`;
+- a `FilesystemTelemetryRepository<F>` over the single production
+  `Arc<ScopedFilesystem<F>>`;
 - bounded tenant/time reads with keyset cursors; and
 - repository conformance, batching, loss-accounting, and metric-proof tests.
 
@@ -92,24 +100,28 @@ pool construction, backend selection, or storage URL/path parsing. Backend
 selection and physical database lifecycle remain entirely in composition and
 `ironclaw_filesystem`.
 
-### Trusted root authority
+### Scoped filesystem authority
 
-The collector is a trusted host-owned background service that batches
-observations from multiple tenants. Its repository therefore receives the
-existing composition-owned `Arc<dyn RootFilesystem>` rather than constructing
-or caching one `ScopedFilesystem` per tenant.
+Composition creates one tenant-aware `ScopedFilesystem` over the existing
+mounted root and gives that single handle to the telemetry repository. It is
+not one filesystem object per tenant: its resolver derives a fresh `MountView`
+from the `ResourceScope` supplied to each operation. The worker carries the
+trusted scope received with each observation and groups writes by scope before
+calling the repository.
 
-Every public repository operation requires a typed `TenantId`, and every path
-is rooted beneath:
+The repository uses only scoped paths below:
 
 ```text
-/tenants/{tenant_id}/telemetry/v0/
+/tenant-shared/telemetry/v0/
 ```
 
-The repository accepts no caller-supplied virtual path. Producers receive only
-`Arc<dyn TelemetryRecorder>` and cannot access the root filesystem. Future
-admin reads derive `TenantId` from authorized product context before calling
-the typed repository; no untrusted caller receives root authority.
+The existing mount view resolves that alias to
+`/tenants/{tenant_id}/shared/telemetry/v0/`. The domain never constructs a
+`/tenants/...` virtual path, accepts a caller path, or receives raw root
+authority. Producers receive only `Arc<dyn TelemetryRecorder>` and cannot
+access either filesystem handle. Future admin reads pass the authenticated
+caller's `ResourceScope`; the repository validates that every returned record's
+tenant projection matches `scope.tenant_id`.
 
 ## Observation contract
 
@@ -122,9 +134,12 @@ pub enum TelemetryObservation {
 }
 ```
 
-All usage observations include typed `tenant_id`, attributable `user_id`, and
-`occurred_at`. Observations without tenant/user attribution are rejected and
-counted as invalid; they never enter an instance-global bucket.
+All recorder calls include a trusted `ResourceScope`; usage observations take
+their tenant and attributable user from that scope and contain `occurred_at`.
+Lifecycle records may additionally name a bounded subject user when an admin
+acts on another member. System-sentinel or otherwise unattributable usage
+scopes are rejected and counted as invalid; they never enter an
+instance-global bucket.
 
 `RunSettledObservation` contains terminal outcome, typed origin, duration,
 optional evidence-backed reported tool-call count, and a bounded sanitized
@@ -138,14 +153,15 @@ terminal outcome. The foundation PR emits this observation from the trigger
 poller's authoritative terminal active-run settlement path—not when a poller
 tick merely discovers or submits work.
 
-The trigger terminal-settlement event must carry typed tenant, creator user,
-trigger identity, fire slot, run identity, automation kind, and terminal
-outcome. The callback runs only after trigger history and active-fire state are
-durably settled. Its implementation calls `try_record` exactly once, performs
-no filesystem I/O, and ignores the best-effort outcome except for bounded
-diagnostics. Successful and failed terminal trigger runs use the same closed
-settlement event; pre-submit failures are not reported as completed
-automations.
+The trigger owner adds one closed `TriggerRunTerminalSettlement` event carrying
+the trusted creator `ResourceScope`, trigger identity, fire slot, run identity,
+automation kind, and terminal outcome. `active_cleanup` emits it for both
+successful and failed terminal runs only after trigger history and active-fire
+state are durably settled. The observer callback calls `try_record` exactly
+once, performs no filesystem I/O, and ignores the best-effort outcome except
+for bounded diagnostics. The existing accepted-submission and pre-submit
+failure callbacks retain their current meanings and do not emit completed
+automation telemetry.
 
 `LifecycleTransitionObservation` contains a stable event ID, closed event kind,
 closed subject kind, subject ID, optional attributable user, and timestamp.
@@ -169,7 +185,8 @@ overlap.
 
 For each drain, the worker:
 
-1. buckets observations by `floor_utc_hour(occurred_at)`;
+1. partitions observations by trusted `ResourceScope`, then buckets them by
+   `floor_utc_hour(occurred_at)`;
 2. combines identical durable keys with checked arithmetic;
 3. retains lifecycle events as individually deduplicated records;
 4. calls one repository batch operation; and
@@ -197,31 +214,48 @@ Unknown record kinds, schema versions, or enum values fail closed.
 Canonical paths are deterministic and include every primary-key dimension:
 
 ```text
-/tenants/{tenant}/telemetry/v0/hourly/activity/{hour}/{user}/{origin}.json
-/tenants/{tenant}/telemetry/v0/hourly/model/{hour}/{user}/{provider}/{model}.json
-/tenants/{tenant}/telemetry/v0/hourly/failure/{hour}/{user}/{category}.json
-/tenants/{tenant}/telemetry/v0/hourly/automation/{hour}/{user}/{kind}.json
-/tenants/{tenant}/telemetry/v0/lifecycle/{event_id}.json
-/tenants/{tenant}/telemetry/v0/coverage/{hour}/{collector_instance_id}.json
+/tenant-shared/telemetry/v0/hourly/activity/{hour}/{user}/{origin}.json
+/tenant-shared/telemetry/v0/hourly/model/{hour}/{user}/{provider}/{model}.json
+/tenant-shared/telemetry/v0/hourly/failure/{hour}/{user}/{category}.json
+/tenant-shared/telemetry/v0/hourly/automation/{hour}/{user}/{kind}.json
+/tenant-shared/telemetry/v0/lifecycle/{event_id}.json
+/tenant-shared/telemetry/v0/coverage/{hour}/{collector_instance_id}.json
 ```
 
 Path components are encoded by one reversible, bounded domain helper; callers
-never concatenate raw identifiers. Tenant equality is present in both the
-trusted virtual root and indexed projection.
+never concatenate raw identifiers. Tenant isolation comes from the scoped
+mount and tenant equality is repeated in the indexed projection as a fail-
+closed readback check, not as caller-selected routing.
 
-The repository declares ordered indexes whose leading keys are:
+The repository declares ordered indexes whose equality prefix, ordered key,
+and tie-breaker are:
 
 ```text
-[tenant_id, record_family, window_start, tie_breaker]
-[tenant_id, user_id, record_family, window_start, tie_breaker]
-[tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker]
-[tenant_id, subject_kind, subject_id, occurred_at, event_id]
+[record_family, window_start, tie_breaker]
+[user_id, record_family, window_start, tie_breaker]
+[record_family, provider_id, window_start, tie_breaker]
+[record_family, effective_model_id, window_start, tie_breaker]
+[record_family, provider_id, effective_model_id, window_start, tie_breaker]
+[record_family, occurred_at, event_id]
+[subject_kind, subject_id, occurred_at, event_id]
 ```
 
-Reads use `query_ordered` with a bounded page size and opaque keyset cursor.
-There is no offset pagination, directory scan, full-result sort, or body parse
-for filtering. Index creation is idempotent and happens during telemetry
-repository initialization after the root filesystem has been assembled.
+Each read selects the exact index matching its supplied equality filters.
+Provider and effective-model filters therefore support all four combinations:
+neither, provider only, model only, or both. Reads use ascending
+`query_ordered` pages. The first page starts after
+`(from, minimum_tie_breaker)` so rows at `from` are included; the reserved
+minimum is outside the valid encoded tie-breaker domain. Later pages use the
+returned opaque cursor, and reading stops before the first row whose time
+is `>= to`. The repository never passes `Filter::Range` to
+`query_ordered`. There is no offset pagination, directory scan, unbounded
+history scan, full-result sort, or body parse for filtering. Page size and
+maximum time window are bounded by the typed read request. Index creation is
+idempotent and tenant-scoped: the worker calls `ensure_indexes` before the
+first batch for a tenant, reads do the same before their first page, and a
+bounded success cache avoids repeated declarations without becoming durable
+authority. No lock is held across filesystem I/O and duplicate declarations
+are safe.
 
 ### Hourly user activity
 
@@ -261,11 +295,14 @@ losslessness.
 
 ## Composition and real-libSQL proof
 
-Production composition creates one telemetry repository over the exact
-`CompositeRootFilesystem` already used by the runtime, initializes indexes,
-then starts one recorder/worker. It injects only the neutral recorder into the
-trigger terminal-settlement observer. No new database handle, pool, runtime,
-path setting, feature flag, or backend selector is added.
+Production composition wraps the exact `CompositeRootFilesystem` already used
+by the runtime with the existing tenant-aware `wrap_scoped`, creates one
+telemetry repository over that shared scoped handle, then starts one
+recorder/worker. The repository idempotently ensures tenant-scoped indexes on
+the first batch or read for each tenant. Composition injects only the neutral
+recorder into the trigger terminal-settlement observer. No new database handle,
+pool, runtime, path setting, feature flag, backend selector, or per-tenant
+filesystem cache is added.
 
 The foundation PR adds an in-process integration scenario under
 `tests/integration/` that:
@@ -274,12 +311,17 @@ The foundation PR adds an in-process integration scenario under
    libSQL database and the real `LibSqlRootFilesystem`;
 2. creates and fires a due trigger through the production trigger poller;
 3. drives the resulting run to a successful terminal state;
-4. waits through an explicit telemetry drain/shutdown synchronization seam;
-5. constructs a fresh typed telemetry repository over a reopened
+4. waits until the trigger poller's active-cleanup sweep has durably cleared
+   the active fire and emitted `TriggerRunTerminalSettlement`;
+5. waits through an explicit telemetry drain/shutdown synchronization seam;
+6. constructs a fresh typed telemetry repository over a freshly wrapped,
+   reopened
    libSQL-backed root filesystem;
-6. reads the tenant/hour automation aggregate and asserts the exact tenant,
+7. reads the tenant/hour automation aggregate with the same authorized scope
+   and asserts the exact tenant,
    creator user, automation kind, completed count, and schema version; and
-7. queries the same range for another tenant and asserts zero rows.
+8. queries the same relative path/range with another tenant's scope and
+   asserts zero rows.
 
 The test never queries telemetry SQL, calls a private adapter, invokes the
 recorder directly, or relies only on `TurnStatus::Completed`. It proves the
@@ -317,13 +359,20 @@ with that surface rather than in the foundation PR.
 
 ## Compatibility, rollback, and failure semantics
 
-The change is additive to product behavior and uses the existing universal
-storage plane. Existing actions never depend on telemetry success. Rollback
-removes composition wiring and the telemetry consumer mount records remain
-unread but harmless; deletion is not part of rollback.
+The closed, unmerged direct-SQL PR created development-only telemetry adapters,
+DDL, ADR 0005, and architecture allowlists but never shipped collection or
+production data. The replacement foundation deletes those adapters and driver
+dependencies, deletes ADR 0005, supersedes the old SQL implementation plan,
+and updates every README, database rule, target-architecture statement, and
+architecture inventory in the same PR. Existing developer databases may
+retain unreachable experimental telemetry tables; V0 neither reads nor
+migrates them, and production has no telemetry rows to preserve.
 
-There is no dedicated telemetry SQL schema to migrate or drop. PostgreSQL,
-libSQL, and in-memory parity comes from their existing `RootFilesystem`
-implementations plus shared telemetry repository conformance tests. No metric
-is represented as exact when its inputs are best-effort, and later downloads
-include collector coverage so analysts can judge fitness for use.
+The resulting product change is additive and uses the existing universal
+storage plane. Existing actions never depend on telemetry success. Rollback
+removes composition wiring; scoped telemetry records remain unread but
+harmless, and deletion is not part of rollback. PostgreSQL, libSQL, and
+in-memory parity comes from their existing `RootFilesystem` implementations
+plus shared telemetry repository conformance tests. No metric is represented
+as exact when its inputs are best-effort, and later downloads include collector
+coverage so analysts can judge fitness for use.
