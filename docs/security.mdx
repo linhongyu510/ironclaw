@@ -39,30 +39,7 @@ IronClaw takes a **defense in depth** approach — independent layers that a req
 
 The critical detail is where the credential enters. It is **not** in the tool. A sandboxed tool builds an unauthenticated request; the host attaches the credential only after the request has passed the leak scan, and the allowlist is enforced before any connection opens — so a destination the tool did not declare never receives the credential.
 
-Four parties take part. Only one of them — the host — ever holds a plaintext credential:
-
-```mermaid
-sequenceDiagram
-    participant M as Model
-    participant T as Tool<br/>(sandbox)
-    participant H as Host<br/>boundary
-    participant S as Secret<br/>store
-    participant X as External<br/>API
-
-    M->>H: pick a tool and its arguments
-    Note over H: authorization plans the call:<br/>network policy · credential staging · resource ceilings
-    S-->>H: credential staged for this one invocation<br/>(host-only — never enters the sandbox)
-    H->>T: run the tool
-    T->>H: unauthenticated request
-    Note over H: 1. reject any credential the tool supplied itself<br/>2. leak-scan URL, headers, body<br/>3. inject the staged credential (https only)<br/>4. match scheme + host against the manifest · refuse private IPs
-    H->>X: authenticated request
-    X-->>H: response
-    Note over H: strip sensitive headers · redact the credential · leak-scan
-    H-->>T: sanitized response
-    T-->>M: tool output
-```
-
-Read it top to bottom: the credential moves only along the store → host → API path. The tool's lane never touches it, and the model's lane sees only the sanitized result.
+On the way out, the host egress boundary rejects any credential the tool supplied itself (sensitive headers, credential-shaped query parameters, `user:pass@` in the URL), leak-scans the URL, headers, and body, injects the staged credential — the only point where plaintext exists — and matches the destination against the tool's declared network targets and credential audiences, refusing private-IP ranges. On the way back, it strips sensitive response headers, redacts the injected credential's own value, and leak-scans the body before the tool, and then the model, sees anything.
 
 Secrets are separated from ordinary data at every point. They are encrypted at rest, never enter the sandbox, and are attached at the host boundary — after the request has been validated, and only for the one call that was authorized.
 

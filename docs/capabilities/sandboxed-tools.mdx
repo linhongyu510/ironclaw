@@ -12,19 +12,7 @@ This is IronClaw's recommended approach for custom integrations that need strong
 
 ## How It Works
 
-A WASM tool starts with no authority at all. Everything it does — including every network call — goes out through a host function and comes back through the host's checks:
-
-```mermaid
-flowchart TB
-    M[model selects a tool] --> A["host reads the manifest and plans obligations<br/>(network policy · credential staging · resource ceilings)"]
-    A --> W["module instantiated with a fuel, memory, and time budget"]
-    W --> C["tool code runs<br/>its only way out is a host function"]
-    C -- "http-request, unauthenticated" --> E["host egress boundary<br/>validate · leak-scan · inject staged credential · allowlist"]
-    E --> X[external API]
-    X --> R["host response boundary<br/>strip headers · redact · leak-scan"]
-    R -- "sanitized response" --> C
-    C --> O[tool output returns to the model]
-```
+When the model selects a tool, authorization reads its manifest and plans obligations for the call — network policy, credential staging, resource ceilings. The host then loads the module and instantiates it with a fuel and memory budget. The tool's only way out is a host function: it calls `http-request` with an unauthenticated request, and the host egress boundary rejects any tool-supplied credential headers, leak-scans the URL, headers, and body, injects the staged credential, and matches the destination against the tool's `network_targets` and credential audiences before any connection opens. The response passes back through the host — sensitive headers stripped, the credential redacted, body leak-scanned — into the sandbox, and the tool's output returns to the model.
 
 The credential never enters the sandbox. See [Secrets & Sandboxing](/security/secrets-and-sandboxing) for that flow in detail.
 
