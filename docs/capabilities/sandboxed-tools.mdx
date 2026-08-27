@@ -95,7 +95,8 @@ max_egress_bytes = 10485760
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 ```
 
 The example is condensed from the shipped `github` package. The real `github.create_repo` entry declares neither `network_targets` nor `max_egress_bytes` — both are shown here to illustrate the fields. Its credential `audience` alone puts `api.github.com` on the allowlist (see below).
@@ -131,6 +132,7 @@ The example is condensed from the shipped `github` package. The real `github.cre
 | `scopes` | For OAuth credentials, the scopes required by this specific tool. |
 | `injection` | How the host attaches it: `header` (with optional `prefix`), `query_param`, `path_placeholder`, `body_json_pointer`, `basic` (HTTP Basic with a `username`), or `vapid_authorization`. |
 | `required` | Whether the tool can run without this credential. Defaults to `true`. |
+| `placeholder_env` | Optional. Names the environment variable that receives a fresh, invocation-scoped `icsbx_…` placeholder when a shell command requests this extension's credentials (`credential_contexts`). The container proxy swaps the placeholder for the real header on the declared HTTPS host; the shell never holds the value. Only `header` injections with an exact `https` audience qualify. Unset means the credential is not available to shell commands. |
 
 There is no manifest field that lets a tool *read* a secret. Credential material is only ever attached by the host to a request the host has already validated.
 
