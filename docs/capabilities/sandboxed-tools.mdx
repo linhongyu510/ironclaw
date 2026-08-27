@@ -41,6 +41,8 @@ Per-call egress size is bounded by the manifest's `max_egress_bytes`, and output
 
 Every extension ships a `manifest.toml` (schema `reborn.extension_manifest.v3`) alongside its `.wasm` module. This file is the single source of truth for what the extension's tools may do, and it is what you are approving when you install.
 
+v3 is the current package format and the only one to author. The loader dispatches on `schema_version`, so packages written against the previous schema (v2 — the `[[host_api]]` / `[capability_provider.tools]` shape) still load and install for compatibility; port a v2 file to `[[tools]]` when you next touch it.
+
 ```toml
 schema_version = "reborn.extension_manifest.v3"
 id = "github"
