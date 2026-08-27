@@ -106,8 +106,10 @@ impl FailureCategory {
         Ok(Self(value))
     }
 
-    pub fn from_sanitized_failure(failure: &SanitizedFailure) -> Self {
-        Self(failure.category().to_owned())
+    pub fn from_sanitized_failure(
+        failure: &SanitizedFailure,
+    ) -> Result<Self, BoundedIdentifierError> {
+        Self::new(failure.category())
     }
 
     pub fn as_str(&self) -> &str {
@@ -115,8 +117,10 @@ impl FailureCategory {
     }
 }
 
-impl From<SanitizedFailure> for FailureCategory {
-    fn from(failure: SanitizedFailure) -> Self {
+impl TryFrom<SanitizedFailure> for FailureCategory {
+    type Error = BoundedIdentifierError;
+
+    fn try_from(failure: SanitizedFailure) -> Result<Self, Self::Error> {
         Self::from_sanitized_failure(&failure)
     }
 }
@@ -299,7 +303,8 @@ impl RunSettledObservation {
             matches!(outcome, RunOutcome::Failed | RunOutcome::RecoveryRequired);
         let failure = failure
             .as_ref()
-            .map(FailureCategory::from_sanitized_failure);
+            .map(FailureCategory::from_sanitized_failure)
+            .transpose()?;
         match (failure_is_required, failure.is_some()) {
             (true, false) => Err(ObservationError::FailureRequired),
             (false, true) => Err(ObservationError::UnexpectedFailure),

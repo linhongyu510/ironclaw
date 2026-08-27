@@ -5,7 +5,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_telemetry_contracts::observation::{
     AutomationId, AutomationKind, AutomationSettledObservation, BoundedIdentifierError,
-    EffectiveModelId, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
+    EffectiveModelId, FailureCategory, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
     LifecycleTransitionObservation, ModelCallCompletedObservation, ModelUsage, ObservationContext,
     ObservationError, OriginKind, ProviderId, RunOutcome, RunSettledObservation,
     TelemetryObservation,
@@ -196,6 +196,29 @@ fn failed_runs_require_only_the_sanitized_failure_category() {
         ),
         Err(ObservationError::UnexpectedFailure)
     ));
+}
+
+#[test]
+fn arbitrary_trusted_static_failure_categories_use_fallible_telemetry_conversion() {
+    let failure = SanitizedFailure::from_trusted_static("arbitrary_failure_category");
+
+    let category = FailureCategory::from_sanitized_failure(&failure)
+        .expect("trusted-static categories are validated by telemetry");
+    assert_eq!(category.as_str(), "arbitrary_failure_category");
+
+    let observation = RunSettledObservation::new(
+        context(),
+        OriginKind::Human,
+        RunOutcome::Failed,
+        42,
+        None,
+        Some(failure),
+    )
+    .expect("arbitrary trusted-static category should remain supported");
+    assert_eq!(
+        observation.failure().map(FailureCategory::as_str),
+        Some("arbitrary_failure_category")
+    );
 }
 
 #[test]
