@@ -63,51 +63,35 @@ See [Credential Protection](/security/secrets-and-sandboxing) for the step-by-st
 
 ## Tool Capability Declarations
 
-When you install an extension, you are approving its **manifest** (`manifest.toml`, schema `reborn.extension_manifest.v3`). The manifest declares, per tool, exactly what that tool may reach. The host enforces those declarations at runtime — a tool cannot call a host it didn't declare, use a credential it didn't declare, or send more than its egress ceiling allows.
+When you install an extension, you are approving its **manifest** — a file that states, per tool, exactly what that tool may reach. The host enforces it at runtime; a tool cannot quietly do more than its manifest says. Each tool entry answers four questions:
 
-This entry is condensed from the shipped `gmail` package (the description is shortened):
+- **Where can it connect?** `network_targets` is an explicit allowlist of hosts. Anything not on it is refused before a connection opens.
+- **Which credential can it use, and where?** Each `[[tools.credentials]]` entry binds one credential to one destination host. The host attaches it in flight; the tool never receives the value.
+- **What is it allowed to do?** `effects` names what the tool claims to do (reach the network, use a secret, write somewhere external, …), and `default_permission` sets whether a call is eligible for an approval prompt. Whether it actually pauses depends on your approval settings — see [Prompt Injection Defense](#prompt-injection-defense).
+- **Who can invoke it?** `origin_gate_matrix` says which kinds of run may reach the tool at all — for example, reachable during an agent turn but forbidden to background automation.
+
+Here is what that looks like, trimmed from the shipped `gmail` package:
 
 ```toml
 [[tools]]
 id = "gmail.send_message"
-description = "Send a Gmail message as the user."
 effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
-visibility = "model"
-input_schema_ref = "schemas/gmail/send_message.input.v1.json"
-prompt_doc_ref = "prompts/gmail/send_message.md"
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
-
 network_targets = [
-  { scheme = "https", host_pattern = "www.googleapis.com" },
   { scheme = "https", host_pattern = "gmail.googleapis.com" },
-  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
-  { scheme = "https", host_pattern = "accounts.google.com" },
+  # …three more Google hosts
 ]
-max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "gmail_account"
-vendor = "google"
-scopes = ["https://www.googleapis.com/auth/gmail.send"]
 audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 ```
 
-What each field controls:
-
-| Field | What it governs |
-|-------|-----------------|
-| `effects` | The effect classes this tool claims — `network`, `use_secret`, `external_write`, `write_filesystem`, `spawn_process`, `financial`, and similar. Authorization plans obligations from these. |
-| `default_permission` | `allow`, `ask`, or `deny`. `ask` makes the tool eligible for approval prompting; whether a call actually pauses depends on your approval settings (see below). `deny` can never be durably auto-approved. |
-| `origin_gate_matrix` | Which invocation origins may reach this tool at all — `loop_run` (an agent turn, including one started by a scheduled trigger), `product` (a direct product action), or `automation` (routine/heartbeat work that is not model-initiated). A tool can be reachable from an agent turn and `forbidden` to automation. |
-| `network_targets` | Outbound destinations, by scheme and host pattern (optionally port). Together with every credential `audience`, this is the allowlist; anything not on it is refused before the connection opens. HTTP method is not part of the match. |
-| `[[tools.credentials]]` | The credential to attach for a matching `audience`, and how (`header` with an optional prefix, query parameter, path placeholder, JSON body pointer, HTTP Basic, or VAPID authorization). The tool never receives the value. A credential may also name a `placeholder_env`, which lets a container-sandboxed shell command request it: the shell sees only a throwaway `icsbx_…` placeholder in that variable, and the proxy substitutes the real header on the declared host. |
-| `max_egress_bytes` | Per-call ceiling on how many bytes this tool may send. Response size is bounded separately by the host. |
-
 Note what is *absent*: there is no field a tool can set to read a secret. Credential material is only ever attached by the host, to a request the host has already validated.
 
-For the full picture, see [WASM Tools](/capabilities/sandboxed-tools).
+Field-by-field reference: [WASM Tools → The Manifest](/capabilities/sandboxed-tools#the-manifest).
 
 ---
 
