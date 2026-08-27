@@ -10,9 +10,11 @@ But all of those capabilities are only possible by using **your credentials**.
 
 Your API keys, OAuth tokens, database passwords, and SSH access sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
 
-IronClaw is built around this problem. Credential handling isn't a feature add-on — it's the core of the system. The principle is simple: **models and tools should never see your raw credentials**.
+IronClaw is built around this problem. Credential handling isn't a feature add-on — it's the core of the system. The principle is simple:
 
-Everything below exists to make that hold up in practice.
+**Models and tools should never see your raw credentials**
+
+Everything listed below exists to make that hold up in practice.
 
 <CardGroup cols={2}>
   <Card title="Encrypted at rest" icon="lock">
@@ -36,13 +38,24 @@ Everything below exists to make that hold up in practice.
 
 ## Data Flow
 
-IronClaw takes a **defense in depth** approach — independent layers that a request passes through on its way out, and that a response passes through on its way back.
+Every tool call passes through a series of independent checks on its way out and again on its way back. If one layer misses something, the next one is still there.
 
-The critical detail is where the credential enters. It is **not** in the tool. A sandboxed tool builds an unauthenticated request; the host attaches the credential only after the request has passed the leak scan, and the allowlist is enforced before any connection opens — so a destination the tool did not declare never receives the credential.
+The key idea: **the tool never holds the credential.** It builds a request with no credential in it. The host adds the credential only after the request has been checked, and only sends it to a destination the tool's manifest declared.
 
-On the way out, the host egress boundary rejects any credential the tool supplied itself (sensitive headers, credential-shaped query parameters, `user:pass@` in the URL), leak-scans the URL, headers, and body, injects the staged credential — the only point where plaintext exists — and matches the destination against the tool's declared network targets and credential audiences, refusing private-IP ranges. On the way back, it strips sensitive response headers, redacts the injected credential's own value, and leak-scans the body before the tool, and then the model, sees anything.
+**On the way out**, before anything leaves the machine:
 
-Secrets are separated from ordinary data at every point. They are encrypted at rest, never enter the sandbox, and are attached at the host boundary — after the request has been validated, and only for the one call that was authorized.
+1. **Reject any credential the tool tried to add itself** — sensitive headers, credential-shaped query parameters, `user:pass@` in the URL. The whole request fails; tools have no business supplying these.
+2. **Scan the request for leaked secrets** — the URL, headers, and body are run through the leak detector.
+3. **Attach the real credential.** This is the only moment the plaintext value exists, and it happens inside the host, not the tool.
+4. **Check the destination** against the tool's declared network targets and the credential's audience, and refuse private IP ranges. If the host isn't on the list, the request never connects.
+
+**On the way back**, before the tool (and then the model) sees anything:
+
+1. **Strip sensitive response headers.**
+2. **Redact the credential** in case the server echoed it back.
+3. **Scan the response body** for secret shapes.
+
+Secrets stay separate from ordinary data throughout: encrypted at rest, never inside the sandbox, attached only at the host boundary, and only for the one call that was authorized.
 
 See [Credential Protection](/security/secrets-and-sandboxing) for the step-by-step walkthrough.
 
