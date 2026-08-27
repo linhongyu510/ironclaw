@@ -97,29 +97,17 @@ Field-by-field reference: [WASM Tools → The Manifest](/capabilities/sandboxed-
 
 ## Leak Detector
 
-Even though a tool never sees the credential it sent, the **server it called** might echo it back — an error message quoting the token, a debug endpoint reflecting request headers, a proxy pasting the credential into a downstream payload. And a compromised tool may try to smuggle a secret *out* in a URL or body.
+Even though a tool never sees the credential it sent, the **server it called** might echo it back — an error message quoting the token, a debug endpoint reflecting request headers. And a compromised tool may try to smuggle a secret *out* in a URL or body. The leak detector is the pattern-matching layer that catches both directions.
 
-The leak detector is the pattern-matching layer that catches both directions. It ships with 23 regex patterns:
+It recognizes 23 secret shapes — provider keys like OpenAI `sk-…` and Anthropic `sk-ant-…`, AWS `AKIA…` and Google `AIza…`, GitHub `ghp_…`, Stripe and Slack tokens, private-key blocks, bearer tokens and JWTs, and IronClaw's own `icsbx_…` sandbox placeholders. Each match triggers one of three responses:
 
-| Category | Patterns |
-|----------|----------|
-| LLM provider keys | OpenAI (`sk-…`, `sk-proj-…`), Anthropic API (`sk-ant-api…`), Anthropic OAuth (`sk-ant-oat##-…`), OpenRouter (`sk-or-v1-…`), Groq (`gsk_…`), NEAR AI session (`sess_…`) |
-| Cloud credentials | AWS access key ID (`AKIA…`), Google API key (`AIza…`) |
-| Developer platforms | GitHub classic tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained PATs (`github_pat_…`) |
-| Payment / messaging | Stripe (`sk_live_…`, `sk_test_…`), Slack (`xoxb-`, `xoxp-`, …), Twilio API key (`SK<32 hex>`), SendGrid (`SG.<…>.<…>`), Telegram bot token (`<digits>:AA…`) |
-| Private keys | PEM RSA / PKCS#8 / encrypted, OpenSSH / EC / DSA, and OpenPGP private-key armor — matched as complete blocks so a partial redaction can't leave key material behind |
-| Generic structures | Bare JWTs (three-segment, header decoded and validated), `Bearer <token>`, `Authorization:` headers, 64-character hex blobs |
-| Sandbox placeholders | `icsbx_…` credential placeholders — inert on their own, but treated like a real secret so one can never cross into model output or logs |
+- **Block** — the content is rejected and the call fails. Used for anything that is unambiguously a live credential: provider keys, cloud keys, private keys.
+- **Redact** — the matched span is masked and the rest passes. Used for shapes that are often legitimate in context: bearer tokens, `Authorization` headers, JWTs.
+- **Warn** — logged, and the content passes. Used for one ambiguous shape: 64-character hex, which is as often a hash as a secret.
 
-Each pattern carries a severity and an action:
+The detector is not one gate. It runs at every boundary where untrusted content changes hands — outbound requests, inbound responses, shell output, error messages, context compaction, traces, and operator logs — so a secret that slips one boundary is caught at the next.
 
-| Action | Effect | Used for |
-|--------|--------|----------|
-| **Block** | The content is rejected; the call fails rather than passing the match through. | Critical and high-severity credentials — provider keys, cloud keys, private keys, sandbox placeholders. |
-| **Redact** | The matched span is replaced before the content moves on. | Shapes that are often legitimate in context — bearer tokens, `Authorization` headers, bare JWTs. |
-| **Warn** | Logged at debug level; the content passes this boundary. (Compaction and trace contribution redact these matches too.) | Ambiguous shapes such as 64-character hex, which is as often a hash as a secret. |
-
-See [Credential Protection](/security/secrets-and-sandboxing#where-the-scan-runs) for exactly which boundaries run this scan.
+Full pattern catalog and the exact boundaries: [Credential Protection → The Leak Detector](/security/secrets-and-sandboxing#the-leak-detector).
 
 ---
 
