@@ -1,6 +1,9 @@
 use super::*;
 use proptest::prelude::*;
 
+/// Matches the `<@UBOT>` mentions the fixtures below already used.
+const TEST_BOT_USER_ID: &str = "UBOT";
+
 fn installation_id() -> AdapterInstallationId {
     AdapterInstallationId::new("install-alpha").expect("installation")
 }
@@ -9,6 +12,7 @@ fn normalize(value: serde_json::Value) -> SlackInboundEvent {
     normalize_slack_event(
         &serde_json::to_vec(&value).expect("payload"),
         &installation_id(),
+        Some(TEST_BOT_USER_ID),
     )
     .expect("normalizes")
 }
@@ -283,6 +287,7 @@ fn slash_command_forms_normalize_without_a_second_product_parser() {
         b"channel_id=D123&channel_name=directmessage&user_id=U123&command=%2Fironclaw&text=hello&trigger_id=trigger-1&team_id=T123",
         &headers,
         &installation_id(),
+        Some(TEST_BOT_USER_ID),
     )
     .expect("slash form");
     let SlackInboundEvent::Message(message) = event else {
@@ -295,11 +300,12 @@ fn slash_command_forms_normalize_without_a_second_product_parser() {
 #[test]
 fn oversized_payload_and_missing_event_id_fail_closed() {
     let oversized = vec![b'x'; MAX_SLACK_PAYLOAD_BYTES + 1];
-    assert!(normalize_slack_event(&oversized, &installation_id()).is_err());
+    assert!(normalize_slack_event(&oversized, &installation_id(), None).is_err());
     assert!(matches!(
         normalize_slack_event(
             br#"{"type":"event_callback","event":{"type":"message"}}"#,
-            &installation_id()
+            &installation_id(),
+            None
         ),
         Err(SlackPayloadParseError::InvalidExternalRef {
             kind: "external_event_id",
@@ -311,6 +317,153 @@ fn oversized_payload_and_missing_event_id_fail_closed() {
 proptest! {
     #[test]
     fn arbitrary_untrusted_bytes_never_panic(raw in proptest::collection::vec(any::<u8>(), 0..512)) {
-        let _ = normalize_slack_event(&raw, &installation_id());
+        let _ = normalize_slack_event(&raw, &installation_id(), Some(TEST_BOT_USER_ID));
     }
+}
+
+/// Slack announces one message as up to two events. Both must resolve to the
+/// same inbound identity, because the durable admission dedupe keys on it —
+/// otherwise a single mention runs twice.
+#[test]
+fn the_two_slack_events_for_one_message_share_one_inbound_identity() {
+    let app_mention = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "Ev-app-mention",
+        "event": {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "C1",
+            "text": "<@UBOT> same message",
+            "thread_ts": "1710000000.000010",
+            "ts": "1710000000.000011"
+        }
+    }));
+    let channel_message = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "Ev-message-channels",
+        "event": {
+            "type": "message",
+            "subtype": "thread_broadcast",
+            "user": "U1",
+            "channel": "C1",
+            "text": "<@UBOT> same message",
+            "thread_ts": "1710000000.000010",
+            "ts": "1710000000.000011"
+        }
+    }));
+    assert_eq!(
+        app_mention.event_id, channel_message.event_id,
+        "the twins of one message must dedupe against each other"
+    );
+    assert_eq!(app_mention.trigger, ProductTriggerReason::BotMention);
+    assert_eq!(
+        channel_message.trigger,
+        ProductTriggerReason::BotMention,
+        "the message twin must be able to start the run on its own"
+    );
+
+    let other_message = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "Ev-app-mention",
+        "event": {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "C1",
+            "text": "<@UBOT> a different message",
+            "ts": "1710000000.000099"
+        }
+    }));
+    assert_ne!(
+        app_mention.event_id, other_message.event_id,
+        "distinct messages must keep distinct identities"
+    );
+}
+
+/// The run-starting classification must not depend on `app_mention` arriving:
+/// it is the only channel trigger that starts a run, and Slack does not
+/// guarantee it for every message shape.
+#[test]
+fn an_explicit_mention_in_a_channel_message_starts_a_run_without_app_mention() {
+    let threaded = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvBroadcastOnly",
+        "event": {
+            "type": "message",
+            "subtype": "thread_broadcast",
+            "user": "U1",
+            "channel": "C1",
+            "text": "<@UBOT> what about Jalapeno?",
+            "thread_ts": "1710000000.000010",
+            "ts": "1710000000.000020"
+        }
+    }));
+    assert_eq!(threaded.trigger, ProductTriggerReason::BotMention);
+    assert_eq!(threaded.text, "what about Jalapeno?");
+    assert_eq!(threaded.conversation.topic_id(), Some("1710000000.000010"));
+
+    // Slack also renders mentions as `<@U…|handle>`.
+    let piped = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvPiped",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "hey <@UBOT|ironclaw> look", "ts": "1710000000.000021"
+        }
+    }));
+    assert_eq!(piped.trigger, ProductTriggerReason::BotMention);
+
+    // A thread reply that names nobody stays bystander chatter.
+    let bystander = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvBystander",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "agreed", "thread_ts": "1710000000.000010",
+            "ts": "1710000000.000022"
+        }
+    }));
+    assert_eq!(bystander.trigger, ProductTriggerReason::ReplyToBot);
+
+    // With no configured bot id, detection degrades to the pre-change behavior
+    // rather than guessing.
+    let unconfigured = normalize_slack_event(
+        &serde_json::to_vec(&serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvNoBotId",
+            "event": {
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@UBOT> hello", "ts": "1710000000.000023"
+            }
+        }))
+        .expect("payload"),
+        &installation_id(),
+        None,
+    )
+    .expect("normalizes");
+    assert!(matches!(unconfigured, SlackInboundEvent::Ignore { .. }));
+}
+
+/// A DM is a direct chat whichever event announced it. Without this the
+/// collapsed pair would take its trigger from whichever event arrived first.
+#[test]
+fn a_dm_is_a_direct_chat_even_when_it_arrives_as_an_app_mention() {
+    let dm_mention = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvDmMention",
+        "event": {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "D1",
+            "channel_type": "im",
+            "text": "<@UBOT> hi",
+            "ts": "1710000000.000030"
+        }
+    }));
+    assert_eq!(dm_mention.trigger, ProductTriggerReason::DirectChat);
 }

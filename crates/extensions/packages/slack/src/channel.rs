@@ -55,8 +55,13 @@ impl ChannelIngress for SlackChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_slack_inbound(request.body, request.headers, &installation_id)
-            .map_err(parse_error)?
+        match normalize_slack_inbound(
+            request.body,
+            request.headers,
+            &installation_id,
+            crate::payload::slack_bot_user_id(request.config),
+        )
+        .map_err(parse_error)?
         {
             SlackInboundEvent::UrlVerification { challenge } => {
                 Ok(InboundOutcome::Respond(ImmediateResponse {
@@ -755,7 +760,14 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.text, "hello there");
         assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
-        assert_eq!(message.event_id.as_str(), "slack-install_alpha-Ev123");
+        // Identity is the message, not the delivery: Slack's per-event
+        // `event_id` (`Ev123` here) would give the `app_mention` and
+        // `message.*` announcements of one message two identities, and the
+        // durable admission dedupe keys on this value.
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-msg-T-A-D123-1710000000.000100"
+        );
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
         assert!(message.reply_context.is_none());

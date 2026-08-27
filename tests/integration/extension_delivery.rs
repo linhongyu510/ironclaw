@@ -110,6 +110,9 @@ const SLACK_ROUTE: &str = "/webhooks/extensions/slack/events";
 const SLACK_INSTALLATION: &str = "slack-itest-install";
 const SLACK_SIGNING_SECRET: &[u8] = b"itest-slack-signing-secret";
 const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
+/// The installation's configured `slack_bot_user_id`: what the adapter matches
+/// `<@…>` against to recognize an explicit mention without an `app_mention`.
+const SLACK_BOT_USER_ID: &str = "U-BOT";
 const SLACK_REPLY: &str = "Here is the coordinated Slack reply.";
 const SLACK_CONNECT_REQUIRED: &str =
     "👋 Connect your Slack account in the IronClaw web app, then message me here again.";
@@ -498,6 +501,12 @@ impl VendorIngress {
         evidence: VerifiedEvidenceMint,
         harness: &RebornIntegrationHarness,
         observer: Arc<RecordingForwardObserver>,
+        // The manifest-declared non-secret configuration the router resolves
+        // for the verified installation, and hands the adapter. Seeded rather
+        // than left empty so the harness feeds the adapter what production
+        // does — an adapter that reads a required config handle behaves
+        // differently against a double that always answers "unconfigured".
+        non_secret_config: Vec<(String, String)>,
     ) -> Self {
         let surface = harness.product_surface_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
@@ -515,7 +524,7 @@ impl VendorIngress {
                         secret: secret.to_vec(),
                     },
                 ])),
-                configuration: Arc::new(StaticIngressConfiguration::default()),
+                configuration: Arc::new(StaticIngressConfiguration::new(non_secret_config)),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
                 drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },
@@ -1037,7 +1046,7 @@ async fn admin_configured_slack_unconnected_dm_gets_connect_notice_without_insta
             {"handle": "slack_team_id", "value": "T-A"},
             {"handle": "slack_api_app_id", "value": "A-ITEST"},
             {"handle": "slack_installation_id", "value": SLACK_INSTALLATION},
-            {"handle": "slack_bot_user_id", "value": "U-BOT"},
+            {"handle": "slack_bot_user_id", "value": SLACK_BOT_USER_ID},
             {"handle": "slack_oauth_client_id", "value": "slack-oauth-client"},
             {"handle": "slack_oauth_client_secret", "value": "slack-oauth-secret"}
         ]),
@@ -1292,17 +1301,24 @@ async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router
 /// asserted on the wire recorder AND in the coordinator's outbound store.
 ///
 /// The `thread_broadcast` case is the same proof for a mention posted as a
-/// threaded reply with "Also send to channel". Slack stamps that message with
-/// a `subtype`, and an @mention that the adapter drops never runs at all — a
-/// `ReplyToBot` thread reply is a NoOp at the product surface, so `app_mention`
-/// is the only event that can start the run.
+/// threaded reply with "Also send to channel", which Slack stamps with a
+/// `subtype`.
+///
+/// The `message_only` case is the same message arriving WITHOUT an
+/// `app_mention` — the shape this channel cannot distinguish from the outside,
+/// because Slack does not guarantee `app_mention` for every message shape.
+/// `BotMention` is the only channel trigger that starts a run (a `ReplyToBot`
+/// thread reply is a NoOp at the product surface), so this pins that the run no
+/// longer depends on which of the two events Slack chose to send.
 #[rstest]
-#[case::libsql(StorageMode::LibSql, None)]
-#[case::libsql_thread_broadcast(StorageMode::LibSql, Some("thread_broadcast"))]
-#[case::postgres(StorageMode::Postgres, None)]
+#[case::libsql(StorageMode::LibSql, "app_mention", None)]
+#[case::libsql_thread_broadcast(StorageMode::LibSql, "app_mention", Some("thread_broadcast"))]
+#[case::libsql_message_only(StorageMode::LibSql, "message", Some("thread_broadcast"))]
+#[case::postgres(StorageMode::Postgres, "app_mention", None)]
 #[tokio::test(flavor = "multi_thread")]
 async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     #[case] storage: StorageMode,
+    #[case] event_type: &'static str,
     #[case] mention_subtype: Option<&'static str>,
 ) {
     let group = RebornIntegrationGroup::builder()
@@ -1331,6 +1347,12 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
         RunDeliveryObserver::new(delivery_services),
     )));
+    // Both the ingress route and the scope pre-resolver run the same adapter,
+    // so both get the same non-secret configuration production would resolve.
+    let adapter_config = [(
+        "slack_bot_user_id".to_string(),
+        SLACK_BOT_USER_ID.to_string(),
+    )];
     let ingress = VendorIngress::register(
         services
             .extension_ingress_parts()
@@ -1344,13 +1366,16 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         },
         &inbound,
         Arc::clone(&observer),
+        adapter_config.to_vec(),
     );
 
+    // `U-BOT` is this installation's configured `slack_bot_user_id`, so the
+    // `message` case is recognized as an explicit mention from the text alone.
     let mut event = json!({
-        "type": "app_mention",
+        "type": event_type,
         "user": "U777",
         "channel": "C777",
-        "text": "<@UBOT> please reply through the coordinator",
+        "text": "<@U-BOT> please reply through the coordinator",
         "thread_ts": "1710000200.000050",
         "ts": "1710000300.000100"
     });
@@ -1360,7 +1385,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     let body = json!({
         "type": "event_callback",
         "event_id": format!(
-            "Ev-delivery-slack-1-{}",
+            "Ev-delivery-slack-1-{event_type}-{}",
             mention_subtype.unwrap_or("plain")
         ),
         "team_id": "T-A",
@@ -1388,7 +1413,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         &ironclaw_slack_extension::SlackChannelAdapter,
         "slack",
         SLACK_INSTALLATION,
-        &[],
+        &adapter_config,
         &evidence,
         &body,
         true,
