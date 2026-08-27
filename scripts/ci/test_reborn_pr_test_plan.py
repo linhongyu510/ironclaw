@@ -1742,8 +1742,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
     # covered by `test_repo_root_example_env_is_classified_and_selects_no_rust_lane`
     # above — main classified it independently via `IGNORED_ROOT_FILES` while
     # this branch was in flight, same fix by the same route.
-    def test_reborn_container_entrypoint_is_owned_by_code_style(self) -> None:
-        """`docker/reborn/entrypoint.sh` is shell that Code Style self-tests.
+    def test_reborn_container_startup_scripts_are_owned_by_static_gates(self) -> None:
+        """The Reborn startup scripts are shell with explicit static owners.
 
         Second half of the same rejection. It is deliberately *not* an ignore:
         the plan names an owner, because one exists —
@@ -1752,13 +1752,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         filter lights that lane for this exact path. No Reborn Rust lane
         executes it, so it selects nothing here.
         """
-        plan = self.plan("pull_request", ["docker/reborn/entrypoint.sh"])
-        self.assertEqual(plan["mode"], "none")
-        self.assertEqual(plan["crate_buckets"], [])
-        self.assertIn(
-            "static CI or workspace-policy checks own: docker/reborn/entrypoint.sh",
-            plan["reasons"],
-        )
+        for path in (
+            "docker/reborn/entrypoint.sh",
+            "docker/reborn/start-sshd.sh",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertIn(
+                    f"static CI or workspace-policy checks own: {path}",
+                    plan["reasons"],
+                )
 
     def test_classified_operator_paths_do_not_mask_a_real_lane(self) -> None:
         """Neither classification may swallow its neighbours.
@@ -1773,6 +1778,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             [
                 ".env.example",
                 "docker/reborn/entrypoint.sh",
+                "docker/reborn/start-sshd.sh",
                 "crates/alpha/src/lib.rs",
             ],
         )
@@ -2345,6 +2351,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '                    -p "${package}" "--${kind}" "${name}"',
             workflow,
         )
+
+    def test_scope_checkouts_minimize_transfer_without_losing_pr_ancestry(
+        self,
+    ) -> None:
+        """Scope jobs keep merge-base semantics without downloading history blobs."""
+        reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        reborn_scope = reborn_tests.split("\n  changes:\n", 1)[1].split(
+            "\n  crate-tests:\n", 1
+        )[0]
+        self.assertIn(
+            "fetch-depth: "
+            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            reborn_scope,
+        )
+        self.assertIn("filter: blob:none", reborn_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
+
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        style_scope = code_style.split("\n  changes:\n", 1)[1].split(
+            "\n  fast-checks:\n", 1
+        )[0]
+        self.assertIn("fetch-depth: 0", style_scope)
+        self.assertIn("filter: blob:none", style_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', style_scope)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

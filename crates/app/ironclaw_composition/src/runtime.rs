@@ -237,7 +237,8 @@ struct RuntimeStoreParts {
     /// `AwaitEdgeSettler::bind_result_writer` (a deferred-binding trait method
     /// mirroring `bind_coordinator`).
     subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
-    subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
+    subagent_await_edge_resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    subagent_await_edge_store: Arc<AwaitEdgeStore>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Process lifecycle source for trigger active-run lookup. Every substrate
@@ -265,7 +266,12 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         processes.checkpoints(),
     )) as Arc<dyn ironclaw_turns::LoopCheckpointStore>;
 
-    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
+    let (
+        subagent_await_edge_writer,
+        subagent_await_edge_resolver,
+        subagent_await_edge_evidence,
+        subagent_await_edge_store,
+    ) = {
         let store = Arc::new(AwaitEdgeStore::new(processes.dependencies()));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
@@ -278,8 +284,9 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         ));
         (
             driver as Arc<dyn AwaitEdgeWriter>,
-            resolver as Arc<dyn AwaitEdgeSettler>,
-            store as Arc<dyn AwaitDependentRunEvidenceStore>,
+            resolver,
+            Arc::clone(&store) as Arc<dyn AwaitDependentRunEvidenceStore>,
+            store,
         )
     };
 
@@ -296,7 +303,8 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_resolver,
+        subagent_await_edge_store,
         subagent_await_edge_evidence,
         trigger_repository: Arc::clone(&services.trigger_repository),
         admin_secret_provisioner,
@@ -398,6 +406,8 @@ mod outbound_delivery_tests;
 mod production;
 mod runtime_turn_scheduler;
 mod skills;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod subagent_delivery_test_support;
 #[cfg(feature = "test-support")]
 #[path = "runtime/test_support.rs"]
 mod test_support;
@@ -576,6 +586,17 @@ pub(crate) struct OutboundTestStores {
 /// `RebornRuntime` is the single user-facing handle returned by
 /// [`build_reborn_runtime`]. Downstream code never reaches into the substrate
 /// or worker machinery: it talks to the runtime through task-level methods.
+pub(crate) struct SubagentDeliveryRuntime {
+    pub(crate) input_queue:
+        Arc<ironclaw_loop_host::FilesystemHostInputQueue<CompositeRootFilesystem>>,
+    // These handles are retained by the composed runtime so the test-support
+    // view can drive the same resolver/store that production wiring uses. The
+    // production runtime reaches them through the bound runner graph; the
+    // underscore names make that intentional ownership explicit to clippy.
+    pub(crate) _resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    pub(crate) _store: Arc<AwaitEdgeStore>,
+}
+
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
@@ -689,7 +710,7 @@ pub struct RebornRuntime {
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
-    input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) subagent_delivery: SubagentDeliveryRuntime,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -1735,7 +1756,8 @@ impl RebornRuntime {
     }
 
     pub(crate) fn webui_input_enqueue(&self) -> Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> {
-        Arc::clone(&self.input_enqueue)
+        Arc::clone(&self.subagent_delivery.input_queue)
+            as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>
     }
 
     /// The generic post-OAuth channel-identity binding config for this
@@ -3096,6 +3118,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
     let deployment = services_input.deployment().clone();
+    // Read before `build_runtime_substrate` consumes the input (§ the runtime
+    // policy capture below, same reason).
+    let memory_curation_interval_turns = services_input.memory_curation_interval_turns();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }
@@ -3218,7 +3243,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_resolver,
+        subagent_await_edge_store,
         subagent_await_edge_evidence,
         trigger_repository,
         admin_secret_provisioner,
@@ -3764,6 +3790,78 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let memory_lifecycle = local_runtime
         .map(|local_runtime| local_runtime.memory_lifecycle.clone())
         .unwrap_or_default();
+    // Scheduled memory upkeep (#7276 / #7664): the bound provider's
+    // DECLARATION arms it — validated shape, resolved prompt, recommended
+    // cadence — and `[memory].curation_interval_turns` ENABLES it (owner
+    // decision, 2026-08-22: background model spend stays opt-in; a manifest
+    // must not switch on token cost for a deployment that never asked).
+    // Config set while the bound provider declares nothing is a startup
+    // error, not a degraded mode — that deployment would believe memory is
+    // being tidied while nothing runs
+    // (`scheduled_after_turn_interval_override` carries the reasoning).
+    let memory_scheduled_op_interval_override =
+        crate::memory_provider_factory::scheduled_after_turn_interval_override(
+            memory_curation_interval_turns,
+            &memory_lifecycle,
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_service_resolver.resolved_binding())
+                .as_ref(),
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?;
+    // Which hook, at which phase, under which trust class is decided by the
+    // crate that owns the dispatcher, so this is one call into it.
+    let memory_scheduled_op_hook_wiring = match memory_lifecycle
+        .scheduled_op(ironclaw_extension_contracts::memory::MemoryScheduledTrigger::AfterTurn)
+        .filter(|_| resolved_memory_provider.is_some())
+        // Opt-in: an armed declaration with no configured interval stays
+        // dormant. The declared `interval_turns` is the provider's
+        // RECOMMENDED cadence for the config key, not an activation.
+        .filter(|_| memory_scheduled_op_interval_override.is_some())
+    {
+        None => None,
+        Some(declared) => {
+            // The prompt was resolved fail-closed at bundle construction, so a
+            // declared op always has one here. Treat its absence as the
+            // configuration error it would be rather than scheduling a pass
+            // with an empty instruction.
+            let prompt = local_runtime
+                .and_then(|local_runtime| {
+                    local_runtime
+                        .memory_scheduled_pass_prompts
+                        .iter()
+                        .find(|(trigger, _)| *trigger == declared.trigger)
+                        .map(|(_, prompt)| prompt.clone())
+                })
+                .ok_or_else(|| RebornRuntimeError::MalformedConfig {
+                    reason: "the bound memory provider declares an after_turn scheduled op whose \
+                             prompt asset did not resolve"
+                        .to_string(),
+                })?;
+            let declared = declared.clone();
+            Some(Box::new(
+                move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                    let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                        deps.thread_service,
+                        deps.coordinator,
+                        deps.thread_scope.agent_id,
+                        deps.thread_scope.project_id,
+                    ));
+                    // Fail closed: the bound provider declared this work. If the
+                    // hook cannot install, swallowing it would leave a
+                    // deployment that believes memory is being tidied while
+                    // nothing ever runs — a difference nothing surfaces later.
+                    // The build carries this out as a startup error instead.
+                    ironclaw_assistant::memory_scheduled_ops::after_turn_scheduled_op_dispatcher_factory(
+                        submitter,
+                        &declared,
+                        &prompt,
+                        memory_scheduled_op_interval_override,
+                    )
+                },
+            )
+                as ironclaw_turn_runner::runtime::AfterTurnHookWiring)
+        }
+    };
     let crate::memory_provider_factory::MemoryLifecycleConsumers {
         memory_context_service: wired_memory_context_service,
         after_turn_memory_writer: wired_after_turn_memory_writer,
@@ -3795,7 +3893,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
     // `runtime_store_parts` before `capability_result_writer` existed. Bind it
     // now, exactly once, before the resolver's settler ever runs.
-    subagent_await_edge_settler
+    subagent_await_edge_resolver
         .bind_result_writer(Arc::clone(&capability_result_writer))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
@@ -3822,6 +3920,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Arc::clone(&thread_service),
         ))
     };
+    host_input_queue
+        .bind_ack_effect_handler(Arc::clone(&subagent_await_edge_resolver) as Arc<_>)
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("await-edge resolver ack effect handler bind failed: {error}"),
+        })?;
     let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
         host_input_queue.clone();
     let host_input_queue_for_cancel_reconcile: Arc<
@@ -3830,7 +3933,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let host_input_queue_for_terminal_reconcile: Arc<
         dyn ironclaw_loop_host::HostInputQueueReconcile,
     > = host_input_queue.clone();
-    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
+    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> =
+        host_input_queue.clone();
+    // Deferred bind: background delivery enqueues a settled child's result as
+    // steering input for the parent's live run through this queue.
+    subagent_await_edge_resolver
+        .bind_input_enqueue(Arc::clone(&host_input_enqueue))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("await-edge resolver input enqueue port bind failed: {error}"),
+        })?;
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
@@ -3891,7 +4002,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         capability_surface_resolver,
         capability_result_writer,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_settler: Arc::clone(&subagent_await_edge_resolver)
+            as Arc<dyn AwaitEdgeSettler>,
         subagent_await_edge_evidence,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
@@ -4017,6 +4129,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         hook_security_audit_sink: Some(Arc::new(ironclaw_event_log::TracingSecurityAuditSink)),
         turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
+        after_turn_hook_wiring: memory_scheduled_op_hook_wiring,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
         // `build_production_shaped` so the `HostRuntimeServices` notifier (used by
@@ -4600,7 +4713,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
-        input_enqueue: host_input_enqueue,
+        subagent_delivery: SubagentDeliveryRuntime {
+            input_queue: host_input_queue,
+            _resolver: subagent_await_edge_resolver,
+            _store: subagent_await_edge_store,
+        },
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,

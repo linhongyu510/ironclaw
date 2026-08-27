@@ -943,6 +943,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        after_turn_hook_wiring: None,
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
@@ -1116,6 +1117,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        after_turn_hook_wiring: None,
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
@@ -1304,6 +1306,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
         hook_dispatcher_builder_factory: None,
+        after_turn_hook_wiring: None,
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
@@ -1556,6 +1559,7 @@ async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
             input: LoopInput::Steering {
                 message_ref: ironclaw_turns::LoopMessageRef::new("msg:ghost").unwrap(),
             },
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1606,6 +1610,7 @@ async fn ack_rejects_unknown_token_instead_of_poisoning_state() {
             input: LoopInput::Steering {
                 message_ref: ironclaw_turns::LoopMessageRef::new("msg:live").unwrap(),
             },
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
