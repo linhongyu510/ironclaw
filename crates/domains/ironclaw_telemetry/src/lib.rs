@@ -9,5 +9,5 @@ pub use aggregate::{
 };
 pub use records::{
     CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
-    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch,
+    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch, TelemetryBatchRowFamily,
 };

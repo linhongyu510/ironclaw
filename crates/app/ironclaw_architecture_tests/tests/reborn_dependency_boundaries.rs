@@ -1110,10 +1110,11 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.
         ("ironclaw_prompt_envelope", 432),
-        // 5 -> 613 (2026-08-26, Task 2 tenant BI telemetry behavior): bounded
-        // observation/recorder vocabulary and validation live in this contracts
-        // crate; aggregation and durable record behavior remain in the domain.
-        ("ironclaw_telemetry_contracts", 613),
+        // 613 -> 647 (2026-08-26, Task 2 signed-BIGINT review-fix re-capture):
+        // bounded observation/recorder vocabulary and counter validation live
+        // in this contracts crate; aggregation and durable record behavior
+        // remain in the domain. Exact count from the ceilings-at-zero gate.
+        ("ironclaw_telemetry_contracts", 647),
     ];
 
     let root = workspace_root();

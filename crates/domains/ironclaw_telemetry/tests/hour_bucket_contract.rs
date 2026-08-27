@@ -4,7 +4,8 @@ use ironclaw_host_api::{
     turn::SanitizedFailure,
 };
 use ironclaw_telemetry::records::{
-    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch,
+    CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
+    HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch, TelemetryBatchRowFamily,
 };
 use ironclaw_telemetry::{
     AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,
@@ -33,6 +34,111 @@ fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> D
 
 fn context(timestamp: DateTime<Utc>) -> ObservationContext {
     ObservationContext::new(tenant(), user(), timestamp)
+}
+
+fn window() -> DateTime<Utc> {
+    at(2026, 8, 26, 10, 0, 0)
+}
+
+fn activity_row(user_id: &str, origin: OriginKind) -> HourlyUserActivity {
+    HourlyUserActivity::new(
+        tenant(),
+        window(),
+        UserId::new(user_id).expect("user"),
+        origin,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        window(),
+        window(),
+    )
+    .expect("activity row")
+}
+
+fn model_row(model_id: &str) -> HourlyModelUsage {
+    HourlyModelUsage::new(
+        tenant(),
+        user(),
+        window(),
+        ProviderId::new("provider-a").expect("provider"),
+        EffectiveModelId::new(model_id).expect("model"),
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        window(),
+        window(),
+    )
+    .expect("model row")
+}
+
+fn failure_row(category: &str) -> HourlyRunFailure {
+    HourlyRunFailure::new(
+        tenant(),
+        window(),
+        user(),
+        ironclaw_telemetry_contracts::observation::FailureCategory::new(category)
+            .expect("failure category"),
+        1,
+        window(),
+        window(),
+    )
+    .expect("failure row")
+}
+
+fn automation_row(user_id: &str, kind: AutomationKind) -> HourlyAutomationUsage {
+    HourlyAutomationUsage::new(
+        tenant(),
+        window(),
+        UserId::new(user_id).expect("user"),
+        kind,
+        1,
+        1,
+        0,
+        0,
+        0,
+        window(),
+        window(),
+    )
+    .expect("automation row")
+}
+
+fn lifecycle_row(event_id: &str, subject_id: &str) -> LifecycleEvent {
+    LifecycleEvent::new(
+        tenant(),
+        LifecycleEventId::new(event_id).expect("event"),
+        Some(user()),
+        LifecycleEventKind::RoutineCreated,
+        LifecycleSubjectKind::Routine,
+        ironclaw_telemetry_contracts::observation::SubjectId::new(subject_id).expect("subject"),
+        window(),
+    )
+    .expect("lifecycle row")
+}
+
+fn coverage_row(collector_id: &str) -> CollectorCoverage {
+    CollectorCoverage::new(
+        tenant(),
+        window(),
+        ironclaw_telemetry_contracts::observation::CollectorInstanceId::new(collector_id)
+            .expect("collector"),
+        1,
+        0,
+        0,
+        0,
+        0,
+        window(),
+        window(),
+    )
+    .expect("coverage row")
 }
 
 fn completed_run(timestamp: DateTime<Utc>, duration_ms: u64) -> TelemetryObservation {
@@ -290,5 +396,143 @@ fn telemetry_batch_constructor_rejects_duplicate_lifecycle_keys() {
         Vec::new(),
     );
 
-    assert!(matches!(result, Err(RecordError::DuplicateLifecycleEvent)));
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::LifecycleEvent
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_activity_keys() {
+    let result = TelemetryBatch::new(
+        vec![
+            activity_row("user-a", OriginKind::Human),
+            activity_row("user-a", OriginKind::Human),
+        ],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::Activity
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_model_keys() {
+    let result = TelemetryBatch::new(
+        Vec::new(),
+        vec![model_row("model-a"), model_row("model-a")],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::ModelUsage
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_failure_keys() {
+    let result = TelemetryBatch::new(
+        Vec::new(),
+        Vec::new(),
+        vec![
+            failure_row("model_unavailable"),
+            failure_row("model_unavailable"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::RunFailure
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_automation_keys() {
+    let result = TelemetryBatch::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![
+            automation_row("user-a", AutomationKind::Cron),
+            automation_row("user-a", AutomationKind::Cron),
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::AutomationUsage
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_rejects_duplicate_coverage_keys() {
+    let result = TelemetryBatch::new(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![coverage_row("collector-a"), coverage_row("collector-a")],
+    );
+
+    assert!(matches!(
+        result,
+        Err(RecordError::DuplicateRow {
+            family: TelemetryBatchRowFamily::CollectorCoverage
+        })
+    ));
+}
+
+#[test]
+fn telemetry_batch_constructor_accepts_distinct_rows_in_each_family() {
+    let result = TelemetryBatch::new(
+        vec![
+            activity_row("user-a", OriginKind::Human),
+            activity_row("user-b", OriginKind::Human),
+        ],
+        vec![model_row("model-a"), model_row("model-b")],
+        vec![failure_row("model_unavailable"), failure_row("cancelled")],
+        vec![
+            automation_row("user-a", AutomationKind::Cron),
+            automation_row("user-a", AutomationKind::Once),
+        ],
+        vec![
+            lifecycle_row("event-a", "routine-a"),
+            lifecycle_row("event-b", "routine-b"),
+        ],
+        vec![coverage_row("collector-a"), coverage_row("collector-b")],
+    );
+
+    let batch = result.expect("all distinct durable row keys are valid");
+    assert_eq!(batch.activity().len(), 2);
+    assert_eq!(batch.model_usage().len(), 2);
+    assert_eq!(batch.run_failures().len(), 2);
+    assert_eq!(batch.automation_usage().len(), 2);
+    assert_eq!(batch.lifecycle_events().len(), 2);
+    assert_eq!(batch.collector_coverage().len(), 2);
 }

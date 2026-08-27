@@ -9,6 +9,16 @@ use ironclaw_telemetry_contracts::observation::{
     MAX_DURABLE_COUNTER, OriginKind, ProviderId, SubjectId,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryBatchRowFamily {
+    Activity,
+    ModelUsage,
+    RunFailure,
+    AutomationUsage,
+    LifecycleEvent,
+    CollectorCoverage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordError {
     #[error("hourly record window_start must be an exact UTC hour")]
@@ -25,8 +35,8 @@ pub enum RecordError {
     ReportedUsageExceedsInferences,
     #[error("{field} value {value} exceeds signed BIGINT range")]
     CounterOutOfRange { field: &'static str, value: u64 },
-    #[error("lifecycle event keys must be unique within a telemetry batch")]
-    DuplicateLifecycleEvent,
+    #[error("duplicate row in telemetry batch: {family:?}")]
+    DuplicateRow { family: TelemetryBatchRowFamily },
     #[error("non-tenant lifecycle events require user attribution")]
     MissingUserAttribution,
 }
@@ -34,6 +44,22 @@ pub enum RecordError {
 fn validate_counter(value: u64, field: &'static str) -> Result<(), RecordError> {
     if value > MAX_DURABLE_COUNTER {
         return Err(RecordError::CounterOutOfRange { field, value });
+    }
+    Ok(())
+}
+
+fn validate_unique_rows<K>(
+    keys: impl IntoIterator<Item = K>,
+    family: TelemetryBatchRowFamily,
+) -> Result<(), RecordError>
+where
+    K: Ord,
+{
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if !seen.insert(key) {
+            return Err(RecordError::DuplicateRow { family });
+        }
     }
     Ok(())
 }
@@ -696,12 +722,67 @@ impl TelemetryBatch {
         lifecycle_events: Vec<LifecycleEvent>,
         collector_coverage: Vec<CollectorCoverage>,
     ) -> Result<Self, RecordError> {
-        let mut lifecycle_keys = BTreeSet::new();
-        for event in &lifecycle_events {
-            if !lifecycle_keys.insert((event.tenant_id().clone(), event.event_id().clone())) {
-                return Err(RecordError::DuplicateLifecycleEvent);
-            }
-        }
+        validate_unique_rows(
+            activity.iter().map(|row| {
+                (
+                    row.tenant_id().clone(),
+                    row.window_start(),
+                    row.user_id().clone(),
+                    row.origin_kind(),
+                )
+            }),
+            TelemetryBatchRowFamily::Activity,
+        )?;
+        validate_unique_rows(
+            model_usage.iter().map(|row| {
+                (
+                    row.tenant_id().clone(),
+                    row.window_start(),
+                    row.user_id().clone(),
+                    row.provider_id().clone(),
+                    row.effective_model_id().clone(),
+                )
+            }),
+            TelemetryBatchRowFamily::ModelUsage,
+        )?;
+        validate_unique_rows(
+            run_failures.iter().map(|row| {
+                (
+                    row.tenant_id().clone(),
+                    row.window_start(),
+                    row.user_id().clone(),
+                    row.failure_category().clone(),
+                )
+            }),
+            TelemetryBatchRowFamily::RunFailure,
+        )?;
+        validate_unique_rows(
+            automation_usage.iter().map(|row| {
+                (
+                    row.tenant_id().clone(),
+                    row.window_start(),
+                    row.user_id().clone(),
+                    row.automation_kind(),
+                )
+            }),
+            TelemetryBatchRowFamily::AutomationUsage,
+        )?;
+        validate_unique_rows(
+            lifecycle_events
+                .iter()
+                .map(|row| (row.tenant_id().clone(), row.event_id().clone())),
+            TelemetryBatchRowFamily::LifecycleEvent,
+        )?;
+        validate_unique_rows(
+            collector_coverage.iter().map(|row| {
+                (
+                    row.tenant_id().clone(),
+                    row.window_start(),
+                    row.collector_instance_id().clone(),
+                )
+            }),
+            TelemetryBatchRowFamily::CollectorCoverage,
+        )?;
         Ok(Self {
             activity,
             model_usage,
