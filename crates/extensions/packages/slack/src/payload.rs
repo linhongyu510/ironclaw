@@ -18,7 +18,32 @@ use thiserror::Error;
 
 pub const SLACK_API_HOST: &str = "slack.com";
 pub const SLACK_USER_ACTOR_KIND: &str = "slack_user";
-const SLACK_FILE_SHARE_SUBTYPE: &str = "file_share";
+/// Slack `subtype` values that are not one person's message.
+///
+/// The gate here used to be the inverse — an allowlist of "human" subtypes,
+/// holding only `None` and `file_share`. That is a standing bet that Slack
+/// will never add another way for a person to post, and this adapter already
+/// lost it: `thread_broadcast` (a threaded reply sent with "Also send to
+/// channel") was discarded as if it were a channel-join announcement, so a
+/// mention written that way silently never ran.
+///
+/// Inverting it means an unrecognized subtype is admitted, not dropped. That
+/// is safe because this list only has to name what the guards below cannot
+/// see for themselves. Slack's system subtypes (`channel_join`,
+/// `channel_topic`, `pinned_item`, …) are channel-scoped announcements with
+/// no thread anchor, so the ambient-chatter rule in [`normalize_slack_event`]
+/// already drops them; message mutations carry their author under a nested
+/// `message` object, so the author guard already drops them. What is named
+/// here is what would otherwise slip past both: bot-authored posts, because a
+/// mention loop between two apps does not terminate on its own, and mutations
+/// that do arrive with a thread anchor.
+const NON_USER_MESSAGE_SUBTYPES: &[&str] = &[
+    "bot_message",
+    "message_changed",
+    "message_deleted",
+    "message_replied",
+    "assistant_app_thread",
+];
 
 /// Maximum accepted byte length for any Slack inbound webhook payload.
 const MAX_SLACK_PAYLOAD_BYTES: usize = 1024 * 1024; // 1 MB
@@ -49,8 +74,37 @@ pub enum SlackInboundEvent {
     /// command (distinct from the Events API's `UrlVerification` challenge).
     /// Any 200 response satisfies it; the body is ignored.
     SslCheck,
-    Ignore,
+    Ignore {
+        reason: SlackIgnoreReason,
+    },
     Message(Box<ParsedSlackInboundMessage>),
+}
+
+/// Why a verified Slack event produced no message.
+///
+/// Carried rather than discarded so the adapter can log one line per drop.
+/// Every rejection on this path ends in [`SlackInboundEvent::Ignore`], the
+/// router maps that to a bare `200`, and Slack's retry machinery is satisfied
+/// — so a human message dropped by mistake leaves no trace anywhere unless
+/// the reason travels with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlackIgnoreReason {
+    /// Envelope is not `event_callback` (`app_rate_limited`, …).
+    NotAnEventCallback,
+    /// `event_callback` with no `event` object.
+    MissingEventPayload,
+    /// An event type this channel does not act on.
+    UnsupportedEventType,
+    /// A channel message that neither mentions the bot nor replies in a
+    /// thread — bystander chatter.
+    AmbientChannelMessage,
+    /// Authored by an integration, including this bot's own echo.
+    BotAuthored,
+    /// A `subtype` in [`NON_USER_MESSAGE_SUBTYPES`].
+    NonUserMessageSubtype(String),
+    /// A field the normalized contract cannot be built without (`user` on a
+    /// message mutation, `channel`, `ts`).
+    MissingField(&'static str),
 }
 
 /// Pure payload-normalization result retained inside the Slack package until
@@ -106,10 +160,14 @@ pub fn normalize_slack_event(
         &wrapper.event_type,
     )?;
     if wrapper.event_type != "event_callback" {
-        return Ok(SlackInboundEvent::Ignore);
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::NotAnEventCallback,
+        });
     }
     let Some(event) = wrapper.event.as_ref() else {
-        return Ok(SlackInboundEvent::Ignore);
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingEventPayload,
+        });
     };
     let team_id = wrapper.team_id.as_deref();
     let kind = match event.event_type.as_str() {
@@ -123,15 +181,18 @@ pub fn normalize_slack_event(
             } else if event.thread_ts.is_some() {
                 SlackMessageKind::ThreadReply
             } else {
-                return Ok(SlackInboundEvent::Ignore);
+                return Ok(SlackInboundEvent::Ignore {
+                    reason: SlackIgnoreReason::AmbientChannelMessage,
+                });
             }
         }
-        _ => return Ok(SlackInboundEvent::Ignore),
+        _ => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::UnsupportedEventType,
+            });
+        }
     };
-    normalize_user_message(event_id, team_id, event, kind).map(|message| match message {
-        Some(message) => SlackInboundEvent::Message(Box::new(message)),
-        None => SlackInboundEvent::Ignore,
-    })
+    normalize_user_message(event_id, team_id, event, kind)
 }
 
 /// Parse one host-verified Slack inbound request that may be EITHER the
@@ -283,26 +344,40 @@ fn normalize_user_message(
     team_id: Option<&str>,
     event: &SlackEvent,
     kind: SlackMessageKind,
-) -> Result<Option<ParsedSlackInboundMessage>, SlackPayloadParseError> {
-    if event.bot_id.is_some() || !is_user_generated_message_subtype(event.subtype.as_deref()) {
-        return Ok(None);
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if event.bot_id.is_some() {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::BotAuthored,
+        });
     }
+    if let Some(subtype) = event.subtype.as_deref()
+        && NON_USER_MESSAGE_SUBTYPES.contains(&subtype)
+    {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::NonUserMessageSubtype(subtype.to_string()),
+        });
+    }
+    // A message mutation (`message_changed`, `message_deleted`) keeps its
+    // author and text under a nested `message` object, so a missing top-level
+    // author is the structural half of the subtype rule above, not a
+    // redundant check.
     let Some(user) = event.user.as_deref() else {
-        return Ok(None);
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("user"),
+        });
     };
     let Some(channel) = event.channel.as_deref() else {
-        return Ok(None);
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("channel"),
+        });
     };
-    if matches!(kind, SlackMessageKind::Dm)
-        && !is_dm_channel(channel, event.channel_type.as_deref())
-    {
-        return Ok(None);
-    }
-    if matches!(kind, SlackMessageKind::ThreadReply) && event.thread_ts.is_none() {
-        return Ok(None);
-    }
+    // `kind` was derived from `channel_type` and `thread_ts` in
+    // `normalize_slack_event`, this function's only caller, so re-checking
+    // them here can only ever agree.
     let Some(ts) = event.ts.as_deref() else {
-        return Ok(None);
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("ts"),
+        });
     };
 
     let raw_text = event.text.as_deref().unwrap_or_default();
@@ -333,19 +408,21 @@ fn normalize_user_message(
             descriptor,
         })
         .collect();
-    Ok(Some(ParsedSlackInboundMessage {
-        message: NormalizedInboundMessage {
-            actor,
-            conversation,
-            event_id,
-            text,
-            trigger,
-            attachments: Vec::new(),
-            conversation_context: None,
-            reply_context: None,
+    Ok(SlackInboundEvent::Message(Box::new(
+        ParsedSlackInboundMessage {
+            message: NormalizedInboundMessage {
+                actor,
+                conversation,
+                event_id,
+                text,
+                trigger,
+                attachments: Vec::new(),
+                conversation_context: None,
+                reply_context: None,
+            },
+            pending_attachments,
         },
-        pending_attachments,
-    }))
+    )))
 }
 
 fn build_event_id(
@@ -445,10 +522,6 @@ fn strip_leading_bot_mention(text: &str) -> String {
         return trimmed[end + 1..].trim_start().to_string();
     }
     trimmed.to_string()
-}
-
-fn is_user_generated_message_subtype(subtype: Option<&str>) -> bool {
-    subtype.is_none_or(|value| value == SLACK_FILE_SHARE_SUBTYPE)
 }
 
 fn is_dm_channel(channel: &str, channel_type: Option<&str>) -> bool {

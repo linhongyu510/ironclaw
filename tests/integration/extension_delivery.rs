@@ -1290,12 +1290,20 @@ async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router
 /// coordinated through the REAL factory-built `DeliveryCoordinator` to
 /// `chat.postMessage`, with the §11 bridged bot token injected host-side —
 /// asserted on the wire recorder AND in the coordinator's outbound store.
+///
+/// The `thread_broadcast` case is the same proof for a mention posted as a
+/// threaded reply with "Also send to channel". Slack stamps that message with
+/// a `subtype`, and an @mention that the adapter drops never runs at all — a
+/// `ReplyToBot` thread reply is a NoOp at the product surface, so `app_mention`
+/// is the only event that can start the run.
 #[rstest]
-#[case::libsql(StorageMode::LibSql)]
-#[case::postgres(StorageMode::Postgres)]
+#[case::libsql(StorageMode::LibSql, None)]
+#[case::libsql_thread_broadcast(StorageMode::LibSql, Some("thread_broadcast"))]
+#[case::postgres(StorageMode::Postgres, None)]
 #[tokio::test(flavor = "multi_thread")]
 async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     #[case] storage: StorageMode,
+    #[case] mention_subtype: Option<&'static str>,
 ) {
     let group = RebornIntegrationGroup::builder()
         .storage(storage)
@@ -1338,18 +1346,25 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         Arc::clone(&observer),
     );
 
+    let mut event = json!({
+        "type": "app_mention",
+        "user": "U777",
+        "channel": "C777",
+        "text": "<@UBOT> please reply through the coordinator",
+        "thread_ts": "1710000200.000050",
+        "ts": "1710000300.000100"
+    });
+    if let Some(subtype) = mention_subtype {
+        event["subtype"] = json!(subtype);
+    }
     let body = json!({
         "type": "event_callback",
-        "event_id": "Ev-delivery-slack-1",
+        "event_id": format!(
+            "Ev-delivery-slack-1-{}",
+            mention_subtype.unwrap_or("plain")
+        ),
         "team_id": "T-A",
-        "event": {
-            "type": "app_mention",
-            "user": "U777",
-            "channel": "C777",
-            "text": "<@UBOT> please reply through the coordinator",
-            "thread_ts": "1710000200.000050",
-            "ts": "1710000300.000100"
-        }
+        "event": event,
     })
     .to_string();
     // The run's scope is the vendor conversation's binding, not this harness

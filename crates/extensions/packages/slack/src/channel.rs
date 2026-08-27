@@ -70,7 +70,16 @@ impl ChannelIngress for SlackChannelAdapter {
                 content_type: None,
                 body: Vec::new(),
             })),
-            SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
+            // Most drops here are ordinary noise — ambient channel chatter and
+            // this bot's own echoes. The one that matters is a human message
+            // dropped by mistake, which the router acknowledges with a bare
+            // 200 that satisfies Slack's retry machinery. Without this line
+            // that drop leaves no trace at all, which is exactly how
+            // `thread_broadcast` stayed invisible.
+            SlackInboundEvent::Ignore { reason } => {
+                tracing::debug!(?reason, "slack inbound event produced no message");
+                Ok(InboundOutcome::Ignore)
+            }
             SlackInboundEvent::Message(parsed) => {
                 let ParsedSlackInboundMessage {
                     mut message,
