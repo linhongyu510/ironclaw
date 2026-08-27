@@ -1,6 +1,6 @@
 # Tenant BI Telemetry V0 Design
 
-**Status:** Proposed; requirements decisions accepted in discussion, pending code review at implementation time
+**Status:** Accepted for implementation; revised 2026-08-27 after persistence review
 **Date:** 2026-08-26
 **Shape research:** [Tenant BI Telemetry V0 — Shape Research](../../plans/2026-08-26-tenant-bi-telemetry-v0-research.md)
 
@@ -8,12 +8,12 @@
 
 Give a tenant administrator a bounded download of privacy-safe, tenant-local BI
 facts. Frequent observations are recorded asynchronously and aggregated into
-one-hour UTC buckets before they become durable. The administrator receives
-the lowest durable grain and performs daily, weekly, monthly, cohort, and
-retention calculations outside IronClaw.
+one-hour UTC buckets before they become durable. The administrator receives the
+lowest durable grain and performs daily, weekly, monthly, cohort, and retention
+calculations outside IronClaw.
 
-V0 is collection and export infrastructure, not a BI dashboard and not a
-centrally hosted analytics service.
+V0 is tenant-local collection and export infrastructure, not a BI dashboard or
+a centrally hosted analytics service.
 
 ## Accepted product decisions
 
@@ -24,24 +24,38 @@ centrally hosted analytics service.
 - Capture is fully asynchronous, bounded, best-effort, and may lose data.
 - Producers receive an injected shared recorder. There is no process-global
   static singleton.
-- Producers never wait for the database and never acquire connections.
-- A single lifecycle-owned worker drains the queue and writes batches.
+- Producers never wait for persistence and never acquire storage handles.
+- One lifecycle-owned worker drains the queue and writes aggregates.
 - Durable usage grain is one UTC hour. V0 has no hourly-to-daily compaction.
 - Individual runs, model calls, and tool calls are not durable telemetry rows.
 - Heartbeats, prompts, responses, reasoning, tool arguments/results, raw error
   messages, emails, display names, and estimated cost are never captured.
-- The current, still-open hour is excluded from export unless the admin sets
-  `include_partial=true`.
-- Activation, retention, churn, win-back, and revenue are analyst-defined
-  calculations, not product-owned metric endpoints in V0.
+- Activation, retention, churn, win-back, and revenue remain analyst-defined
+  calculations, not product-owned metric endpoints.
 - There is no telemetry purge/TTL in V0. A retention policy requires a separate
-  deletion contract; it must never delete canonical LLM or product records.
+  deletion contract and must never delete canonical LLM or product records.
+
+## Delivery slices
+
+The replacement foundation PR is independently useful and testable. It includes:
+
+1. typed observations and the non-blocking recorder;
+2. hourly aggregation and a typed `RootFilesystem` repository;
+3. lifecycle-owned composition over the existing mounted root filesystem;
+4. one authoritative producer for terminal trigger executions; and
+5. an in-process integration test that drives the real trigger path into a
+   real embedded libSQL-backed `RootFilesystem` and reads the durable result.
+
+The authenticated admin query/download surface, the remaining run/model/setup
+producers, and the full metric-proof fixture are follow-up PRs. Deferring the
+HTTP surface does not defer backend-neutral bounded repository reads: the
+integration test and later admin service use the same typed read contract.
 
 ## Ownership
 
 ### Neutral producer contract
 
-Add `crates/contracts/ironclaw_telemetry_contracts`. It owns only bounded,
+`crates/contracts/ironclaw_telemetry_contracts` owns only bounded,
 provider-neutral observation types and this injection port:
 
 ```rust
@@ -57,33 +71,45 @@ pub enum RecordOutcome {
 }
 ```
 
-The two consumers that justify the contracts crate are the loop/trigger/
-identity producers and the domain-owned buffered implementation. Observation
-construction validates maximum identifier lengths and admits no open metadata
-map. `DroppedInvalid` remains distinct from queue pressure and a closed worker
-so collector coverage can report why an observation was lost.
+Observation construction validates maximum identifier lengths and admits no
+open metadata map. The contract crate contains no filesystem, SQL, runtime,
+queue, or product dependencies.
 
-### Durable domain
+### Durable telemetry domain
 
-Add `crates/domains/ironclaw_telemetry`. It owns:
+`crates/domains/ironclaw_telemetry` owns:
 
-- UTC hour bucketing and additive aggregation;
-- the bounded queue implementation and worker;
-- typed durable record grammar;
-- libSQL and PostgreSQL repositories;
-- tenant-scoped, paged export reads;
-- shared backend conformance and metric-proof tests.
+- UTC-hour bucketing and checked additive aggregation;
+- the bounded recorder queue and one worker;
+- typed durable record grammar and path/index construction;
+- a `FilesystemTelemetryRepository` over `Arc<dyn RootFilesystem>`;
+- bounded tenant/time reads with keyset cursors; and
+- repository conformance, batching, loss-accounting, and metric-proof tests.
 
-The crate receives composition-owned database handles. It cannot parse a
-database URL/path/environment variable, create a runtime or pool, or choose a
-backend. ADR 0005 records and limits this exception.
+The domain does not depend on `libsql`, `ironclaw_libsql_runtime`,
+`deadpool-postgres`, or `tokio-postgres`. It contains no SQL, DDL, migrations,
+pool construction, backend selection, or storage URL/path parsing. Backend
+selection and physical database lifecycle remain entirely in composition and
+`ironclaw_filesystem`.
 
-### Product and transport
+### Trusted root authority
 
-`ironclaw_assistant` registers a paginated telemetry `ProductView`, authorizes
-the caller, and issues a tenant-bound export read through the existing frozen
-`ProductSurface::query` conduit. `ironclaw_webui` validates range/filter syntax
-and streams archive framing. Neither imports a SQL driver or domain repository.
+The collector is a trusted host-owned background service that batches
+observations from multiple tenants. Its repository therefore receives the
+existing composition-owned `Arc<dyn RootFilesystem>` rather than constructing
+or caching one `ScopedFilesystem` per tenant.
+
+Every public repository operation requires a typed `TenantId`, and every path
+is rooted beneath:
+
+```text
+/tenants/{tenant_id}/telemetry/v0/
+```
+
+The repository accepts no caller-supplied virtual path. Producers receive only
+`Arc<dyn TelemetryRecorder>` and cannot access the root filesystem. Future
+admin reads derive `TenantId` from authorized product context before calling
+the typed repository; no untrusted caller receives root authority.
 
 ## Observation contract
 
@@ -96,52 +122,38 @@ pub enum TelemetryObservation {
 }
 ```
 
-All observations include `tenant_id`, attributable `user_id`, and `occurred_at`
-as typed values. Observations without a tenant or user are rejected locally and
-counted as invalid; they are not placed into an instance-global bucket.
+All usage observations include typed `tenant_id`, attributable `user_id`, and
+`occurred_at`. Observations without tenant/user attribution are rejected and
+counted as invalid; they never enter an instance-global bucket.
 
-`RunSettledObservation` includes only terminal outcome, typed origin, duration
-milliseconds, optional evidence-backed reported tool-call count, whether at
-least one tool was called when that count is known, and the existing bounded
-`SanitizedFailure` category when the run failed. A composition-owned
-`ProcessJournalCommitObserver` emits it from the committed terminal process
-snapshot, so executor errors and supervisor-caught panics are covered too. The
-origin is a closed enum derived from canonical typed run context: `human`,
-`parent_agent`, `system`, `automation`, or `other`; no transport string is
-reinterpreted. Before recording, the observer asks a threads-owned
-`RunToolUsageEvidenceReader` for the count of durable, finalized, run-scoped
-tool-call evidence. That narrow read contract is implemented over the existing
-`SessionThreadService`; it does not widen the kernel-only
-`LoopExitEvidencePort`, and canonical loop-exit claims and run snapshots remain
-unchanged. If evidence cannot supply a count, the observation retains `None`
-instead of claiming zero; exports therefore label these fields as reported
-rather than exact execution totals.
-
-`ModelCallCompletedObservation` is emitted at the physical model gateway after
-the provider, effective model, and provider-reported usage are known. It
-contains `provider_id`, `effective_model_id`, one inference, and the four token
-counters. Missing provider-reported usage records the inference with zero token
-counters; this means inference counts remain useful without pretending token
-usage was reported.
+`RunSettledObservation` contains terminal outcome, typed origin, duration,
+optional evidence-backed reported tool-call count, and a bounded sanitized
+failure category. `ModelCallCompletedObservation` contains provider, effective
+model, inference count, and provider-reported token counters. These types stay
+in the foundation even though their production producers land later.
 
 `AutomationSettledObservation` contains the attributable user, stable
 automation identity, `automation_kind` (`cron`, `once`, or `manual`), and
-settlement outcome. `event` and `webhook` are deliberately absent because the
-current trigger contract does not establish either origin.
+terminal outcome. The foundation PR emits this observation from the trigger
+poller's authoritative terminal active-run settlement path—not when a poller
+tick merely discovers or submits work.
+
+The trigger terminal-settlement event must carry typed tenant, creator user,
+trigger identity, fire slot, run identity, automation kind, and terminal
+outcome. The callback runs only after trigger history and active-fire state are
+durably settled. Its implementation calls `try_record` exactly once, performs
+no filesystem I/O, and ignores the best-effort outcome except for bounded
+diagnostics. Successful and failed terminal trigger runs use the same closed
+settlement event; pre-submit failures are not reported as completed
+automations.
 
 `LifecycleTransitionObservation` contains a stable event ID, closed event kind,
 closed subject kind, subject ID, optional attributable user, and timestamp.
-V0 event kinds are `member_added`, `member_removed`, `routine_created`,
-`routine_enabled`, `routine_disabled`, and `routine_deleted`. Channel and skill
-lifecycle were listed as nice-to-have inputs, but their current owners do not
-offer a tenant-and-user-attributed committed observer suitable for this
-collector; V0 reports them as unsupported rather than editing unrelated paths
-or inferring transitions from a read snapshot. A producer is added only where
-a committed authoritative transition exists.
+V0 event kinds remain `member_added`, `member_removed`, `routine_created`,
+`routine_enabled`, `routine_disabled`, and `routine_deleted`; their production
+producers are follow-ups.
 
 ## Queue and worker contract
-
-Defaults are fixed and configurable only through typed `DeploymentConfig`:
 
 | Setting | V0 default |
 |---|---:|
@@ -150,157 +162,135 @@ Defaults are fixed and configurable only through typed `DeploymentConfig`:
 | maximum wait before draining a non-empty queue | 1 second |
 | graceful shutdown flush budget | 5 seconds |
 
-`try_record` uses `try_send` exactly once. A full or closed queue increments an
-in-memory loss counter and returns immediately. It never logs a field from the
-observation. There is exactly one consumer task, so flushes cannot overlap.
+`try_record` validates and calls `try_send` exactly once. A full or closed
+queue increments bounded in-memory diagnostics and returns immediately. It
+never logs observation fields. One consumer task guarantees drains do not
+overlap.
 
 For each drain, the worker:
 
-1. buckets usage observations by `floor_utc_hour(occurred_at)`;
-2. combines identical durable keys using checked `u64` accumulation;
-3. retains lifecycle events as individually deduplicated rows;
-4. acquires one admitted writer/client;
-5. performs all upserts/inserts in one transaction;
-6. commits and releases the handle before draining again.
+1. buckets observations by `floor_utc_hour(occurred_at)`;
+2. combines identical durable keys with checked arithmetic;
+3. retains lifecycle events as individually deduplicated records;
+4. calls one repository batch operation; and
+5. releases the drain before receiving the next batch.
 
-The open hour is upserted incrementally; the worker does not retain an hour of
-observations in memory. A crash can lose the queue tail but cannot produce a
-partially committed batch. On an acquisition, statement, or commit error, the
-worker drops that drain, increments its in-memory write-loss counters, and
-continues. It does not retry an ambiguously committed additive upsert, which
-would risk double-counting. A later successful coverage write reports the loss.
-Telemetry failures never fail or delay the originating product action.
+The filesystem repository applies each aggregate record with the shared
+bounded `cas_update` helper. A batch may commit a prefix before a later record
+fails; this is acceptable for explicitly best-effort analytics and is reported
+through collector coverage. The worker does not replay an ambiguous aggregate
+write, because additive replay could double-count. Telemetry failures never
+fail or delay the originating product action.
 
-At shutdown, composition closes senders and gives the worker up to five
-seconds to drain. Expiry aborts the worker and reports the remaining count as
-lost through operational diagnostics.
+On shutdown, composition closes intake and waits at most five seconds. Timeout
+aborts the worker and records the remaining count in operational diagnostics.
+Deployments therefore normally flush their sub-second queue tail without
+holding shutdown indefinitely.
 
-## Literal durable tables
+## Durable record layout
 
-All timestamps are UTC. `window_start` is an exact hour and every usage table
-has tenant-leading primary/index keys. `schema_version` is `0` in V0.
-PostgreSQL uses `TIMESTAMPTZ`; libSQL stores canonical RFC3339 text while the
-typed repository enforces identical ordering and precision.
+Each aggregate is a typed JSON `Entry` with a versioned `RecordKind` and
+explicit indexed projections. The body is the typed record; queryable tenant,
+time, user, family, and dimensions are duplicated only in `Entry::indexed`.
+Unknown record kinds, schema versions, or enum values fail closed.
 
-### `telemetry_hourly_user_activity_v0`
-
-Primary key:
+Canonical paths are deterministic and include every primary-key dimension:
 
 ```text
-(tenant_id, window_start, user_id, origin_kind)
+/tenants/{tenant}/telemetry/v0/hourly/activity/{hour}/{user}/{origin}.json
+/tenants/{tenant}/telemetry/v0/hourly/model/{hour}/{user}/{provider}/{model}.json
+/tenants/{tenant}/telemetry/v0/hourly/failure/{hour}/{user}/{category}.json
+/tenants/{tenant}/telemetry/v0/hourly/automation/{hour}/{user}/{kind}.json
+/tenants/{tenant}/telemetry/v0/lifecycle/{event_id}.json
+/tenants/{tenant}/telemetry/v0/coverage/{hour}/{collector_instance_id}.json
 ```
 
-Additive values:
+Path components are encoded by one reversible, bounded domain helper; callers
+never concatenate raw identifiers. Tenant equality is present in both the
+trusted virtual root and indexed projection.
+
+The repository declares ordered indexes whose leading keys are:
 
 ```text
-run_count
-runs_with_reported_tool_calls_count
-tool_count_reported_run_count
-reported_tool_call_count
-completed_count
-failed_count
-cancelled_count
-recovery_required_count
-total_run_latency_ms
+[tenant_id, record_family, window_start, tie_breaker]
+[tenant_id, user_id, record_family, window_start, tie_breaker]
+[tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker]
+[tenant_id, subject_kind, subject_id, occurred_at, event_id]
 ```
 
-Metadata: `first_observed_at`, `last_observed_at`, `schema_version`,
-`updated_at`. The sum of the four terminal counts equals `run_count` by typed
-construction. `tool_count_reported_run_count` exposes runs for which durable
-evidence could not report a count; averages over reported tool calls use that
-denominator. Timeout is not a terminal status in the current turn
-contract; V0 cannot separately query it.
+Reads use `query_ordered` with a bounded page size and opaque keyset cursor.
+There is no offset pagination, directory scan, full-result sort, or body parse
+for filtering. Index creation is idempotent and happens during telemetry
+repository initialization after the root filesystem has been assembled.
 
-### `telemetry_hourly_model_usage_v0`
+### Hourly user activity
 
-Primary key, matching the accepted requirement:
+Key: `(tenant, hour, user, origin)`. Values are run count, reported-tool
+denominators/totals, terminal outcome counts, total latency, observed span, and
+schema version.
 
-```text
-(tenant_id, user_id, window_start, provider_id, effective_model_id)
-```
+### Hourly model usage
 
-Additive values:
+Key: `(tenant, hour, user, provider, effective model)`. Values are inference
+count, usage-reported count, input/output/cache token totals, observed span,
+and schema version. No cost fields exist.
 
-```text
-inference_count
-usage_reported_count
-input_tokens
-output_tokens
-cache_read_input_tokens
-cache_creation_input_tokens
-```
+### Hourly run failures
 
-`usage_reported_count` makes zero-token calls distinguishable from calls whose
-provider omitted usage. Metadata matches the activity table. No cost columns
-exist.
+Key: `(tenant, hour, user, sanitized failure category)`. Value is failure
+count plus observed span and schema version. No error text is stored.
 
-### `telemetry_hourly_run_failures_v0`
+### Hourly automation usage
 
-Primary key:
+Key: `(tenant, hour, user, automation kind)`. Values are run and terminal
+outcome counts plus observed span and schema version. Stable automation IDs are
+accepted at observation time for attribution/deduplication diagnostics but are
+not an unbounded per-run durable row.
 
-```text
-(tenant_id, window_start, user_id, failure_category)
-```
+### Lifecycle events
 
-The additive value is `failure_count`; metadata matches the activity table.
-`failure_category` is copied only from the bounded, sanitized category already
-stored on the terminal run. No error message or provider payload is admitted.
+Key: `(tenant, event_id)`. Records are idempotent and contain only the closed
+event/subject vocabulary and timestamp. No arbitrary JSON payload exists.
 
-### `telemetry_hourly_automation_usage_v0`
+### Collector coverage
 
-Primary key:
+Key: `(tenant, hour, collector_instance_id)`. Values are accepted, queue-full,
+closed, invalid, and write-failed counts plus observed span. A UUID identifies
+one process incarnation. Coverage exposes best-effort gaps; it does not claim
+losslessness.
 
-```text
-(tenant_id, window_start, user_id, automation_kind)
-```
+## Composition and real-libSQL proof
 
-Additive values are `run_count`, `completed_count`, `failed_count`,
-`cancelled_count`, and `recovery_required_count`; metadata matches the other
-hourly tables. `automation_kind` is a checked value among `cron`, `once`, and
-`manual`.
+Production composition creates one telemetry repository over the exact
+`CompositeRootFilesystem` already used by the runtime, initializes indexes,
+then starts one recorder/worker. It injects only the neutral recorder into the
+trigger terminal-settlement observer. No new database handle, pool, runtime,
+path setting, feature flag, or backend selector is added.
 
-### `telemetry_lifecycle_events_v0`
+The foundation PR adds an in-process integration scenario under
+`tests/integration/` that:
 
-Primary key `(tenant_id, event_id)`, with scan index
-`(tenant_id, occurred_at, event_id)` and reconstruction index
-`(tenant_id, subject_kind, subject_id, occurred_at, event_id)`.
+1. builds the production-profile runtime over a temporary real embedded
+   libSQL database and the real `LibSqlRootFilesystem`;
+2. creates and fires a due trigger through the production trigger poller;
+3. drives the resulting run to a successful terminal state;
+4. waits through an explicit telemetry drain/shutdown synchronization seam;
+5. constructs a fresh typed telemetry repository over a reopened
+   libSQL-backed root filesystem;
+6. reads the tenant/hour automation aggregate and asserts the exact tenant,
+   creator user, automation kind, completed count, and schema version; and
+7. queries the same range for another tenant and asserts zero rows.
 
-Columns are `event_id`, `tenant_id`, `user_id` nullable only for a tenant-level
-transition, `event_kind`, `subject_kind`, `subject_id`, `occurred_at`, and
-`schema_version`. No arbitrary JSON payload exists. Conflict on the stable
-event ID is a no-op, making producer replay idempotent.
+The test never queries telemetry SQL, calls a private adapter, invokes the
+recorder directly, or relies only on `TurnStatus::Completed`. It proves the
+real trigger producer, composition wiring, asynchronous worker, filesystem
+dispatch, libSQL durability, typed readback, and tenant isolation.
 
-### `telemetry_collector_hourly_v0`
+## Follow-up admin export contract
 
-Primary key `(tenant_id, window_start, collector_instance_id)`. Values are
-`accepted_observation_count`, `queue_full_drop_count`, `closed_drop_count`,
-`invalid_drop_count`, `write_failed_observation_count`, `first_observed_at`,
-and `last_observed_at`.
-
-`collector_instance_id` identifies one process incarnation, not a second
-worker within a process. A restart or rolling deployment can legitimately
-produce two instances in the same hour; keeping them separate makes their
-non-overlapping observed spans visible instead of merging them into false
-full-hour coverage. The manifest conservatively marks every hour with anything
-other than exactly one full-span, loss-free incarnation as partial; V0 never
-tries to prove that two incarnation spans are contiguous. This table exposes
-coverage limitations; it does not make the data lossless.
-If the database remains unavailable, the latest losses cannot themselves be
-persisted. The export manifest therefore labels counts as last successfully
-reported and marks a bucket partial whenever its observed span does not cover
-the full hour or any reported loss is non-zero.
-
-### Physical partitioning and retention
-
-V0 uses tenant-leading primary keys and time scan indexes, not native database
-partitions. Hourly rows already bound cardinality and native partitioning would
-need materially different libSQL/PostgreSQL lifecycle machinery. Table-size
-and export-size observability is included; partitioning, daily compaction, and
-purge are follow-ups based on measured volume.
-
-## Export contract
-
-The route is:
+The next PR adds the authenticated tenant-admin `ProductView` and streamed
+archive. It derives `tenant_id` from authorized caller context and uses the
+repository's bounded keyset reads. The intended route remains:
 
 ```text
 GET /api/webchat/v2/admin/telemetry/export
@@ -311,66 +301,29 @@ GET /api/webchat/v2/admin/telemetry/export
     &effective_model_id=<optional exact filter>
 ```
 
-`from` and `to` are required, `from < to`, and the range is at most 366 days.
-Provider and model filters affect only `hourly_model_usage.csv`; the manifest
-echoes normalized filters. The product service derives `tenant_id` from the
-authorized caller and never accepts it in query parameters.
-
-Unless `include_partial=true`, `to` is capped at the current UTC hour boundary
-and rows whose `window_start` is the current hour are excluded. Lifecycle
-events use the same half-open `[from, to)` timestamps. Admins can export longer
-history in adjacent chunks without a single unbounded request.
-
-The response is a streamed ZIP with:
-
-```text
-manifest.json
-hourly_user_activity.csv
-hourly_model_usage.csv
-hourly_run_failures.csv
-hourly_automation_usage.csv
-lifecycle_events.csv
-collector_coverage.csv
-```
-
-Every CSV has a versioned, fixed column order. Cells that begin with `=`, `+`,
-`-`, `@`, tab, or carriage return are prefixed with a single quote after CSV
-escaping to prevent spreadsheet formula injection. IDs are bounded before
-capture. The archive writer reads repository pages of at most 2,000 rows and
-applies a 1,000,000-row and 256 MiB uncompressed limit; exceeding either
-returns a typed `range_too_large` error before a successful archive is claimed.
-The route has a dedicated low-rate admission descriptor and disconnect
-cancellation releases the read cursor promptly.
-
-`manifest.json` includes schema version, tenant ID, requested and effective
-ranges, generation time, filters, partial-hour policy, per-file row counts,
-collector coverage/loss summaries, supported lifecycle kinds, and these known
-gaps: no channel/skill lifecycle, event/webhook origin, timeout classification,
-latency percentiles, cost/revenue, global analytics, or guaranteed-complete
-signup/setup history.
+The current open hour is excluded unless `include_partial=true`. Range and
+archive size limits, CSV formula escaping, audit records, and ZIP framing land
+with that surface rather than in the foundation PR.
 
 ## Privacy and security
 
-- Tenant scope is derived from `ProductSurfaceCaller` after a fresh admin
-  authorization check for every request.
 - User IDs are stable opaque identifiers. Emails, names, roles, prompts,
   content, raw errors, run/thread IDs, and tool details are absent.
-- Provider/model IDs are validated bounded identifiers; they are not free-form
-  metadata bags.
-- Export is audited using the existing sanitized product-admin audit path; the
-  audit record contains tenant, caller, time range, filters, and result status,
-  never archive contents.
-- The worker's operational logs contain counts and typed error classes only.
+- Provider/model IDs and every path component are validated bounded types.
+- The repository exposes tenant-scoped typed methods, never arbitrary paths.
+- Root filesystem authority remains inside trusted composition and the domain
+  repository; producers and future HTTP handlers cannot obtain it.
+- Operational logs contain counts and stable failure classes only.
 
 ## Compatibility, rollback, and failure semantics
 
-The feature is additive. Existing actions do not depend on successful
-telemetry capture. Rollback disables composition wiring and the export route;
-tables may remain unread but harmless. Dropping tables is a separate destructive
-migration and is not part of rollback. Schema names include `_v0`, export files
-carry versioned headers, and unknown persisted enum values fail closed as a
-sanitized storage error rather than being silently remapped.
+The change is additive to product behavior and uses the existing universal
+storage plane. Existing actions never depend on telemetry success. Rollback
+removes composition wiring and the telemetry consumer mount records remain
+unread but harmless; deletion is not part of rollback.
 
-No V0 metric is represented as exact when its inputs are best-effort. Downloads
-are accompanied by collector coverage so analysts can decide whether a range
-is fit for a particular calculation.
+There is no dedicated telemetry SQL schema to migrate or drop. PostgreSQL,
+libSQL, and in-memory parity comes from their existing `RootFilesystem`
+implementations plus shared telemetry repository conformance tests. No metric
+is represented as exact when its inputs are best-effort, and later downloads
+include collector coverage so analysts can judge fitness for use.

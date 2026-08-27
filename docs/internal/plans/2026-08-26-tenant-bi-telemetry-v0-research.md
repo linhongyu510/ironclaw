@@ -1,8 +1,15 @@
 # Tenant BI Telemetry V0 — Shape Research
 
 **Date:** 2026-08-26
-**Status:** Shape selected; ready for design and implementation planning
+**Status:** Revised shape selected; trusted `RootFilesystem` store approved 2026-08-27
 **Scope:** Planning only. No production behavior is changed by this document.
+
+> **Revision note (2026-08-27):** The initial direct-SQL selection below was
+> rejected after review against the live universal filesystem contract. The
+> current decision is Shape B, refined as a trusted host store over the existing
+> `Arc<dyn RootFilesystem>`, with terminal-trigger production wiring and a real
+> libSQL `tests/integration` proof in the foundation PR. Historical Shape A
+> analysis remains as the record of the rejected alternative.
 
 ## Briefing
 
@@ -14,14 +21,12 @@ writes batches. Telemetry should extend that mechanism, but not reuse the
 durable event log: telemetry is explicitly best-effort and lossy, while the
 event log claims durable, replayable state.
 
-The durable shape selected here is a dedicated `ironclaw_telemetry` domain with
-literal libSQL and PostgreSQL tables. This is an intentional exception to the
-repository's normal `RootFilesystem` persistence floor. The exception needs a
-new ADR and architecture-test allowlist entry, just as triggers does under ADR
-0003. It does **not** authorize a second database, pool, URL, or connection
-factory. Composition passes the already-admitted `LibSqlRuntime` or PostgreSQL
-pool into the telemetry repository. One batch holds one writer lease/client
-and one transaction, then releases it.
+The selected durable shape is a dedicated `ironclaw_telemetry` domain whose
+typed repository writes through the existing universal `RootFilesystem`.
+Composition passes the already-assembled root handle; telemetry names no SQL
+driver and creates no database, pool, URL, runtime, migration, or parallel
+connection plane. The trusted background repository writes only beneath the
+typed tenant telemetry namespace.
 
 Only hourly additive facts become durable. Per-call/per-run observations live
 in the queue and disappear after aggregation. This keeps write volume bounded
@@ -50,11 +55,11 @@ canonical producers
                                            │ one consumer
                                            ▼
                           hourly accumulator + batch worker
-                                           │ one admitted handle/transaction
-                          ┌────────────────┴────────────────┐
-                          ▼                                 ▼
-                    libSQL tables                    PostgreSQL tables
-                          └────────────────┬────────────────┘
+                                           │ bounded CAS updates
+                                           ▼
+                             existing RootFilesystem
+                              (libSQL/PostgreSQL/in-memory)
+                                           │
                                            ▼
                           typed tenant-scoped export reader
                                            │ authorized ProductSurface call
@@ -100,7 +105,7 @@ canonical producers
 
 ## Candidate shapes
 
-### Shape A — Typed SQL telemetry domain (selected)
+### Shape A — Typed SQL telemetry domain (rejected after review)
 
 Create `ironclaw_telemetry_contracts` for the neutral observation/recorder port
 and `ironclaw_telemetry` for aggregation, SQL repositories, and export reads.
@@ -120,24 +125,29 @@ diagnostic logging, model-provider contracts, and operational run records.
 the SQL repository can later be replaced; schema/data migration would still be
 required for already-collected telemetry.
 
-This is the only shape that satisfies the explicit literal-table requirement
-and preserves the repository's dual deployment backends.
+This shape was initially selected, then rejected because the current
+`RootFilesystem` already owns structured records, ordered indexes, CAS, and
+backend parity. Adding another driver-linked domain path would fork the
+canonical persistence plane.
 
-### Shape B — RootFilesystem logical hourly records
+### Shape B — Trusted RootFilesystem hourly records (selected)
 
-Store typed hourly documents under a telemetry mount and use bounded CAS for
-increments. Export scans logical records through `ScopedFilesystem`.
+Store typed hourly records beneath `/tenants/{tenant}/telemetry/v0`, use the
+shared bounded CAS helper for increments, and use tenant-leading ordered
+indexes for bounded reads. The one trusted multi-tenant worker receives the
+existing `Arc<dyn RootFilesystem>`; producers and future admin handlers do not.
 
 **Extend:** the default persistence contract and mount catalog.
 **Fork:** none.
-**Delete:** nothing.
-**Leave untouched:** SQL-driver allowlists.
-**Cost to undo:** low to moderate.
+**Delete:** telemetry SQL adapters, driver dependencies, ADR 0005, and their
+architecture allowlists.
+**Leave untouched:** canonical event-log durability and physical filesystem
+backend implementations.
+**Cost to undo:** low.
 
-This is architecturally conventional but rejected for V0 because it does not
-provide literal queryable SQL tables, tenant-leading indexes, or efficient
-multi-dimensional grouped reads. Concurrent CAS updates also turn a simple
-additive batch into repeated document rewrites.
+This is selected because telemetry's best-effort contract tolerates a partially
+applied multi-record drain, while the existing filesystem supplies the required
+typed entries, tenant-leading indexes, keyset queries, and backend parity.
 
 ### Shape C — Durable event-log observations plus projections
 
@@ -190,14 +200,13 @@ the WebUI never receives a repository handle.
 
 ## Human gate
 
-Shape A is selected from the prior requirements discussion: tenant-local
-admin export, best-effort asynchronous capture, one-hour durable aggregation,
-dedicated literal tables, reuse of the instance database, and no cross-tenant
-service. The implementation plan must not silently substitute Shape B if the
-SQL ADR is rejected; ADR rejection means the literal-table requirement needs a
-new explicit decision.
+Shape B was explicitly approved on 2026-08-27 after reviewing the initially
+opened PR. The foundation PR must also wire terminal trigger settlement and
+prove a real trigger execution persists through a real embedded libSQL-backed
+`RootFilesystem` in `tests/integration`; only the authenticated admin export
+surface remains deferred.
 
-## PR1 implementation recon
+## Historical direct-SQL PR1 recon (superseded)
 
 ### Map
 
