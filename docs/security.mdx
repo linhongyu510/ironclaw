@@ -57,7 +57,7 @@ The key idea: **the tool never holds the credential.** It builds a request with 
 
 Secrets stay separate from ordinary data throughout: encrypted at rest, never inside the sandbox, attached only at the host boundary, and only for the one call that was authorized.
 
-See [Credential Protection](/security/secrets-and-sandboxing) for the step-by-step walkthrough.
+See [Credential Protection → How a Tool Uses a Secret](/security/secrets-and-sandboxing#how-a-tool-uses-a-secret) for the step-by-step walkthrough.
 
 ---
 
@@ -99,7 +99,7 @@ Field-by-field reference: [WASM Tools → The Manifest](/capabilities/sandboxed-
 
 Even though a tool never sees the credential it sent, the **server it called** might echo it back — an error message quoting the token, a debug endpoint reflecting request headers. And a compromised tool may try to smuggle a secret *out* in a URL or body. The leak detector is the pattern-matching layer that catches both directions.
 
-It recognizes 23 secret shapes — provider keys like OpenAI `sk-…` and Anthropic `sk-ant-…`, AWS `AKIA…` and Google `AIza…`, GitHub `ghp_…`, Stripe and Slack tokens, private-key blocks, bearer tokens and JWTs, and IronClaw's own `icsbx_…` sandbox placeholders. Each match triggers one of three responses:
+It recognizes the common secret shapes — provider keys like OpenAI `sk-…` and Anthropic `sk-ant-…`, AWS `AKIA…` and Google `AIza…`, GitHub `ghp_…`, Stripe and Slack tokens, private-key blocks, bearer tokens and JWTs, and IronClaw's own `icsbx_…` sandbox placeholders. Each match triggers one of three responses:
 
 - **Block** — the content is rejected and the call fails. Used for anything that is unambiguously a live credential: provider keys, cloud keys, private keys.
 - **Redact** — the matched span is masked and the rest passes. Used for shapes that are often legitimate in context: bearer tokens, `Authorization` headers, JWTs.
