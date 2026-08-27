@@ -127,6 +127,12 @@ pub(crate) enum McpInvalidToolListCause {
     InvalidAnnotations,
     InvalidCursor,
     TooManyPages,
+    /// Retained for the diagnostic vocabulary, no longer raised: an over-large catalog
+    /// now truncates rather than failing the discovery pass, because discarding every
+    /// already-collected tool left the extension indistinguishable from an unreachable
+    /// one. Kept so existing log/metric consumers keying on `catalog_too_large` do not
+    /// break, and so a future hard limit has a name ready.
+    #[allow(dead_code)]
     CatalogTooLarge,
 }
 

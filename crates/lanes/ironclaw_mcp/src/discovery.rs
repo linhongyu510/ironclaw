@@ -19,7 +19,17 @@ use crate::diagnostics::{McpInvalidToolListCause, invalid_tool_list};
 /// pass, across all pages. Shared by the discovery loop's running-total check
 /// and [`parse_tools_list_result`]'s per-page cap so the two enforcement
 /// points cannot drift apart.
-pub(crate) const MAX_DISCOVERED_MCP_TOOLS: usize = 1024;
+///
+/// Sized for a real integration catalog rather than a single vendor's server.
+/// At the previous 1,024 a large catalog did not degrade -- it FAILED: exceeding
+/// the cap aborted the whole discovery pass and the extension published zero
+/// tools. Measured against a 47,337-tool MCP endpoint, discovery pulled six
+/// pages, tripped the cap, and every `tool_search` afterwards ran against an
+/// empty index; the agent reported "the extension is registered and installed
+/// -- but the MCP server's tools are not publishing" and answered from nothing.
+/// The tools are deferred (definitions never enter the model's context), so the
+/// cost of a larger ceiling is host-side index memory, not prompt tokens.
+pub(crate) const MAX_DISCOVERED_MCP_TOOLS: usize = 65_536;
 
 /// Maximum number of `tools/list` pagination pages followed during a single
 /// discovery pass.
@@ -27,7 +37,12 @@ pub(crate) const MAX_MCP_TOOLS_LIST_PAGES: usize = 50;
 
 /// Maximum aggregate serialized bytes accepted across all `tools/list` pages
 /// during a single discovery pass.
-pub(crate) const MAX_MCP_TOOLS_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+///
+/// Raised alongside [`MAX_DISCOVERED_MCP_TOOLS`]: a catalog large enough to need
+/// the higher tool ceiling also carries more schema bytes, and tripping this
+/// limit had the same all-or-nothing consequence. A 47,337-tool catalog
+/// serializes to roughly 44 MB.
+pub(crate) const MAX_MCP_TOOLS_CATALOG_BYTES: usize = 96 * 1024 * 1024;
 
 pub(crate) fn parse_tools_list_result(
     value: &Value,
@@ -368,7 +383,10 @@ mod tests {
 
     #[test]
     fn parse_tools_list_result_caps_manifest_budget_at_host_maximum() {
-        let tools = (0..1025)
+        // Derived from the constant, not a literal: this assertion hardcoded 1025 and broke
+        // the moment the ceiling moved, even though what it checks -- that a provider's
+        // declared budget is clamped to the host's -- was unaffected.
+        let tools = (0..=MAX_DISCOVERED_MCP_TOOLS)
             .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
             .collect::<Vec<_>>();
 

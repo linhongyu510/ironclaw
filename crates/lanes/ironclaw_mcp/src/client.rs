@@ -591,17 +591,35 @@ where
             let (page_tools, next_cursor) =
                 parse_tools_list_page(&result).map_err(McpClientError::invalid_tool_catalog)?;
             accepted_catalog_bytes = accepted_catalog_bytes.saturating_add(page_bytes);
-            if discovered.len().saturating_add(page_tools.len()) > MAX_DISCOVERED_MCP_TOOLS
-                || discovered.len().saturating_add(page_tools.len()) > max_tools as usize
-            {
-                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
-                    McpInvalidToolListCause::TooManyTools,
-                )));
-            }
-            if accepted_catalog_bytes > MAX_MCP_TOOLS_CATALOG_BYTES {
-                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
-                    McpInvalidToolListCause::CatalogTooLarge,
-                )));
+
+            // Over-large catalogs TRUNCATE; they no longer fail the pass.
+            //
+            // Returning `Err` here discarded every tool already collected, so an endpoint
+            // one tool over the ceiling published exactly as many tools as an endpoint that
+            // was unreachable: none. Measured against a 47,337-tool server, discovery pulled
+            // six pages, tripped the ceiling, and the extension came up with an empty index
+            // while reporting itself installed -- the agent then ran 55 fruitless
+            // `tool_search` calls and answered from nothing. A partial catalog is worth
+            // vastly more than no catalog, and the caller cannot tell the difference between
+            // "server has no tools" and "server had too many" from a bare error.
+            let budget = MAX_DISCOVERED_MCP_TOOLS.min(max_tools as usize);
+            let (kept, over_budget) = page_intake(
+                discovered.len(),
+                page_tools.len(),
+                budget,
+                accepted_catalog_bytes,
+                MAX_MCP_TOOLS_CATALOG_BYTES,
+            );
+            if over_budget {
+                discovered.extend(page_tools.into_iter().take(kept));
+                tracing::warn!(
+                    discovered = discovered.len(),
+                    budget,
+                    kept_from_final_page = kept,
+                    accepted_catalog_bytes,
+                    "hosted MCP catalog exceeds the discovery ceiling; truncating"
+                );
+                break;
             }
             discovered.extend(page_tools);
             match next_cursor {
@@ -694,9 +712,67 @@ fn accumulate_usage(total: &mut ResourceUsage, usage: ResourceUsage) {
     total.output_bytes = total.output_bytes.saturating_add(usage.output_bytes);
 }
 
+/// How much of a `tools/list` page fits within the discovery budget, and whether the pass
+/// should stop after taking it.
+///
+/// Extracted from the discovery loop so the ceiling behaviour is testable without a live
+/// MCP server -- the bug this guards against (an over-large catalog yielding ZERO tools
+/// rather than a truncated set) lived in exactly this arithmetic and was only observable
+/// end-to-end against a 47k-tool endpoint.
+fn page_intake(
+    discovered: usize,
+    page_len: usize,
+    tool_budget: usize,
+    accepted_bytes: usize,
+    byte_budget: usize,
+) -> (usize, bool) {
+    let room = tool_budget.saturating_sub(discovered);
+    let over_budget = page_len > room || accepted_bytes > byte_budget;
+    (page_len.min(room), over_budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An over-large catalog must TRUNCATE, never yield nothing.
+    ///
+    /// Regression test for the failure this replaced: exceeding the ceiling returned an
+    /// error that discarded every tool already collected, so a server one tool over the
+    /// limit published exactly as many tools as an unreachable one -- zero. Measured
+    /// against a 47,337-tool endpoint, discovery pulled six pages, tripped the old 1,024
+    /// ceiling, and the extension came up installed with an empty index while the agent ran
+    /// 55 fruitless searches.
+    #[test]
+    fn an_over_large_catalog_truncates_instead_of_yielding_nothing() {
+        const BYTES_OK: usize = 0;
+        const BYTE_CAP: usize = 1_000;
+
+        // A page that runs past the ceiling keeps what fits and stops.
+        let (kept, stop) = page_intake(1_000, 200, 1_024, BYTES_OK, BYTE_CAP);
+        assert_eq!(kept, 24, "must keep the 24 that fit, not discard all 200");
+        assert!(stop, "discovery stops once the ceiling is reached");
+
+        // A page well inside the ceiling is taken whole and paging continues.
+        let (kept, stop) = page_intake(0, 200, 1_024, BYTES_OK, BYTE_CAP);
+        assert_eq!(kept, 200);
+        assert!(!stop);
+
+        // Exactly filling the ceiling is not over it.
+        let (kept, stop) = page_intake(824, 200, 1_024, BYTES_OK, BYTE_CAP);
+        assert_eq!(kept, 200);
+        assert!(!stop);
+
+        // The byte ceiling truncates too, and still keeps the page it can afford.
+        let (kept, stop) = page_intake(10, 5, 1_024, BYTE_CAP + 1, BYTE_CAP);
+        assert_eq!(kept, 5);
+        assert!(stop);
+
+        // Already at the ceiling: keep nothing further, but do not error.
+        let (kept, stop) = page_intake(1_024, 200, 1_024, BYTES_OK, BYTE_CAP);
+        assert_eq!(kept, 0);
+        assert!(stop);
+    }
 
     #[test]
     fn mcp_tool_name_strips_provider_prefix_for_canonical_tool_name() {
