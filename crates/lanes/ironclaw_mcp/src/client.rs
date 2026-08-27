@@ -602,26 +602,32 @@ where
             // `tool_search` calls and answered from nothing. A partial catalog is worth
             // vastly more than no catalog, and the caller cannot tell the difference between
             // "server has no tools" and "server had too many" from a bare error.
-            let budget = MAX_DISCOVERED_MCP_TOOLS.min(max_tools as usize);
-            let (kept, over_budget) = page_intake(
+            match page_intake(
                 discovered.len(),
                 page_tools.len(),
-                budget,
+                max_tools as usize,
+                MAX_DISCOVERED_MCP_TOOLS,
                 accepted_catalog_bytes,
                 MAX_MCP_TOOLS_CATALOG_BYTES,
-            );
-            if over_budget {
-                discovered.extend(page_tools.into_iter().take(kept));
-                tracing::warn!(
-                    discovered = discovered.len(),
-                    budget,
-                    kept_from_final_page = kept,
-                    accepted_catalog_bytes,
-                    "hosted MCP catalog exceeds the discovery ceiling; truncating"
-                );
-                break;
+            ) {
+                PageIntake::ExceedsManifest => {
+                    return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                        McpInvalidToolListCause::TooManyTools,
+                    )));
+                }
+                PageIntake::Truncate(kept) => {
+                    discovered.extend(page_tools.into_iter().take(kept));
+                    tracing::warn!(
+                        discovered = discovered.len(),
+                        host_ceiling = MAX_DISCOVERED_MCP_TOOLS,
+                        kept_from_final_page = kept,
+                        accepted_catalog_bytes,
+                        "hosted MCP catalog exceeds the host discovery ceiling; truncating"
+                    );
+                    break;
+                }
+                PageIntake::Accept => discovered.extend(page_tools),
             }
-            discovered.extend(page_tools);
             match next_cursor {
                 Some(_next_cursor) if page == MAX_MCP_TOOLS_LIST_PAGES => {
                     return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
@@ -712,66 +718,107 @@ fn accumulate_usage(total: &mut ResourceUsage, usage: ResourceUsage) {
     total.output_bytes = total.output_bytes.saturating_add(usage.output_bytes);
 }
 
-/// How much of a `tools/list` page fits within the discovery budget, and whether the pass
-/// should stop after taking it.
+/// What to do with a `tools/list` page that runs past a limit.
+#[derive(Debug, PartialEq, Eq)]
+enum PageIntake {
+    /// Take the whole page and keep paging.
+    Accept,
+    /// Take this many and stop: a HOST resource ceiling was reached.
+    Truncate(usize),
+    /// Fail the pass: the server returned more than its manifest DECLARED.
+    ExceedsManifest,
+}
+
+/// Decide a page's fate against the two ceilings, which are not the same kind of limit.
 ///
-/// Extracted from the discovery loop so the ceiling behaviour is testable without a live
-/// MCP server -- the bug this guards against (an over-large catalog yielding ZERO tools
-/// rather than a truncated set) lived in exactly this arithmetic and was only observable
-/// end-to-end against a 47k-tool endpoint.
+/// `manifest_max_tools` is a contract: the extension declared how many tools its server
+/// publishes and the user approved that. A server exceeding its own declaration is a trust
+/// violation, and silently truncating it would let a package that asked to publish one tool
+/// publish five hundred. That still fails the pass.
+///
+/// The host ceiling is a resource budget with no such meaning, and treating it as a validity
+/// check is what made a 47,337-tool catalog publish ZERO tools: discovery collected six
+/// pages, crossed the ceiling, and threw all of them away. That case truncates.
 fn page_intake(
     discovered: usize,
     page_len: usize,
-    tool_budget: usize,
+    manifest_max_tools: usize,
+    host_ceiling: usize,
     accepted_bytes: usize,
     byte_budget: usize,
-) -> (usize, bool) {
-    let room = tool_budget.saturating_sub(discovered);
-    let over_budget = page_len > room || accepted_bytes > byte_budget;
-    (page_len.min(room), over_budget)
+) -> PageIntake {
+    if discovered.saturating_add(page_len) > manifest_max_tools {
+        return PageIntake::ExceedsManifest;
+    }
+    let room = host_ceiling.saturating_sub(discovered);
+    if page_len > room || accepted_bytes > byte_budget {
+        return PageIntake::Truncate(page_len.min(room));
+    }
+    PageIntake::Accept
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// An over-large catalog must TRUNCATE, never yield nothing.
+    /// The two ceilings are different KINDS of limit and must behave differently.
     ///
-    /// Regression test for the failure this replaced: exceeding the ceiling returned an
-    /// error that discarded every tool already collected, so a server one tool over the
-    /// limit published exactly as many tools as an unreachable one -- zero. Measured
-    /// against a 47,337-tool endpoint, discovery pulled six pages, tripped the old 1,024
-    /// ceiling, and the extension came up installed with an empty index while the agent ran
-    /// 55 fruitless searches.
+    /// Regression test for the failure this replaced: crossing the host ceiling returned an
+    /// error that discarded every tool already collected, so a server one tool over it
+    /// published exactly as many as an unreachable one -- zero. Measured against a
+    /// 47,337-tool endpoint, discovery pulled six pages, tripped the old 1,024 ceiling, and
+    /// the extension came up installed with an empty index.
+    ///
+    /// The manifest limit is NOT that. It is what the extension declared and the user
+    /// approved, so a server exceeding its own declaration still fails: truncating there
+    /// would let a package that asked to publish one tool publish five hundred.
     #[test]
-    fn an_over_large_catalog_truncates_instead_of_yielding_nothing() {
+    fn the_host_ceiling_truncates_but_the_manifest_ceiling_still_fails() {
+        const HUGE: usize = 65_536;
         const BYTES_OK: usize = 0;
         const BYTE_CAP: usize = 1_000;
 
-        // A page that runs past the ceiling keeps what fits and stops.
-        let (kept, stop) = page_intake(1_000, 200, 1_024, BYTES_OK, BYTE_CAP);
-        assert_eq!(kept, 24, "must keep the 24 that fit, not discard all 200");
-        assert!(stop, "discovery stops once the ceiling is reached");
+        // Host ceiling reached: keep what fits rather than discarding the lot.
+        assert_eq!(
+            page_intake(1_000, 200, HUGE, 1_024, BYTES_OK, BYTE_CAP),
+            PageIntake::Truncate(24),
+            "must keep the 24 that fit, not throw away all 200"
+        );
 
-        // A page well inside the ceiling is taken whole and paging continues.
-        let (kept, stop) = page_intake(0, 200, 1_024, BYTES_OK, BYTE_CAP);
-        assert_eq!(kept, 200);
-        assert!(!stop);
+        // Comfortably inside both ceilings: take the page and keep paging.
+        assert_eq!(
+            page_intake(0, 200, HUGE, 1_024, BYTES_OK, BYTE_CAP),
+            PageIntake::Accept
+        );
 
-        // Exactly filling the ceiling is not over it.
-        let (kept, stop) = page_intake(824, 200, 1_024, BYTES_OK, BYTE_CAP);
-        assert_eq!(kept, 200);
-        assert!(!stop);
+        // Exactly filling the host ceiling is not over it.
+        assert_eq!(
+            page_intake(824, 200, HUGE, 1_024, BYTES_OK, BYTE_CAP),
+            PageIntake::Accept
+        );
 
-        // The byte ceiling truncates too, and still keeps the page it can afford.
-        let (kept, stop) = page_intake(10, 5, 1_024, BYTE_CAP + 1, BYTE_CAP);
-        assert_eq!(kept, 5);
-        assert!(stop);
+        // The byte ceiling is a resource budget too: truncate, keeping what it can afford.
+        assert_eq!(
+            page_intake(10, 5, HUGE, 1_024, BYTE_CAP + 1, BYTE_CAP),
+            PageIntake::Truncate(5)
+        );
 
-        // Already at the ceiling: keep nothing further, but do not error.
-        let (kept, stop) = page_intake(1_024, 200, 1_024, BYTES_OK, BYTE_CAP);
-        assert_eq!(kept, 0);
-        assert!(stop);
+        // Already at the host ceiling: keep nothing more, but do not error.
+        assert_eq!(
+            page_intake(1_024, 200, HUGE, 1_024, BYTES_OK, BYTE_CAP),
+            PageIntake::Truncate(0)
+        );
+
+        // A server publishing more than it DECLARED is a contract violation, not a
+        // resource problem -- it fails even though the host ceiling has room to spare.
+        assert_eq!(
+            page_intake(0, 2, 1, HUGE, BYTES_OK, BYTE_CAP),
+            PageIntake::ExceedsManifest
+        );
+        assert_eq!(
+            page_intake(1_000, 200, 1_024, HUGE, BYTES_OK, BYTE_CAP),
+            PageIntake::ExceedsManifest
+        );
     }
 
     #[test]
