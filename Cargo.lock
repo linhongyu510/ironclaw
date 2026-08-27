@@ -5231,13 +5231,17 @@ dependencies = [
 name = "ironclaw_telemetry"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "deadpool-postgres",
  "ironclaw_host_api",
  "ironclaw_libsql_runtime",
  "ironclaw_telemetry_contracts",
  "libsql",
+ "tempfile",
+ "testcontainers-modules",
  "thiserror 2.0.20",
+ "tokio",
  "tokio-postgres",
 ]
 
