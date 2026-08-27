@@ -866,6 +866,7 @@ impl HostRuntimeCapabilityHarness {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
                 workspace_root.clone(),
                 None,
+                true,
             )
             .await?;
             sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();

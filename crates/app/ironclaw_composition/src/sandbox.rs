@@ -19,6 +19,7 @@ use crate::{RebornBuildError, RebornRuntimeProcessBinding};
 pub async fn build_local_docker_user_sandbox_binding(
     workspace_root: PathBuf,
     legacy_workspace_root: Option<PathBuf>,
+    enable_loop_worker: bool,
 ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
     let mut config = RebornSandboxConfig::new(workspace_root);
     if let Some(legacy_workspace_root) = legacy_workspace_root {
@@ -41,10 +42,14 @@ pub async fn build_local_docker_user_sandbox_binding(
     );
     let command_transport: Arc<dyn ironclaw_host_api::process::SandboxCommandTransport> =
         transport.clone();
+    let process_port = Arc::new(UserSandboxProcessPort::new(command_transport));
+    if !enable_loop_worker {
+        return Ok(RebornRuntimeProcessBinding::user_sandbox(process_port));
+    }
     let loop_worker_transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport> =
         transport;
     Ok(RebornRuntimeProcessBinding::user_sandbox_with_loop_worker(
-        Arc::new(UserSandboxProcessPort::new(command_transport)),
+        process_port,
         loop_worker_transport,
     ))
 }
