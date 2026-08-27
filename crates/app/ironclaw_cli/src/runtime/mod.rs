@@ -788,6 +788,22 @@ pub(crate) fn build_services_input_with_options(
     };
     services_input = services_input.with_memory_provider_connection(memory_provider_connection);
 
+    // Scheduled memory upkeep (#7276 / #7664), from the `[memory]` section
+    // only — no env override, matching `provider` and `admin_overrides` rather
+    // than the mem0 connection fields. This is an override of the cadence the
+    // bound provider declares for itself; absent lets the declaration decide.
+    // The config layer already rejects a `0` sentinel.
+    if let Some(interval_turns) = config_file
+        .as_ref()
+        .and_then(|file| file.memory.as_ref())
+        .and_then(|memory| memory.curation_interval_turns)
+        // Cannot silently drop a configured interval: the config layer above
+        // rejects `0` outright, so every value reaching here is non-zero.
+        .and_then(std::num::NonZeroU32::new)
+    {
+        services_input = services_input.with_memory_curation_interval_turns(interval_turns);
+    }
+
     Ok(RuntimeServicesInput {
         services_input,
         profile,
@@ -1317,6 +1333,14 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .context("HOME or USERPROFILE must be set")
 }
 
+fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => anyhow::bail!("{name} must not be empty when set"),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+    }
+}
+
 pub(crate) fn local_runtime_storage_root(
     config: &RebornBootConfig,
     profile: RebornProfile,
@@ -1331,6 +1355,9 @@ fn runtime_workspace_root(
     config: &RebornBootConfig,
     profile: RebornProfile,
 ) -> anyhow::Result<PathBuf> {
+    if let Some(workspace_root) = optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")? {
+        return Ok(workspace_root);
+    }
     match profile {
         RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted => {
             std::env::current_dir().with_context(|| {
@@ -2901,6 +2928,8 @@ regex_activation_enabled = false
 
     #[test]
     fn hosted_profiles_share_one_transport_neutral_workspace_root() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::clear("IRONCLAW_REBORN_WORKSPACE_ROOT");
         let (_temp, config) = boot_config_with_config_toml("local-dev", "");
         let expected = config.home().path().join("workspaces");
 
@@ -2958,6 +2987,59 @@ regex_activation_enabled = false
             error
                 .to_string()
                 .contains("failed to initialize Reborn runtime state")
+        );
+    }
+
+    #[test]
+    fn runtime_workspace_root_uses_explicit_env_override() {
+        // A reviewer noted IRONCLAW_REBORN_WORKSPACE_ROOT feeds two production
+        // builders with no test anywhere; this pins the override path.
+        let _lock = lock_runtime_env();
+        let explicit = std::path::PathBuf::from("/tmp/example-reborn-workspace-root");
+        let _workspace_root = EnvGuard::set(
+            "IRONCLAW_REBORN_WORKSPACE_ROOT",
+            explicit.to_str().expect("test path must be valid utf8"),
+        );
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let root = runtime_workspace_root(
+            &config,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+        )
+        .expect("explicit workspace root must resolve");
+
+        assert_eq!(root, explicit);
+    }
+
+    #[test]
+    fn runtime_workspace_root_falls_back_to_current_dir_for_local_dev() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::clear("IRONCLAW_REBORN_WORKSPACE_ROOT");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let root = runtime_workspace_root(&config, ironclaw_config::RebornProfile::Standalone)
+            .expect("unset workspace root must fall back to the current directory");
+
+        assert_eq!(
+            root,
+            std::env::current_dir().expect("current dir must be resolvable in test")
+        );
+    }
+
+    #[test]
+    fn runtime_workspace_root_rejects_explicitly_empty_value() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::set("IRONCLAW_REBORN_WORKSPACE_ROOT", "");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let error = runtime_workspace_root(&config, ironclaw_config::RebornProfile::Standalone)
+            .expect_err(
+                "an explicitly empty workspace root must fail loudly, not silently fall back",
+            );
+
+        assert!(
+            error.to_string().contains("IRONCLAW_REBORN_WORKSPACE_ROOT"),
+            "unexpected error: {error}"
         );
     }
 
