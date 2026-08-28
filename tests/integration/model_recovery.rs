@@ -274,8 +274,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
     // compactor instead of taking its safe "nothing eligible" skip path.
     let input_secret = concat!("AKIA", "IOSFODNN7EXAMPLE");
     let second_input_secret = concat!("ghp_", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-    let first_setup_turn =
-        format!("first setup turn credentials {input_secret} and {second_input_secret}");
+    let first_setup_turn = format!(
+        "first setup turn credentials {input_secret} and {second_input_secret} {}",
+        "history ".repeat(5_000)
+    );
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
     let output_secret = "OUTPUT_PRIVATE_KEY_MATERIAL";
     let compacted_summary = format!(
@@ -356,9 +358,17 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("input and output redactions produce one typed aggregate milestone");
     harness
+        .assert_compaction_input_truncated_once_since(before_recovery_milestones, 1)
+        .await
+        .expect("oversized durable message produces one typed truncation milestone");
+    harness
         .assert_summary_artifacts_lack(input_secret)
         .await
         .expect("the durable compaction summary does not persist the transcript secret");
+    harness
+        .assert_conversation_history_contains("third setup turn history history")
+        .await
+        .expect("summarizer input truncation does not alter durable transcript history");
     harness
         .assert_summary_artifacts_lack(second_input_secret)
         .await

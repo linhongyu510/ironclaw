@@ -5,7 +5,6 @@ use ironclaw_threads::MessageKind;
 
 use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 
-const MAX_XML_ESCAPE_EXPANSION: usize = 5;
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
 
@@ -96,28 +95,50 @@ impl<'a> CompactionSanitizer<'a> {
         })
     }
 
-    fn validate_unredacted_message_boundaries(
+    pub(super) fn validate_unredacted_message_boundaries(
         &self,
         messages: &[ValidatedCompactionMessage],
     ) -> Result<(), CompactionError> {
-        // Boundary validation must inspect the unredacted representation, but
-        // its worst-case XML expansion is larger than the final model-input
-        // cap. The actual sanitized serialization is still bounded separately
-        // by `max_input_bytes` in `sanitize_messages`.
-        let validation_cap = self
-            .max_input_bytes
-            .checked_mul(MAX_XML_ESCAPE_EXPANSION)
-            .and_then(|expanded| expanded.checked_add(self.max_input_bytes))
-            .ok_or(CompactionError::LeakRedactionFailed)?;
+        // Inspect complete durable bodies before summarizer-only truncation.
+        // Raw text is the trust boundary; XML escaping happens only after the
+        // retained fragment is bounded. Avoid escaping the full durable input:
+        // that could allocate up to five extra bytes per source byte for text
+        // that will never reach inference.
+        if let [message] = messages {
+            if !self
+                .injection_scanner
+                .scan_injection(&message.body)
+                .is_empty()
+            {
+                return Err(CompactionError::InjectionDetected);
+            }
+            let scan = self.leak_scanner.scan_leaks(&message.body);
+            let body_range = 0..message.body.len();
+            return validate_matches_stay_within_bodies(
+                &message.body,
+                std::slice::from_ref(&body_range),
+                &scan.matches,
+            );
+        }
+
+        let validation_cap = messages.iter().try_fold(0_usize, |total, message| {
+            total
+                .checked_add(message.body.len())
+                .and_then(|bytes| bytes.checked_add(1))
+                .ok_or(CompactionError::LeakRedactionFailed)
+        })?;
         let mut content = String::new();
+        content.try_reserve_exact(validation_cap).map_err(|error| {
+            tracing::debug!(%error, "compaction full-body validation allocation failed");
+            CompactionError::LeakRedactionFailed
+        })?;
         let mut body_ranges = Vec::with_capacity(messages.len());
         for message in messages {
             if !content.is_empty() {
                 push_checked(&mut content, "\n", validation_cap)?;
             }
-            let escaped_body = escape_xml_checked(&message.body, validation_cap)?;
             let body_start = content.len();
-            push_checked(&mut content, &escaped_body, validation_cap)?;
+            push_checked(&mut content, &message.body, validation_cap)?;
             body_ranges.push(body_start..content.len());
         }
 

@@ -639,11 +639,23 @@ where
                         truncation.omitted_through_kind,
                     ),
                 });
-        let messages = prompt_context_budget::select_prompt_context_messages(
+        let selection = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
             accepted_task_message_id(&self.run_context),
         )?;
+        let budget_truncation =
+            selection
+                .truncation
+                .map(|truncation| LoopContextWindowTruncation {
+                    omitted_through_sequence: truncation.omitted_through_sequence,
+                    omitted_through_kind: compaction_kind_for_message(
+                        truncation.omitted_through_kind,
+                    ),
+                });
+        let recent_window_truncation =
+            newest_context_truncation(recent_window_truncation, budget_truncation);
+        let messages = selection;
         trace_loop_host_latency_ok(
             "context_select_messages",
             &self.run_context,
@@ -3350,6 +3362,23 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
                 .map(|message_ref| (message_ref.as_str().to_string(), context_message))
         })
         .collect()
+}
+
+fn newest_context_truncation(
+    left: Option<LoopContextWindowTruncation>,
+    right: Option<LoopContextWindowTruncation>,
+) -> Option<LoopContextWindowTruncation> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            if left.omitted_through_sequence >= right.omitted_through_sequence {
+                Some(left)
+            } else {
+                Some(right)
+            }
+        }
+        (Some(truncation), None) | (None, Some(truncation)) => Some(truncation),
+        (None, None) => None,
+    }
 }
 
 fn context_message_to_compaction_metadata(
