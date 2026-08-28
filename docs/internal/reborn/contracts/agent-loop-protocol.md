@@ -268,17 +268,26 @@ replaces the complete prefix before it. This keeps normal cuts between user
 turns and permits a split inside one oversized turn at an assistant boundary.
 `LoopCompactionRequest.first_retained_seq` lets the host verify that the
 retained suffix does not start at a tool result and that no model-visible
-message lies between the replaced prefix and retained suffix. Legacy requests
-without that additive field keep the prior user-only terminal rule.
+message lies between the replaced prefix and retained suffix. Window eviction
+keeps its existing finalized tool-result drop watermark and omits this
+assistant-split field. Legacy requests without the additive field keep the
+prior user-only terminal rule.
 Unstable boundaries remain deferred and are not retried against an unchanged
 prompt fingerprint.
 
-Before truncating any summarizer input, the host scans every complete untrusted
-message body for injection and cross-message leak ranges. It then bounds each
-new transcript message body to 32 KiB with UTF-8-safe head-and-tail retention
-and an explicit omission marker. Carried cumulative summaries remain intact.
-This truncation affects only the system-inference request; the original
-transcript row remains unchanged and readable.
+Before truncating summarizer input, the host bounds the selected durable range
+to 129 transcript messages (the 128-message window plus its pinned task), 257
+total messages including carried summaries, and 16 MiB of original text.
+Larger ranges fail as typed `InputTooLarge`
+recovery input before scanning or allocation. Within that
+bound, the host scans every complete untrusted message body for injection and
+cross-message leak ranges. Cross-message leak matches fail closed; matches
+inside one body are redacted on the complete body before slicing, so truncation
+cannot expose a credential prefix that no longer matches the leak scanner.
+Each new transcript message body is then bounded to 32 KiB with UTF-8-safe
+head-and-tail retention and an explicit omission marker. Carried cumulative
+summaries remain intact. This truncation affects only system-inference input;
+the original transcript row remains unchanged and readable.
 
 Successful persistence returns additive `redacted_leak_count` and
 `input_truncation` fields. Both are defaulted and omitted when empty so legacy

@@ -486,12 +486,16 @@ impl<'a> PromptCompactionStep<'a> {
             }
         };
 
-        let first_retained_seq = state
-            .compaction_prompt
-            .message_index
-            .iter()
-            .find(|entry| entry.sequence > drop_through_seq)
-            .map(|entry| entry.sequence);
+        let first_retained_seq = if mode == LoopCompactionMode::Fresh {
+            state
+                .compaction_prompt
+                .message_index
+                .iter()
+                .find(|entry| entry.sequence > drop_through_seq)
+                .map(|entry| entry.sequence)
+        } else {
+            None
+        };
         let compaction_request = LoopCompactionRequest {
             task_id,
             thread_id: self.ctx.host.run_context().thread_id.clone(),

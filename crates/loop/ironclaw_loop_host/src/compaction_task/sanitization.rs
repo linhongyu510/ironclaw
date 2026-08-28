@@ -7,12 +7,21 @@ use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
+// The canonical 128-message context window may additionally pin the accepted
+// user task, so a valid compaction range can contain 129 transcript messages.
+const MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES: usize = 129;
+const MAX_UNTRUNCATED_TOTAL_MESSAGES: usize = 257;
+const MAX_UNTRUNCATED_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct SanitizedContent {
     pub(super) content: String,
     pub(super) redacted_leak_count: u32,
 }
 
+pub(super) struct PreTruncationSanitizedMessages {
+    pub(super) messages: Vec<ValidatedCompactionMessage>,
+    pub(super) redacted_leak_count: u32,
+}
 struct LeakRedaction {
     content: Option<String>,
     count: u32,
@@ -95,15 +104,80 @@ impl<'a> CompactionSanitizer<'a> {
         })
     }
 
-    pub(super) fn validate_unredacted_message_boundaries(
+    pub(super) fn sanitize_messages_before_truncation(
+        &self,
+        messages: &[ValidatedCompactionMessage],
+    ) -> Result<PreTruncationSanitizedMessages, CompactionError> {
+        self.validate_unredacted_message_boundaries(messages)?;
+        let mut sanitized_messages = Vec::new();
+        sanitized_messages
+            .try_reserve_exact(messages.len())
+            .map_err(|error| {
+                tracing::debug!(%error, "compaction pre-truncation message allocation failed");
+                CompactionError::LeakRedactionFailed
+            })?;
+        let mut redacted_leak_count = 0_u32;
+        for message in messages {
+            let redaction = self.redact_leaks(&message.body)?;
+            redacted_leak_count = redacted_leak_count
+                .checked_add(redaction.count)
+                .ok_or(CompactionError::LeakRedactionFailed)?;
+            let body = redaction.content.unwrap_or_else(|| message.body.clone());
+            if redaction.count > 0 && !self.injection_scanner.scan_injection(&body).is_empty() {
+                return Err(CompactionError::InjectionDetected);
+            }
+            sanitized_messages.push(ValidatedCompactionMessage {
+                sequence: message.sequence,
+                kind: message.kind,
+                body,
+            });
+        }
+        Ok(PreTruncationSanitizedMessages {
+            messages: sanitized_messages,
+            redacted_leak_count,
+        })
+    }
+
+    fn validate_unredacted_message_boundaries(
         &self,
         messages: &[ValidatedCompactionMessage],
     ) -> Result<(), CompactionError> {
+        let transcript_message_count = messages
+            .iter()
+            .filter(|message| message.kind != MessageKind::Summary)
+            .count();
+        if transcript_message_count > MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES {
+            return Err(CompactionError::MessageCountExceeded {
+                cap: MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES,
+                observed: transcript_message_count,
+            });
+        }
+        if messages.len() > MAX_UNTRUNCATED_TOTAL_MESSAGES {
+            return Err(CompactionError::MessageCountExceeded {
+                cap: MAX_UNTRUNCATED_TOTAL_MESSAGES,
+                observed: messages.len(),
+            });
+        }
+        let validation_cap = messages.iter().try_fold(0_usize, |total, message| {
+            let observed_bytes = total
+                .checked_add(message.body.len())
+                .and_then(|bytes| bytes.checked_add(1))
+                .ok_or(CompactionError::InputTooLarge {
+                    cap: MAX_UNTRUNCATED_COMPACTION_BYTES,
+                    observed_bytes: usize::MAX,
+                })?;
+            if observed_bytes > MAX_UNTRUNCATED_COMPACTION_BYTES {
+                return Err(CompactionError::InputTooLarge {
+                    cap: MAX_UNTRUNCATED_COMPACTION_BYTES,
+                    observed_bytes,
+                });
+            }
+            Ok(observed_bytes)
+        })?;
+
         // Inspect complete durable bodies before summarizer-only truncation.
         // Raw text is the trust boundary; XML escaping happens only after the
-        // retained fragment is bounded. Avoid escaping the full durable input:
-        // that could allocate up to five extra bytes per source byte for text
-        // that will never reach inference.
+        // retained fragment is bounded.
         if let [message] = messages {
             if !self
                 .injection_scanner
@@ -121,12 +195,6 @@ impl<'a> CompactionSanitizer<'a> {
             );
         }
 
-        let validation_cap = messages.iter().try_fold(0_usize, |total, message| {
-            total
-                .checked_add(message.body.len())
-                .and_then(|bytes| bytes.checked_add(1))
-                .ok_or(CompactionError::LeakRedactionFailed)
-        })?;
         let mut content = String::new();
         content.try_reserve_exact(validation_cap).map_err(|error| {
             tracing::debug!(%error, "compaction full-body validation allocation failed");

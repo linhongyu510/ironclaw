@@ -1349,6 +1349,7 @@ async fn compaction_accepts_complete_turn_prefix_before_retained_user_boundary()
         .await
         .expect("a complete turn may be summarized before the next user boundary");
 
+    assert!(inference.last_input().contains("old user"));
     assert!(inference.last_input().contains("old answer"));
     assert!(!inference.last_input().contains("retained user"));
 }
@@ -1530,6 +1531,83 @@ async fn compaction_task_truncates_oversized_message_before_inference() {
         .expect("oversized input should produce typed truncation evidence");
     assert_eq!(truncation.message_count, 1);
     assert!(truncation.omitted_bytes > 0);
+}
+#[tokio::test]
+async fn compaction_task_redacts_full_credential_before_truncation_splits_it() {
+    const TRUNCATION_MARKER: &str = "\n[... omitted oversized message bytes ...]\n";
+    const MESSAGE_BUDGET: usize = 32 * 1024;
+    const CREDENTIAL: &str = "SECRET_TOKEN";
+    let retained_head_bytes = (MESSAGE_BUDGET - TRUNCATION_MARKER.len()) / 2;
+    let oversized = format!(
+        "{}{CREDENTIAL}{}",
+        "x".repeat(retained_head_bytes - CREDENTIAL.len() + 1),
+        "y".repeat(40 * 1024)
+    );
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user(&oversized).await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(ActionTokenLeakScanner::new(LeakAction::Redact)),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("credential crossing the truncation boundary must be redacted");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+
+    assert!(!inference.last_input().contains("SECRET"));
+    assert!(inference.last_input().contains("[REDACTED]"));
+    assert_eq!(response.redacted_leak_count, 1);
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_unbounded_original_input_before_scanning() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user(&"x".repeat(16 * 1024 * 1024 + 1)).await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("unbounded original input must fail before scanning or inference");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_unbounded_original_message_count() {
+    let fixture = CompactionFixture::new().await;
+    for index in 0..130 {
+        fixture.append_user(&format!("message {index}")).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(130))
+        .await
+        .expect_err("unbounded original message count must fail before inference");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    assert!(inference.last_input().is_empty());
 }
 
 #[tokio::test]

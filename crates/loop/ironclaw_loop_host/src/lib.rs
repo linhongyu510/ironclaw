@@ -3410,15 +3410,30 @@ fn newest_context_truncation(
 ) -> Option<LoopContextWindowTruncation> {
     match (left, right) {
         (Some(left), Some(right)) => {
-            if left.omitted_through_sequence >= right.omitted_through_sequence {
-                Some(left)
-            } else {
-                Some(right)
+            let left_eligible = context_truncation_is_compactable(&left);
+            let right_eligible = context_truncation_is_compactable(&right);
+            match (left_eligible, right_eligible) {
+                (true, false) => Some(left),
+                (false, true) => Some(right),
+                (true, true) | (false, false) => {
+                    if left.omitted_through_sequence >= right.omitted_through_sequence {
+                        Some(left)
+                    } else {
+                        Some(right)
+                    }
+                }
             }
         }
         (Some(truncation), None) | (None, Some(truncation)) => Some(truncation),
         (None, None) => None,
     }
+}
+
+fn context_truncation_is_compactable(truncation: &LoopContextWindowTruncation) -> bool {
+    matches!(
+        truncation.omitted_through_kind,
+        LoopContextCompactionKind::User | LoopContextCompactionKind::ToolResult
+    )
 }
 
 fn context_message_to_compaction_metadata(
@@ -3730,6 +3745,40 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn truncation_merge_preserves_earlier_compactable_watermark() {
+        let tool_result = LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        };
+        let later_assistant = LoopContextWindowTruncation {
+            omitted_through_sequence: 4,
+            omitted_through_kind: LoopContextCompactionKind::Assistant,
+        };
+
+        assert_eq!(
+            newest_context_truncation(Some(tool_result.clone()), Some(later_assistant)),
+            Some(tool_result)
+        );
+    }
+
+    #[test]
+    fn truncation_merge_uses_newest_when_eligibility_matches() {
+        let earlier = LoopContextWindowTruncation {
+            omitted_through_sequence: 3,
+            omitted_through_kind: LoopContextCompactionKind::ToolResult,
+        };
+        let later = LoopContextWindowTruncation {
+            omitted_through_sequence: 5,
+            omitted_through_kind: LoopContextCompactionKind::User,
+        };
+
+        assert_eq!(
+            newest_context_truncation(Some(earlier), Some(later.clone())),
+            Some(later)
+        );
+    }
 
     struct BlockingPromptDiagnosticSink {
         calls: std::sync::atomic::AtomicUsize,
