@@ -1812,10 +1812,13 @@ async fn compaction_task_rejects_envelope_only_overflow_before_inference() {
         fixture.append_user("").await;
     }
     let inference = Arc::new(CapturingInference::new("summary"));
+    let scanners = Arc::new(CountingCleanScanners::default());
+    let injection_scanner: Arc<dyn InjectionScanner> = scanners.clone();
+    let leak_scanner: Arc<dyn LeakScanner> = scanners.clone();
     let port = fixture.port_with_inference(
         inference.clone(),
-        Arc::new(CleanInjectionScanner),
-        Arc::new(CleanLeakScanner),
+        injection_scanner,
+        leak_scanner,
         fixture.scope.clone(),
     );
 
@@ -1826,6 +1829,8 @@ async fn compaction_task_rejects_envelope_only_overflow_before_inference() {
 
     assert!(matches!(error, LoopCompactionError::InputTooLarge));
     assert!(inference.last_input().is_empty());
+    assert_eq!(scanners.injection_scans(), 0);
+    assert_eq!(scanners.leak_scans(), 0);
 }
 
 #[tokio::test]
@@ -2753,6 +2758,40 @@ struct CleanLeakScanner;
 
 impl LeakScanner for CleanLeakScanner {
     fn scan_leaks(&self, _content: &str) -> LeakScanResult {
+        LeakScanResult {
+            matches: Vec::new(),
+            should_block: false,
+            redacted_content: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingCleanScanners {
+    injection_scans: AtomicUsize,
+    leak_scans: AtomicUsize,
+}
+
+impl CountingCleanScanners {
+    fn injection_scans(&self) -> usize {
+        self.injection_scans.load(Ordering::SeqCst)
+    }
+
+    fn leak_scans(&self) -> usize {
+        self.leak_scans.load(Ordering::SeqCst)
+    }
+}
+
+impl InjectionScanner for CountingCleanScanners {
+    fn scan_injection(&self, _content: &str) -> Vec<InjectionWarning> {
+        self.injection_scans.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    }
+}
+
+impl LeakScanner for CountingCleanScanners {
+    fn scan_leaks(&self, _content: &str) -> LeakScanResult {
+        self.leak_scans.fetch_add(1, Ordering::SeqCst);
         LeakScanResult {
             matches: Vec::new(),
             should_block: false,

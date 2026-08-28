@@ -553,16 +553,11 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
-        let sanitizer = self.sanitizer();
-        let pre_truncation = sanitizer.sanitize_messages_before_truncation(&range.messages)?;
-        let message_count = pre_truncation.messages.len();
-        let envelope_budget = pre_truncation
-            .messages
-            .iter()
-            .try_fold(0_usize, |total, message| {
-                serialized_message_envelope_byte_len(message.sequence, message.kind)
-                    .and_then(|bytes| total.checked_add(bytes))
-            });
+        let message_count = range.messages.len();
+        let envelope_budget = range.messages.iter().try_fold(0_usize, |total, message| {
+            serialized_message_envelope_byte_len(message.sequence, message.kind)
+                .and_then(|bytes| total.checked_add(bytes))
+        });
         let Some(envelope_budget) = envelope_budget else {
             tracing::debug!(
                 message_count,
@@ -597,6 +592,11 @@ where
                 observed_bytes: envelope_budget,
             });
         }
+        // Envelope admission is metadata-only and must precede any allocation
+        // proportional to attacker-controlled message count. Admitted ranges
+        // still scan complete durable bodies before body truncation.
+        let sanitizer = self.sanitizer();
+        let pre_truncation = sanitizer.sanitize_messages_before_truncation(&range.messages)?;
         let aggregate_message_budget = self.max_input_bytes - envelope_budget;
         let per_message_budget = aggregate_message_budget
             .checked_div(message_count)
