@@ -2784,7 +2784,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_sandbox_profile_selects_docker_process_binding_when_required() {
+    fn local_sandbox_profile_builds_with_loop_worker_switch_off_and_on() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
             eprintln!(
                 "skipping Docker-backed sandbox profile test; set IRONCLAW_REQUIRE_DOCKER_TESTS=1 to require it"
@@ -2795,26 +2795,31 @@ regex_activation_enabled = false
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reborn_home = temp.path().join("reborn-home");
-        std::fs::create_dir_all(&reborn_home).expect("mkdir");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
-            None,
-            None,
-            Some("hosted-single-tenant-volume-sandboxed".into()),
-        )
-        .expect("boot config");
+        for value in ["false", "true"] {
+            let flag = EnvGuard::set(SANDBOX_LOOP_WORKER_ENV, value);
+            let temp = tempfile::tempdir().expect("tempdir");
+            let reborn_home = temp.path().join("reborn-home");
+            std::fs::create_dir_all(&reborn_home).expect("mkdir");
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(reborn_home.into_os_string()),
+                None,
+                None,
+                Some("hosted-single-tenant-volume-sandboxed".into()),
+            )
+            .expect("boot config");
 
-        let runtime_input =
-            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
-        let services = runtime_input.services.expect("services input");
-        let policy = services.runtime_policy().expect("runtime policy");
-        assert_eq!(
-            services.profile(),
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-        );
-        assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+            let runtime_input =
+                build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+            let services = runtime_input.services.expect("services input");
+            let policy = services.runtime_policy().expect("runtime policy");
+            assert_eq!(
+                services.profile(),
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+            );
+            assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+            drop(services);
+            drop(flag);
+        }
     }
 
     #[test]

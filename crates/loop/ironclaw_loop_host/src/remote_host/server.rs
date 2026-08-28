@@ -2,9 +2,31 @@ use ironclaw_host_api::process::{RuntimeProcessError, SandboxLoopWorkerSession};
 use ironclaw_loop_contracts::*;
 
 use crate::remote_host::protocol::*;
+#[cfg(not(test))]
+const WORKER_CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const WORKER_CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_millis(25);
 
-fn process_error(_error: RuntimeProcessError) -> AgentLoopHostError {
-    tracing::debug!("sandbox loop worker transport failed");
+async fn cancellation_grace_elapsed(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn cancellation_grace_error() -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Cancelled,
+        "sandbox loop worker did not exit within the cancellation grace period",
+    )
+}
+
+fn process_error(error: RuntimeProcessError) -> AgentLoopHostError {
+    let error_kind = match error {
+        RuntimeProcessError::Timeout(_) => "timeout",
+        RuntimeProcessError::ExecutionFailed(_) => "execution_failed",
+    };
+    tracing::debug!(error_kind, "sandbox loop worker transport failed");
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,
         "sandbox loop worker transport failed",
@@ -277,6 +299,7 @@ pub async fn serve_loop_worker(
         .map_err(process_error)?;
 
     let mut cancellation_sent = false;
+    let mut cancellation_deadline = None;
     loop {
         let bytes = tokio::select! {
             frame = session.receive() => frame
@@ -293,7 +316,12 @@ pub async fn serve_loop_worker(
                     .await
                     .map_err(process_error)?;
                 cancellation_sent = true;
+                cancellation_deadline =
+                    Some(tokio::time::Instant::now() + WORKER_CANCELLATION_GRACE);
                 continue;
+            }
+            _ = cancellation_grace_elapsed(cancellation_deadline) => {
+                return Err(cancellation_grace_error());
             }
         };
         match decode::<WorkerFrame>(&bytes)? {
@@ -320,6 +348,11 @@ pub async fn serve_loop_worker(
                                 .await
                                 .map_err(process_error)?;
                             cancellation_sent = true;
+                            cancellation_deadline =
+                                Some(tokio::time::Instant::now() + WORKER_CANCELLATION_GRACE);
+                        }
+                        _ = cancellation_grace_elapsed(cancellation_deadline) => {
+                            return Err(cancellation_grace_error());
                         }
                     }
                 };

@@ -15,8 +15,8 @@ use ironclaw_host_api::process::{
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    CONTAINER_WORKSPACE_ROOT, RebornScopedSandboxCommandTransport, acquire_user_lifecycle_gate,
-    registry::SandboxActivityGuard, user_container, user_key::RebornSandboxUserKey,
+    CONTAINER_WORKSPACE_ROOT, RebornScopedSandboxCommandTransport, registry::SandboxActivityGuard,
+    user_container, user_key::RebornSandboxUserKey,
 };
 
 const FRAME_HEADER_BYTES: usize = std::mem::size_of::<u32>();
@@ -167,7 +167,8 @@ impl SandboxLoopWorkerTransport for RebornScopedSandboxCommandTransport {
             request.workdir.as_deref(),
         )?;
         let key = RebornSandboxUserKey::from_scope(&request.scope);
-        let workspace = self.prepare_workspace(&request.scope).await?;
+        let (workspace, activity, lifecycle) =
+            self.begin_user_workspace(&request.scope, &key).await?;
         let container_user = self
             .config
             .container_identity
@@ -184,14 +185,6 @@ impl SandboxLoopWorkerTransport for RebornScopedSandboxCommandTransport {
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
 
-        let activity = self.activity.begin(&key)?;
-        let gate = self.activity.gate(&key).ok_or_else(|| {
-            RuntimeProcessError::ExecutionFailed(
-                "sandbox user container lifecycle gate disappeared".to_string(),
-            )
-        })?;
-        let lifecycle =
-            acquire_user_lifecycle_gate(gate, super::USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
         let resolved_image = self.resolve_worker_image().await?;
         let bundle = match self.managed_egress.as_ref() {
             Some(managed) => Some(

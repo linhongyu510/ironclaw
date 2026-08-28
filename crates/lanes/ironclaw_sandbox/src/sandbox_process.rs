@@ -54,6 +54,7 @@ mod registry;
 mod user_key;
 
 use mounts::RebornSandboxMountSources;
+use registry::SandboxActivityGuard;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
@@ -593,6 +594,30 @@ impl RebornScopedSandboxCommandTransport {
     // the kernel wraps the transport (`UserSandboxProcessPort::new`), which
     // is the direction the port inversion requires.
 
+    async fn begin_user_workspace(
+        &self,
+        scope: &ResourceScope,
+        key: &RebornSandboxUserKey,
+    ) -> Result<
+        (
+            PathBuf,
+            SandboxActivityGuard,
+            tokio::sync::OwnedMutexGuard<()>,
+        ),
+        RuntimeProcessError,
+    > {
+        let activity = self.activity.begin(key)?;
+        let gate = self.activity.gate(key).ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox user container lifecycle gate disappeared".to_string(),
+            )
+        })?;
+        let lifecycle =
+            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let workspace = self.prepare_workspace(scope).await?;
+        Ok((workspace, activity, lifecycle))
+    }
+
     async fn prepare_workspace(
         &self,
         scope: &ResourceScope,
@@ -828,7 +853,8 @@ impl RebornScopedSandboxCommandTransport {
         }
         user_container::exec_helper_timeout_secs(timeout)?;
         validate_credential_env(&request.extra_env, &credentials)?;
-        let workspace = self.prepare_workspace(&request.scope).await?;
+        let (workspace, activity, user_lifecycle) =
+            self.begin_user_workspace(&request.scope, &user_key).await?;
         let container_user = self
             .config
             .container_identity
@@ -844,15 +870,7 @@ impl RebornScopedSandboxCommandTransport {
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
-        let activity = self.activity.begin(&user_key)?;
-        let gate = self.activity.gate(&user_key).ok_or_else(|| {
-            RuntimeProcessError::ExecutionFailed(
-                "sandbox user container lifecycle gate disappeared".to_string(),
-            )
-        })?;
         let resolved_image = self.resolve_worker_image().await?;
-        let user_lifecycle =
-            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
         let mut credential_cleanup =
             CredentialCleanupGuard::new(self.docker.clone(), user_lifecycle);
         let bundle = match self.managed_egress.as_ref() {
@@ -1202,7 +1220,7 @@ mod tests {
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
         action::{NetworkPolicy, NetworkTargetPattern},
-        ids::{TenantId, UserId},
+        ids::UserId,
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
@@ -1409,22 +1427,27 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let legacy_root = temp.path().join("legacy");
         let canonical_root = temp.path().join("workspaces");
-        let key = RebornSandboxUserKey::from_tenant_user(
-            &TenantId::new("tenant").expect("tenant"),
-            &UserId::new("user").expect("user"),
-        );
+        let scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&scope);
         let legacy = key.legacy_workspace_path(&legacy_root);
         std::fs::create_dir_all(&legacy).expect("legacy workspace");
         std::fs::write(legacy.join("proof.txt"), "preserved").expect("legacy file");
-        let canonical = key.workspace_path(&canonical_root);
+        let transport = test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root.clone())
+                .with_legacy_workspace_root(legacy_root),
+        );
 
-        RebornScopedSandboxCommandTransport::migrate_legacy_workspace(
-            &key,
-            &[legacy_root],
-            &canonical,
-        )
-        .await
-        .expect("legacy workspace migrates");
+        let (canonical, activity, lifecycle) = transport
+            .begin_user_workspace(&scope, &key)
+            .await
+            .expect("legacy workspace migrates through caller");
+        drop(lifecycle);
+        drop(activity);
 
         assert_eq!(
             std::fs::read_to_string(canonical.join("proof.txt")).expect("migrated file"),
@@ -1438,28 +1461,76 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let legacy_root = temp.path().join("legacy");
         let canonical_root = temp.path().join("workspaces");
-        let key = RebornSandboxUserKey::from_tenant_user(
-            &TenantId::new("tenant").expect("tenant"),
-            &UserId::new("user").expect("user"),
-        );
+        let scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&scope);
         let legacy = key.legacy_workspace_path(&legacy_root);
         let canonical = key.workspace_path(&canonical_root);
         std::fs::create_dir_all(&legacy).expect("legacy workspace");
         std::fs::create_dir_all(&canonical).expect("canonical workspace");
         std::fs::write(legacy.join("legacy.txt"), "legacy").expect("legacy file");
         std::fs::write(canonical.join("canonical.txt"), "canonical").expect("canonical file");
+        let transport = test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root).with_legacy_workspace_root(legacy_root),
+        );
 
-        let error = RebornScopedSandboxCommandTransport::migrate_legacy_workspace(
-            &key,
-            &[legacy_root],
-            &canonical,
-        )
-        .await
-        .expect_err("conflicting workspace trees fail closed");
+        let error = match transport.begin_user_workspace(&scope, &key).await {
+            Err(error) => error,
+            Ok(_) => panic!("conflicting workspace trees must fail closed"),
+        };
 
         assert!(error.to_string().contains("manual reconciliation"));
         assert!(legacy.join("legacy.txt").is_file());
         assert!(canonical.join("canonical.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_workspace_calls_serialize_legacy_migration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let first_scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let second_scope = ResourceScope::local_default(
+            first_scope.user_id.clone(),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&first_scope);
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::write(legacy.join("proof.txt"), "preserved").expect("legacy file");
+        let transport = Arc::new(test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root).with_legacy_workspace_root(legacy_root),
+        ));
+        let prepare = |scope: ResourceScope| {
+            let transport = Arc::clone(&transport);
+            async move {
+                let key = RebornSandboxUserKey::from_scope(&scope);
+                let (workspace, activity, lifecycle) =
+                    transport.begin_user_workspace(&scope, &key).await?;
+                drop(lifecycle);
+                drop(activity);
+                Ok::<_, RuntimeProcessError>(workspace)
+            }
+        };
+
+        let (first, second) = tokio::join!(prepare(first_scope), prepare(second_scope));
+        let first = first.expect("first workspace");
+        let second = second.expect("second workspace");
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first.join("proof.txt")).expect("migrated file"),
+            "preserved"
+        );
     }
 
     #[test]
