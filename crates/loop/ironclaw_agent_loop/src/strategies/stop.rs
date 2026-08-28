@@ -888,6 +888,9 @@ mod tests {
             assert_eq!(warning.phase, RepeatedCallWarningPhase::Rendered);
         }
 
+        /// Also proves Task 2's windowed check cannot fire here: it reads
+        /// seen_capability_output_digests, which this test never populates —
+        /// not a count comparison, an empty ring.
         #[tokio::test]
         async fn non_consecutive_repetition_does_not_arm_warning() {
             let strategy = DefaultStopConditionStrategy::default();
