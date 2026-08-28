@@ -458,6 +458,110 @@ async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
     );
 }
 
+/// Drives exactly `no_progress_threshold` completed capability observations
+/// with the same call signature and an identical `output_digest` through the
+/// full executor caller path. The first strike must give the run one more
+/// recovery turn (a model-visible warning), not a terminal failure, and
+/// `schedule_no_progress_warning` (turn_stop.rs) must reset
+/// `seen_capability_output_digests` so the reset is observable on the very
+/// next `BeforeModel` checkpoint. A second, SHORTER run of identical
+/// observations after the reset must stay below threshold and never
+/// terminate the run.
+#[tokio::test]
+async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() {
+    let threshold =
+        crate::strategies::DefaultStopConditionStrategy::default().no_progress_threshold;
+    let digest = ironclaw_loop_contracts::ContentDigest(31_337);
+
+    fn identical_batch_outcome(
+        digest: ironclaw_loop_contracts::ContentDigest,
+        ordinal: usize,
+    ) -> ironclaw_host_api::resolution::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                LoopResultRef::new(format!("result:no-progress-{ordinal}")).expect("valid"),
+                "identical output".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::NoChange,
+                false,
+                0,
+                Some(digest),
+                None,
+            )],
+            stopped_on_suspension: false,
+        }
+    }
+
+    let mut responses = Vec::new();
+    let mut batch_outcomes = Vec::new();
+    // Strike: exactly `threshold` completed observations, same signature
+    // (calls_response() always mints the same capability_id + "input:demo"
+    // signature) and the same output_digest.
+    for i in 0..threshold {
+        responses.push(calls_response());
+        batch_outcomes.push(identical_batch_outcome(digest, i));
+    }
+    // Recovery: fewer than `threshold` further identical observations after
+    // the reset — must stay advisory and never re-trip the check.
+    let recovery_count = threshold - 1;
+    for i in 0..recovery_count {
+        responses.push(calls_response());
+        batch_outcomes.push(identical_batch_outcome(digest, threshold + i));
+    }
+    responses.push(reply_response_with_text("done after recovery"));
+
+    let host = MockHost::new(responses).with_batch_outcomes(batch_outcomes);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the strike must grant one recovery turn and the shorter follow-up run must not \
+         re-trip the check; got {exit:?}"
+    );
+
+    // The strike must be a recovery warning, not a terminal failure: the very
+    // next model request (the recovery turn) carries the no-progress control
+    // message.
+    let recovery_request = host
+        .model_requests()
+        .get(threshold)
+        .expect("a recovery-turn model request after the strike")
+        .clone();
+    assert!(
+        recovery_request
+            .inline_messages
+            .iter()
+            .any(|message| message.safe_body.as_str().contains("no progress detected")),
+        "the recovery turn must carry the no-progress warning, not a silent continue"
+    );
+
+    // The BeforeModel checkpoint carrying the scheduled (not yet delivered)
+    // warning is the state right after `schedule_no_progress_warning` ran:
+    // seen_capability_output_digests must have been reset to empty there.
+    let post_strike_state = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .find(|state| state.terminal_warning_state.pending().is_some())
+        .expect("a BeforeModel checkpoint must carry the pending no-progress warning");
+    assert!(
+        post_strike_state.seen_capability_output_digests.is_empty(),
+        "schedule_no_progress_warning must reset seen_capability_output_digests on the first strike"
+    );
+}
+
 /// Byte-threshold trips through the full executor turn: capability batch returns
 /// a result whose `byte_len` exceeds `ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES`
 /// (32 000). PostCapabilityStage should set both compaction flags on the state
