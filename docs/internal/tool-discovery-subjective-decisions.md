@@ -77,6 +77,10 @@ especially for side-effecting tools.
 budgets while collecting the end-to-end comparison. Schemas are complete or
 omitted, never truncated.
 
+**Superseded by D21 (2026-08-28):** rank-1-only is now the production
+rule. D5's "several complete candidates" rationale doesn't survive contact
+with the first-look pager ceiling — see D21.
+
 **Why:** The per-schema ceiling guarantees one result cannot consume the whole
 response, while the total ceiling bounds context growth. The benchmark must
 decide whether the total should be reduced or biased more strongly toward rank
@@ -398,3 +402,42 @@ workflow mix.
 7.0s lower. Rejected because the completion gate failed and the median mixes
 very different provider-tail behavior across task classes. A latency win does
 not compensate for a lower end-to-end success rate.
+
+## D21 — tool_search's reply is sized to the first-look envelope, not an independent cap
+
+**Supersedes D5.** D5 kept several-complete-schemas as production policy
+and explicitly declined rank-1-only, reasoning that "ambiguous tasks may
+benefit from several complete candidates." That reasoning no longer holds:
+the spike proved the model never saw the array *at all* once it crossed
+the 3 KiB first-look pager — a second or third complete schema couldn't
+help an ambiguous task if the whole reply already collapsed to "omitted."
+Ranks 2-3 don't disappear, they just stop being pre-expanded: their
+compact entry (name/capability_id/description/required) is enough to pick
+one, and `tool_describe` returns its complete schema on demand.
+
+**Decision:** Delete D5's MAX_SEARCH_RESPONSE_BYTES (24 KiB) and
+MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT (8 KiB). Build the reply against the
+shared MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES ceiling instead: rank 1 complete
+when the reply carrying its own schema (with ranks 2-3's compact entries and
+the guidance field already in place) fits the ceiling minus a fixed 512 B
+wrapper allowance, ranks 2-3 always compact (default limit 3, was 10), a
+`guidance` field tells the model to invoke a complete rank 1, call
+`tool_describe` on a compact-but-matched rank 1, or stop searching when
+nothing matched. Whether rank 1 rides complete is a property of the WHOLE
+reply, not of rank 1's schema size alone — see the plan's Goal section for
+the exact arithmetic and why the three largest committed GitHub schemas
+(individually well under budget) still land compact together.
+
+**Why:** Spike measured a 16,066 B reply collapsed to 857 B model-visible
+content, entire results array omitted — D5's budgets never looked at the
+3 KiB pager ceiling that actually gates inline delivery.
+
+**Alternative rejected — lower D5's two numbers to fit under 3 KiB:** a second hand-tuned number duplicating the pager's real ceiling is the exact drift class that caused this bug.
+
+**Alternative rejected — admit as many complete schemas as fit under the shared ceiling, not just rank 1:** the D5-preserving middle ground the new ceiling itself makes possible. Rejected: (a) it re-opens, by intuition, the exact question D5 deferred to a benchmark — bias toward rank 1 or not — now under a ceiling ~8x tighter than D5's original 24 KiB; (b) a result's shape would then depend on a neighbour's schema size, making the reply non-deterministic from the model's own perspective and unauditable without re-serializing every candidate; (c) nothing is lost by not doing it — ranks 2-3 stay selectable from their compact entry and `tool_describe` returns the complete schema on demand.
+
+**Alternative rejected — inline no schema at all, for any rank (require `tool_describe` unconditionally):** the strictly simpler option this Decision must also name. Hermes (`hermes-agent`'s own `tool_search` bridge, a separate agent codebase, not this one) never inlines a parameters schema in a search reply for ANY rank — `tools/tool_search.py`'s `_format_search_hit` (~:852-859) returns only `name`/`source`/`source_name`/a 400-char-capped `description`; a schema reaches the model exclusively through a follow-up `tool_describe` call, for every rank including the top one. This is proven, working prior art at Hermes' own ~830-tool catalog scale, and it would eliminate this plan's entire cross-rank byte-coupling problem outright: with zero schemas inlined, rank 1's fate never depends on ranks 2-3's compact-entry sizes, because no rank's reply size depends on any schema at all. **Rejected, but only as a reasoned bet, not a measured one:** #7892's B1 documents a real production run where the model searched and then never invoked the matched tool — forcing every rank through a second mandatory `tool_describe` hop before it can act risks worsening exactly that failure mode, trading a byte-coupling problem for a steering problem. `TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE` plus an inline rank-1 schema exists specifically to let the model act immediately on the one candidate most likely to be right, rather than adding a hop between every search and every invocation. IronClaw does not have Hermes' benchmark data isolating whether zero-inline actually costs more invocations in practice than rank-1-complete does — this is this plan's own judgment call, stated as such.
+
+**Why a single spike, not a D13/D14-style benchmark, is enough evidence here:** D5's deferral and D13/D14's live-run comparisons are the right bar for a ranking-quality or latency tradeoff, where intuition alone cannot separate a real gain from noise. This is not that: the spike is a correctness defect (the model saw zero results, not a worse-ranked set), and a benchmark against a baseline that already delivers nothing would measure nothing — D5's own "never truncate mid-schema" invariant is exactly what the pager's `omitted` collapse violated, one layer downstream of D5's budgets. A correctness fix doesn't need the evidence bar for choosing among working alternatives. **Hermes' data does not settle this choice either way:** Hermes' own benchmark modes (`eager`/`bridge`/`listing`) vary how the *whole tool catalog* is presented, never how many results a single search reply returns or whether a result's schema is complete versus compact — it has no experimental axis comparable to rank-1-only versus several-complete-schemas, so it can neither validate nor refute D21's specific choice; it is cited above only for the zero-inline-schema alternative, which is a real, working design Hermes does run, not for the rank-count choice.
+
+**Divergent from Hermes, deliberately (see T5):** unlike this reply-shape choice, the #5712 byte-identical denied-vs-nonexistent invariant this plan preserves is a place IronClaw *knowingly* diverges from Hermes' prior art rather than following it — see T5 below for why.
