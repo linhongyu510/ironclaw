@@ -124,6 +124,10 @@ pub(crate) enum McpInvalidToolListCause {
     InvalidDescription,
     MissingInputSchema,
     UnsafeInputSchema,
+    /// The input schema exceeded a host SIZE bound (depth, node count, or string
+    /// length). A resource limit, not a trust violation, so it drops the single
+    /// oversized tool instead of rejecting the whole generation.
+    OversizeInputSchema,
     InvalidAnnotations,
     InvalidCursor,
     /// Retained for the diagnostic vocabulary, no longer raised: exhausting the page
@@ -148,6 +152,7 @@ impl McpInvalidToolListCause {
             Self::InvalidDescription => "invalid_description",
             Self::MissingInputSchema => "missing_input_schema",
             Self::UnsafeInputSchema => "unsafe_input_schema",
+            Self::OversizeInputSchema => "oversize_input_schema",
             Self::InvalidAnnotations => "invalid_annotations",
             Self::InvalidCursor => "invalid_cursor",
             Self::TooManyPages => "too_many_pages",

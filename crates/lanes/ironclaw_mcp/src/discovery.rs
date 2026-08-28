@@ -164,13 +164,30 @@ fn classify_discovered_tool(
         .filter(|schema| schema.is_object())
         .cloned()
         .ok_or(McpInvalidToolListCause::MissingInputSchema)?;
-    if !is_supported_mcp_input_schema(
+    // A schema can fail for two unrelated reasons, and they deserve different
+    // blast radii. An UNSAFE construct (control characters smuggled into a key or
+    // string) is a trust violation: the provider is not behaving, so the whole
+    // generation is rejected. Merely OVERSIZE (too deep, too many nodes, one long
+    // string) is a resource limit, exactly like the page/byte/tool ceilings -- and
+    // resource limits already truncate rather than discard. Collapsing both into
+    // one bool meant a single tool with a long parameter description destroyed an
+    // otherwise valid catalog: measured against a 47,337-tool endpoint, three tools
+    // carried a >16 KiB parameter description, the first at index 9,325, and their
+    // presence published ZERO of the other 47,334. The agent then ran 91 fruitless
+    // `tool_search` calls against an empty index.
+    match classify_mcp_input_schema(
         &input_schema,
         max_schema_depth,
         max_schema_nodes,
         max_schema_string_bytes,
     ) {
-        return Err(McpInvalidToolListCause::UnsafeInputSchema);
+        SchemaVerdict::Ok => {}
+        SchemaVerdict::Unsafe => return Err(McpInvalidToolListCause::UnsafeInputSchema),
+        SchemaVerdict::Oversize => {
+            return Ok(DiscoveredToolClassification::SkippedShapeViolation(
+                McpInvalidToolListCause::OversizeInputSchema,
+            ));
+        }
     }
     // Discovered tool names become Reborn capability suffixes, so discovery
     // skips unsupported names instead of normalizing them into potentially
@@ -207,12 +224,21 @@ fn classify_discovered_tool(
     ))
 }
 
-fn is_supported_mcp_input_schema(
+/// Why a schema was rejected. `Oversize` is a resource limit (drop this tool);
+/// `Unsafe` is a trust violation (reject the generation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaVerdict {
+    Ok,
+    Oversize,
+    Unsafe,
+}
+
+fn classify_mcp_input_schema(
     schema: &Value,
     max_depth: u8,
     max_nodes: usize,
     max_string_bytes: usize,
-) -> bool {
+) -> SchemaVerdict {
     let mut nodes = 0usize;
     validate_mcp_schema_value(
         schema,
@@ -231,41 +257,66 @@ fn validate_mcp_schema_value(
     max_nodes: usize,
     max_string_bytes: usize,
     nodes: &mut usize,
-) -> bool {
+) -> SchemaVerdict {
     if depth > max_depth {
-        return false;
+        return SchemaVerdict::Oversize;
     }
     *nodes = nodes.saturating_add(1);
     if *nodes > max_nodes {
-        return false;
+        return SchemaVerdict::Oversize;
     }
     match value {
+        // Unsafe is checked before size so a string that is both oversized and
+        // carries control characters still classifies as the trust violation --
+        // preserving the "security evaluated first" property of the original.
         Value::String(value) => {
-            value.len() <= max_string_bytes && !value.chars().any(is_unsupported_description_char)
+            if value.chars().any(is_unsupported_description_char) {
+                SchemaVerdict::Unsafe
+            } else if value.len() > max_string_bytes {
+                SchemaVerdict::Oversize
+            } else {
+                SchemaVerdict::Ok
+            }
         }
-        Value::Array(values) => values.iter().all(|value| {
-            validate_mcp_schema_value(
-                value,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                max_string_bytes,
-                nodes,
-            )
-        }),
-        Value::Object(values) => values.iter().all(|(key, value)| {
-            key.len() <= max_string_bytes
-                && !key.chars().any(is_unsupported_description_char)
-                && validate_mcp_schema_value(
+        Value::Array(values) => {
+            for value in values {
+                let verdict = validate_mcp_schema_value(
                     value,
                     depth + 1,
                     max_depth,
                     max_nodes,
                     max_string_bytes,
                     nodes,
-                )
-        }),
-        _ => true,
+                );
+                if verdict != SchemaVerdict::Ok {
+                    return verdict;
+                }
+            }
+            SchemaVerdict::Ok
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if key.chars().any(is_unsupported_description_char) {
+                    return SchemaVerdict::Unsafe;
+                }
+                if key.len() > max_string_bytes {
+                    return SchemaVerdict::Oversize;
+                }
+                let verdict = validate_mcp_schema_value(
+                    value,
+                    depth + 1,
+                    max_depth,
+                    max_nodes,
+                    max_string_bytes,
+                    nodes,
+                );
+                if verdict != SchemaVerdict::Ok {
+                    return verdict;
+                }
+            }
+            SchemaVerdict::Ok
+        }
+        _ => SchemaVerdict::Ok,
     }
 }
 
@@ -467,12 +518,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_rejects_unsafe_schema_strings_and_shape() {
+    fn parse_tools_list_result_rejects_schemas_carrying_control_characters() {
+        // A control character smuggled into a schema string or key is a TRUST
+        // violation, so it still rejects the whole generation.
         let cases = [
             valid_tool(
                 "control",
                 json!({"type": "object", "description": "bad\u{0008}schema"}),
             ),
+            valid_tool("control-key", json!({"type": "object", "ba\u{0008}d": "x"})),
+        ];
+
+        for tool in cases {
+            let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
+                .expect_err("control characters in a schema must fail");
+
+            assert_eq!(error, "mcp_invalid_tool_list: unsafe_input_schema");
+        }
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn parse_tools_list_result_skips_oversize_schemas_and_publishes_the_rest() {
+        // Size bounds are RESOURCE limits, not trust violations: an oversized
+        // schema drops that one tool and the rest of the catalog still
+        // publishes. Conflating these two was catastrophic at scale -- a
+        // 47,337-tool endpoint carried three tools with a >16 KiB parameter
+        // description (first at index 9,325) and published none of the other
+        // 47,334.
+        let oversize = [
             valid_tool(
                 "long-string",
                 json!({"type": "object", "description": "a".repeat(16 * 1024 + 1)}),
@@ -481,12 +555,41 @@ mod tests {
             valid_tool("too-many-nodes", wide_schema(8193)),
         ];
 
-        for tool in cases {
-            let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
-                .expect_err("unsafe schema strings and shape must fail");
+        for tool in oversize {
+            let name = tool["name"].as_str().expect("test tool name").to_string();
+            let tools = vec![
+                valid_tool("alpha", json!({"type": "object"})),
+                tool,
+                valid_tool("beta", json!({"type": "object"})),
+            ];
 
-            assert_eq!(error, "mcp_invalid_tool_list: unsafe_input_schema");
+            let published = parse_tools_list_result(&json!({ "tools": tools }), 128)
+                .expect("an oversized schema must not destroy its valid neighbors");
+
+            assert_eq!(published.len(), 2, "only the oversized tool is dropped");
+            assert!(
+                published.iter().all(|tool| tool.name != name),
+                "the oversized tool must not publish"
+            );
+            assert!(published.iter().any(|tool| tool.name == "alpha"));
+            assert!(published.iter().any(|tool| tool.name == "beta"));
         }
+        assert!(logs_contain("oversize_input_schema"));
+    }
+
+    #[test]
+    fn parse_tools_list_result_treats_oversize_and_unsafe_together_as_unsafe() {
+        // Fail closed when both apply: a string that is oversized AND carries a
+        // control character is a trust violation, not a resource limit, so the
+        // cosmetic size defect cannot downgrade it to a per-tool skip.
+        let mut payload = "a".repeat(16 * 1024 + 1);
+        payload.push('\u{0008}');
+        let tool = valid_tool("both", json!({"type": "object", "description": payload}));
+
+        let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
+            .expect_err("a control character must win over the size bound");
+
+        assert_eq!(error, "mcp_invalid_tool_list: unsafe_input_schema");
     }
 
     #[test]
@@ -526,15 +629,22 @@ mod tests {
 
     #[test]
     fn parse_tools_list_result_fails_whole_catalog_when_unsafe_schema_amid_valid_tools() {
-        // Security/bounds violations are never downgraded to a per-tool skip:
-        // a single over-deep (DoS-shaped) input schema fails the entire
-        // generation even when it is surrounded by otherwise-valid tools, so a
-        // hostile entry cannot smuggle itself in by riding a valid catalog.
+        // Trust violations are never downgraded to a per-tool skip: a schema
+        // carrying a control character fails the entire generation even when
+        // surrounded by otherwise-valid tools, so a hostile entry cannot
+        // smuggle itself in by riding a valid catalog. (Size violations are a
+        // resource limit and DO drop per-tool -- covered separately above.)
         let mut tools = vec![
             valid_tool("alpha", json!({"type": "object"})),
             valid_tool("beta", json!({"type": "object"})),
         ];
-        tools.insert(1, valid_tool("too-deep", nested_schema(64)));
+        tools.insert(
+            1,
+            valid_tool(
+                "control",
+                json!({"type": "object", "description": "bad\u{0008}schema"}),
+            ),
+        );
 
         let error = parse_tools_list_result(&json!({ "tools": tools }), 128)
             .expect_err("an unsafe schema must fail the whole catalog even with valid neighbors");
