@@ -131,7 +131,7 @@ candidate module.
 
 | Sub-owner | Owns | Never contains | Items |
 |---|---|---|---|
-| `session` | The session-bootstrap response and the feature flags it carries | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `WebUiV2ServerInfo`, `WEBUI_V2_PROTOCOL_VERSION`, `get_session`, `global_auto_approve_enabled` |
+| `session` | The session-bootstrap response, the feature flags it carries, and the demo-scope self-serve session-token mint | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `WebUiV2ServerInfo`, `WEBUI_V2_PROTOCOL_VERSION`, `get_session`, `global_auto_approve_enabled`, `mint_session_token` |
 | `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `session_channel_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
 | `notifications` | Durable notification-inbox listing and lifecycle mutations, including route-edge query/path parsing | External-channel preferences, enrollment, or delivery — those are `outbound` | `list_notifications`, `ListNotificationsQuery`, `NotificationPath`, `mark_notification_read`, `mark_all_notifications_read`, `archive_notification` |
 | `approvals` | Cross-thread pending-approval listing for the caller | Gate resolution (that is `runs`) | `list_pending_approvals`, `PendingApprovalsQuery` |
@@ -186,6 +186,7 @@ closed (`500`) if that layer is missing (locked by
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
+| `webui.v2.mint_session_token` | POST | `/api/webchat/v2/session/tokens` | — | `ProductSurface` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.list_notifications` | GET | `/api/webchat/v2/notifications` (`?limit&cursor`) | — | `ProductSurface` |

@@ -15,7 +15,7 @@
 // envelope mirrors `ProductSurfaceError`.
 
 const TOKEN_KEY = "ironclaw_token";
-const V2_BASE = "/api/webchat/v2";
+export const V2_BASE = "/api/webchat/v2";
 
 export class ApiError extends Error {
   constructor(message, { status, statusText, body, headers, payload } = {}) {

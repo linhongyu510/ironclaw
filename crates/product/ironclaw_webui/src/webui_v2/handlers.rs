@@ -138,6 +138,9 @@ use ironclaw_product_contracts::product_wire::{
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
 };
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenRequest, ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND,
+};
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
@@ -297,6 +300,26 @@ pub async fn get_session(
         attachments: attachment_capabilities(),
         session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
+}
+
+/// `POST /api/webchat/v2/session/tokens`
+///
+/// DEMO SCOPE: self-serve bearer mint for a client that cannot complete the
+/// browser session flow itself. Superseded by device-code pairing; delete
+/// with the Settings Devices tab. 503s when the deployment has no admin
+/// token minter wired.
+pub async fn mint_session_token(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ProductMintSessionTokenResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SESSION_TOKEN_MINT_COMMAND,
+        ProductMintSessionTokenRequest {},
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 async fn global_auto_approve_enabled(state: &WebUiV2State, caller: ProductSurfaceCaller) -> bool {

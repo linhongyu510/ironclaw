@@ -148,6 +148,9 @@ use ironclaw_product_contracts::product_wire::{
     RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
     RebornSuggestionStartResponse, RebornSuggestionsResponse,
 };
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND_ID,
+};
 use ironclaw_product_contracts::suggestions::{
     SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
     SUGGESTIONS_LIST_VIEW,
@@ -2030,6 +2033,21 @@ impl ProductSurface for StubServices {
             );
         }
 
+        if request.operation_id.as_str() == SESSION_TOKEN_MINT_COMMAND_ID {
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output = serde_json::to_value(ProductMintSessionTokenResponse {
+                token: "stub-session-token".to_string(),
+            })
+            .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
+
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -3471,6 +3489,37 @@ async fn list_pending_approvals_queries_the_flat_approvals_view() {
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0].view_id.as_str(), APPROVALS_PENDING_VIEW.id);
     assert_eq!(queries[0].params["limit"], 10);
+}
+
+#[tokio::test]
+async fn mint_session_token_dispatches_the_demo_scope_command() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/tokens")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert!(
+        body["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(
+        calls.last().expect("mint invoke recorded").0.as_str(),
+        SESSION_TOKEN_MINT_COMMAND_ID
+    );
 }
 
 #[tokio::test]

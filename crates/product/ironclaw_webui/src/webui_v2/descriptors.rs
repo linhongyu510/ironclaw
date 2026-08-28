@@ -31,6 +31,9 @@ use run_action_descriptors::{
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
+// DEMO SCOPE: self-serve session-token mint; superseded by device-code
+// pairing. Delete with the Settings Devices tab.
+pub const WEBUI_V2_ROUTE_MINT_SESSION_TOKEN: &str = "webui.v2.mint_session_token";
 pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_LIST_NOTIFICATIONS: &str = "webui.v2.list_notifications";
@@ -168,6 +171,7 @@ pub const WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION: &str =
     "/api/webchat/v2/notifications/{notification_id}/archive";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
+pub const WEBUI_V2_PATTERN_MINT_SESSION_TOKEN: &str = "/api/webchat/v2/session/tokens";
 pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
     "/api/webchat/v2/channels/{extension_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
@@ -333,6 +337,7 @@ pub fn webui_v2_routes_with_artifact_flags(
 ) -> Vec<IngressRouteDescriptor> {
     let mut routes = vec![
         get_session_descriptor(),
+        mint_session_token_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
         session_channel_message_descriptor(),
@@ -511,6 +516,22 @@ fn get_session_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
+        ),
+    )
+}
+
+// DEMO SCOPE: see the route id's doc comment. Delete with the Settings
+// Devices tab.
+fn mint_session_token_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_MINT_SESSION_TOKEN,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_MINT_SESSION_TOKEN,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            rate_limit_per_caller(5, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

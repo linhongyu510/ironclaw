@@ -14,8 +14,8 @@ use std::{
 };
 
 use ironclaw_product_contracts::admin_users::{
-    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminCreateUserFields,
-    AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminApiTokenMinter,
+    AdminCreateUserFields, AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::lifecycle_service::{
@@ -279,6 +279,9 @@ pub use ironclaw_product_contracts::product_wire::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
     SettingsToolPermissionState,
+};
+use ironclaw_product_contracts::session_tokens::{
+    ProductMintSessionTokenRequest, ProductMintSessionTokenResponse, SESSION_TOKEN_MINT_COMMAND_ID,
 };
 // A product-tier port gets exactly one import path (§11.2.4), so this is a
 // private `use` and never a `pub use` — callers name the contracts crate.
@@ -2545,6 +2548,11 @@ pub struct RebornServices<
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     ironhub_link: Option<Arc<dyn IronhubLinkService>>,
+    // DEMO SCOPE: self-serve bearer mint. Genuinely optional — wired only when
+    // the deployment has an admin token minter — mirrors the sibling optional
+    // `ironhub_link` field. Superseded by device-code pairing; delete with the
+    // Settings Devices tab.
+    session_token_minter: Option<Arc<dyn AdminApiTokenMinter>>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2646,6 +2654,7 @@ where
             skill_activation_clearer: None,
             llm_config: None,
             ironhub_link: None,
+            session_token_minter: None,
             active_model_reader: None,
             operator_approval_config: None,
             diagnostic_store: Arc::new(crate::inspector_store::InMemoryDiagnosticStore::default()),
@@ -2746,6 +2755,13 @@ where
         self
     }
 
+    // DEMO SCOPE: see the field's doc comment. Delete with the Settings
+    // Devices tab.
+    pub fn with_session_token_minter(mut self, minter: Arc<dyn AdminApiTokenMinter>) -> Self {
+        self.session_token_minter = Some(minter);
+        self
+    }
+
     pub async fn ironhub_deliver_install(
         &self,
         caller: ProductSurfaceCaller,
@@ -2759,6 +2775,32 @@ where
             .deliver_install(caller, request)
             .await
             .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    // DEMO SCOPE: see the `session_token_minter` field's doc comment. Delete
+    // with the Settings Devices tab.
+    async fn mint_session_token(
+        &self,
+        caller: ProductSurfaceCaller,
+        _request: ProductMintSessionTokenRequest,
+    ) -> Result<ProductMintSessionTokenResponse, ProductSurfaceError> {
+        let Some(minter) = &self.session_token_minter else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::Unavailable,
+                503,
+                false,
+            ));
+        };
+        let secret = minter
+            .mint(&caller.tenant_id, &caller.user_id)
+            .await
+            .map_err(|reason| {
+                tracing::warn!(%reason, "session token mint failed");
+                ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
+            })?;
+        Ok(ProductMintSessionTokenResponse {
+            token: secret.expose_secret().to_string(),
+        })
     }
 
     /// Wire the read-only port exposing the runtime's live active/default model
