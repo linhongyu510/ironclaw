@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use ironclaw_safety::{InjectionScanner, LeakScanner};
+use ironclaw_safety::{InjectionScanner, InjectionWarning, LeakScanner};
 use ironclaw_threads::MessageKind;
 
 use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
@@ -123,7 +123,7 @@ impl<'a> CompactionSanitizer<'a> {
                 .checked_add(redaction.count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
             let body = redaction.content.unwrap_or_else(|| message.body.clone());
-            if redaction.count > 0 && !self.injection_scanner.scan_injection(&body).is_empty() {
+            if redaction.count > 0 && self.contains_actionable_injection(&body) {
                 return Err(CompactionError::InjectionDetected);
             }
             sanitized_messages.push(ValidatedCompactionMessage {
@@ -179,11 +179,7 @@ impl<'a> CompactionSanitizer<'a> {
         // Raw text is the trust boundary; XML escaping happens only after the
         // retained fragment is bounded.
         if let [message] = messages {
-            if !self
-                .injection_scanner
-                .scan_injection(&message.body)
-                .is_empty()
-            {
+            if self.contains_actionable_injection(&message.body) {
                 return Err(CompactionError::InjectionDetected);
             }
             let scan = self.leak_scanner.scan_leaks(&message.body);
@@ -210,7 +206,7 @@ impl<'a> CompactionSanitizer<'a> {
             body_ranges.push(body_start..content.len());
         }
 
-        if !self.injection_scanner.scan_injection(&content).is_empty() {
+        if self.contains_actionable_injection(&content) {
             return Err(CompactionError::InjectionDetected);
         }
         let scan = self.leak_scanner.scan_leaks(&content);
@@ -223,18 +219,13 @@ impl<'a> CompactionSanitizer<'a> {
         max_escaped_bytes: usize,
     ) -> Result<SanitizedContent, CompactionError> {
         ensure_within_cap(content, max_escaped_bytes)?;
-        if !self.injection_scanner.scan_injection(content).is_empty() {
+        if self.contains_actionable_injection(content) {
             return Err(CompactionError::InjectionDetected);
         }
 
         let redaction = self.redact_leaks(content)?;
         let redacted_content = redaction.content.as_deref().unwrap_or(content);
-        if redaction.count > 0
-            && !self
-                .injection_scanner
-                .scan_injection(redacted_content)
-                .is_empty()
-        {
+        if redaction.count > 0 && self.contains_actionable_injection(redacted_content) {
             return Err(CompactionError::InjectionDetected);
         }
         let escaped = escape_xml_checked(redacted_content, max_escaped_bytes)?;
@@ -250,10 +241,7 @@ impl<'a> CompactionSanitizer<'a> {
         let escaped_content = escaped_redaction.content.unwrap_or(escaped);
         ensure_within_cap(&escaped_content, max_escaped_bytes)?;
         if (escape_transformed_content || escaped_redaction.count > 0)
-            && !self
-                .injection_scanner
-                .scan_injection(&escaped_content)
-                .is_empty()
+            && self.contains_actionable_injection(&escaped_content)
         {
             return Err(CompactionError::InjectionDetected);
         }
@@ -303,8 +291,15 @@ impl<'a> CompactionSanitizer<'a> {
         })
     }
 
+    fn contains_actionable_injection(&self, content: &str) -> bool {
+        self.injection_scanner
+            .scan_injection(content)
+            .iter()
+            .any(|warning| !is_embedded_role_label(content, warning))
+    }
+
     fn validate_serialized_content(&self, content: &str) -> Result<(), CompactionError> {
-        if !self.injection_scanner.scan_injection(content).is_empty() {
+        if self.contains_actionable_injection(content) {
             return Err(CompactionError::InjectionDetected);
         }
         if !self.leak_scanner.scan_leaks(content).is_clean() {
@@ -312,6 +307,25 @@ impl<'a> CompactionSanitizer<'a> {
         }
         Ok(())
     }
+}
+
+fn is_embedded_role_label(content: &str, warning: &InjectionWarning) -> bool {
+    if !matches!(
+        warning.pattern.to_ascii_lowercase().as_str(),
+        "system:" | "assistant:" | "user:"
+    ) || warning.location.start == 0
+        || warning.location.start > content.len()
+        || !content.is_char_boundary(warning.location.start)
+    {
+        return false;
+    }
+
+    content[..warning.location.start]
+        .chars()
+        .next_back()
+        .is_some_and(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/' | '.')
+        })
 }
 
 fn validate_matches_stay_within_bodies(

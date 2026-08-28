@@ -19,7 +19,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_safety::{
     InjectionScanner, InjectionWarning, LeakAction, LeakDetector, LeakMatch, LeakScanResult,
-    LeakScanner, LeakSeverity, Severity,
+    LeakScanner, LeakSeverity, Sanitizer, Severity,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -117,6 +117,25 @@ async fn compaction_port_rejects_injection_split_across_message_boundaries() {
         history.summary_artifacts.is_empty(),
         "split injection content must not be persisted"
     );
+}
+
+#[tokio::test]
+async fn compaction_port_allows_role_label_inside_a_path_segment() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("mapred/system: 3 files").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(Sanitizer::new()),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    port.compact_loop_context(fixture.request(1))
+        .await
+        .expect("a role label embedded in a path is not prompt injection");
+
+    assert!(inference.last_input().contains("mapred/system: 3 files"));
 }
 
 #[tokio::test]
@@ -1532,6 +1551,50 @@ async fn compaction_task_truncates_oversized_message_before_inference() {
     assert_eq!(truncation.message_count, 1);
     assert!(truncation.omitted_bytes > 0);
 }
+#[tokio::test]
+async fn compaction_task_budgets_cumulative_summary_and_multi_message_delta() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("initial context").await;
+    fixture
+        .port(
+            "s".repeat(100 * 1024),
+            Arc::new(CleanInjectionScanner),
+            Arc::new(CleanLeakScanner),
+        )
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("initial compaction should persist a large cumulative summary");
+    for index in 0..8 {
+        fixture
+            .append_user(&format!("message {index}: {}", "x".repeat(20 * 1024)))
+            .await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+    let mut request = fixture.request(9);
+    request.last_compacted_through_seq = Some(1);
+
+    let outcome = port
+        .compact_loop_context(request)
+        .await
+        .expect("the summary and aggregate delta should fit the summarizer budget");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+
+    assert!(inference.last_input().len() <= 256 * 1024);
+    let truncation = response
+        .input_truncation
+        .expect("aggregate truncation should produce typed evidence");
+    assert!(truncation.message_count > 0);
+    assert!(truncation.omitted_bytes > 0);
+}
+
 #[tokio::test]
 async fn compaction_task_redacts_full_credential_before_truncation_splits_it() {
     const TRUNCATION_MARKER: &str = "\n[... omitted oversized message bytes ...]\n";
