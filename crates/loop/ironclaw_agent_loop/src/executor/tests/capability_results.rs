@@ -458,6 +458,49 @@ async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
     );
 }
 
+/// Sibling of `completed_output_digest_is_recorded_for_the_no_progress_window`
+/// (same seam: `append_completed_capability_result` through the full executor
+/// caller path), but asserting the opposite final state — a genuinely distinct
+/// case from "digest IS recorded", so it stays a separate test rather than a
+/// branch inside that one: a completed result with `output_digest: None` must
+/// leave `seen_capability_output_digests` fully EMPTY, not merely excluded
+/// from a mixed set. `append_completed_capability_result`
+/// (capabilities.rs) only pushes into the ring `if let Some(output_digest) =
+/// result.output_digest`.
+#[tokio::test]
+async fn completed_result_without_output_digest_leaves_no_progress_window_empty() {
+    let result_ref = LoopResultRef::new("result:no-digest").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                result_ref,
+                "completed without digest".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                true,
+                0,
+                None,
+                None,
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+    assert!(matches!(exit, LoopExit::Completed(_)));
+
+    assert!(
+        final_staged_state(&host)
+            .seen_capability_output_digests
+            .is_empty(),
+        "a completed result with no output_digest must not populate the no-progress window"
+    );
+}
+
 /// Drives exactly `no_progress_threshold` completed capability observations
 /// with the same call signature and an identical `output_digest` through the
 /// full executor caller path. The first strike must give the run one more
