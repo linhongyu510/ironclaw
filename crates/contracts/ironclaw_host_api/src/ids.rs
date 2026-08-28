@@ -68,6 +68,18 @@ fn is_name_char(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
 }
 
+/// This caps each dot-segment at 128 bytes, but nothing here (nor
+/// [`CapabilityId::new`] below, which calls this per segment) caps a
+/// `CapabilityId`'s *total* length across all its segments. `ironclaw_loop_host`'s
+/// `tool_search` compact-entry reply budget (`bounded_search_output` in
+/// `tool_disclosure_port.rs`) is sized against today's observed real-corpus
+/// maximum `capability_id` length (39 B), not against any guarantee this
+/// function or `CapabilityId::new` enforces — a future segment- or
+/// total-length change here should re-check
+/// `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling` in
+/// that file before shipping, the same way `EXTERNAL_TOOL_CAPABILITY_PREFIX`
+/// above points a `ProviderToolName` change at `ironclaw_loop_host`'s
+/// `external_tool_capability_id`.
 fn validate_name_segment(kind: &'static str, value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {
         return Err(HostApiError::invalid_id(kind, value, "must not be empty"));
