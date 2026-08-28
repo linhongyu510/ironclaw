@@ -1026,7 +1026,7 @@ async fn compaction_port_rejects_serialized_output_cross_boundary_matches() {
 }
 
 #[tokio::test]
-async fn compaction_port_rejects_serialized_redaction_expansion_over_byte_cap() {
+async fn compaction_port_bounds_serialized_redaction_expansion_before_inference() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user(&"&".repeat(50_000)).await;
     let inference = Arc::new(CapturingInference::new("summary"));
@@ -1037,13 +1037,16 @@ async fn compaction_port_rejects_serialized_redaction_expansion_over_byte_cap() 
         fixture.scope.clone(),
     );
 
-    let error = port
+    let outcome = port
         .compact_loop_context(fixture.request(1))
         .await
-        .expect_err("serialized redaction expansion must preserve the byte cap");
+        .expect("serialized redaction expansion should be truncated to the byte cap");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
 
-    assert!(matches!(error, LoopCompactionError::InputTooLarge));
-    assert!(inference.last_input().is_empty());
+    assert!(inference.last_input().len() <= 256 * 1024);
+    assert!(response.input_truncation.is_some());
 }
 
 #[tokio::test]
@@ -1593,6 +1596,37 @@ async fn compaction_task_budgets_cumulative_summary_and_multi_message_delta() {
         .expect("aggregate truncation should produce typed evidence");
     assert!(truncation.message_count > 0);
     assert!(truncation.omitted_bytes > 0);
+}
+
+#[tokio::test]
+async fn compaction_task_budgets_xml_expansion_across_multiple_messages() {
+    let fixture = CompactionFixture::new().await;
+    for _ in 0..16 {
+        fixture.append_user(&"&".repeat(20 * 1024)).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(16))
+        .await
+        .expect("escaped aggregate input should fit the summarizer byte cap");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+
+    let input = inference.last_input();
+    assert!(input.len() <= 256 * 1024);
+    assert!(input.contains("&amp;"));
+    assert!(
+        response.input_truncation.is_some(),
+        "XML-expansion budgeting should return typed truncation evidence"
+    );
 }
 
 #[tokio::test]
