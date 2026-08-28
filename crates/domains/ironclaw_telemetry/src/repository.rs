@@ -469,7 +469,7 @@ fn exact_index(
 fn projection(
     family: &str,
     tenant: &str,
-    window: Option<DateTime<Utc>>,
+    window: DateTime<Utc>,
     tie: &str,
     provider: Option<&str>,
     model: Option<&str>,
@@ -480,17 +480,10 @@ fn projection(
         index_key("record_family")?,
         IndexValue::Text(family.to_owned()),
     );
-    if let Some(window) = window {
-        values.insert(
-            index_key("window_start")?,
-            IndexValue::Text(timestamp_text(window)),
-        );
-    } else {
-        values.insert(
-            index_key("occurred_at")?,
-            IndexValue::Text(timestamp_text(Utc::now())),
-        );
-    }
+    values.insert(
+        index_key("window_start")?,
+        IndexValue::Text(timestamp_text(window)),
+    );
     values.insert(index_key("tie_breaker")?, IndexValue::Text(tie.to_owned()));
     if let Some(provider) = provider {
         values.insert(

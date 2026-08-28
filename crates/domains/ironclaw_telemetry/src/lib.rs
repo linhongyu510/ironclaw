@@ -18,8 +18,6 @@ pub use buffered_recorder::{
     TelemetryWriteFailureClass,
 };
 pub use error::TelemetryRepositoryError;
-pub use ironclaw_telemetry_contracts::recorder::RecordOutcome;
-pub use ironclaw_telemetry_contracts::recorder::TelemetryRecorder;
 pub use records::{
     CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
     HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch, TelemetryBatchRowFamily,

@@ -290,7 +290,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         let automation_id = match AutomationId::new(event.trigger_id.to_string()) {
             Ok(automation_id) => automation_id,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::trigger_poller",
                     ?error,
                     trigger_id = %event.trigger_id,
@@ -307,7 +307,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         ) {
             Ok(observation) => observation,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     target: "ironclaw::reborn::trigger_poller",
                     ?error,
                     trigger_id = %event.trigger_id,

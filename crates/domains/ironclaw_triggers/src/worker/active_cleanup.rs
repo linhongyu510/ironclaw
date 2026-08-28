@@ -4,7 +4,7 @@ use crate::{
 };
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
-use super::{
+use crate::worker::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
     TriggerPollerWorker, TriggerRunTerminalSettlement, TriggerTerminalOutcome,
@@ -188,7 +188,7 @@ impl TriggerPollerWorker {
                                 })
                                 .await;
                         } else {
-                            tracing::warn!(
+                            tracing::debug!(
                                 tenant_id = %record.tenant_id,
                                 trigger_id = %record.trigger_id,
                                 fire_slot = %fire_slot,

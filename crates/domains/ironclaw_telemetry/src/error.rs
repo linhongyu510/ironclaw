@@ -83,8 +83,6 @@ pub enum TelemetryRepositoryError {
     },
 }
 
-// Task 1 retains typed decode constructors for the Task 3 filesystem reader.
-#[allow(dead_code)]
 impl TelemetryRepositoryError {
     pub(crate) fn invalid_cursor_encoding<E>(source: E) -> Self
     where
@@ -97,18 +95,6 @@ impl TelemetryRepositoryError {
 
     pub(crate) fn invalid_cursor_length(value: String, source: ParseIntError) -> Self {
         Self::InvalidCursorLength { value, source }
-    }
-
-    pub(crate) fn counter_conversion(
-        family: &'static str,
-        value: i64,
-        source: TryFromIntError,
-    ) -> Self {
-        Self::CounterConversion {
-            family,
-            value,
-            source,
-        }
     }
 
     pub(crate) fn invalid_persisted_field<E>(field: &'static str, value: String, source: E) -> Self

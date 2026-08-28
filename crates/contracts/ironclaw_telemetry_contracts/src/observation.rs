@@ -1,14 +1,8 @@
 //! Bounded, provider-neutral facts accepted by the telemetry collector.
 
 use chrono::{DateTime, Utc};
-pub use ironclaw_host_api::resource::ResourceScope;
-use ironclaw_host_api::{
-    ids::{TenantId, UserId},
-    turn::SanitizedFailure,
-};
-
-pub type CanonicalTenantId = TenantId;
-pub type CanonicalUserId = UserId;
+use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::{ids::UserId, turn::SanitizedFailure};
 
 /// Maximum UTF-8 byte length for identifiers introduced by telemetry.
 pub const MAX_TELEMETRY_IDENTIFIER_BYTES: usize = 128;
@@ -172,8 +166,6 @@ pub enum RunOutcome {
     Cancelled,
     RecoveryRequired,
 }
-
-pub type TerminalOutcome = RunOutcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AutomationKind {

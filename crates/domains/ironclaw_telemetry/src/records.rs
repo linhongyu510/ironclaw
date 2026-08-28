@@ -3,10 +3,10 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Timelike, Utc};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_telemetry_contracts::observation::{
-    AutomationKind, CanonicalTenantId as TenantId, CanonicalUserId as UserId, CollectorInstanceId,
-    EffectiveModelId, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
-    MAX_DURABLE_COUNTER, OriginKind, ProviderId, SubjectId,
+    AutomationKind, CollectorInstanceId, EffectiveModelId, LifecycleEventId, LifecycleEventKind,
+    LifecycleSubjectKind, MAX_DURABLE_COUNTER, OriginKind, ProviderId, SubjectId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +120,7 @@ pub struct HourlyUserActivity {
 }
 
 impl HourlyUserActivity {
+    // arch-exempt: too_many_args, record constructor preserves explicit hourly activity fields, plan #7961
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_id: TenantId,
@@ -269,6 +270,7 @@ pub struct HourlyModelUsage {
 }
 
 impl HourlyModelUsage {
+    // arch-exempt: too_many_args, record constructor preserves explicit model usage fields, plan #7961
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_id: TenantId,
@@ -450,6 +452,7 @@ pub struct HourlyAutomationUsage {
 }
 
 impl HourlyAutomationUsage {
+    // arch-exempt: too_many_args, record constructor preserves explicit automation fields, plan #7961
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_id: TenantId,
@@ -621,6 +624,7 @@ pub struct CollectorCoverage {
 }
 
 impl CollectorCoverage {
+    // arch-exempt: too_many_args, record constructor preserves explicit collector coverage fields, plan #7961
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_id: TenantId,

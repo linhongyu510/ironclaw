@@ -5,11 +5,11 @@ use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, IndexKey, IndexValue, ScopedFilesystem, VersionedEntry,
     cas_update,
 };
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_telemetry_contracts::observation::{
-    AutomationKind, CanonicalTenantId as TenantId, CanonicalUserId as UserId, CollectorInstanceId,
-    EffectiveModelId, FailureCategory, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
-    MAX_TELEMETRY_IDENTIFIER_BYTES, OriginKind, ProviderId, SubjectId,
+    AutomationKind, CollectorInstanceId, EffectiveModelId, FailureCategory, LifecycleEventId,
+    LifecycleEventKind, LifecycleSubjectKind, OriginKind, ProviderId, SubjectId,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, sync::Arc};
@@ -94,7 +94,10 @@ pub(super) fn parse_length_prefixed_segment(
     let length = length_text.parse::<usize>().map_err(|source| {
         TelemetryRepositoryError::invalid_cursor_length(length_text.to_owned(), source)
     })?;
-    if length == 0 || length > MAX_TELEMETRY_IDENTIFIER_BYTES * 2 {
+    // The tie-breaker is an encoded scoped path, not an identifier. Escaping
+    // valid 128-byte identifiers can expand a path beyond the identifier
+    // bound, so cap each segment by the already bounded whole-cursor budget.
+    if length == 0 || length > MAX_TELEMETRY_CURSOR_BYTES {
         return Err(TelemetryRepositoryError::InvalidCursor);
     }
     let value_start = colon + 1;
@@ -116,8 +119,12 @@ pub(super) fn checked_counter_sum(
     incoming: u64,
     family: &'static str,
 ) -> Result<(), TelemetryRepositoryError> {
-    let current = u64::try_from(current)
-        .map_err(|source| TelemetryRepositoryError::counter_conversion(family, current, source))?;
+    let current =
+        u64::try_from(current).map_err(|source| TelemetryRepositoryError::CounterConversion {
+            family,
+            value: current,
+            source,
+        })?;
     let total = current
         .checked_add(incoming)
         .ok_or(TelemetryRepositoryError::CounterOverflow { family })?;
@@ -721,6 +728,7 @@ pub(super) fn map_cas_error(
 
 // The codec callbacks stay explicit so each record family can supply its own
 // closed wire type without a second repository abstraction.
+// arch-exempt: too_many_args, additive update keeps storage callbacks and typed record inputs explicit, plan #7961
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn additive_update<F, W, R, M, C>(
     filesystem: &Arc<ScopedFilesystem<F>>,

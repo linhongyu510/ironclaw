@@ -192,7 +192,10 @@ where
     )
     .expect("coverage row");
     let batch = TelemetryBatch::new(
-        vec![activity("tenant-contract", "user-contract", hour)],
+        vec![
+            activity("tenant-contract", "user-contract", hour),
+            activity("tenant-contract", "user-contract-2", hour),
+        ],
         vec![model(
             "tenant-contract",
             "user-contract",
@@ -210,7 +213,7 @@ where
         .apply_batch(ScopedTelemetryBatch::new(tenant.clone(), batch))
         .await
         .expect("shared contract write");
-    assert_eq!(report.applied_record_count(), 6);
+    assert_eq!(report.applied_record_count(), 7);
     assert_eq!(report.failed_record_count(), 0);
 
     let page_request = request(
@@ -227,8 +230,37 @@ where
             .expect("activity read")
             .rows()
             .len(),
-        1
+        2
     );
+    let first_activity_page = repository
+        .read_activity_page(
+            &tenant,
+            &request(
+                hour,
+                hour + Duration::hours(1),
+                hour + Duration::hours(1),
+                1,
+                None,
+            ),
+        )
+        .await
+        .expect("first activity page");
+    assert_eq!(first_activity_page.rows().len(), 1);
+    let second_activity_page = repository
+        .read_activity_page(
+            &tenant,
+            &request(
+                hour,
+                hour + Duration::hours(1),
+                hour + Duration::hours(1),
+                1,
+                first_activity_page.next_cursor().map(str::to_owned),
+            ),
+        )
+        .await
+        .expect("second activity page");
+    assert_eq!(second_activity_page.rows().len(), 1);
+    assert!(second_activity_page.next_cursor().is_none());
     assert_eq!(
         repository
             .read_model_page(&tenant, &page_request)
@@ -278,7 +310,47 @@ where
         repository
             .read_activity_page(&other_tenant, &page_request)
             .await
-            .expect("other tenant read")
+            .expect("other tenant activity read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_model_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant model read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_failure_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant failure read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_automation_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant automation read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_lifecycle_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant lifecycle read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_coverage_page(&other_tenant, &page_request)
+            .await
+            .expect("other tenant coverage read")
             .rows()
             .is_empty()
     );
@@ -486,6 +558,67 @@ async fn repository_pages_half_open_ranges_and_model_filters() {
 }
 
 #[tokio::test]
+async fn model_pagination_accepts_a_maximum_length_valid_model_path() {
+    let (_, filesystem) = in_memory_filesystem();
+    let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
+    let tenant = scope("tenant-a", "user-a");
+    let hour = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test hour");
+    let long_user = "u".repeat(128);
+    let long_provider = "p".repeat(128);
+    let long_model = "m".repeat(128);
+    let next_model = "n".repeat(128);
+    let batch = TelemetryBatch::new(
+        vec![],
+        vec![
+            model("tenant-a", &long_user, hour, &long_provider, &long_model),
+            model("tenant-a", &long_user, hour, &long_provider, &next_model),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .expect("maximum length model batch");
+    repository
+        .apply_batch(ScopedTelemetryBatch::new(tenant.clone(), batch))
+        .await
+        .expect("maximum length model write");
+
+    let first_page = repository
+        .read_model_page(
+            &tenant,
+            &request(
+                hour,
+                hour + Duration::hours(1),
+                hour + Duration::hours(1),
+                1,
+                None,
+            ),
+        )
+        .await
+        .expect("first long model page");
+    assert_eq!(first_page.rows().len(), 1);
+    let second_page = repository
+        .read_model_page(
+            &tenant,
+            &request(
+                hour,
+                hour + Duration::hours(1),
+                hour + Duration::hours(1),
+                1,
+                first_page.next_cursor().map(str::to_owned),
+            ),
+        )
+        .await
+        .expect("second long model page");
+    assert_eq!(second_page.rows().len(), 1);
+    assert!(second_page.next_cursor().is_none());
+}
+
+#[tokio::test]
 async fn lifecycle_replay_is_idempotent_and_conflicts_fail_closed() {
     let (_, filesystem) = in_memory_filesystem();
     let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
@@ -680,6 +813,85 @@ async fn typed_reads_reject_malformed_json_even_with_valid_projection() {
         error,
         ironclaw_telemetry::TelemetryRepositoryError::Serialization { .. }
     ));
+}
+
+#[tokio::test]
+async fn simple_reads_reject_a_persisted_tenant_mismatch() {
+    let (root, filesystem) = in_memory_filesystem();
+    let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
+    let tenant = scope("tenant-a", "user-a");
+    let hour = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test hour");
+    repository
+        .apply_batch(ScopedTelemetryBatch::new(
+            tenant.clone(),
+            TelemetryBatch::new(
+                vec![],
+                vec![],
+                vec![
+                    HourlyRunFailure::new(
+                        TenantId::new("tenant-a").expect("tenant"),
+                        hour,
+                        UserId::new("user-a").expect("user"),
+                        FailureCategory::new("provider_error").expect("category"),
+                        1,
+                        hour,
+                        hour,
+                    )
+                    .expect("failure"),
+                ],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .expect("batch"),
+        ))
+        .await
+        .expect("write");
+
+    let prefix =
+        ScopedPath::new("/tenant-shared/telemetry/v0/hourly/failure").expect("failure prefix");
+    let stored = filesystem
+        .query(&tenant, &prefix, &Filter::All, Page::first(1))
+        .await
+        .expect("query stored failure")
+        .into_iter()
+        .next()
+        .expect("stored failure");
+    let mut body: serde_json::Value = serde_json::from_slice(&stored.entry.body).expect("json");
+    body["tenant_id"] = serde_json::Value::String("tenant-b".to_owned());
+    let entry = Entry {
+        body: serde_json::to_vec(&body).expect("encoded json"),
+        content_type: ContentType::json(),
+        kind: stored.entry.kind.clone(),
+        indexed: stored.entry.indexed.clone(),
+    };
+    root.put(&stored.path, entry, CasExpectation::Version(stored.version))
+        .await
+        .expect("corrupt tenant field");
+
+    let error = repository
+        .read_failure_page(
+            &tenant,
+            &request(
+                hour - Duration::hours(1),
+                hour + Duration::hours(1),
+                hour + Duration::hours(1),
+                100,
+                None,
+            ),
+        )
+        .await
+        .expect_err("tenant mismatch must fail closed");
+    assert!(
+        matches!(
+            &error,
+            ironclaw_telemetry::TelemetryRepositoryError::ScopeMismatch
+        ),
+        "unexpected tenant-mismatch error: {error:?}"
+    );
 }
 
 #[tokio::test]

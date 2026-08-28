@@ -1,19 +1,13 @@
 //! The single consumer that aggregates and persists telemetry drains.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ids::{InvocationId, UserId as WorkerUserId},
+    ids::{InvocationId, TenantId, UserId as WorkerUserId},
     resource::ResourceScope,
 };
-use ironclaw_telemetry_contracts::observation::{
-    CanonicalTenantId as TenantId, CollectorInstanceId, ScopedTelemetryObservation,
-};
+use ironclaw_telemetry_contracts::observation::{CollectorInstanceId, ScopedTelemetryObservation};
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -257,24 +251,6 @@ fn partition_drain(
         .collect()
 }
 
-fn observations_from_drains(drains: &[TenantDrain]) -> Vec<ScopedTelemetryObservation> {
-    drains
-        .iter()
-        .flat_map(|drain| drain.observations.iter().cloned())
-        .collect()
-}
-
-fn retain_coverage_for_drains(
-    pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
-    drains: &[TenantDrain],
-) {
-    let tenants = drains
-        .iter()
-        .map(|drain| drain.tenant_id.clone())
-        .collect::<BTreeSet<_>>();
-    pending_coverage.retain(|(tenant_id, _), _| tenants.contains(tenant_id));
-}
-
 fn batch_record_count(batch: &TelemetryBatch) -> usize {
     batch.record_count()
 }
@@ -415,13 +391,21 @@ async fn flush(
     clock: &dyn TelemetryClock,
     diagnostics: &DiagnosticsState,
 ) {
-    for (key, delta) in intake.take_drop_deltas() {
-        let Some(accumulator) = ensure_coverage_entry(&key, pending_coverage, diagnostics) else {
+    let drop_deltas: Vec<_> = intake.take_drop_deltas().into_iter().collect();
+    for (index, (key, delta)) in drop_deltas.iter().enumerate() {
+        let Some(accumulator) = ensure_coverage_entry(key, pending_coverage, diagnostics) else {
             continue;
         };
-        if accumulator.add_side_delta(delta).is_err() {
+        if accumulator.add_side_delta(*delta).is_err() {
             diagnostics.add_invalid(1);
             diagnostics.record_failure(crate::buffered_recorder::FailureClassCode::CounterOverflow);
+            intake.restore_drop_deltas(
+                drop_deltas[index..]
+                    .iter()
+                    .map(|(key, delta)| (key.clone(), *delta)),
+                diagnostics,
+            );
+            account_observations(intake, observations, diagnostics);
             return;
         }
     }
@@ -521,7 +505,8 @@ async fn flush(
     }
 
     let started = clock.now();
-    for (index, drain) in drains.iter().enumerate() {
+    let mut failed_tenants = Vec::new();
+    for drain in &drains {
         let expected_records = batch_record_count(&drain.batch);
         let result = repository
             .apply_batch(ScopedTelemetryBatch::new(
@@ -533,34 +518,33 @@ async fn flush(
             Ok(report) if report.is_complete_for(expected_records) => {}
             Ok(_) => {
                 diagnostics.record_partial_batch_failure();
-                let failed_drains = &drains[index..];
-                let failed_observations = observations_from_drains(failed_drains);
-                retain_coverage_for_drains(pending_coverage, failed_drains);
-                diagnostics.add_write_failed(failed_observations.len());
+                failed_tenants.push(drain.tenant_id.clone());
+                diagnostics.add_write_failed(drain.observations.len());
                 replace_with_write_failure_coverage(
-                    &failed_observations,
+                    &drain.tenant_id,
+                    &drain.observations,
                     pending_coverage,
                     diagnostics,
                 );
-                account_observations(intake, observations, diagnostics);
-                return;
             }
             Err(error) => {
                 let class = classify_repository_error(&error);
                 diagnostics.record_repository_failure(class);
-                let failed_drains = &drains[index..];
-                let failed_observations = observations_from_drains(failed_drains);
-                retain_coverage_for_drains(pending_coverage, failed_drains);
-                diagnostics.add_write_failed(failed_observations.len());
+                failed_tenants.push(drain.tenant_id.clone());
+                diagnostics.add_write_failed(drain.observations.len());
                 replace_with_write_failure_coverage(
-                    &failed_observations,
+                    &drain.tenant_id,
+                    &drain.observations,
                     pending_coverage,
                     diagnostics,
                 );
-                account_observations(intake, observations, diagnostics);
-                return;
             }
         }
+    }
+    pending_coverage.retain(|(tenant_id, _), _| failed_tenants.contains(tenant_id));
+    if !failed_tenants.is_empty() {
+        account_observations(intake, observations, diagnostics);
+        return;
     }
     let elapsed_ms = clock
         .now()
@@ -572,6 +556,7 @@ async fn flush(
 }
 
 fn replace_with_write_failure_coverage(
+    tenant_id: &TenantId,
     observations: &[ScopedTelemetryObservation],
     pending_coverage: &mut BTreeMap<(TenantId, DateTime<Utc>), CoverageAccumulator>,
     diagnostics: &DiagnosticsState,
@@ -581,22 +566,25 @@ fn replace_with_write_failure_coverage(
     // marker for each tenant/hour key touched by this attempted drain.
     let mut attempted_keys =
         BTreeMap::<(TenantId, DateTime<Utc>), (DateTime<Utc>, DateTime<Utc>, u64, u64)>::new();
-    for ((tenant_id, window_start), accumulator) in pending_coverage.iter() {
+    for ((pending_tenant_id, window_start), accumulator) in pending_coverage.iter() {
+        if pending_tenant_id != tenant_id {
+            continue;
+        }
         attempted_keys.insert(
-            (tenant_id.clone(), *window_start),
+            (pending_tenant_id.clone(), *window_start),
             (
                 accumulator.first_observed_at,
                 accumulator.last_observed_at,
-                accumulator.write_failed_observation_count.max(1),
+                accumulator.write_failed_observation_count,
                 0,
             ),
         );
     }
     for observation in observations {
-        let key = (
-            observation.scope().tenant_id.clone(),
-            floor_utc_hour(observation.occurred_at()),
-        );
+        if observation.scope().tenant_id != *tenant_id {
+            continue;
+        }
+        let key = (tenant_id.clone(), floor_utc_hour(observation.occurred_at()));
         let occurred_at = observation.occurred_at();
         if let Some((first_observed_at, last_observed_at, _, current_count)) =
             attempted_keys.get_mut(&key)
@@ -611,7 +599,7 @@ fn replace_with_write_failure_coverage(
         }
     }
 
-    pending_coverage.clear();
+    pending_coverage.retain(|(pending_tenant_id, _), _| pending_tenant_id != tenant_id);
     for (
         (tenant_id, window_start),
         (first_observed_at, last_observed_at, prior_count, current_count),
@@ -681,8 +669,25 @@ fn account_observations(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use ironclaw_telemetry_contracts::observation::{
+        ObservationContext, OriginKind, RunOutcome, RunSettledObservation, TelemetryObservation,
+    };
+    use ironclaw_telemetry_contracts::recorder::RecordOutcome;
 
     use super::*;
+    use crate::SystemTelemetryClock;
+
+    struct NeverSink;
+
+    #[async_trait::async_trait]
+    impl TelemetryBatchSink for NeverSink {
+        async fn apply_batch(
+            &self,
+            _batch: ScopedTelemetryBatch,
+        ) -> Result<crate::BatchApplyReport, crate::TelemetryRepositoryError> {
+            panic!("overflow path must return before writing");
+        }
+    }
 
     #[test]
     fn coverage_accumulator_rejects_counter_overflow_without_mutation() {
@@ -703,5 +708,80 @@ mod tests {
         };
         assert!(accumulator.add_side_delta(delta).is_err());
         assert_eq!(accumulator.accepted_observation_count, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn drop_delta_overflow_restores_remaining_deltas_and_accounts_observations() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let intake = Intake::new(sender);
+        let diagnostics = DiagnosticsState::default();
+        let tenant_id = TenantId::new("tenant-a").expect("valid tenant");
+        let user_id = WorkerUserId::new("user-a").expect("valid user");
+        let scope = ResourceScope {
+            tenant_id: tenant_id.clone(),
+            user_id,
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let occurred_at = Utc
+            .timestamp_opt(1_756_200_000, 0)
+            .single()
+            .expect("valid timestamp");
+        let observation = ScopedTelemetryObservation::new(
+            scope,
+            TelemetryObservation::RunSettled(
+                RunSettledObservation::new(
+                    ObservationContext::new(occurred_at),
+                    OriginKind::Human,
+                    RunOutcome::Completed,
+                    1,
+                    Some(0),
+                    None,
+                )
+                .expect("valid observation"),
+            ),
+        );
+        let key = TenantHourKey {
+            tenant_id: tenant_id.clone(),
+            window_start: floor_utc_hour(occurred_at),
+        };
+        assert_eq!(
+            intake.try_record(observation.clone(), key.clone(), &diagnostics, Ok(())),
+            RecordOutcome::Accepted
+        );
+        assert_eq!(
+            intake.try_record(observation.clone(), key.clone(), &diagnostics, Ok(())),
+            RecordOutcome::DroppedQueueFull
+        );
+        intake.notified().await;
+
+        let mut pending_coverage = BTreeMap::new();
+        let mut accumulator = CoverageAccumulator::from_observation(&observation);
+        accumulator.queue_full_drop_count = u64::MAX;
+        pending_coverage.insert((tenant_id, key.window_start), accumulator);
+        let clock = SystemTelemetryClock;
+
+        flush(
+            &[observation],
+            &mut pending_coverage,
+            &intake,
+            None,
+            &NeverSink,
+            &clock,
+            &diagnostics,
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_millis(10), intake.notified())
+            .await
+            .expect("restoring drop deltas must wake the idle worker");
+
+        let (_, pending_observation_count) = intake.take_unpersisted();
+        assert_eq!(pending_observation_count, 0);
+        let restored = intake.take_drop_deltas();
+        assert_eq!(restored[&key].queue_full_drop_count, 1);
     }
 }

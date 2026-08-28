@@ -9,8 +9,7 @@ use std::{
 use crate::repository::{ScopedTelemetryBatch, TelemetryBatchSink};
 use crate::{
     BatchApplyReport, BufferedRecorderConfig, BufferedTelemetryRecorder, RecordError,
-    RecordOutcome, TelemetryBatch, TelemetryClock, TelemetryRepositoryError,
-    TelemetryWriteFailureClass,
+    TelemetryBatch, TelemetryClock, TelemetryRepositoryError, TelemetryWriteFailureClass,
 };
 use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_host_api::{
@@ -23,6 +22,7 @@ use ironclaw_telemetry_contracts::observation::{
     ModelCallCompletedObservation, ModelUsage, ObservationContext, OriginKind, ProviderId,
     RunOutcome, RunSettledObservation, TelemetryObservation,
 };
+use ironclaw_telemetry_contracts::recorder::RecordOutcome;
 use ironclaw_telemetry_contracts::recorder::TelemetryRecorder;
 
 const START: i64 = 1_756_200_000;
@@ -398,7 +398,7 @@ async fn coverage_only_commit_then_error_retains_a_loss_marker() {
     assert_eq!(marker.queue_full_drop_count(), 0);
     assert_eq!(marker.closed_drop_count(), 0);
     assert_eq!(marker.invalid_drop_count(), 0);
-    assert_eq!(marker.write_failed_observation_count(), 1);
+    assert_eq!(marker.write_failed_observation_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -442,7 +442,7 @@ async fn repeated_marker_failure_retains_a_fresh_marker_for_retry() {
     assert_eq!(second_attempt.queue_full_drop_count(), 0);
     assert_eq!(second_attempt.closed_drop_count(), 0);
     assert_eq!(second_attempt.invalid_drop_count(), 0);
-    assert_eq!(second_attempt.write_failed_observation_count(), 1);
+    assert_eq!(second_attempt.write_failed_observation_count(), 0);
 
     lifecycle.shutdown().await;
     assert_eq!(repository.batches().len(), 3);
@@ -673,7 +673,7 @@ async fn partial_report_is_not_counted_as_a_successful_flush() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
+async fn tenant_fan_out_continues_after_failure_and_preserves_queued_scopes() {
     let repository = Arc::new(FakeRepository::default());
     repository.fail_on_write(2);
     let clock = Arc::new(FixedClock::new(timestamp(0)));
@@ -681,6 +681,7 @@ async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
         BufferedTelemetryRecorder::spawn_with_sink(config(), repository.clone(), clock);
     let (tenant_a_scope, tenant_a_observation) = completed_run_for_tenant_hour(0);
     let (tenant_b_scope, tenant_b_observation) = completed_run_for_tenant_hour(1);
+    let (tenant_c_scope, tenant_c_observation) = completed_run_for_tenant_hour(2);
 
     assert_eq!(
         recorder.try_record_scoped(tenant_a_scope.clone(), tenant_a_observation),
@@ -688,6 +689,10 @@ async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
     );
     assert_eq!(
         recorder.try_record_scoped(tenant_b_scope.clone(), tenant_b_observation),
+        RecordOutcome::Accepted
+    );
+    assert_eq!(
+        recorder.try_record_scoped(tenant_c_scope.clone(), tenant_c_observation),
         RecordOutcome::Accepted
     );
     tokio::task::yield_now().await;
@@ -699,11 +704,16 @@ async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
         tokio::task::yield_now().await;
     }
     assert_eq!(lifecycle.diagnostics().repository_failure_count(), 1);
-    assert_eq!(repository.scopes().len(), 1);
+    assert_eq!(repository.scopes().len(), 2);
     assert_eq!(repository.scopes()[0], tenant_a_scope);
+    assert_eq!(repository.scopes()[1], tenant_c_scope);
     assert_eq!(
         repository.batches()[0].activity()[0].tenant_id().as_str(),
         "tenant-0"
+    );
+    assert_eq!(
+        repository.batches()[1].activity()[0].tenant_id().as_str(),
+        "tenant-2"
     );
 
     assert_eq!(
@@ -722,19 +732,19 @@ async fn tenant_fan_out_stops_after_failure_and_preserves_queued_scopes() {
     );
     assert_eq!(
         repository.scopes().len(),
-        2,
+        3,
         "batches={:?}",
         repository.batches()
     );
-    assert_eq!(repository.scopes()[1], tenant_b_scope);
+    assert_eq!(repository.scopes()[2], tenant_b_scope);
     assert!(
-        repository.batches()[1]
+        repository.batches()[2]
             .activity()
             .iter()
             .all(|row| row.tenant_id().as_str() == "tenant-1")
     );
     assert_eq!(
-        repository.batches()[1]
+        repository.batches()[2]
             .collector_coverage()
             .iter()
             .map(|row| row.write_failed_observation_count())

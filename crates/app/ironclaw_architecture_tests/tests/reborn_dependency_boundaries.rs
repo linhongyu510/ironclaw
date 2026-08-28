@@ -1255,6 +1255,7 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
         "ironclaw_loop_contracts",
         "ironclaw_product_contracts",
         "ironclaw_prompt_envelope",
+        "ironclaw_telemetry_contracts",
     ];
 
     let metadata = cargo_metadata();

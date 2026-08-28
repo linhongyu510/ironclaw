@@ -236,7 +236,7 @@ fn telemetry_is_scoped_filesystem_backed_and_driver_free() {
         .map_or(manifest.as_str(), |(normal, _)| normal);
     let lib = std::fs::read_to_string(src.join("lib.rs"))
         .unwrap_or_else(|error| panic!("read telemetry lib.rs: {error}"));
-    assert!(manifest.contains("ironclaw_filesystem"));
+    assert!(normal_manifest.contains("ironclaw_filesystem"));
     assert!(!normal_manifest.contains("ironclaw_libsql_runtime"));
     assert!(!normal_manifest.contains("deadpool-postgres"));
     assert!(!normal_manifest.contains("tokio-postgres"));

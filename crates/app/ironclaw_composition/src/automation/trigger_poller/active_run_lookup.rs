@@ -441,7 +441,7 @@ mod tests {
             results[1],
             Ok(TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
-                ..
+                outcome: TriggerTerminalOutcome::Completed,
             })
         ));
         assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));

@@ -89,7 +89,7 @@ All gates live in `crates/app/ironclaw_architecture_tests` (run:
 - **Framework/driver deny**
   (`reborn_contracts_crates_hold_no_framework_dependencies`): no
   axum/hyper/tower/reqwest/tonic, no libsql/rusqlite/sqlx/tokio-postgres/
-  deadpool, no wasmtime — across all seven crates. The one carve-out is
+  deadpool, no wasmtime — across every contracts crate. The one carve-out is
   `ironclaw_loop_contracts`' `tokio` with the `rt` feature only, documented in
   its manifest and pinned in the test.
 - **Size ceilings** (`reborn_contracts_crates_carry_a_checked_size_ceiling`):

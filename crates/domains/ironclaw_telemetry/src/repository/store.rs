@@ -1,6 +1,29 @@
 //! Private filesystem persistence and ordered read implementation.
 
 use super::*;
+use ironclaw_host_api::ids::TenantId;
+
+trait TenantScoped {
+    fn tenant_id(&self) -> &TenantId;
+}
+
+impl TenantScoped for HourlyRunFailure {
+    fn tenant_id(&self) -> &TenantId {
+        HourlyRunFailure::tenant_id(self)
+    }
+}
+
+impl TenantScoped for HourlyAutomationUsage {
+    fn tenant_id(&self) -> &TenantId {
+        HourlyAutomationUsage::tenant_id(self)
+    }
+}
+
+impl TenantScoped for CollectorCoverage {
+    fn tenant_id(&self) -> &TenantId {
+        CollectorCoverage::tenant_id(self)
+    }
+}
 
 impl<F> FilesystemTelemetryRepository<F>
 where
@@ -98,7 +121,7 @@ where
             let indexed = projection(
                 FAMILY_ACTIVITY,
                 row.tenant_id().as_str(),
-                Some(row.window_start()),
+                row.window_start(),
                 path.as_str(),
                 None,
                 None,
@@ -129,7 +152,7 @@ where
             let indexed = projection(
                 FAMILY_MODEL,
                 row.tenant_id().as_str(),
-                Some(row.window_start()),
+                row.window_start(),
                 path.as_str(),
                 Some(row.provider_id().as_str()),
                 Some(row.effective_model_id().as_str()),
@@ -156,7 +179,7 @@ where
             let indexed = projection(
                 FAMILY_FAILURE,
                 row.tenant_id().as_str(),
-                Some(row.window_start()),
+                row.window_start(),
                 path.as_str(),
                 None,
                 None,
@@ -186,7 +209,7 @@ where
             let indexed = projection(
                 FAMILY_AUTOMATION,
                 row.tenant_id().as_str(),
-                Some(row.window_start()),
+                row.window_start(),
                 path.as_str(),
                 None,
                 None,
@@ -219,7 +242,7 @@ where
             let indexed = projection(
                 FAMILY_COVERAGE,
                 row.tenant_id().as_str(),
-                Some(row.window_start()),
+                row.window_start(),
                 path.as_str(),
                 None,
                 None,
@@ -490,7 +513,7 @@ where
                 projection(
                     FAMILY_ACTIVITY,
                     row.tenant_id().as_str(),
-                    Some(row.window_start()),
+                    row.window_start(),
                     path.as_str(),
                     None,
                     None,
@@ -498,19 +521,20 @@ where
             )?;
             rows.push(row);
         }
-        let next = has_more
-            .then(|| {
-                rows.last().and_then(|row| {
+        let next = if has_more {
+            rows.last()
+                .map(|row| {
                     path_for(
                         FAMILY_ACTIVITY,
                         row.window_start(),
                         &[row.user_id().as_str(), origin_text(row.origin_kind())],
                     )
-                    .ok()
                     .map(|path| encode_cursor(row.window_start(), &[path.as_str()]))
                 })
-            })
-            .flatten();
+                .transpose()?
+        } else {
+            None
+        };
         Ok(TelemetryPage::new(rows, next))
     }
 
@@ -547,7 +571,7 @@ where
                 projection(
                     FAMILY_MODEL,
                     row.tenant_id().as_str(),
-                    Some(row.window_start()),
+                    row.window_start(),
                     path.as_str(),
                     Some(row.provider_id().as_str()),
                     Some(row.effective_model_id().as_str()),
@@ -555,9 +579,9 @@ where
             )?;
             rows.push(row);
         }
-        let next = has_more
-            .then(|| {
-                rows.last().and_then(|row| {
+        let next = if has_more {
+            rows.last()
+                .map(|row| {
                     path_for(
                         FAMILY_MODEL,
                         row.window_start(),
@@ -567,11 +591,12 @@ where
                             row.effective_model_id().as_str(),
                         ],
                     )
-                    .ok()
                     .map(|path| encode_cursor(row.window_start(), &[path.as_str()]))
                 })
-            })
-            .flatten();
+                .transpose()?
+        } else {
+            None
+        };
         Ok(TelemetryPage::new(rows, next))
     }
 
@@ -589,6 +614,9 @@ where
                     serde_json::from_slice(&entry.entry.body)
                         .map_err(|source| json_error("decoding failure", source))?,
                 )?;
+                if row.tenant_id() != &scope.tenant_id {
+                    return Err(TelemetryRepositoryError::ScopeMismatch);
+                }
                 let path = path_for(
                     FAMILY_FAILURE,
                     row.window_start(),
@@ -597,7 +625,7 @@ where
                 let shape = projection(
                     FAMILY_FAILURE,
                     row.tenant_id().as_str(),
-                    Some(row.window_start()),
+                    row.window_start(),
                     path.as_str(),
                     None,
                     None,
@@ -631,6 +659,9 @@ where
                     serde_json::from_slice(&entry.entry.body)
                         .map_err(|source| json_error("decoding automation", source))?,
                 )?;
+                if row.tenant_id() != &scope.tenant_id {
+                    return Err(TelemetryRepositoryError::ScopeMismatch);
+                }
                 let path = path_for(
                     FAMILY_AUTOMATION,
                     row.window_start(),
@@ -642,7 +673,7 @@ where
                 let shape = projection(
                     FAMILY_AUTOMATION,
                     row.tenant_id().as_str(),
-                    Some(row.window_start()),
+                    row.window_start(),
                     path.as_str(),
                     None,
                     None,
@@ -687,11 +718,14 @@ where
                     serde_json::from_slice(&entry.entry.body)
                         .map_err(|source| json_error("decoding coverage", source))?,
                 )?;
+                if row.tenant_id() != &scope.tenant_id {
+                    return Err(TelemetryRepositoryError::ScopeMismatch);
+                }
                 let path = coverage_path(&row)?;
                 let shape = projection(
                     FAMILY_COVERAGE,
                     row.tenant_id().as_str(),
-                    Some(row.window_start()),
+                    row.window_start(),
                     path.as_str(),
                     None,
                     None,
@@ -715,6 +749,7 @@ where
         cursor: C,
     ) -> Result<TelemetryPage<T>, TelemetryRepositoryError>
     where
+        T: TenantScoped,
         D: Fn(&VersionedEntry) -> Result<T, TelemetryRepositoryError>,
         C: Fn(&T) -> Result<(DateTime<Utc>, String), TelemetryRepositoryError>,
     {
@@ -727,6 +762,9 @@ where
             .take(request.page_size)
             .map(|entry| decode(&entry))
             .collect::<Result<Vec<_>, _>>()?;
+        if rows.iter().any(|row| row.tenant_id() != &scope.tenant_id) {
+            return Err(TelemetryRepositoryError::ScopeMismatch);
+        }
         let next = has_more
             .then(|| rows.last().map(&cursor).transpose())
             .transpose()?

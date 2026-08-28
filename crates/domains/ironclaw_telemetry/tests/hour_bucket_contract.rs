@@ -298,6 +298,38 @@ fn aggregate_is_order_independent_and_reconciles_terminal_counts() {
 }
 
 #[test]
+fn aggregate_accumulates_failure_categories_across_origins() {
+    let failure = SanitizedFailure::new("model_unavailable").expect("sanitized category");
+    let human = scoped(TelemetryObservation::RunSettled(
+        RunSettledObservation::new(
+            context(at(2026, 8, 26, 10, 24, 0)),
+            OriginKind::Human,
+            RunOutcome::Failed,
+            20,
+            Some(0),
+            Some(failure.clone()),
+        )
+        .expect("valid human failure"),
+    ));
+    let automation = scoped(TelemetryObservation::RunSettled(
+        RunSettledObservation::new(
+            context(at(2026, 8, 26, 10, 25, 0)),
+            OriginKind::Automation,
+            RunOutcome::Failed,
+            30,
+            Some(0),
+            Some(failure),
+        )
+        .expect("valid automation failure"),
+    ));
+
+    let batch = aggregate_batch([human, automation]).expect("aggregate failures");
+
+    assert_eq!(batch.run_failures().len(), 1);
+    assert_eq!(batch.run_failures()[0].failure_count(), 2);
+}
+
+#[test]
 fn aggregate_rejects_sum_above_signed_bigint_maximum() {
     let observations = [
         completed_run(at(2026, 8, 26, 10, 0, 0), i64::MAX as u64),

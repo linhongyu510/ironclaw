@@ -19,7 +19,7 @@ crates/contracts/
 
 ## Role
 
-Contracts is the vocabulary tier: the one family every other family depends on, and which depends on nothing itself. A type earns a home here by passing a four-part test — it names a concept that crosses an authority, host, or product boundary; it is neutral with respect to vendor, runtime, storage, and deployment; it is needed by two or more consumers that must not import one another; and it carries no execution, persistence, policy engine, or workflow. Five kinds of vocabulary live here: the identity and authority primitives shared by the whole workspace (`ironclaw_host_api`, `ironclaw_common`); the untrusted-content fence every prompt-construction path wraps snippets with (`ironclaw_prompt_envelope`); and four purpose-built membranes for the loop tier, extension surface, product surface, and tenant telemetry (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`, `ironclaw_telemetry_contracts`). Nothing in this family runs, stores, or decides; it only names.
+Contracts is the vocabulary tier: every other family depends on it, and it has no dependencies outside the contracts family. A type earns a home here by passing a four-part test — it names a concept that crosses an authority, host, or product boundary; it is neutral with respect to vendor, runtime, storage, and deployment; it is needed by two or more consumers that must not import one another; and it carries no execution, persistence, policy engine, or workflow. Six kinds of vocabulary live here: the identity and authority primitives shared by the whole workspace (`ironclaw_host_api`, `ironclaw_common`); the untrusted-content fence every prompt-construction path wraps snippets with (`ironclaw_prompt_envelope`); and four purpose-built membranes for the loop tier, extension surface, product surface, and tenant telemetry (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`, `ironclaw_telemetry_contracts`). Nothing in this family runs, stores, or decides; it only names.
 
 ## Boundaries — what makes this family distinct
 
@@ -166,12 +166,12 @@ Contracts holds the sealed constructors for the `Authorized` witness, the privil
 ### `ironclaw_telemetry_contracts`
 
 - **Purpose:** provider-neutral tenant BI telemetry vocabulary and the recorder membrane.
-- **Owns:** typed tenant/user identity references, bounded model-safe observation dimensions, and the future recorder port. This initial crate is a documented shell; it contains no observation behavior.
+- **Owns:** typed tenant/user identity references, bounded model-safe observation dimensions, and the synchronous recorder port used by telemetry producers. The contract crate contains only vocabulary; recorder implementations remain in the telemetry domain.
 - **Never contains:** SQL, migrations, queues, aggregation, exporters, prompt/content payloads, runtime orchestration, or concrete database/framework types.
 - **Public surface:** telemetry observation and recorder shapes, with identity vocabulary imported from `ironclaw_host_api`.
 - **Depends on:** `ironclaw_host_api` only; no storage, HTTP, runtime, or framework dependency.
 - **Security & authority role:** neutral contract membrane; it grants no persistence or execution authority.
-- **Why a separate crate:** future telemetry producers and persistence/export adapters need a shared contract without importing one another or a storage owner.
+- **Why a separate crate:** telemetry producers and persistence/export adapters need a shared contract without importing one another or a storage owner.
 
 ## Family AGENTS.md requirements
 

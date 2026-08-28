@@ -11,10 +11,10 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use ironclaw_host_api::{ids::TenantId, resource::ResourceScope};
 use ironclaw_telemetry_contracts::{
     observation::{
-        CollectorInstanceId, MAX_DURABLE_COUNTER, ResourceScope, ScopedTelemetryObservation,
-        TelemetryObservation,
+        CollectorInstanceId, MAX_DURABLE_COUNTER, ScopedTelemetryObservation, TelemetryObservation,
     },
     recorder::{RecordOutcome, TelemetryRecorder},
 };
@@ -140,18 +140,23 @@ pub enum TelemetryWriteFailureClass {
     CollectorIdResolution = 8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum FailureClassCode {
-    StorageAdmission = 1,
-    StoragePoolAdmission = 2,
-    StorageOperation = 3,
-    CounterOverflow = 4,
-    InvalidRecord = 5,
-    InvalidData = 6,
-    ShutdownTimeout = 7,
-    CollectorIdResolution = 8,
+impl TelemetryWriteFailureClass {
+    const fn from_repr(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::StorageAdmission),
+            2 => Some(Self::StoragePoolAdmission),
+            3 => Some(Self::StorageOperation),
+            4 => Some(Self::CounterOverflow),
+            5 => Some(Self::InvalidRecord),
+            6 => Some(Self::InvalidData),
+            7 => Some(Self::ShutdownTimeout),
+            8 => Some(Self::CollectorIdResolution),
+            _ => None,
+        }
+    }
 }
+
+pub(crate) type FailureClassCode = TelemetryWriteFailureClass;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PreflightError {
@@ -307,17 +312,8 @@ impl Default for DiagnosticsState {
 
 impl DiagnosticsState {
     pub(crate) fn snapshot(&self) -> TelemetryDiagnostics {
-        let last_failure_class = match self.last_failure_class.load(Ordering::Relaxed) {
-            1 => Some(TelemetryWriteFailureClass::StorageAdmission),
-            2 => Some(TelemetryWriteFailureClass::StoragePoolAdmission),
-            3 => Some(TelemetryWriteFailureClass::StorageOperation),
-            4 => Some(TelemetryWriteFailureClass::CounterOverflow),
-            5 => Some(TelemetryWriteFailureClass::InvalidRecord),
-            6 => Some(TelemetryWriteFailureClass::InvalidData),
-            7 => Some(TelemetryWriteFailureClass::ShutdownTimeout),
-            8 => Some(TelemetryWriteFailureClass::CollectorIdResolution),
-            _ => None,
-        };
+        let last_failure_class =
+            TelemetryWriteFailureClass::from_repr(self.last_failure_class.load(Ordering::Relaxed));
         TelemetryDiagnostics {
             accepted_observation_count: self.accepted_observation_count.load(Ordering::Relaxed),
             queue_full_drop_count: self.queue_full_drop_count.load(Ordering::Relaxed),
@@ -445,7 +441,7 @@ fn checked_atomic_add(counter: &AtomicU64, amount: u64) -> Result<u64, u64> {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TenantHourKey {
-    pub(crate) tenant_id: ironclaw_telemetry_contracts::observation::CanonicalTenantId,
+    pub(crate) tenant_id: TenantId,
     pub(crate) window_start: DateTime<Utc>,
 }
 
@@ -514,6 +510,51 @@ impl CoverageSideAccumulator {
                 || delta.invalid_drop_count != 0
         });
         drops
+    }
+
+    fn restore_drop_delta(
+        &mut self,
+        key: TenantHourKey,
+        delta: CoverageSideDelta,
+    ) -> Result<(), ()> {
+        let Some(existing) = self.entries.get(&key) else {
+            if self.entries.len() >= MAX_COVERAGE_SIDE_KEYS {
+                return Err(());
+            }
+            self.entries.insert(key, delta);
+            return Ok(());
+        };
+        let queue_full_drop_count = existing
+            .queue_full_drop_count
+            .checked_add(delta.queue_full_drop_count)
+            .ok_or(())?;
+        let closed_drop_count = existing
+            .closed_drop_count
+            .checked_add(delta.closed_drop_count)
+            .ok_or(())?;
+        let invalid_drop_count = existing
+            .invalid_drop_count
+            .checked_add(delta.invalid_drop_count)
+            .ok_or(())?;
+        let first_observed_at = match (existing.first_observed_at, delta.first_observed_at) {
+            (Some(existing), Some(delta)) => Some(existing.min(delta)),
+            (Some(existing), None) => Some(existing),
+            (None, Some(delta)) => Some(delta),
+            (None, None) => None,
+        };
+        let last_observed_at = match (existing.last_observed_at, delta.last_observed_at) {
+            (Some(existing), Some(delta)) => Some(existing.max(delta)),
+            (Some(existing), None) => Some(existing),
+            (None, Some(delta)) => Some(delta),
+            (None, None) => None,
+        };
+        let existing = self.entries.get_mut(&key).ok_or(())?;
+        existing.queue_full_drop_count = queue_full_drop_count;
+        existing.closed_drop_count = closed_drop_count;
+        existing.invalid_drop_count = invalid_drop_count;
+        existing.first_observed_at = first_observed_at;
+        existing.last_observed_at = last_observed_at;
+        Ok(())
     }
 
     fn account_observations(
@@ -635,7 +676,7 @@ fn record_coverage_event(
 }
 
 impl Intake {
-    fn new(sender: mpsc::Sender<ScopedTelemetryObservation>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<ScopedTelemetryObservation>) -> Self {
         Self {
             state: Mutex::new(IntakeState {
                 sender,
@@ -667,6 +708,26 @@ impl Intake {
 
     pub(crate) fn take_drop_deltas(&self) -> BTreeMap<TenantHourKey, CoverageSideDelta> {
         self.lock().coverage.take_drop_deltas()
+    }
+
+    pub(crate) fn restore_drop_deltas(
+        &self,
+        deltas: impl IntoIterator<Item = (TenantHourKey, CoverageSideDelta)>,
+        diagnostics: &DiagnosticsState,
+    ) {
+        let mut state = self.lock();
+        let mut restored_any = false;
+        for (key, delta) in deltas {
+            if state.coverage.restore_drop_delta(key, delta).is_err() {
+                diagnostics.record_coverage_key_overflow();
+            } else {
+                restored_any = true;
+            }
+        }
+        drop(state);
+        if restored_any {
+            self.notify.notify_one();
+        }
     }
 
     pub(crate) fn account_observations(
@@ -1108,5 +1169,5 @@ mod tests {
 // the worker's exact call shape, but that seam is intentionally not a public
 // repository selector.
 #[cfg(test)]
-#[path = "buffered_recorder_contract.rs"]
+#[path = "buffered_recorder_contract_tests.rs"]
 mod buffered_recorder_contract;

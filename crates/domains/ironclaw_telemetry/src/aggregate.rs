@@ -3,9 +3,10 @@
 use std::{borrow::Borrow, collections::BTreeMap};
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_telemetry_contracts::observation::{
-    CanonicalTenantId as TenantId, CanonicalUserId as UserId, FailureCategory, LifecycleEventId,
-    MAX_DURABLE_COUNTER, RunOutcome, ScopedTelemetryObservation, TelemetryObservation,
+    FailureCategory, LifecycleEventId, MAX_DURABLE_COUNTER, RunOutcome, ScopedTelemetryObservation,
+    TelemetryObservation,
 };
 
 use crate::records::{
@@ -177,6 +178,44 @@ fn add_terminal_counter(
     }
 }
 
+fn accumulate_failure(
+    run_failures: &mut BTreeMap<FailureKey, FailureAccumulator>,
+    tenant_id: &TenantId,
+    window_start: DateTime<Utc>,
+    user_id: &UserId,
+    failure_category: &FailureCategory,
+    occurred_at: DateTime<Utc>,
+) -> Result<(), AggregationError> {
+    let key = FailureKey(
+        tenant_id.clone(),
+        window_start,
+        user_id.clone(),
+        failure_category.clone(),
+    );
+    if let Some(accumulator) = run_failures.get_mut(&key) {
+        checked_add(&mut accumulator.failure_count, 1, "failure_count")?;
+        update_range(
+            &mut accumulator.first_observed_at,
+            &mut accumulator.last_observed_at,
+            occurred_at,
+        );
+    } else {
+        run_failures.insert(
+            key,
+            FailureAccumulator {
+                tenant_id: tenant_id.clone(),
+                window_start,
+                user_id: user_id.clone(),
+                failure_category: failure_category.clone(),
+                failure_count: 1,
+                first_observed_at: occurred_at,
+                last_observed_at: occurred_at,
+            },
+        );
+    }
+    Ok(())
+}
+
 /// Return the exact UTC start of the hour containing timestamp.
 pub fn floor_utc_hour(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     match Utc
@@ -267,6 +306,17 @@ where
                     scope.user_id.clone(),
                     observation.origin(),
                 );
+                let window_start = key.1;
+                if let Some(failure) = observation.failure() {
+                    accumulate_failure(
+                        &mut run_failures,
+                        &scope.tenant_id,
+                        window_start,
+                        &scope.user_id,
+                        failure,
+                        observation.occurred_at(),
+                    )?;
+                }
                 if let Some(accumulator) = activity.get_mut(&key) {
                     checked_add(&mut accumulator.run_count, 1, "run_count")?;
                     add_terminal_counter(
@@ -305,40 +355,6 @@ where
                         &mut accumulator.last_observed_at,
                         observation.occurred_at(),
                     );
-                    if let Some(failure) = observation.failure() {
-                        let failure_category = (*failure).clone();
-                        let failure_key = FailureKey(
-                            scope.tenant_id.clone(),
-                            window_start,
-                            scope.user_id.clone(),
-                            failure_category.clone(),
-                        );
-                        if let Some(failure_accumulator) = run_failures.get_mut(&failure_key) {
-                            checked_add(
-                                &mut failure_accumulator.failure_count,
-                                1,
-                                "failure_count",
-                            )?;
-                            update_range(
-                                &mut failure_accumulator.first_observed_at,
-                                &mut failure_accumulator.last_observed_at,
-                                observation.occurred_at(),
-                            );
-                        } else {
-                            run_failures.insert(
-                                failure_key,
-                                FailureAccumulator {
-                                    tenant_id: scope.tenant_id.clone(),
-                                    window_start,
-                                    user_id: scope.user_id.clone(),
-                                    failure_category,
-                                    failure_count: 1,
-                                    first_observed_at: observation.occurred_at(),
-                                    last_observed_at: observation.occurred_at(),
-                                },
-                            );
-                        }
-                    }
                 } else {
                     let mut accumulator = ActivityAccumulator {
                         tenant_id: scope.tenant_id.clone(),
@@ -370,27 +386,6 @@ where
                         accumulator.runs_with_reported_tool_calls_count = u64::from(count > 0);
                     }
                     activity.insert(key, accumulator);
-
-                    if let Some(failure) = observation.failure() {
-                        let failure_category = (*failure).clone();
-                        run_failures.insert(
-                            FailureKey(
-                                scope.tenant_id.clone(),
-                                window_start,
-                                scope.user_id.clone(),
-                                failure_category.clone(),
-                            ),
-                            FailureAccumulator {
-                                tenant_id: scope.tenant_id.clone(),
-                                window_start,
-                                user_id: scope.user_id.clone(),
-                                failure_category,
-                                failure_count: 1,
-                                first_observed_at: observation.occurred_at(),
-                                last_observed_at: observation.occurred_at(),
-                            },
-                        );
-                    }
                 }
             }
             TelemetryObservation::ModelCallCompleted(observation) => {
