@@ -417,10 +417,10 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
 }
 
 #[tokio::test]
-async fn completed_output_digest_is_not_promoted_to_loop_progress_policy() {
-    // The digest remains part of the host result contract, but the loop does not
-    // retain it as heuristic no-progress evidence. Repetition is advisory-only
-    // and keyed by consecutive call signatures.
+async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
+    // NOT (re-)promoted to host-reported `CapabilityProgress` — that stays
+    // retired — but IS retained as a (signature, digest) observation the
+    // terminating check (strategies/stop.rs) scans.
     let digest = ironclaw_loop_contracts::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
@@ -451,9 +451,10 @@ async fn completed_output_digest_is_not_promoted_to_loop_progress_policy() {
         .iter()
         .map(|observation| observation.output_digest)
         .collect();
-    assert!(
-        recorded.is_empty(),
-        "digest policy ring must stay inert; got {recorded:?}"
+    assert_eq!(
+        recorded,
+        vec![digest],
+        "digest must be recorded; got {recorded:?}"
     );
 }
 

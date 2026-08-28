@@ -169,7 +169,9 @@ pub(crate) enum StopKind {
     /// Explicit no-progress stop requested by a non-default strategy. The
     /// executor gives the model one recovery turn before resolving it to a
     /// typed `LoopFailureKind::NoProgressDetected` failure. The default
-    /// strategy uses repeated calls only for an advisory warning.
+    /// strategy's CONSECUTIVE-call check (`repetition_threshold`) stays a
+    /// pure advisory and never returns this kind on its own; its independent
+    /// windowed OUTPUT-repetition check does.
     NoProgressDetected,
     /// Strategy aborts with an explicit failure kind.
     Aborted(LoopFailureKind),
@@ -185,7 +187,13 @@ pub(crate) enum StopKind {
 ///    in `repetition_threshold` (default 3) consecutive iterations → render a
 ///    model-visible warning. Repetition never terminates the run; deterministic
 ///    iteration and budget strategies remain the backstop.
-/// 4. **Rejected-reply escape**: reply admission rejects
+/// 4. **Terminating non-progress**: `no_progress_threshold` (8) occurrences
+///    of the SAME (signature, digest) pair within the trailing
+///    `no_progress_window` (32) → `Stop { NoProgressDetected }`. Multiset
+///    scan, catches alternation, requires real output repetition — see the
+///    header disclosure. One recovery turn on first occurrence; a second
+///    anywhere later terminates.
+/// 5. **Rejected-reply escape**: reply admission rejects
 ///    `rejected_reply_threshold` replies in a row →
 ///    `Stop { Aborted(InvalidModelOutput) }`.
 ///
@@ -199,6 +207,19 @@ pub struct DefaultStopConditionStrategy {
     /// `LoopFailureKind` is too coarse to distinguish repeated failure from
     /// unrelated model attempts that happen to share the same category.
     pub rejected_reply_threshold: usize,
+    /// Trailing window of `seen_capability_output_digests` observations the
+    /// terminating check scans for a dominant repeated (signature,
+    /// output_digest) pair. Wider than the consecutive-run advisory so an
+    /// alternating pattern (A, B, A, B, ...) is still visible — this defeated
+    /// `trailing_repeated_call` in #7892. Requires real OUTPUT repetition,
+    /// not just a repeated call — see the plan header's precedent disclosure
+    /// (PR #7531/#7486) for why this is a new mechanism, not a
+    /// reinstatement of #7531's removed escalation path.
+    pub no_progress_window: usize,
+    /// Occurrences of the SAME (signature, output_digest) pair within
+    /// `no_progress_window` required to terminate as
+    /// `StopKind::NoProgressDetected`. See the header derivation.
+    pub no_progress_threshold: usize,
 }
 
 impl Default for DefaultStopConditionStrategy {
@@ -206,6 +227,8 @@ impl Default for DefaultStopConditionStrategy {
         Self {
             repetition_threshold: 3,
             rejected_reply_threshold: 3,
+            no_progress_window: 32,
+            no_progress_threshold: 8,
         }
     }
 }
@@ -267,6 +290,23 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         {
             return StopOutcome::Stop {
                 kind: StopKind::GracefulStop,
+            };
+        }
+
+        // (b.5) terminating non-progress: the same (signature, output_digest)
+        // pair dominates the trailing window of completed capability-call
+        // OUTPUTS. First occurrence this run: turn_stop.rs's
+        // schedule_no_progress_warning gives one more recovery turn and
+        // resets both rings. Any later occurrence finalizes the typed
+        // failure (TerminalWarningState::schedule is a run-lifetime one-shot
+        // latch per kind — state/terminal_warning.rs:141-149).
+        if state
+            .seen_capability_output_digests
+            .most_common_count_in(self.no_progress_window)
+            >= self.no_progress_threshold
+        {
+            return StopOutcome::Stop {
+                kind: StopKind::NoProgressDetected,
             };
         }
 
@@ -509,10 +549,11 @@ mod tests {
         };
         use ironclaw_loop_contracts::{
             AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
-            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-            LoopFailureKind, LoopRunContext, ModelProfileId, RedactedRunProfileProvenance,
-            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContentDigest,
+            ContextProfileId, LoopDriverId, LoopFailureKind, LoopRunContext, ModelProfileId,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, SteeringPolicy,
         };
         use serde_json::json;
 
@@ -521,8 +562,8 @@ mod tests {
             StopKind, StopOutcome, TurnEndKind, TurnSummary,
         };
         use crate::state::{
-            CapabilityCallSignature, LoopExecutionState, RepeatedCallWarningPhase,
-            RepeatedCallWarningState, StopStrategyState,
+            CapabilityCallSignature, CapabilityOutputObservation, LoopExecutionState,
+            RepeatedCallWarningPhase, RepeatedCallWarningState, StopStrategyState,
         };
 
         fn test_run_context() -> LoopRunContext {
@@ -638,6 +679,8 @@ mod tests {
             let strategy = DefaultStopConditionStrategy::default();
             assert_eq!(strategy.repetition_threshold, 3);
             assert_eq!(strategy.rejected_reply_threshold, 3);
+            assert_eq!(strategy.no_progress_window, 32);
+            assert_eq!(strategy.no_progress_threshold, 8);
         }
 
         #[tokio::test]
@@ -868,6 +911,107 @@ mod tests {
 
             assert!(matches!(outcome, StopOutcome::Continue { .. }));
             assert!(state.stop_state.repeated_call_warning.is_none());
+        }
+
+        fn output_observation(id: &str, arg: i64, digest: u64) -> CapabilityOutputObservation {
+            CapabilityOutputObservation {
+                signature: CapabilityCallSignature::from_call(
+                    CapabilityId::new(id).expect("valid"),
+                    &json!({ "x": arg }),
+                )
+                .expect("valid call signature"),
+                output_digest: ContentDigest(digest),
+            }
+        }
+
+        #[tokio::test]
+        async fn dominant_repeated_output_reaching_threshold_returns_no_progress_detected() {
+            // 24 distinct fillers (count 1 each) + 8 identical target = a
+            // 32-wide window whose only dominant group is the target — same
+            // call AND same output, not call alone.
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            for i in 0..24 {
+                state
+                    .seen_capability_output_digests
+                    .push(output_observation("demo.filler", i, 1_000 + i as u64));
+            }
+            for _ in 0..strategy.no_progress_threshold {
+                state
+                    .seen_capability_output_digests
+                    .push(output_observation("demo.echo", 1, 7));
+            }
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            assert_eq!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn same_signature_with_changing_output_never_stops_a_tdd_loop() {
+            // Audit's motivating counter-example: same `cargo test` call,
+            // DIFFERENT digest each time (real red/green loop) — must never
+            // terminate; exactly what a bare call-signature count would miss.
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            for i in 0..strategy.no_progress_threshold {
+                state
+                    .seen_capability_output_digests
+                    .push(output_observation("cargo.test", 1, i as u64));
+            }
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+        }
+
+        #[tokio::test]
+        async fn four_identical_polls_render_only_the_advisory_not_termination() {
+            // #7486 anchor: 4 identical observations arm the advisory but
+            // stay far below no_progress_threshold (8).
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let observation = output_observation("demo.poll", 1, 5);
+            for _ in 0..4 {
+                state
+                    .recent_call_signatures
+                    .push(observation.signature.clone());
+                state
+                    .seen_capability_output_digests
+                    .push(observation.clone());
+            }
+            let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("advisory must render");
+            assert_eq!(warning.signature, observation.signature);
+        }
+
+        #[tokio::test]
+        async fn seven_identical_outputs_stays_below_the_no_progress_threshold() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            for _ in 0..(strategy.no_progress_threshold - 1) {
+                state
+                    .seen_capability_output_digests
+                    .push(output_observation("demo.echo", 1, 9));
+            }
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
+        }
+
+        #[tokio::test]
+        async fn empty_output_digest_ring_never_terminates() {
+            // Complements state.rs's legacy-decode-to-empty test (decode
+            // side); proves the STRATEGY side is inert on an empty ring —
+            // fresh run, or an old checkpoint predating this field again.
+            let strategy = DefaultStopConditionStrategy::default();
+            let state = LoopExecutionState::initial_for_run(&test_run_context());
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         #[tokio::test]

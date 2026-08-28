@@ -43,7 +43,7 @@ use super::{
     push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 use crate::{
-    state::{CheckpointKind, InvocationCharge, LoopExecutionState},
+    state::{CapabilityOutputObservation, CheckpointKind, InvocationCharge, LoopExecutionState},
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
         RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
@@ -2524,9 +2524,22 @@ async fn append_completed_capability_result(
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
     let signature = capability_call_signature(call)?;
-    // Repeated output is not terminal evidence. The host-reported progress and
-    // digest remain part of the result contract, while loop steering relies on
-    // consecutive call signatures and deterministic limits remain the backstop.
+    // #7531 made repeated-call detection advisory-only by deleting this
+    // ring's only producer; dominant_repeated_observation (strategies/stop.rs)
+    // needs a (signature, output_digest) trail — real OUTPUT repetition, not
+    // just repeated CALLS. A result with no digest (synthetic results, older
+    // hosts, failures) never counts.
+    if let Some(output_digest) = result.output_digest {
+        state
+            .seen_capability_output_digests
+            .push(CapabilityOutputObservation {
+                signature: signature.clone(),
+                output_digest,
+            });
+    }
+    // NOT (re-)promoted to host-reported CapabilityProgress — that stays
+    // retired; the advisory keys off consecutive signatures, the terminating
+    // check above keys off the digest ring, neither reads this.
     capability_batch.record_result(signature, result.terminate_hint);
     push_completed_result(state, &call.capability_id, result);
     Ok(())

@@ -66,9 +66,14 @@ pub struct LoopExecutionState {
 
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
-    /// Deprecated checkpoint field retained for rolling-upgrade and rollback
-    /// compatibility. The default loop policy no longer records or reads
-    /// output digests when deciding whether to continue.
+    /// (signature, output_digest) trail for completed calls whose result
+    /// carried a digest. Populated by `append_completed_capability_result`
+    /// (executor/capabilities.rs); read by
+    /// `DefaultStopConditionStrategy::should_stop_after_observed_turn`
+    /// (strategies/stop.rs) to detect a call whose OUTPUT repeats, not just
+    /// its signature. `#[serde(default)]` for rolling-upgrade/rollback: a
+    /// legacy checkpoint with no ring decodes to empty; the guard is inert
+    /// until repopulated by fresh calls.
     #[serde(default)]
     pub seen_capability_output_digests: BoundedRing<CapabilityOutputObservation, 64>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,

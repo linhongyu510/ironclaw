@@ -143,9 +143,13 @@ impl StopStage {
     }
 }
 
-/// Convert an explicit strategy's first no-progress terminal into one normal
-/// loop iteration with typed model-visible recovery context. The default stop
-/// strategy does not emit this terminal; its repeated-call signal is advisory.
+/// Convert a strategy's first no-progress terminal into one normal loop
+/// iteration with typed model-visible recovery context — for an explicit
+/// non-default strategy AND for the default strategy's own windowed
+/// output-repetition check (strategies/stop.rs's
+/// `DefaultStopConditionStrategy::should_stop_after_observed_turn`). The
+/// default strategy's separate CONSECUTIVE-call advisory renders through a
+/// different path and never emits this `StopKind` on its own.
 fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind) -> bool {
     if !matches!(kind, StopKind::NoProgressDetected) {
         return false;
@@ -167,6 +171,7 @@ fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind)
     }
 
     state.recent_call_signatures = BoundedRing::new();
+    state.seen_capability_output_digests = BoundedRing::new();
     state.recent_output_token_counts = BoundedRing::new();
     state.stop_state.trailing_no_progress_results = 0;
     state.stop_state.repeated_call_warning = None;
