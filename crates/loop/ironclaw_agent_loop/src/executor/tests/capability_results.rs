@@ -605,6 +605,116 @@ async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() 
     );
 }
 
+/// Sibling of `no_progress_strike_schedules_recovery_warning_and_resets_digest_ring`
+/// (same seam: the full executor caller path through `schedule_no_progress_warning`
+/// in turn_stop.rs), but with an ALTERNATING call signature (A, B, A, B, ...) that
+/// still shares the same `output_digest`, so the terminating check
+/// (`seen_capability_output_digests.most_common_count_in(no_progress_window)`,
+/// strategies/stop.rs) sees signature A's `(signature, output_digest)` pair
+/// dominate the window. The buggy computation this pins against
+/// (`recent_call_signatures.most_common_count_in(8)`) counts bare signatures over
+/// the wrong ring and the wrong window: alternating A/B in the trailing 8 calls
+/// yields 4, not the true dominant digest-window count of `no_progress_threshold`
+/// (8). The recovery warning must report the digest-ring count, not the
+/// signature-ring miscount.
+#[tokio::test]
+async fn no_progress_strike_reports_dominant_digest_count_for_alternating_signatures() {
+    use ironclaw_loop_contracts::{
+        CapabilityCallCandidate, CapabilityInputRef, LoopModelResponse, ModelProfileId,
+        ParentLoopOutput,
+    };
+
+    let threshold =
+        crate::strategies::DefaultStopConditionStrategy::default().no_progress_threshold;
+    let digest = ironclaw_loop_contracts::ContentDigest(90_210);
+
+    fn alternating_calls_response(use_first_signature: bool) -> LoopModelResponse {
+        let input = if use_first_signature {
+            "input:alt-a"
+        } else {
+            "input:alt-b"
+        };
+        LoopModelResponse {
+            chunks: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new(input).expect("valid"),
+                effective_capability_ids: vec![capability_id()],
+                provider_replay: None,
+            }]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
+        }
+    }
+
+    fn alternating_batch_outcome(
+        digest: ironclaw_loop_contracts::ContentDigest,
+        ordinal: usize,
+    ) -> ironclaw_host_api::resolution::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                LoopResultRef::new(format!("result:alt-{ordinal}")).expect("valid"),
+                "identical output".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::NoChange,
+                false,
+                0,
+                Some(digest),
+                None,
+            )],
+            stopped_on_suspension: false,
+        }
+    }
+
+    // 2*threshold - 1 calls alternating A,B,A,B,...,A: signature A's
+    // (signature, output_digest) pair reaches `threshold` occurrences (the
+    // dominant pair, and the strike point) while signature B reaches only
+    // `threshold - 1`.
+    let total_calls = 2 * threshold - 1;
+    let mut responses = Vec::new();
+    let mut batch_outcomes = Vec::new();
+    for i in 0..total_calls {
+        responses.push(alternating_calls_response(i % 2 == 0));
+        batch_outcomes.push(alternating_batch_outcome(digest, i));
+    }
+    responses.push(reply_response_with_text("done after recovery"));
+
+    let host = MockHost::new(responses).with_batch_outcomes(batch_outcomes);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "the strike must grant one recovery turn; got {exit:?}"
+    );
+
+    let recovery_request = host
+        .model_requests()
+        .get(total_calls)
+        .expect("a recovery-turn model request after the strike")
+        .clone();
+    let warning_message = recovery_request
+        .inline_messages
+        .iter()
+        .find(|message| message.safe_body.as_str().contains("no progress detected"))
+        .expect("the recovery turn must carry the no-progress warning");
+    assert!(
+        warning_message
+            .safe_body
+            .as_str()
+            .contains(&format!("repeated {threshold} times")),
+        "recovery warning must report the dominant digest-window count ({threshold}), not a \
+         signature-ring miscount; got: {}",
+        warning_message.safe_body.as_str()
+    );
+}
+
 /// Byte-threshold trips through the full executor turn: capability batch returns
 /// a result whose `byte_len` exceeds `ByteCapStrategy::DEFAULT_FALLBACK_CAP_BYTES`
 /// (32 000). PostCapabilityStage should set both compaction flags on the state
