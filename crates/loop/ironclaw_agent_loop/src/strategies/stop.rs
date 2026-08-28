@@ -377,16 +377,10 @@ fn trailing_repeated_call(
     state: &LoopExecutionState,
     threshold: usize,
 ) -> Option<RepeatedCallObservation> {
-    let signature = state.recent_call_signatures.iter().next_back()?.clone();
-    let count = state
-        .recent_call_signatures
-        .iter()
-        .rev()
-        .take_while(|candidate| **candidate == signature)
-        .count();
-    if count < threshold {
+    if state.recent_call_signatures.same_run_length() < threshold {
         return None;
     }
+    let signature = state.recent_call_signatures.iter().next_back()?.clone();
     Some(RepeatedCallObservation { signature })
 }
 
