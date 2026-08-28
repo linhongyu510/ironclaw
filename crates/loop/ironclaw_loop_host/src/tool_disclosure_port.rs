@@ -78,6 +78,11 @@ const COMPACT_DESCRIPTION_MAX_BYTES: usize = 160;
 
 /// A SUCCESS results[] entry name, not a failure diagnostic (#5712 covers describe/call FAILURE branches only).
 const TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE: &str = "rank 1 has a complete parameters schema; invoke it directly with the schema above, or via tool_call";
+/// Steers the model to `tool_describe` when rank 1's schema is too large to inline here. NOTE:
+/// `tool_describe`'s own reply is NOT bounded by this file's first-look-envelope fix — it still
+/// rides the generic pager and can itself collapse behind an `omitted` marker for a large enough
+/// schema (same defect class as D21 in `docs/internal/tool-discovery-subjective-decisions.md`).
+/// Tracked as follow-up, not yet fixed.
 const TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE: &str = "rank 1 matched but its schema is too large to show inline; call tool_describe on it to get the full parameters schema, then invoke it";
 const TOOL_SEARCH_NO_MATCH_GUIDANCE: &str = "no deferred tool matches this query; do not search again for it; tell the user the capability is unavailable";
 
@@ -1321,6 +1326,14 @@ impl ToolDisclosureCapabilityPort {
             let output = if self.mode.includes_complete_signatures() {
                 bounded_search_output(query, ranked_results)
             } else {
+                // ToolDisclosureMode::Compact is a deliberately unbounded measurement control
+                // arm (tool_disclosure_mode.rs), reachable only via REBORN_TOOL_DISCLOSURE=compact
+                // (production default is Namespaces). compact_search_results maps every ranked
+                // result through compact_result_fields with no description truncation, no
+                // `.take(...)`, and no byte-budget check, on purpose: truncating here would
+                // change the control arm's wire bytes and invalidate the A/B comparison it exists
+                // to run. The bounded, first-look-envelope construction above applies only to the
+                // production arms.
                 json!({
                     "query": query,
                     "results": compact_search_results(ranked_results),
@@ -4296,6 +4309,42 @@ mod tests {
                 .expect("first result serializes"),
             serde_json::to_vec(&bounded_search_output("query", inputs))
                 .expect("second result serializes")
+        );
+    }
+
+    /// Proves the `.take(TOOL_SEARCH_INLINE_RESULT_LIMIT)` cap in `bounded_search_output` actually
+    /// drops a 4th+ ranked result rather than merely happening to line up with every existing
+    /// test's fixture count: every other `bounded_search_output_*` test above passes at most
+    /// `TOOL_SEARCH_INLINE_RESULT_LIMIT` results, so none of them can fail if the cap were removed
+    /// or widened. This one passes 5 small (well under budget) results and asserts both that the
+    /// array is truncated to exactly the limit AND that survivors are ranks 1-3 in order, not an
+    /// arbitrary subset -- and that no panic occurs when more results are supplied than the limit.
+    #[test]
+    fn bounded_search_output_drops_results_beyond_the_inline_limit() {
+        let results: Vec<_> = (1..=5)
+            .map(|rank| {
+                search_result_with_schema(&format!("rank{rank}"), json!({"type": "object"}))
+            })
+            .collect();
+
+        let output = bounded_search_output("query", results);
+
+        let names: Vec<&str> = output["results"]
+            .as_array()
+            .expect("results is an array")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("name is a string"))
+            .collect();
+
+        assert_eq!(
+            names.len(),
+            TOOL_SEARCH_INLINE_RESULT_LIMIT,
+            "a 4th+ ranked result must be dropped, not carried through"
+        );
+        assert_eq!(
+            names,
+            vec!["rank1", "rank2", "rank3"],
+            "survivors must be exactly the first three ranks, in rank order"
         );
     }
 

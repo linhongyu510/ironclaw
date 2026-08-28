@@ -1090,6 +1090,14 @@ async fn unnarrowed_policy_keeps_full_tool_search_catalog() {
 /// whole reply to 2,811 B against the 2,560 B budget (over by 251 B), so it
 /// takes the compact-fallback branch instead and `schema_complete: true` never
 /// appears -- the plan's own Goal-section arithmetic, not this test's mistake.
+///
+/// Fragility note: this test selects its branch (schema-complete vs.
+/// compact-fallback) from the LIVE github manifest's byte sizes, so an
+/// ordinary manifest edit elsewhere can flip which branch it exercises. If a
+/// github manifest change trips this test, re-derive the boundary from
+/// `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling`
+/// (crate-tier, synthetic worst case) rather than re-tuning the query string
+/// here until it happens to pass again.
 #[tokio::test]
 async fn tool_search_reply_rides_the_first_look_preview_inline() {
     let harness = RebornIntegrationHarness::test_default()
@@ -1137,6 +1145,13 @@ async fn tool_search_reply_rides_the_first_look_preview_inline() {
 /// instead of an inline schema. Proves the OTHER production return path is
 /// still never collapsed by the pager, even though it carries no complete
 /// schema.
+///
+/// Fragility note: like its sibling test above, this test's branch selection
+/// depends on `github.search_issues_pull_requests`'s LIVE compact-serialized
+/// size staying on the compact-fallback side of the budget. If a github
+/// manifest edit trips this test, re-derive the boundary from
+/// `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling`
+/// (crate-tier, synthetic worst case), not by re-tuning the query string.
 #[tokio::test]
 async fn tool_search_reply_falls_back_to_compact_when_rank_one_does_not_fit() {
     let harness = RebornIntegrationHarness::test_default()

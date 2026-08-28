@@ -413,7 +413,11 @@ the 3 KiB first-look pager — a second or third complete schema couldn't
 help an ambiguous task if the whole reply already collapsed to "omitted."
 Ranks 2-3 don't disappear, they just stop being pre-expanded: their
 compact entry (name/capability_id/description/required) is enough to pick
-one, and `tool_describe` returns its complete schema on demand.
+one, and `tool_describe` returns its complete schema on demand. That
+on-demand path is not itself bounded by this decision: `tool_describe`'s
+reply still rides the generic first-look pager and can collapse behind an
+`omitted` marker for a large schema, the same defect class D21 fixes for
+`tool_search` — tracked as follow-up, not yet fixed.
 
 **Decision:** Delete D5's MAX_SEARCH_RESPONSE_BYTES (24 KiB) and
 MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT (8 KiB). Build the reply against the
