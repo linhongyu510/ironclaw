@@ -210,7 +210,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// merged tree with `bash scripts/ci/check-composition-budget.sh --print`;
 /// the manifest's `loc_ceiling`/`loc_observed` move to the same figure in
 /// this commit. No new composition code in the merge itself.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_732;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_446;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
