@@ -4466,7 +4466,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
                 manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
-                telemetry_recorder: Arc::clone(&services.telemetry_recorder),
+                telemetry_recorder: services.telemetry_recorder.clone(),
                 post_submit_hook_slot: hook_slot,
             },
         )

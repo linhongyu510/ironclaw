@@ -42,6 +42,16 @@ const TEST_SECRET_MASTER_KEY: &str =
 #[derive(Debug, Default)]
 struct RecordingGateway {
     requests: Mutex<Vec<HostManagedModelRequest>>,
+    fail: bool,
+}
+
+impl RecordingGateway {
+    fn failing() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            fail: true,
+        }
+    }
 }
 
 #[async_trait]
@@ -51,6 +61,9 @@ impl HostManagedModelGateway for RecordingGateway {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.requests.lock().await.push(request);
+        if self.fail {
+            return Ok(HostManagedModelResponse::assistant_reply(""));
+        }
         Ok(HostManagedModelResponse::assistant_reply(
             "telemetry proof ok",
         ))
@@ -58,6 +71,13 @@ impl HostManagedModelGateway for RecordingGateway {
 }
 
 async fn build_runtime(root: &tempfile::TempDir) -> (RebornRuntime, Arc<RecordingGateway>) {
+    build_runtime_with_gateway(root, Arc::new(RecordingGateway::default())).await
+}
+
+async fn build_runtime_with_gateway(
+    root: &tempfile::TempDir,
+    gateway: Arc<RecordingGateway>,
+) -> (RebornRuntime, Arc<RecordingGateway>) {
     seed_test_secret_master_key(root.path());
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
@@ -71,7 +91,6 @@ async fn build_runtime(root: &tempfile::TempDir) -> (RebornRuntime, Arc<Recordin
     )
     .expect("local runtime input")
     .with_local_runtime_confirmed_host_home_root(host_home_root);
-    let gateway = Arc::new(RecordingGateway::default());
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
@@ -282,6 +301,91 @@ async fn production_trigger_settlement_survives_libsql_reopen_and_stays_tenant_s
         .read_automation_page(&telemetry_scope(OTHER_TENANT), &request)
         .await
         .expect("read foreign tenant telemetry");
+    assert!(
+        foreign_rows.rows().is_empty(),
+        "foreign tenant must see zero rows"
+    );
+}
+
+#[tokio::test]
+async fn failed_production_trigger_settlement_survives_libsql_reopen_and_stays_tenant_scoped() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (runtime, gateway) =
+        build_runtime_with_gateway(&root, Arc::new(RecordingGateway::failing())).await;
+    let trigger_id = create_trigger(&runtime).await;
+    let trigger_repo = runtime.trigger_repository();
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut settled = false;
+    while Instant::now() < deadline {
+        let current = trigger_repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("read failed settled trigger")
+            .expect("failed settled trigger");
+        if gateway.requests.lock().await.len() >= 4
+            && current.last_fired_slot.is_some()
+            && current.active_fire_slot.is_none()
+            && current.state == TriggerState::Completed
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !settled {
+        panic!(
+            "poller did not settle failed trigger fire: {:?}; model requests: {}",
+            trigger_repo
+                .get_trigger(tenant_id.clone(), trigger_id)
+                .await
+                .expect("read failed trigger after timeout"),
+            gateway.requests.lock().await.len()
+        );
+    }
+    assert!(gateway.requests.lock().await.len() >= 4);
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let telemetry =
+        ironclaw_composition::test_support::open_standalone_telemetry_repository_for_test(
+            &root.path().join("local-dev"),
+        )
+        .await
+        .expect("fresh telemetry repository");
+    let now = Utc::now();
+    let request = TelemetryPageRequest::new(
+        now - chrono::Duration::hours(1),
+        now + chrono::Duration::hours(1),
+        now,
+        10,
+        None,
+    )
+    .expect("telemetry request")
+    .with_include_partial(true);
+    let rows = telemetry
+        .read_automation_page(&telemetry_scope(TENANT), &request)
+        .await
+        .expect("read original tenant failure telemetry");
+    assert_eq!(rows.rows().len(), 1, "exactly one automation aggregate");
+    let row = &rows.rows()[0];
+    assert_eq!(row.tenant_id().as_str(), TENANT);
+    assert_eq!(row.user_id().as_str(), USER);
+    assert_eq!(
+        row.automation_kind(),
+        ironclaw_telemetry_contracts::observation::AutomationKind::Once
+    );
+    assert_eq!(row.run_count(), 1);
+    assert_eq!(row.completed_count(), 0);
+    assert_eq!(row.failed_count(), 1);
+    assert_eq!(row.cancelled_count(), 0);
+    assert_eq!(row.recovery_required_count(), 0);
+
+    let foreign_rows = telemetry
+        .read_automation_page(&telemetry_scope(OTHER_TENANT), &request)
+        .await
+        .expect("read foreign tenant failure telemetry");
     assert!(
         foreign_rows.rows().is_empty(),
         "foreign tenant must see zero rows"

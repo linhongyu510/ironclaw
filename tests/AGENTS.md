@@ -318,6 +318,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | A completed scheduled automation's hourly aggregate survives a production libSQL reopen and remains tenant scoped | `tenant_telemetry.rs` |
+| A failed scheduled automation's hourly aggregate survives a production libSQL reopen and remains tenant scoped | `tenant_telemetry.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |
 | A suggestions generation survives a backend restart: GET/list alone shows it generating and then ready after durable recovery | `suggestions.rs::generation_in_progress_survives_runtime_restart_and_recovers_via_list_view` |
 | Odd gate sequences (double-resolve, cancel-after-finish, approve-a-done-run) behave | `generated_gate_sequences.rs` |

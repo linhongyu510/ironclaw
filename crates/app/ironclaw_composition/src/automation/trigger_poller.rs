@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_telemetry::BufferedTelemetryRecorder;
 use ironclaw_telemetry_contracts::{
     observation::{
         AutomationId, AutomationKind, AutomationSettledObservation, ObservationContext, RunOutcome,
@@ -113,7 +112,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     pub(crate) manual_fire_runner: Arc<LateBoundTriggerManualFireRunner>,
-    pub(crate) telemetry_recorder: Arc<BufferedTelemetryRecorder>,
+    pub(crate) telemetry_recorder: Arc<dyn TelemetryRecorder>,
     /// Late-binding slot for the post-submit delivery hook.
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
