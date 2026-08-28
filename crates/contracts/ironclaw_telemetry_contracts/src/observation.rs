@@ -1,8 +1,11 @@
 //! Bounded, provider-neutral facts accepted by the telemetry collector.
 
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_host_api::{ids::UserId, turn::SanitizedFailure};
+use serde::{Deserialize, Serialize};
 
 /// Maximum UTF-8 byte length for identifiers introduced by telemetry.
 pub const MAX_TELEMETRY_IDENTIFIER_BYTES: usize = 128;
@@ -26,12 +29,12 @@ pub enum BoundedIdentifierError {
 
 macro_rules! bounded_identifier {
     ($name:ident, $field:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, BoundedIdentifierError> {
-                let value = value.into();
+            fn validate(value: &str) -> Result<(), BoundedIdentifierError> {
                 if value.is_empty() {
                     return Err(BoundedIdentifierError::Empty { field: $field });
                 }
@@ -45,6 +48,12 @@ macro_rules! bounded_identifier {
                 if value.chars().any(char::is_control) {
                     return Err(BoundedIdentifierError::ControlCharacters { field: $field });
                 }
+                Ok(())
+            }
+
+            pub fn new(value: impl Into<String>) -> Result<Self, BoundedIdentifierError> {
+                let value = value.into();
+                Self::validate(&value)?;
                 Ok(Self(value))
             }
 
@@ -52,14 +61,35 @@ macro_rules! bounded_identifier {
                 &self.0
             }
 
-            pub fn into_string(self) -> String {
+            pub fn into_inner(self) -> String {
                 self.0
             }
         }
 
-        impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        impl TryFrom<String> for $name {
+            type Error = BoundedIdentifierError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::validate(&value)?;
+                Ok(Self(value))
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str(self.as_str())
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
             }
         }
     };
@@ -72,12 +102,12 @@ bounded_identifier!(LifecycleEventId, "event_id");
 bounded_identifier!(SubjectId, "subject_id");
 bounded_identifier!(CollectorInstanceId, "collector_instance_id");
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct FailureCategory(String);
 
 impl FailureCategory {
-    pub fn new(value: impl Into<String>) -> Result<Self, BoundedIdentifierError> {
-        let value = value.into();
+    fn validate(value: &str) -> Result<(), BoundedIdentifierError> {
         if value.is_empty() {
             return Err(BoundedIdentifierError::Empty {
                 field: "failure_category",
@@ -98,6 +128,12 @@ impl FailureCategory {
                 field: "failure_category",
             });
         }
+        Ok(())
+    }
+
+    pub fn new(value: impl Into<String>) -> Result<Self, BoundedIdentifierError> {
+        let value = value.into();
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
@@ -109,6 +145,37 @@ impl FailureCategory {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for FailureCategory {
+    type Error = BoundedIdentifierError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl AsRef<str> for FailureCategory {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for FailureCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<FailureCategory> for String {
+    fn from(value: FailureCategory) -> Self {
+        value.0
     }
 }
 

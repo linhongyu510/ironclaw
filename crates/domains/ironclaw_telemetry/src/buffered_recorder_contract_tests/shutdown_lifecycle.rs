@@ -224,7 +224,7 @@ async fn invalid_timestamp_is_rejected_synchronously_and_covered() {
     tokio::time::advance(Duration::from_secs(1)).await;
     wait_for_batches(&repository, 1).await;
     let diagnostics = lifecycle.diagnostics();
-    assert_eq!(diagnostics.invalid_observation_count(), 1);
+    assert_eq!(diagnostics.invalid_drop_count(), 1); // safety: test-only assertion.
     assert_eq!(
         repository.batches()[0].collector_coverage()[0].invalid_drop_count(),
         1

@@ -168,8 +168,9 @@ pub trait TriggerFireSettlementObserver: Send + Sync {
     /// `on_run_terminal_settled` from the active-cleanup sweep. Implementors
     /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
     /// egress) must be detached internally (for example a bounded spawn, as
-    /// the composition `PostSubmitHookObserver` does for accepted-fire
-    /// delivery) rather than awaited through this call.
+    /// the composition `TriggerSettlementObserver` does for accepted-fire
+    /// delivery and terminal-settlement telemetry) rather than awaited through
+    /// this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 
     async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}

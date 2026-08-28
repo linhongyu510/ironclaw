@@ -6,10 +6,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_telemetry_contracts::observation::{
     AutomationId, AutomationKind, AutomationSettledObservation, BoundedIdentifierError,
-    EffectiveModelId, FailureCategory, LifecycleEventId, LifecycleEventKind, LifecycleSubjectKind,
-    LifecycleTransitionObservation, ModelCallCompletedObservation, ModelUsage, ObservationContext,
-    ObservationError, OriginKind, ProviderId, RunOutcome, RunSettledObservation,
-    TelemetryObservation,
+    CollectorInstanceId, EffectiveModelId, FailureCategory, LifecycleEventId, LifecycleEventKind,
+    LifecycleSubjectKind, LifecycleTransitionObservation, MAX_TELEMETRY_IDENTIFIER_BYTES,
+    ModelCallCompletedObservation, ModelUsage, ObservationContext, ObservationError, OriginKind,
+    ProviderId, RunOutcome, RunSettledObservation, SubjectId, TelemetryObservation,
 };
 use ironclaw_telemetry_contracts::recorder::{
     NoopTelemetryRecorder, RecordOutcome, TelemetryRecorder,
@@ -230,6 +230,107 @@ fn identifiers_enforce_utf8_byte_limits() {
         LifecycleEventId::new(too_long),
         Err(BoundedIdentifierError::TooLong { .. })
     ));
+}
+
+macro_rules! assert_identifier_validation {
+    ($name:ident, $field:literal) => {{
+        assert!(matches!(
+            $name::new(""),
+            Err(BoundedIdentifierError::Empty { field }) if field == $field
+        ));
+
+        let too_long = "a".repeat(MAX_TELEMETRY_IDENTIFIER_BYTES + 1);
+        let error = $name::new(too_long).expect_err("identifier must be bounded");
+        let field = $field;
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{field} must be at most {MAX_TELEMETRY_IDENTIFIER_BYTES} UTF-8 bytes (got {})",
+                MAX_TELEMETRY_IDENTIFIER_BYTES + 1,
+            )
+        );
+
+        assert!(matches!(
+            $name::new("valid\nvalue"),
+            Err(BoundedIdentifierError::ControlCharacters { field }) if field == $field
+        ));
+    }};
+}
+
+#[test]
+fn every_macro_identifier_rejects_empty_too_long_and_control_values() {
+    assert_identifier_validation!(ProviderId, "provider_id");
+    assert_identifier_validation!(EffectiveModelId, "effective_model_id");
+    assert_identifier_validation!(AutomationId, "automation_id");
+    assert_identifier_validation!(LifecycleEventId, "event_id");
+    assert_identifier_validation!(SubjectId, "subject_id");
+    assert_identifier_validation!(CollectorInstanceId, "collector_instance_id");
+}
+
+macro_rules! assert_newtype_contract {
+    ($name:ident, $value:literal) => {{
+        let value = $name::new($value).expect("valid newtype value");
+        assert_eq!(value.as_str(), $value);
+        assert_eq!(<$name as AsRef<str>>::as_ref(&value), $value);
+        assert_eq!(value.to_string(), $value);
+        assert_eq!(String::from(value.clone()), $value);
+        assert_eq!(value.clone().into_inner(), $value);
+
+        let from_string = $name::try_from($value.to_owned()).expect("validated conversion");
+        assert_eq!(from_string, value);
+
+        let encoded = serde_json::to_string(&value).expect("serialize newtype");
+        assert_eq!(encoded, format!("\"{}\"", $value));
+        let decoded: $name = serde_json::from_str(&encoded).expect("deserialize newtype");
+        assert_eq!(decoded, value);
+        assert!(serde_json::from_str::<$name>("\"\"").is_err());
+    }};
+}
+
+#[test]
+fn macro_identifiers_use_checked_conversions_and_serde_round_trips() {
+    assert_newtype_contract!(ProviderId, "provider-a");
+    assert_newtype_contract!(EffectiveModelId, "model-a");
+    assert_newtype_contract!(AutomationId, "automation-a");
+    assert_newtype_contract!(LifecycleEventId, "event-a");
+    assert_newtype_contract!(SubjectId, "subject-a");
+    assert_newtype_contract!(CollectorInstanceId, "collector-a");
+}
+
+#[test]
+fn failure_category_rejects_empty_too_long_and_invalid_grammar() {
+    assert!(matches!(
+        FailureCategory::new(""),
+        Err(BoundedIdentifierError::Empty {
+            field: "failure_category"
+        })
+    ));
+
+    let too_long = "a".repeat(257);
+    let error = FailureCategory::new(too_long).expect_err("failure category must be bounded");
+    assert_eq!(
+        error.to_string(),
+        "failure_category must be at most 256 UTF-8 bytes (got 257)"
+    );
+
+    for invalid in [
+        "Uppercase",
+        "contains-hyphen",
+        "contains space",
+        "bad\nvalue",
+    ] {
+        assert!(matches!(
+            FailureCategory::new(invalid),
+            Err(BoundedIdentifierError::ControlCharacters {
+                field: "failure_category"
+            })
+        ));
+    }
+}
+
+#[test]
+fn failure_category_uses_checked_conversions_and_serde_round_trip() {
+    assert_newtype_contract!(FailureCategory, "model_unavailable");
 }
 
 #[test]

@@ -56,7 +56,7 @@ pub struct TelemetryDiagnostics {
     accepted_observation_count: u64,
     queue_full_drop_count: u64,
     closed_drop_count: u64,
-    invalid_observation_count: u64,
+    invalid_drop_count: u64,
     write_failed_observation_count: u64,
     repository_failure_count: u64,
     partial_batch_failure_count: u64,
@@ -83,8 +83,8 @@ impl TelemetryDiagnostics {
     pub const fn closed_drop_count(self) -> u64 {
         self.closed_drop_count
     }
-    pub const fn invalid_observation_count(self) -> u64 {
-        self.invalid_observation_count
+    pub const fn invalid_drop_count(self) -> u64 {
+        self.invalid_drop_count
     }
     pub const fn write_failed_observation_count(self) -> u64 {
         self.write_failed_observation_count
@@ -134,7 +134,7 @@ pub(crate) struct DiagnosticsState {
     pub(super) accepted_observation_count: AtomicU64,
     queue_full_drop_count: AtomicU64,
     closed_drop_count: AtomicU64,
-    invalid_observation_count: AtomicU64,
+    invalid_drop_count: AtomicU64,
     write_failed_observation_count: AtomicU64,
     repository_failure_count: AtomicU64,
     partial_batch_failure_count: AtomicU64,
@@ -157,7 +157,7 @@ impl Default for DiagnosticsState {
             accepted_observation_count: AtomicU64::new(0),
             queue_full_drop_count: AtomicU64::new(0),
             closed_drop_count: AtomicU64::new(0),
-            invalid_observation_count: AtomicU64::new(0),
+            invalid_drop_count: AtomicU64::new(0),
             write_failed_observation_count: AtomicU64::new(0),
             repository_failure_count: AtomicU64::new(0),
             partial_batch_failure_count: AtomicU64::new(0),
@@ -184,7 +184,7 @@ impl DiagnosticsState {
             accepted_observation_count: self.accepted_observation_count.load(Ordering::Relaxed),
             queue_full_drop_count: self.queue_full_drop_count.load(Ordering::Relaxed),
             closed_drop_count: self.closed_drop_count.load(Ordering::Relaxed),
-            invalid_observation_count: self.invalid_observation_count.load(Ordering::Relaxed),
+            invalid_drop_count: self.invalid_drop_count.load(Ordering::Relaxed),
             write_failed_observation_count: self
                 .write_failed_observation_count
                 .load(Ordering::Relaxed),
@@ -224,7 +224,7 @@ impl DiagnosticsState {
             self.record_counter_overflow();
             return;
         };
-        self.add_counter(&self.invalid_observation_count, count);
+        self.add_counter(&self.invalid_drop_count, count);
     }
     pub(crate) fn add_write_failed(&self, count: usize) {
         let Ok(count) = u64::try_from(count) else {

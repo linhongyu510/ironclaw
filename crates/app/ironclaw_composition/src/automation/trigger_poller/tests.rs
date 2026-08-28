@@ -46,9 +46,9 @@ async fn trigger_poller_runtime_handle_aborts_when_join_times_out() {
     runtime_handle.shutdown(Duration::from_millis(1)).await;
 }
 
-// ── PostSubmitHookObserver tests ────────────────────────────────────────
+// ── TriggerSettlementObserver tests ────────────────────────────────────
 
-mod post_submit_observer {
+mod trigger_settlement_observer {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -73,13 +73,13 @@ mod post_submit_observer {
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
-    use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
+    use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, TriggerSettlementObserver};
 
     fn test_observer(
         hook_slot: Arc<std::sync::OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
-    ) -> PostSubmitHookObserver {
-        PostSubmitHookObserver::with_telemetry_recorder(
+    ) -> TriggerSettlementObserver {
+        TriggerSettlementObserver::with_telemetry_recorder(
             hook_slot,
             drain_cancel,
             Arc::new(NoopTelemetryRecorder),
@@ -254,7 +254,7 @@ mod post_submit_observer {
             calls: Mutex::new(Vec::new()),
             outcome: RecordOutcome::Accepted,
         });
-        let observer = PostSubmitHookObserver::with_telemetry_recorder(
+        let observer = TriggerSettlementObserver::with_telemetry_recorder(
             Arc::new(std::sync::OnceLock::new()),
             CancellationToken::new(),
             recorder.clone(),
@@ -284,7 +284,7 @@ mod post_submit_observer {
             calls: Mutex::new(Vec::new()),
             outcome: RecordOutcome::DroppedClosed,
         });
-        let observer = PostSubmitHookObserver::with_telemetry_recorder(
+        let observer = TriggerSettlementObserver::with_telemetry_recorder(
             Arc::new(std::sync::OnceLock::new()),
             CancellationToken::new(),
             recorder.clone(),

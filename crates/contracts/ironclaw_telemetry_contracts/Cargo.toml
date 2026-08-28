@@ -16,7 +16,11 @@ layer = "contracts"
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true

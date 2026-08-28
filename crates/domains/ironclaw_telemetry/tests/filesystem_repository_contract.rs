@@ -124,6 +124,63 @@ fn request(
     TelemetryPageRequest::new(from, to, now, page_size, after).expect("test request")
 }
 
+#[test]
+fn page_requests_reject_empty_oversized_and_unbounded_inputs() {
+    let from = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test timestamp");
+    let now = from + Duration::days(366) + Duration::hours(1);
+
+    let empty_range = TelemetryPageRequest::new(from, from, now, 1, None)
+        .expect_err("empty range must be rejected");
+    assert!(matches!(
+        empty_range,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidScanRequest { .. }
+    ));
+
+    let oversized_range = TelemetryPageRequest::new(
+        from,
+        from + Duration::days(366) + Duration::microseconds(1),
+        now,
+        1,
+        None,
+    )
+    .expect_err("ranges over 366 days must be rejected");
+    assert!(matches!(
+        oversized_range,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidScanRequest { .. }
+    ));
+
+    let zero_page_size = TelemetryPageRequest::new(from, from + Duration::hours(1), now, 0, None)
+        .expect_err("zero page size must be rejected");
+    assert!(matches!(
+        zero_page_size,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidPageRequest { .. }
+    ));
+
+    let oversized_page_size =
+        TelemetryPageRequest::new(from, from + Duration::hours(1), now, 2_001, None)
+            .expect_err("page sizes over 2000 must be rejected");
+    assert!(matches!(
+        oversized_page_size,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidPageRequest { .. }
+    ));
+
+    let oversized_cursor = TelemetryPageRequest::new(
+        from,
+        from + Duration::hours(1),
+        now,
+        1,
+        Some("x".repeat(4_097)),
+    )
+    .expect_err("cursors over 4096 bytes must be rejected");
+    assert!(matches!(
+        oversized_cursor,
+        ironclaw_telemetry::TelemetryRepositoryError::InvalidPageRequest { .. }
+    ));
+}
+
 async fn assert_shared_repository_contract<F>(filesystem: Arc<ScopedFilesystem<F>>)
 where
     F: RootFilesystem + 'static,
@@ -429,6 +486,63 @@ async fn filesystem_repository_is_tenant_scoped_and_additive() {
 }
 
 #[tokio::test]
+async fn mismatched_scoped_batch_is_rejected_before_either_tenant_is_written() {
+    let (_, filesystem) = in_memory_filesystem();
+    let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
+    let tenant_a = scope("tenant-a", "user-a");
+    let tenant_b = scope("tenant-b", "user-b");
+    let hour = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test hour");
+    let batch = TelemetryBatch::new(
+        vec![
+            activity("tenant-a", "user-a", hour),
+            activity("tenant-b", "user-b", hour),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .expect("mismatched batch");
+
+    let error = repository
+        .apply_batch(ScopedTelemetryBatch::new(tenant_a.clone(), batch))
+        .await
+        .expect_err("batch scope mismatch must be rejected");
+    assert!(matches!(
+        error,
+        ironclaw_telemetry::TelemetryRepositoryError::ScopeMismatch
+    ));
+
+    let page_request = request(
+        hour,
+        hour + Duration::hours(1),
+        hour + Duration::hours(1),
+        100,
+        None,
+    );
+    assert!(
+        repository
+            .read_activity_page(&tenant_a, &page_request)
+            .await
+            .expect("tenant A read")
+            .rows()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .read_activity_page(&tenant_b, &page_request)
+            .await
+            .expect("tenant B read")
+            .rows()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn repository_pages_half_open_ranges_and_model_filters() {
     let (_, filesystem) = in_memory_filesystem();
     let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
@@ -555,6 +669,50 @@ async fn repository_pages_half_open_ranges_and_model_filters() {
             .iter()
             .all(|row| row.effective_model_id().as_str() == "model-a")
     );
+}
+
+#[tokio::test]
+async fn repository_ceil_lower_bound_excludes_prior_microsecond_record() {
+    let (_, filesystem) = in_memory_filesystem();
+    let repository = FilesystemTelemetryRepository::new(Arc::clone(&filesystem));
+    let tenant = scope("tenant-a", "user-a");
+    let first_hour = Utc
+        .with_ymd_and_hms(2026, 8, 26, 10, 0, 0)
+        .single()
+        .expect("test hour");
+    let second_hour = first_hour + Duration::hours(1);
+    let batch = TelemetryBatch::new(
+        vec![
+            activity("tenant-a", "user-a", first_hour),
+            activity("tenant-a", "user-b", second_hour),
+        ],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    )
+    .expect("activity batch");
+    repository
+        .apply_batch(ScopedTelemetryBatch::new(tenant.clone(), batch))
+        .await
+        .expect("activity write");
+
+    let page = repository
+        .read_activity_page(
+            &tenant,
+            &request(
+                first_hour + Duration::nanoseconds(1),
+                second_hour + Duration::nanoseconds(1),
+                second_hour + Duration::hours(1),
+                100,
+                None,
+            ),
+        )
+        .await
+        .expect("activity read");
+    assert_eq!(page.rows().len(), 1);
+    assert_eq!(page.rows()[0].window_start(), second_hour);
 }
 
 #[tokio::test]

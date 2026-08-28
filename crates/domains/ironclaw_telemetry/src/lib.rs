@@ -7,10 +7,7 @@ pub mod records;
 pub mod repository;
 mod worker;
 
-pub use aggregate::{
-    AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,
-    floor_utc_year,
-};
+pub use aggregate::{AggregationError, aggregate_batch, floor_utc_hour};
 pub use buffered_recorder::{
     BufferedRecorderConfig, BufferedTelemetryRecorder, BufferedTelemetryRecorderHandle,
     DEFAULT_TELEMETRY_MAX_BATCH_SIZE, DEFAULT_TELEMETRY_MAX_WAIT, DEFAULT_TELEMETRY_QUEUE_CAPACITY,

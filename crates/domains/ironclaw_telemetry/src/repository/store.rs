@@ -25,6 +25,38 @@ impl TenantScoped for CollectorCoverage {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum QueryShape {
+    Activity,
+    Model,
+    Failure,
+    Automation,
+    Lifecycle,
+    Coverage,
+}
+
+impl QueryShape {
+    fn family(self) -> &'static str {
+        match self {
+            Self::Activity => FAMILY_ACTIVITY,
+            Self::Model => FAMILY_MODEL,
+            Self::Failure => FAMILY_FAILURE,
+            Self::Automation => FAMILY_AUTOMATION,
+            Self::Lifecycle => FAMILY_LIFECYCLE,
+            Self::Coverage => FAMILY_COVERAGE,
+        }
+    }
+
+    fn time_key(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "occurred_at",
+            Self::Activity | Self::Model | Self::Failure | Self::Automation | Self::Coverage => {
+                "window_start"
+            }
+        }
+    }
+}
+
 impl<F> FilesystemTelemetryRepository<F>
 where
     F: ironclaw_filesystem::RootFilesystem + ?Sized,
@@ -309,63 +341,30 @@ where
         &self,
         scope: &ResourceScope,
         request: &TelemetryPageRequest,
-        family: &'static str,
-        model_read: bool,
-        lifecycle_read: bool,
+        shape: QueryShape,
     ) -> Result<Vec<VersionedEntry>, TelemetryRepositoryError> {
+        let family = shape.family();
         let to = request.effective_to();
         if request.from >= to {
             return Ok(Vec::new());
         }
         self.ensure_indexes(scope).await?;
         let prefix = scoped_path(TELEMETRY_PREFIX.to_owned())?;
-        let (index_name_value, _index_keys, key_name, tie_name) = if lifecycle_read {
-            (
-                INDEX_LIFECYCLE_TIME,
-                &["tenant_id", "record_family"][..],
-                "occurred_at",
-                "tie_breaker",
-            )
-        } else if model_read
-            && request.provider_id.is_some()
-            && request.effective_model_id.is_some()
-        {
-            (
-                INDEX_PROVIDER_MODEL_TIME,
-                &[
-                    "tenant_id",
-                    "record_family",
-                    "provider_id",
-                    "effective_model_id",
-                ][..],
-                "window_start",
-                "tie_breaker",
-            )
-        } else if model_read && request.provider_id.is_some() {
-            (
-                INDEX_PROVIDER_TIME,
-                &["tenant_id", "record_family", "provider_id"][..],
-                "window_start",
-                "tie_breaker",
-            )
-        } else if model_read && request.effective_model_id.is_some() {
-            (
-                INDEX_MODEL_TIME,
-                &["tenant_id", "record_family", "effective_model_id"][..],
-                "window_start",
-                "tie_breaker",
-            )
-        } else {
-            (
-                INDEX_FAMILY_TIME,
-                &["tenant_id", "record_family"][..],
-                if lifecycle_read {
-                    "occurred_at"
-                } else {
-                    "window_start"
-                },
-                "tie_breaker",
-            )
+        let (index_name_value, key_name, tie_name) = match shape {
+            QueryShape::Lifecycle => (INDEX_LIFECYCLE_TIME, "occurred_at", "tie_breaker"),
+            QueryShape::Model => match (
+                request.provider_id.is_some(),
+                request.effective_model_id.is_some(),
+            ) {
+                (true, true) => (INDEX_PROVIDER_MODEL_TIME, "window_start", "tie_breaker"),
+                (true, false) => (INDEX_PROVIDER_TIME, "window_start", "tie_breaker"),
+                (false, true) => (INDEX_MODEL_TIME, "window_start", "tie_breaker"),
+                (false, false) => (INDEX_FAMILY_TIME, "window_start", "tie_breaker"),
+            },
+            QueryShape::Activity
+            | QueryShape::Failure
+            | QueryShape::Automation
+            | QueryShape::Coverage => (INDEX_FAMILY_TIME, "window_start", "tie_breaker"),
         };
         let index = index_name(index_name_value)?;
         let mut filters = vec![
@@ -378,21 +377,19 @@ where
                 value: IndexValue::Text(family.to_owned()),
             },
         ];
-        if let Some(provider) = request.provider_id.as_ref()
-            && model_read
-        {
-            filters.push(Filter::Eq {
-                key: index_key("provider_id")?,
-                value: IndexValue::Text(provider.as_str().to_owned()),
-            });
-        }
-        if let Some(model) = request.effective_model_id.as_ref()
-            && model_read
-        {
-            filters.push(Filter::Eq {
-                key: index_key("effective_model_id")?,
-                value: IndexValue::Text(model.as_str().to_owned()),
-            });
+        if let QueryShape::Model = shape {
+            if let Some(provider) = request.provider_id.as_ref() {
+                filters.push(Filter::Eq {
+                    key: index_key("provider_id")?,
+                    value: IndexValue::Text(provider.as_str().to_owned()),
+                });
+            }
+            if let Some(model) = request.effective_model_id.as_ref() {
+                filters.push(Filter::Eq {
+                    key: index_key("effective_model_id")?,
+                    value: IndexValue::Text(model.as_str().to_owned()),
+                });
+            }
         }
         let filter = Filter::And(filters);
         let (after_time, after_tie) = match request.after.as_deref() {
@@ -441,11 +438,7 @@ where
             let result_len = result.len();
             let mut last = None;
             for item in result {
-                let time_key = if lifecycle_read {
-                    "occurred_at"
-                } else {
-                    "window_start"
-                };
+                let time_key = shape.time_key();
                 let Some(IndexValue::Text(value)) = item.entry.indexed.get(&index_key(time_key)?)
                 else {
                     return Err(TelemetryRepositoryError::InvalidProjection);
@@ -491,7 +484,7 @@ where
         request: &TelemetryPageRequest,
     ) -> Result<TelemetryPage<HourlyUserActivity>, TelemetryRepositoryError> {
         let entries = self
-            .query_entries(scope, request, FAMILY_ACTIVITY, false, false)
+            .query_entries(scope, request, QueryShape::Activity)
             .await?;
         let has_more = entries.len() > request.page_size;
         let mut rows = Vec::with_capacity(entries.len().min(request.page_size));
@@ -544,7 +537,7 @@ where
         request: &TelemetryPageRequest,
     ) -> Result<TelemetryPage<HourlyModelUsage>, TelemetryRepositoryError> {
         let entries = self
-            .query_entries(scope, request, FAMILY_MODEL, true, false)
+            .query_entries(scope, request, QueryShape::Model)
             .await?;
         let has_more = entries.len() > request.page_size;
         let mut rows = Vec::with_capacity(entries.len().min(request.page_size));
@@ -608,7 +601,7 @@ where
         self.read_simple(
             scope,
             request,
-            FAMILY_FAILURE,
+            QueryShape::Failure,
             |entry| {
                 let row = failure_from_wire(
                     serde_json::from_slice(&entry.entry.body)
@@ -653,7 +646,7 @@ where
         self.read_simple(
             scope,
             request,
-            FAMILY_AUTOMATION,
+            QueryShape::Automation,
             |entry| {
                 let row = automation_from_wire(
                     serde_json::from_slice(&entry.entry.body)
@@ -712,7 +705,7 @@ where
         self.read_simple(
             scope,
             request,
-            FAMILY_COVERAGE,
+            QueryShape::Coverage,
             |entry| {
                 let row = coverage_from_wire(
                     serde_json::from_slice(&entry.entry.body)
@@ -744,7 +737,7 @@ where
         &self,
         scope: &ResourceScope,
         request: &TelemetryPageRequest,
-        family: &'static str,
+        shape: QueryShape,
         decode: D,
         cursor: C,
     ) -> Result<TelemetryPage<T>, TelemetryRepositoryError>
@@ -753,9 +746,7 @@ where
         D: Fn(&VersionedEntry) -> Result<T, TelemetryRepositoryError>,
         C: Fn(&T) -> Result<(DateTime<Utc>, String), TelemetryRepositoryError>,
     {
-        let entries = self
-            .query_entries(scope, request, family, false, false)
-            .await?;
+        let entries = self.query_entries(scope, request, shape).await?;
         let has_more = entries.len() > request.page_size;
         let rows = entries
             .into_iter()
@@ -779,7 +770,7 @@ where
         request: &TelemetryPageRequest,
     ) -> Result<TelemetryPage<LifecycleEvent>, TelemetryRepositoryError> {
         let entries = self
-            .query_entries(scope, request, FAMILY_LIFECYCLE, false, true)
+            .query_entries(scope, request, QueryShape::Lifecycle)
             .await?;
         let has_more = entries.len() > request.page_size;
         let mut rows = Vec::with_capacity(entries.len().min(request.page_size));

@@ -8,10 +8,7 @@ use ironclaw_telemetry::records::{
     CollectorCoverage, HourlyAutomationUsage, HourlyModelUsage, HourlyRunFailure,
     HourlyUserActivity, LifecycleEvent, RecordError, TelemetryBatch, TelemetryBatchRowFamily,
 };
-use ironclaw_telemetry::{
-    AggregationError, aggregate_batch, floor_utc_day, floor_utc_hour, floor_utc_month,
-    floor_utc_year,
-};
+use ironclaw_telemetry::{AggregationError, aggregate_batch, floor_utc_hour};
 use ironclaw_telemetry_contracts::observation::{
     AutomationId, AutomationKind, AutomationSettledObservation, EffectiveModelId, LifecycleEventId,
     LifecycleEventKind, LifecycleSubjectKind, LifecycleTransitionObservation,
@@ -173,13 +170,10 @@ fn completed_run(timestamp: DateTime<Utc>, duration_ms: u64) -> ScopedTelemetryO
 }
 
 #[test]
-fn utc_floor_is_exact_at_hour_day_month_and_year_boundaries() {
+fn utc_floor_is_exact_at_hour_boundaries() {
     let timestamp = at(2026, 8, 26, 10, 23, 45);
 
     assert_eq!(floor_utc_hour(timestamp), at(2026, 8, 26, 10, 0, 0));
-    assert_eq!(floor_utc_day(timestamp), at(2026, 8, 26, 0, 0, 0));
-    assert_eq!(floor_utc_month(timestamp), at(2026, 8, 1, 0, 0, 0));
-    assert_eq!(floor_utc_year(timestamp), at(2026, 1, 1, 0, 0, 0));
     assert_eq!(
         floor_utc_hour(at(2026, 8, 26, 10, 0, 0)),
         at(2026, 8, 26, 10, 0, 0)

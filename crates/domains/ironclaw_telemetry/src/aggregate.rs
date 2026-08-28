@@ -234,46 +234,6 @@ pub fn floor_utc_hour(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
-/// Return the exact UTC start of the calendar day containing timestamp.
-pub fn floor_utc_day(timestamp: DateTime<Utc>) -> DateTime<Utc> {
-    match Utc
-        .with_ymd_and_hms(
-            timestamp.year(),
-            timestamp.month(),
-            timestamp.day(),
-            0,
-            0,
-            0,
-        )
-        .single()
-    {
-        Some(floored) => floored,
-        None => timestamp,
-    }
-}
-
-/// Return the exact UTC start of the calendar month containing timestamp.
-pub fn floor_utc_month(timestamp: DateTime<Utc>) -> DateTime<Utc> {
-    match Utc
-        .with_ymd_and_hms(timestamp.year(), timestamp.month(), 1, 0, 0, 0)
-        .single()
-    {
-        Some(floored) => floored,
-        None => timestamp,
-    }
-}
-
-/// Return the exact UTC start of the calendar year containing timestamp.
-pub fn floor_utc_year(timestamp: DateTime<Utc>) -> DateTime<Utc> {
-    match Utc
-        .with_ymd_and_hms(timestamp.year(), 1, 1, 0, 0, 0)
-        .single()
-    {
-        Some(floored) => floored,
-        None => timestamp,
-    }
-}
-
 /// Aggregate observations into deterministic, hourly records.
 ///
 /// Borrow permits callers to pass either an owned iterator or a borrowed slice

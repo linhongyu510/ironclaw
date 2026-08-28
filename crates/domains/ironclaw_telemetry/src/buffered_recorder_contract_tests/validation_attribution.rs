@@ -75,12 +75,12 @@ async fn invalid_aggregate_is_counted_without_a_repository_write() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
     for _ in 0..100 {
-        if lifecycle.diagnostics().invalid_observation_count() == 2 {
+        if lifecycle.diagnostics().invalid_drop_count() == 2 {
             break;
         }
         tokio::task::yield_now().await;
     }
-    assert_eq!(lifecycle.diagnostics().invalid_observation_count(), 2);
+    assert_eq!(lifecycle.diagnostics().invalid_drop_count(), 2); // safety: test-only assertion.
     assert_eq!(
         lifecycle.diagnostics().last_failure_class(),
         Some(TelemetryWriteFailureClass::CounterOverflow)
@@ -143,7 +143,7 @@ async fn system_scope_is_rejected_without_entering_a_global_bucket() {
         recorder.try_record_scoped(ResourceScope::system(), completed_run(0)),
         RecordOutcome::DroppedInvalid
     );
-    assert_eq!(lifecycle.diagnostics().invalid_observation_count(), 1);
+    assert_eq!(lifecycle.diagnostics().invalid_drop_count(), 1); // safety: test-only assertion.
     lifecycle.shutdown().await;
     assert!(repository.batches().is_empty());
 }

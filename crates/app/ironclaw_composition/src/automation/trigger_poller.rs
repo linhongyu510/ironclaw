@@ -127,7 +127,7 @@ pub(crate) fn spawn_trigger_poller(
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
     let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
-        Arc::new(PostSubmitHookObserver::with_telemetry_recorder(
+        Arc::new(TriggerSettlementObserver::with_telemetry_recorder(
             deps.post_submit_hook_slot,
             cancel.clone(),
             deps.telemetry_recorder,
@@ -174,10 +174,11 @@ fn spawn_post_submit_delivery(hook: Arc<dyn PostSubmitDeliveryHook>, event: Trig
 }
 
 /// Bridges trigger-domain settlement notifications to the composition-owned
-/// channel delivery hook. Delivery is detached from the poller tick only after
-/// the worker has persisted either the accepted run/thread mapping or the
-/// permanent pre-submit failure.
-pub(crate) struct PostSubmitHookObserver {
+/// channel delivery hook and telemetry recorder. Delivery is detached from the
+/// poller tick only after the worker has persisted either the accepted
+/// run/thread mapping or the permanent pre-submit failure; terminal trigger
+/// outcomes are recorded as best-effort telemetry observations.
+pub(crate) struct TriggerSettlementObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
     telemetry_recorder: Arc<dyn TelemetryRecorder>,
     pending: Arc<Mutex<VecDeque<TriggerFireSettlement>>>,
@@ -185,7 +186,7 @@ pub(crate) struct PostSubmitHookObserver {
     drain_cancel: CancellationToken,
 }
 
-impl PostSubmitHookObserver {
+impl TriggerSettlementObserver {
     fn with_telemetry_recorder(
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
@@ -260,7 +261,7 @@ impl PostSubmitHookObserver {
 }
 
 #[async_trait]
-impl TriggerFireSettlementObserver for PostSubmitHookObserver {
+impl TriggerFireSettlementObserver for TriggerSettlementObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     OrderedPage, OrderedQueryCursor, ScopedFilesystem, SortDirection, VersionedEntry, cas_update,
@@ -42,6 +42,18 @@ const INDEX_PROVIDER_TIME: &str = "telemetry_provider_time_v0";
 const INDEX_MODEL_TIME: &str = "telemetry_model_time_v0";
 const INDEX_PROVIDER_MODEL_TIME: &str = "telemetry_provider_model_time_v0";
 const INDEX_LIFECYCLE_TIME: &str = "telemetry_lifecycle_time_v0";
+
+fn ceil_timestamp(timestamp: DateTime<Utc>) -> Result<DateTime<Utc>, TelemetryRepositoryError> {
+    let floored = normalize_timestamp(timestamp);
+    if floored == timestamp {
+        return Ok(timestamp);
+    }
+    floored.checked_add_signed(Duration::microseconds(1)).ok_or(
+        TelemetryRepositoryError::InvalidScanRequest {
+            reason: "range lower bound cannot be represented at telemetry precision",
+        },
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedTelemetryBatch {
@@ -182,9 +194,6 @@ impl TelemetryPageRequest {
         page_size: usize,
         after: Option<String>,
     ) -> Result<Self, TelemetryRepositoryError> {
-        let from = normalize_timestamp(from);
-        let to = normalize_timestamp(to);
-        let now = normalize_timestamp(now);
         if from >= to || to.signed_duration_since(from) > MAX_TELEMETRY_RANGE {
             return Err(TelemetryRepositoryError::InvalidScanRequest {
                 reason: "range must be non-empty and at most 366 days",
@@ -204,9 +213,13 @@ impl TelemetryPageRequest {
             });
         }
         Ok(Self {
-            from,
+            // Persisted timestamps are microsecond-precision. Ceil the
+            // inclusive lower bound so a sub-microsecond request cannot
+            // include the preceding persisted timestamp, while retaining the
+            // caller's exclusive upper bound for exact local filtering.
+            from: ceil_timestamp(from)?,
             to,
-            now,
+            now: normalize_timestamp(now),
             page_size,
             after,
             include_partial: false,
