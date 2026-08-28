@@ -570,6 +570,15 @@ where
             .checked_div(message_count)
             .unwrap_or(0)
             .min(MAX_COMPACTION_MESSAGE_BYTES);
+        let system_prompt_tokens = crate::estimate_tokens_from_chars(&self.system_prompt).as_u64();
+        let aggregate_token_units = self
+            .max_input_tokens
+            .saturating_sub(system_prompt_tokens)
+            .saturating_mul(crate::CHARS_PER_TOKEN_DEFAULT)
+            .saturating_sub(u64::try_from(envelope_budget).unwrap_or(u64::MAX));
+        let per_message_token_units = aggregate_token_units
+            .checked_div(u64::try_from(message_count).unwrap_or(u64::MAX))
+            .unwrap_or(0);
         let mut truncated_message_count = 0_u32;
         let mut omitted_input_bytes = 0_u64;
         let truncated = pre_truncation
@@ -581,6 +590,7 @@ where
                     &message.body,
                     per_message_budget,
                     per_message_budget,
+                    per_message_token_units,
                 );
                 if omitted_bytes > 0 {
                     truncated_message_count = truncated_message_count.checked_add(1).ok_or(
@@ -728,40 +738,59 @@ fn truncate_message_body_for_compaction(
     body: &str,
     max_bytes: usize,
     max_escaped_bytes: usize,
+    max_token_units: u64,
 ) -> (String, usize) {
-    if body.len() <= max_bytes && xml_escaped_byte_len(body) <= max_escaped_bytes {
+    if body.len() <= max_bytes
+        && xml_escaped_byte_len(body) <= max_escaped_bytes
+        && xml_escaped_token_units(body) <= max_token_units
+    {
         return (body.to_string(), 0);
     }
     const MARKER: &str = "\n[... omitted oversized message bytes ...]\n";
-    if max_bytes < MARKER.len() || max_escaped_bytes < MARKER.len() {
+    let marker_token_units = u64::try_from(MARKER.len()).unwrap_or(u64::MAX);
+    if max_bytes < MARKER.len()
+        || max_escaped_bytes < MARKER.len()
+        || max_token_units < marker_token_units
+    {
         return (String::new(), body.len());
     }
     let available_escaped = max_escaped_bytes.saturating_sub(MARKER.len());
     let head_budget = available_escaped / 2;
     let tail_budget = available_escaped.saturating_sub(head_budget);
+    let available_token_units = max_token_units.saturating_sub(marker_token_units);
+    let head_token_budget = available_token_units / 2;
+    let tail_token_budget = available_token_units.saturating_sub(head_token_budget);
 
     let mut head_end = 0;
     let mut head_escaped_bytes = 0_usize;
+    let mut head_token_units = 0_u64;
     for (index, character) in body.char_indices() {
         let next_bytes = head_escaped_bytes.saturating_add(xml_escaped_char_len(character));
-        if next_bytes > head_budget {
+        let next_token_units =
+            head_token_units.saturating_add(xml_escaped_char_token_units(character));
+        if next_bytes > head_budget || next_token_units > head_token_budget {
             break;
         }
         head_escaped_bytes = next_bytes;
+        head_token_units = next_token_units;
         head_end = index.saturating_add(character.len_utf8());
     }
 
     let mut tail_start = body.len();
     let mut tail_escaped_bytes = 0_usize;
+    let mut tail_token_units = 0_u64;
     for (index, character) in body.char_indices().rev() {
         if index < head_end {
             break;
         }
         let next_bytes = tail_escaped_bytes.saturating_add(xml_escaped_char_len(character));
-        if next_bytes > tail_budget {
+        let next_token_units =
+            tail_token_units.saturating_add(xml_escaped_char_token_units(character));
+        if next_bytes > tail_budget || next_token_units > tail_token_budget {
             break;
         }
         tail_escaped_bytes = next_bytes;
+        tail_token_units = next_token_units;
         tail_start = index;
     }
 
@@ -772,6 +801,7 @@ fn truncate_message_body_for_compaction(
     truncated.push_str(&body[tail_start..]);
     debug_assert!(truncated.len() <= max_bytes);
     debug_assert!(xml_escaped_byte_len(&truncated) <= max_escaped_bytes);
+    debug_assert!(xml_escaped_token_units(&truncated) <= max_token_units);
     (truncated, omitted)
 }
 
@@ -781,11 +811,26 @@ fn xml_escaped_byte_len(value: &str) -> usize {
     })
 }
 
+fn xml_escaped_token_units(value: &str) -> u64 {
+    value.chars().fold(0_u64, |units, character| {
+        units.saturating_add(xml_escaped_char_token_units(character))
+    })
+}
+
 fn xml_escaped_char_len(character: char) -> usize {
     match character {
         '&' => "&amp;".len(),
         '<' | '>' => "&lt;".len(),
         _ => character.len_utf8(),
+    }
+}
+
+fn xml_escaped_char_token_units(character: char) -> u64 {
+    match character {
+        '&' => "&amp;".len() as u64,
+        '<' | '>' => "&lt;".len() as u64,
+        _ if character.is_ascii() => 1,
+        _ => (character.len_utf8() as u64).saturating_mul(2),
     }
 }
 

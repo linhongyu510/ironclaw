@@ -14,8 +14,8 @@ use ironclaw_loop_contracts::{
     SystemInferenceRequest, SystemInferenceResponse, SystemInferenceTaskId, SystemPromptSource,
 };
 use ironclaw_loop_host::{
-    ACTIVE_TASK_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
-    active_task_compaction_prompt_id,
+    ACTIVE_TASK_COMPACTION_PROMPT_ID, ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT,
+    HostManagedLoopCompactionPort, active_task_compaction_prompt_id, estimate_tokens_from_chars,
 };
 use ironclaw_safety::{
     InjectionScanner, InjectionWarning, LeakAction, LeakDetector, LeakMatch, LeakScanResult,
@@ -136,6 +136,30 @@ async fn compaction_port_allows_role_label_inside_a_path_segment() {
         .expect("a role label embedded in a path is not prompt injection");
 
     assert!(inference.last_input().contains("mapred/system: 3 files"));
+}
+
+#[tokio::test]
+async fn compaction_port_allows_hdfs_system_component_at_full_window() {
+    let fixture = CompactionFixture::new().await;
+    let line = "081109 203518 35 INFO dfs.FSNamesystem: BLOCK* NameSystem.allocateBlock: \
+        /mnt/hadoop/mapred/system/job_200811092030_0001/job.jar. \
+        blk_-1608999687919862906";
+    for _ in 0..131 {
+        fixture.append_user(line).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(Sanitizer::new()),
+        Arc::new(LeakDetector::new()),
+        fixture.scope.clone(),
+    );
+
+    port.compact_loop_context(fixture.request(131))
+        .await
+        .expect("embedded HDFS system components are not prompt injection");
+
+    assert!(inference.last_input().contains("dfs.FSNamesystem:"));
 }
 
 #[tokio::test]
@@ -1630,6 +1654,27 @@ async fn compaction_task_budgets_xml_expansion_across_multiple_messages() {
 }
 
 #[tokio::test]
+async fn compaction_task_reserves_system_prompt_tokens_before_inference() {
+    let fixture = CompactionFixture::new().await;
+    for _ in 0..130 {
+        fixture.append_user(&"你".repeat(2 * 1024)).await;
+    }
+    let port = HostManagedLoopCompactionPort::with_scanners_and_prompt_id(
+        Arc::new(TokenAdmissionInference),
+        Arc::clone(&fixture.threads),
+        fixture.scope.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        active_task_compaction_prompt_id(),
+        ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT,
+    );
+
+    port.compact_loop_context(fixture.request(130))
+        .await
+        .expect("sanitized input plus the compaction prompt must fit 64 Ki tokens");
+}
+
+#[tokio::test]
 async fn compaction_task_redacts_full_credential_before_truncation_splits_it() {
     const TRUNCATION_MARKER: &str = "\n[... omitted oversized message bytes ...]\n";
     const MESSAGE_BUDGET: usize = 32 * 1024;
@@ -1685,28 +1730,7 @@ async fn compaction_task_rejects_unbounded_original_input_before_scanning() {
 }
 
 #[tokio::test]
-async fn compaction_task_accepts_full_window_with_pinned_task_and_retained_boundary() {
-    let fixture = CompactionFixture::new().await;
-    for index in 0..130 {
-        fixture.append_user(&format!("message {index}")).await;
-    }
-    let inference = Arc::new(CapturingInference::new("summary"));
-    let port = fixture.port_with_inference(
-        inference.clone(),
-        Arc::new(CleanInjectionScanner),
-        Arc::new(CleanLeakScanner),
-        fixture.scope.clone(),
-    );
-
-    port.compact_loop_context(fixture.request(130))
-        .await
-        .expect("the production compaction window may contain 130 transcript messages");
-
-    assert!(!inference.last_input().is_empty());
-}
-
-#[tokio::test]
-async fn compaction_task_rejects_message_count_above_production_window() {
+async fn compaction_task_accepts_full_window_plus_triggering_result() {
     let fixture = CompactionFixture::new().await;
     for index in 0..131 {
         fixture.append_user(&format!("message {index}")).await;
@@ -1719,8 +1743,29 @@ async fn compaction_task_rejects_message_count_above_production_window() {
         fixture.scope.clone(),
     );
 
+    port.compact_loop_context(fixture.request(131))
+        .await
+        .expect("the production compaction range may contain 131 transcript messages");
+
+    assert!(!inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_message_count_above_production_window() {
+    let fixture = CompactionFixture::new().await;
+    for index in 0..132 {
+        fixture.append_user(&format!("message {index}")).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
     let error = port
-        .compact_loop_context(fixture.request(131))
+        .compact_loop_context(fixture.request(132))
         .await
         .expect_err("message counts above the production window must fail before inference");
 
@@ -2484,6 +2529,29 @@ impl SystemInferencePort for FailingInference {
         _request: SystemInferenceRequest,
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
         Err(self.error.clone())
+    }
+}
+
+struct TokenAdmissionInference;
+
+#[async_trait]
+impl SystemInferencePort for TokenAdmissionInference {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        let input_tokens = estimate_tokens_from_chars(&request.identity.system_prompt)
+            .as_u64()
+            .saturating_add(estimate_tokens_from_chars(&request.input_text).as_u64());
+        if input_tokens > request.max_input_tokens {
+            return Err(SystemInferenceError::InputTooLarge);
+        }
+        Ok(SystemInferenceResponse {
+            task_id: request.task_id,
+            output_text: "summary".to_string(),
+            elapsed_ms: 1,
+            usage: None,
+        })
     }
 }
 

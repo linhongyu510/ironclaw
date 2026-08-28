@@ -8,9 +8,10 @@ use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
 // The canonical 128-message context window may additionally pin the accepted
-// task and the active-task boundary, so a valid compaction range can contain
-// 130 transcript messages.
-const MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES: usize = 130;
+// task and active-task boundary, then admit the capability result that triggers
+// proactive compaction. A valid production range can therefore contain 131
+// transcript messages.
+const MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES: usize = 131;
 const MAX_UNTRUNCATED_TOTAL_MESSAGES: usize = 257;
 const MAX_UNTRUNCATED_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 
