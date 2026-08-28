@@ -26,6 +26,7 @@ mod context;
 mod drain;
 pub(crate) mod gate;
 mod model;
+mod progress;
 pub(crate) mod recovery;
 mod reply_admission;
 mod stop;
@@ -51,6 +52,7 @@ pub(crate) use gate::{
 pub(crate) use model::{
     DefaultModelStrategy, ModelPreference, ModelStrategy, StructuredResultModelStrategy,
 };
+pub(crate) use progress::RepeatedOutputProgressStrategy;
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
     ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,

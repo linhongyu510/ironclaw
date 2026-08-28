@@ -512,8 +512,7 @@ async fn completed_result_without_output_digest_leaves_no_progress_window_empty(
 /// terminate the run.
 #[tokio::test]
 async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() {
-    let threshold =
-        crate::strategies::DefaultStopConditionStrategy::default().no_progress_threshold;
+    let threshold = crate::strategies::RepeatedOutputProgressStrategy::default().threshold();
     let digest = ironclaw_loop_contracts::ContentDigest(31_337);
 
     fn identical_batch_outcome(
@@ -609,8 +608,8 @@ async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() 
 /// (same seam: the full executor caller path through `schedule_no_progress_warning`
 /// in turn_stop.rs), but with an ALTERNATING call signature (A, B, A, B, ...) that
 /// still shares the same `output_digest`, so the terminating check
-/// (`seen_capability_output_digests.most_common_count_in(no_progress_window)`,
-/// strategies/stop.rs) sees signature A's `(signature, output_digest)` pair
+/// (`RepeatedOutputProgressStrategy::dominant_repeated_output_count`,
+/// strategies/progress.rs) sees signature A's `(signature, output_digest)` pair
 /// dominate the window. The buggy computation this pins against
 /// (`recent_call_signatures.most_common_count_in(8)`) counts bare signatures over
 /// the wrong ring and the wrong window: alternating A/B in the trailing 8 calls
@@ -624,8 +623,7 @@ async fn no_progress_strike_reports_dominant_digest_count_for_alternating_signat
         ParentLoopOutput,
     };
 
-    let threshold =
-        crate::strategies::DefaultStopConditionStrategy::default().no_progress_threshold;
+    let threshold = crate::strategies::RepeatedOutputProgressStrategy::default().threshold();
     let digest = ironclaw_loop_contracts::ContentDigest(90_210);
 
     fn alternating_calls_response(use_first_signature: bool) -> LoopModelResponse {
@@ -1275,6 +1273,49 @@ async fn recoverable_batch_port_error_surfaces_as_model_visible_tool_error() {
         }
         other => panic!("expected GenericFailure observation detail, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn same_signature_with_changing_output_digest_never_stops_or_warns_no_progress() {
+    // Audit's motivating counter-example, driven through the full canonical
+    // executor from fresh state: the SAME call signature repeated exactly at
+    // the no-progress threshold (8), but with a DIFFERENT output digest each
+    // time (a real red/green retry loop) — must never dominate the trailing
+    // window, so the run completes normally instead of stopping (or
+    // scheduling a no-progress warning) as `NoProgressDetected`.
+    let name = "demo.echo";
+    let script = ScenarioScript {
+        model_responses: (0..8)
+            .map(|_| ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new(name)]))
+            .chain(std::iter::once(ScriptedModelResponse::Reply {
+                text: "done".to_string(),
+            }))
+            .collect(),
+        capability_outcomes: (0..8u64)
+            .map(|i| {
+                vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                    format!("result:changing-{i}"),
+                    ironclaw_loop_contracts::ContentDigest(i),
+                )]
+            })
+            .collect(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = DriverMockHost::builder().script(script).build();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "changing output digests must never trigger a no-progress stop: {exit:?}"
+    );
+    assert_eq!(host.model_call_count(), 9);
 }
 
 #[tokio::test]

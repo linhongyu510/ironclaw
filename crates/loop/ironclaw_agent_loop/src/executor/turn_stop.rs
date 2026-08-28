@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::{
     state::{BoundedRing, LoopExecutionState, TerminalWarningObservation},
-    strategies::{StopKind, StopOutcome, TurnSummary},
+    strategies::{RepeatedOutputProgressStrategy, StopKind, StopOutcome, TurnSummary},
 };
 
 use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
@@ -155,15 +155,12 @@ fn schedule_no_progress_warning(state: &mut LoopExecutionState, kind: &StopKind)
         return false;
     }
     // Same window the stop strategy used to trigger this path
-    // (`DefaultStopConditionStrategy::no_progress_window`, strategies/stop.rs) —
-    // the digest ring, not the bare call-signature ring, since the terminating
-    // check dominates on (signature, output_digest) pairs and can trip on an
+    // (`RepeatedOutputProgressStrategy`, strategies/progress.rs) — the digest
+    // ring, not the bare call-signature ring, since the terminating check
+    // dominates on (signature, output_digest) pairs and can trip on an
     // alternating call-signature sequence.
-    let repeated_call_count = state
-        .seen_capability_output_digests
-        .most_common_count_in(
-            crate::strategies::DefaultStopConditionStrategy::default().no_progress_window,
-        )
+    let repeated_call_count = RepeatedOutputProgressStrategy::default()
+        .dominant_repeated_output_count(&state.seen_capability_output_digests)
         .min(u32::MAX as usize) as u32;
     let repeated_call_count = (repeated_call_count > 1).then_some(repeated_call_count);
     let last_failure = state.recent_failure_kinds.iter().next_back().copied();
