@@ -45,10 +45,8 @@ impl TelemetryWriteFailureClass {
     }
 }
 
-const _: () = assert!(
-    TelemetryWriteFailureClass::CollectorIdResolution.index() + 1 == FAILURE_CLASS_COUNT,
-    "FAILURE_CLASS_COUNT must match TelemetryWriteFailureClass",
-);
+const _: [(); FAILURE_CLASS_COUNT] =
+    [(); TelemetryWriteFailureClass::CollectorIdResolution.index() + 1];
 
 pub(crate) type FailureClassCode = TelemetryWriteFailureClass;
 
