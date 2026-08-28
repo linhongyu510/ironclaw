@@ -65,8 +65,23 @@ export function InferenceTab({
     "ollama",
     "near",
   ]);
+  const showLearningSection = matchesSearch(searchQuery, [
+    t("llm.learningTitle"),
+    t("llm.learningDesc"),
+    t("llm.learningToggleLabel"),
+    t("llm.learningModelLabel"),
+    t("llm.learningMemoryPolicyLabel"),
+    t("llm.learningMemoryPolicyHelp"),
+    "learning",
+  ]);
 
-  if (isAdmin && !showProviderSummary && !showProviderManagement && sections.length === 0) {
+  if (
+    isAdmin &&
+    !showProviderSummary &&
+    !showProviderManagement &&
+    !showLearningSection &&
+    sections.length === 0
+  ) {
     return (<SettingsSearchEmpty query={searchQuery} />);
   }
 
@@ -76,7 +91,7 @@ export function InferenceTab({
 
       <UserModelPreferenceSelector />
 
-      {isAdmin && <LearningSection providerState={providerState} />}
+      {isAdmin && showLearningSection && <LearningSection providerState={providerState} />}
 
       {isAdmin && showProviderSummary &&
       (

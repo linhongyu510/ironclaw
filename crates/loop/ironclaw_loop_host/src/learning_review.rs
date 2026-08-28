@@ -13,22 +13,25 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
-use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider};
 use ironclaw_memory::{
-    LearningCandidateInsert, LearningCandidateStore, LearningCandidateStoreError, LearningReview,
-    LearningReviewRecord, LearningScope, MAX_LEARNING_UNRESOLVED_PROPOSALS,
+    LearningAction, LearningCandidateInsert, LearningCandidateStore, LearningCandidateStoreError,
+    LearningReview, LearningReviewRecord, LearningScope, MAX_LEARNING_UNRESOLVED_PROPOSALS,
 };
 use ironclaw_product_contracts::operator_llm::{LearningRuntimeController, LearningSettings};
+use ironclaw_safety::LeakDetector;
 use ironclaw_threads::{
-    ContextWindow, LoadContextWindowRequest, MessageKind, SessionThreadService, ThreadScope,
+    CompletedRunMessages, CompletedRunMessagesRequest, MessageKind, SessionThreadService,
+    ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId};
-use tokio::task::JoinHandle;
+use tokio::{sync::Semaphore, task::JoinHandle};
 
 const TRANSCRIPT_READ_LIMIT: usize = 64;
 const TRANSCRIPT_MAX_BYTES: usize = 16 * 1024;
-const LEARNING_REVIEW_MAX_TOKENS: u32 = 4_096;
+const LEARNING_REVIEW_OUTPUT_MAX_BYTES: usize = 32 * 1024;
+pub(crate) const LEARNING_REVIEW_MAX_TOKENS: u32 = 4_096;
 const CANDIDATE_RECORD_MAX_BYTES: usize = 32 * 1024;
+const MAX_CONCURRENT_REVIEWS: usize = 4;
 const CANDIDATE_DIRECTORY: &str = "/tenant-shared/learning-candidates";
 const LEARNING_REVIEW_SYSTEM_PROMPT: &str = include_str!("../prompts/learning_review.md");
 /// Fan out the single turn-event sink slot to independent best-effort sinks.
@@ -104,50 +107,15 @@ impl std::fmt::Display for LearningInferenceError {
         formatter.write_str(&self.0)
     }
 }
+impl LearningInferenceError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
 
 #[async_trait]
 pub trait LearningInferencePort: Send + Sync {
     async fn infer(&self, system: &str, user: &str) -> Result<String, LearningInferenceError>;
-}
-
-/// Uses the active provider with the model selected in Learning settings.
-pub struct LearningInferenceAdapter {
-    provider: Arc<dyn LlmProvider>,
-    controller: Arc<LearningRuntimeControllerImpl>,
-}
-
-impl LearningInferenceAdapter {
-    pub fn new(
-        provider: Arc<dyn LlmProvider>,
-        controller: Arc<LearningRuntimeControllerImpl>,
-    ) -> Self {
-        Self {
-            provider,
-            controller,
-        }
-    }
-}
-
-#[async_trait]
-impl LearningInferencePort for LearningInferenceAdapter {
-    async fn infer(&self, system: &str, user: &str) -> Result<String, LearningInferenceError> {
-        if !self.controller.enabled() {
-            return Err(LearningInferenceError("learning is disabled".to_string()));
-        }
-        let model = self
-            .controller
-            .current_model()
-            .ok_or_else(|| LearningInferenceError("learning has no selected model".to_string()))?;
-        let request =
-            CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
-                .with_model(model)
-                .with_max_tokens(LEARNING_REVIEW_MAX_TOKENS);
-        self.provider
-            .complete(request)
-            .await
-            .map(|response| response.content)
-            .map_err(|error| LearningInferenceError(error.to_string()))
-    }
 }
 
 /// Durable candidate store. A run owns one immutable record, so an exclusive
@@ -171,12 +139,16 @@ impl<F: RootFilesystem + ?Sized> FilesystemLearningCandidateStore<F> {
             None => "project-none".to_string(),
         };
         ScopedPath::new(format!(
-            "{CANDIDATE_DIRECTORY}/{}/{}/{}",
+            "{CANDIDATE_DIRECTORY}/{}/{}/{}/{}",
+            scope.tenant_id().as_str(),
             scope.user_id().as_str(),
             scope.agent_id().as_str(),
             project,
         ))
-        .map_err(|_| LearningCandidateStoreError::InvalidData)
+        .map_err(|error| {
+            tracing::debug!(%error, "learning candidate path construction failed");
+            LearningCandidateStoreError::InvalidData
+        })
     }
 
     fn path(
@@ -184,8 +156,10 @@ impl<F: RootFilesystem + ?Sized> FilesystemLearningCandidateStore<F> {
         run_id: TurnRunId,
     ) -> Result<ScopedPath, LearningCandidateStoreError> {
         let directory = Self::directory(scope)?;
-        ScopedPath::new(format!("{}/{}.json", directory.as_str(), run_id))
-            .map_err(|_| LearningCandidateStoreError::InvalidData)
+        ScopedPath::new(format!("{}/{}.json", directory.as_str(), run_id)).map_err(|error| {
+            tracing::debug!(%error, ?run_id, "learning candidate path construction failed");
+            LearningCandidateStoreError::InvalidData
+        })
     }
 }
 
@@ -195,12 +169,17 @@ impl<F: RootFilesystem + ?Sized> LearningCandidateStore for FilesystemLearningCa
         &self,
         record: &LearningReviewRecord,
     ) -> Result<LearningCandidateInsert, LearningCandidateStoreError> {
+        if record.idempotency_key.as_str() != format!("learning-review:{}", record.run_id) {
+            return Err(LearningCandidateStoreError::InvalidData);
+        }
         record
             .review
             .validate()
             .map_err(|_| LearningCandidateStoreError::InvalidData)?;
-        let bytes =
-            serde_json::to_vec(record).map_err(|_| LearningCandidateStoreError::InvalidData)?;
+        let bytes = serde_json::to_vec(record).map_err(|error| {
+            tracing::debug!(%error, run_id = ?record.run_id, "learning candidate serialization failed");
+            LearningCandidateStoreError::InvalidData
+        })?;
         if bytes.len() > CANDIDATE_RECORD_MAX_BYTES {
             return Err(LearningCandidateStoreError::InvalidData);
         }
@@ -243,9 +222,15 @@ impl<F: RootFilesystem + ?Sized> LearningCandidateStore for FilesystemLearningCa
         else {
             return Ok(None);
         };
-        let record: LearningReviewRecord = serde_json::from_slice(&row.entry.body)
-            .map_err(|_| LearningCandidateStoreError::InvalidData)?;
-        if &record.scope != scope || record.run_id != run_id {
+        let record: LearningReviewRecord =
+            serde_json::from_slice(&row.entry.body).map_err(|error| {
+                tracing::debug!(%error, ?run_id, "learning candidate deserialization failed");
+                LearningCandidateStoreError::InvalidData
+            })?;
+        if &record.scope != scope
+            || record.run_id != run_id
+            || record.idempotency_key.as_str() != format!("learning-review:{run_id}")
+        {
             return Err(LearningCandidateStoreError::InvalidData);
         }
         record
@@ -280,8 +265,14 @@ impl<F: RootFilesystem + ?Sized> LearningCandidateStore for FilesystemLearningCa
         rows.into_iter()
             .map(|row| {
                 let record: LearningReviewRecord = serde_json::from_slice(&row.entry.body)
-                    .map_err(|_| LearningCandidateStoreError::InvalidData)?;
-                if &record.scope != scope {
+                    .map_err(|error| {
+                        tracing::debug!(%error, "learning candidate deserialization failed");
+                        LearningCandidateStoreError::InvalidData
+                    })?;
+                if &record.scope != scope
+                    || record.idempotency_key.as_str()
+                        != format!("learning-review:{}", record.run_id)
+                {
                     return Err(LearningCandidateStoreError::InvalidData);
                 }
                 record
@@ -296,10 +287,20 @@ impl<F: RootFilesystem + ?Sized> LearningCandidateStore for FilesystemLearningCa
 
 /// Runtime-owned post-run tasks. Shutdown aborts all remaining model and store
 /// work before their dependencies are dropped.
-#[derive(Default)]
 pub struct LearningReviewTasks {
     handles: Mutex<Vec<JoinHandle<()>>>,
     in_flight: Arc<Mutex<BTreeSet<TurnRunId>>>,
+    permits: Arc<Semaphore>,
+}
+
+impl Default for LearningReviewTasks {
+    fn default() -> Self {
+        Self {
+            handles: Mutex::new(Vec::new()),
+            in_flight: Arc::new(Mutex::new(BTreeSet::new())),
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEWS)),
+        }
+    }
 }
 
 impl LearningReviewTasks {
@@ -309,17 +310,30 @@ impl LearningReviewTasks {
 
     fn spawn(&self, job: LearningReviewJob) {
         let run_id = job.run_id;
+        let permit = match Arc::clone(&self.permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::debug!(
+                    ?run_id,
+                    limit = MAX_CONCURRENT_REVIEWS,
+                    "learning review dropped because concurrency is saturated"
+                );
+                return;
+            }
+        };
         {
             let mut in_flight = match self.in_flight.lock() {
                 Ok(in_flight) => in_flight,
                 Err(poisoned) => poisoned.into_inner(),
             };
             if !in_flight.insert(run_id) {
+                tracing::debug!(?run_id, "duplicate learning review dropped");
                 return;
             }
         }
         let in_flight = Arc::clone(&self.in_flight);
         let handle = tokio::spawn(async move {
+            let _permit = permit;
             job.run().await;
             match in_flight.lock() {
                 Ok(mut in_flight) => {
@@ -463,22 +477,28 @@ impl LearningReviewJob {
                 return;
             }
         }
-        let window = match self
+        let messages = match self
             .thread_service
-            .load_context_window(LoadContextWindowRequest {
+            .list_completed_run_messages_bounded(CompletedRunMessagesRequest {
                 scope: self.thread_scope,
                 thread_id: self.thread_id,
+                turn_run_id: self.run_id.to_string(),
                 max_messages: TRANSCRIPT_READ_LIMIT,
+                max_bytes: TRANSCRIPT_MAX_BYTES,
             })
             .await
         {
-            Ok(window) => window,
+            Ok(CompletedRunMessages::Complete(messages)) => messages,
+            Ok(CompletedRunMessages::LimitExceeded) => {
+                tracing::debug!(run_id = ?self.run_id, "learning review transcript exceeded bounds");
+                return;
+            }
             Err(error) => {
                 tracing::debug!(%error, run_id = ?self.run_id, "learning review transcript read failed");
                 return;
             }
         };
-        let transcript = format_transcript(&window);
+        let transcript = format_transcript(&messages);
         if transcript.content.is_empty() || !self.controller.enabled() {
             return;
         }
@@ -513,7 +533,15 @@ impl LearningReviewJob {
             .infer(LEARNING_REVIEW_SYSTEM_PROMPT, &user_prompt)
             .await
         {
-            Ok(output) => output,
+            Ok(output) if output.len() <= LEARNING_REVIEW_OUTPUT_MAX_BYTES => output,
+            Ok(_) => {
+                tracing::debug!(
+                    run_id = ?self.run_id,
+                    limit = LEARNING_REVIEW_OUTPUT_MAX_BYTES,
+                    "learning review provider output exceeded byte limit"
+                );
+                return;
+            }
             Err(error) => {
                 tracing::debug!(%error, run_id = ?self.run_id, "learning review inference failed");
                 return;
@@ -521,6 +549,7 @@ impl LearningReviewJob {
         };
         let review = match parse_review(&output)
             .and_then(|review| seal_review_sources(review, &transcript))
+            .and_then(reject_secret_bearing_candidates)
         {
             Ok(review) => review,
             Err(reason) => {
@@ -528,6 +557,9 @@ impl LearningReviewJob {
                 return;
             }
         };
+        if !self.controller.enabled() {
+            return;
+        }
         let record = match LearningReviewRecord::new(self.run_id, self.learning_scope, review) {
             Ok(record) => record,
             Err(error) => {
@@ -542,6 +574,9 @@ impl LearningReviewJob {
 }
 
 fn parse_review(output: &str) -> Result<LearningReview, &'static str> {
+    if output.len() > LEARNING_REVIEW_OUTPUT_MAX_BYTES {
+        return Err("output too large");
+    }
     let review: LearningReview = serde_json::from_str(output).map_err(|_| "invalid JSON")?;
     review.validate().map_err(|_| "invalid learning review")?;
     Ok(review)
@@ -557,6 +592,7 @@ fn seal_review_sources(
     mut review: LearningReview,
     transcript: &FormattedTranscript,
 ) -> Result<LearningReview, &'static str> {
+    let transcript_tainted = !transcript.tainted_indices.is_empty();
     for proposal in &mut review.memory {
         if !proposal
             .source_message_indices
@@ -565,10 +601,11 @@ fn seal_review_sources(
         {
             return Err("unknown source message index");
         }
-        proposal.tainted |= proposal
-            .source_message_indices
-            .iter()
-            .any(|index| transcript.tainted_indices.contains(index));
+        proposal.tainted |= transcript_tainted
+            || proposal
+                .source_message_indices
+                .iter()
+                .any(|index| transcript.tainted_indices.contains(index));
     }
     if !review
         .skill
@@ -578,20 +615,50 @@ fn seal_review_sources(
     {
         return Err("unknown skill source message index");
     }
+    if review.skill.action == LearningAction::Distill {
+        review.skill.tainted |= transcript_tainted
+            || review
+                .skill
+                .source_message_indices
+                .iter()
+                .any(|index| transcript.tainted_indices.contains(index));
+    }
     Ok(review)
 }
 
-fn format_transcript(window: &ContextWindow) -> FormattedTranscript {
+fn reject_secret_bearing_candidates(
+    review: LearningReview,
+) -> Result<LearningReview, &'static str> {
+    let detector = LeakDetector::new();
+    if review
+        .memory
+        .iter()
+        .any(|proposal| !detector.scan(&proposal.content).is_clean())
+        || review
+            .skill
+            .reason
+            .as_deref()
+            .is_some_and(|reason| !detector.scan(reason).is_clean())
+    {
+        return Err("secret detected in learning candidate");
+    }
+    Ok(review)
+}
+
+fn format_transcript(messages: &[ThreadMessageRecord]) -> FormattedTranscript {
     let mut output = String::new();
     let mut source_indices = BTreeSet::new();
     let mut tainted_indices = BTreeSet::new();
-    for (index, message) in window.messages.iter().enumerate() {
+    for (index, message) in messages.iter().enumerate() {
         let role = match message.kind {
             MessageKind::User => "user",
             MessageKind::Assistant => "assistant",
             MessageKind::ToolResultReference => "tool_result",
             MessageKind::System => "system",
             _ => continue,
+        };
+        let Some(content) = message.content.as_deref() else {
+            continue;
         };
         let mut line = format!("[{index}] {role}: ");
         if matches!(message.kind, MessageKind::ToolResultReference)
@@ -601,18 +668,20 @@ fn format_transcript(window: &ContextWindow) -> FormattedTranscript {
             line.push_str(call.capability_id.as_str());
             line.push(' ');
         }
-        line.push_str(&message.content);
+        line.push_str(content);
         line.push('\n');
+        if output.len().saturating_add(line.len()) > TRANSCRIPT_MAX_BYTES {
+            break;
+        }
         let Ok(index) = u16::try_from(index) else {
             break;
         };
+        output.push_str(&line);
         source_indices.insert(index);
-        if matches!(message.kind, MessageKind::ToolResultReference) {
+        if matches!(message.kind, MessageKind::ToolResultReference)
+            || message.source_binding_id.is_some()
+        {
             tainted_indices.insert(index);
-        }
-        push_bounded(&mut output, &line, TRANSCRIPT_MAX_BYTES);
-        if output.len() == TRANSCRIPT_MAX_BYTES {
-            break;
         }
     }
     FormattedTranscript {
@@ -620,19 +689,6 @@ fn format_transcript(window: &ContextWindow) -> FormattedTranscript {
         source_indices,
         tainted_indices,
     }
-}
-
-fn push_bounded(output: &mut String, value: &str, limit: usize) {
-    let remaining = limit.saturating_sub(output.len());
-    if value.len() <= remaining {
-        output.push_str(value);
-        return;
-    }
-    let mut end = remaining;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    output.push_str(&value[..end]);
 }
 
 #[cfg(test)]
@@ -653,6 +709,24 @@ mod tests {
     use tokio::sync::Notify;
 
     #[test]
+    fn review_semaphore_caps_concurrency_and_drops_newest() {
+        let tasks = LearningReviewTasks::new();
+        let held = (0..MAX_CONCURRENT_REVIEWS)
+            .map(|_| {
+                Arc::clone(&tasks.permits)
+                    .try_acquire_owned()
+                    .expect("configured review permit")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            Arc::clone(&tasks.permits).try_acquire_owned().is_err(),
+            "the newest review must be dropped when all permits are held"
+        );
+        drop(held);
+        assert!(Arc::clone(&tasks.permits).try_acquire_owned().is_ok());
+    }
+
+    #[test]
     fn parser_accepts_only_valid_bounded_reviews() {
         let review = LearningReview {
             memory: vec![MemoryLearningProposal {
@@ -667,6 +741,7 @@ mod tests {
                 action: LearningAction::Skip,
                 reason: None,
                 source_message_indices: Vec::new(),
+                tainted: false,
             },
         };
         let json = serde_json::to_string(&review).expect("serialize");
@@ -681,6 +756,7 @@ mod tests {
                 kind: MemoryLearningProposalKind::Fact,
                 content: "Unsupported claim".to_string(),
                 source_message_indices: vec![1],
+
                 confidence_basis_points: 8_000,
                 explicitness: LearningExplicitness::Inferred,
                 tainted: false,
@@ -694,12 +770,82 @@ mod tests {
         };
         assert!(seal_review_sources(review, &transcript).is_err());
     }
+
     #[test]
-    fn bounded_append_preserves_utf8_boundaries() {
-        let mut output = String::new();
-        push_bounded(&mut output, &"é".repeat(20_000), TRANSCRIPT_MAX_BYTES);
-        assert!(output.len() <= TRANSCRIPT_MAX_BYTES);
-        assert!(output.is_char_boundary(output.len()));
+    fn parser_rejects_oversized_provider_output_before_json_parse() {
+        assert_eq!(
+            parse_review(&"x".repeat(LEARNING_REVIEW_OUTPUT_MAX_BYTES + 1)),
+            Err("output too large")
+        );
+    }
+
+    #[test]
+    fn host_rejects_secret_bearing_candidate_text() {
+        let token = format!("ghp_{}", "x".repeat(36));
+        let review = LearningReview {
+            memory: vec![MemoryLearningProposal {
+                kind: MemoryLearningProposalKind::Fact,
+                content: token,
+                source_message_indices: vec![0],
+                confidence_basis_points: 8_000,
+                explicitness: LearningExplicitness::Explicit,
+                tainted: false,
+            }],
+            skill: LearningDecision::skip(),
+        };
+        assert_eq!(
+            reject_secret_bearing_candidates(review),
+            Err("secret detected in learning candidate")
+        );
+    }
+
+    #[test]
+    fn host_taints_skill_decisions_when_transcript_contains_untrusted_data() {
+        let review = LearningReview {
+            memory: Vec::new(),
+            skill: LearningDecision {
+                action: LearningAction::Distill,
+                reason: Some("procedure".to_string()),
+                source_message_indices: vec![0],
+                tainted: false,
+            },
+        };
+        let transcript = FormattedTranscript {
+            content: "[0] system: child".to_string(),
+            source_indices: BTreeSet::from([0]),
+            tainted_indices: BTreeSet::from([0]),
+        };
+        let sealed = seal_review_sources(review, &transcript).expect("seal");
+        assert!(sealed.skill.tainted);
+    }
+    #[test]
+    fn transcript_budget_keeps_only_complete_lines() {
+        let thread_id = ThreadId::new("learning-thread").expect("thread");
+        let message = |sequence, content| ThreadMessageRecord {
+            message_id: ironclaw_threads::ThreadMessageId::new(),
+            thread_id: thread_id.clone(),
+            sequence,
+            kind: MessageKind::User,
+            status: ironclaw_threads::MessageStatus::Accepted,
+            created_at: None,
+            updated_at: None,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(content),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        let transcript = format_transcript(&[
+            message(1, "first".to_string()),
+            message(2, "x".repeat(TRANSCRIPT_MAX_BYTES)),
+        ]);
+        assert_eq!(transcript.content, "[0] user: first\n");
+        assert_eq!(transcript.source_indices, BTreeSet::from([0]));
     }
 
     struct RecordingInference {
@@ -783,6 +929,7 @@ mod tests {
             owner_user_id: Some(user_id.clone()),
             mission_id: None,
         };
+        let run_id = TurnRunId::new();
         let threads = Arc::new(InMemorySessionThreadService::default());
         threads
             .ensure_thread(EnsureThreadRequest {
@@ -805,7 +952,7 @@ mod tests {
                     mission_id: None,
                 },
                 thread_id: thread_id.clone(),
-                turn_run_id: "run-1".to_string(),
+                turn_run_id: run_id.to_string(),
                 result_ref: "result:learning".to_string(),
                 safe_summary: ToolResultSafeSummary::new("The user prefers concise status reports")
                     .expect("summary"),
@@ -867,7 +1014,6 @@ mod tests {
             Arc::clone(&tasks),
             controller,
         );
-        let run_id = TurnRunId::new();
         let event = TurnLifecycleEvent {
             cursor: EventCursor::default(),
             scope: TurnScope::new_with_owner(
@@ -895,28 +1041,30 @@ mod tests {
             .expect("candidate insert");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(inference.calls.load(Ordering::SeqCst), 1);
-        let users = inference.users.lock().expect("users lock");
-        let input: serde_json::Value =
-            serde_json::from_str(&users[0]).expect("learning input JSON");
-        assert_eq!(
-            input["unresolved_proposals"]
-                .as_array()
-                .expect("unresolved proposals")
-                .len(),
-            1
-        );
-        drop(users);
-        let records = store.records.lock().expect("records lock");
-        assert_eq!(records.len(), 2);
-        let record = records.last().expect("new record");
-        assert_eq!(record.run_id, run_id);
-        assert_eq!(record.scope.user_id().as_str(), "learning-user");
-        assert_eq!(record.review.memory.len(), 1);
-        assert!(
-            record.review.memory[0].tainted,
-            "the host must taint tool-derived proposals even when the model says false"
-        );
-        drop(records);
+        {
+            let users = inference.users.lock().expect("users lock");
+            let input: serde_json::Value =
+                serde_json::from_str(&users[0]).expect("learning input JSON");
+            assert_eq!(
+                input["unresolved_proposals"]
+                    .as_array()
+                    .expect("unresolved proposals")
+                    .len(),
+                1
+            );
+        }
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 2);
+            let record = records.last().expect("new record");
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(record.scope.user_id().as_str(), "learning-user");
+            assert_eq!(record.review.memory.len(), 1);
+            assert!(
+                record.review.memory[0].tainted,
+                "the host must taint tool-derived proposals even when the model says false"
+            );
+        }
         tasks.shutdown().await;
     }
 }

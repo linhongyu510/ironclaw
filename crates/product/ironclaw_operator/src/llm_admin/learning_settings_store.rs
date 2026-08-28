@@ -54,8 +54,10 @@ impl<F: RootFilesystem + ?Sized> LearningSettingsStore for FilesystemLearningSet
     }
 
     async fn write(&self, settings: &LearningSettings) -> Result<(), LearningSettingsStoreError> {
-        let bytes =
-            serde_json::to_vec(settings).map_err(|_| LearningSettingsStoreError::InvalidData)?;
+        let bytes = serde_json::to_vec(settings).map_err(|error| {
+            tracing::error!(error = %error, "learning settings serialization failed");
+            LearningSettingsStoreError::InvalidData
+        })?;
         if bytes.len() > SETTINGS_MAX_BYTES {
             return Err(LearningSettingsStoreError::InvalidData);
         }

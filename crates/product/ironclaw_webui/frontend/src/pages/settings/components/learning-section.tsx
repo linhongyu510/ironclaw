@@ -6,13 +6,13 @@ import { SelectMenu } from "../../../design-system/select-menu";
 import { Switch } from "../../../design-system/switch";
 import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
-import { fetchUserModelCatalog, setLearning } from "../lib/settings-api";
+import { setLearning } from "../lib/settings-api";
 
 // The learning settings live on the shared LLM config snapshot, so the
 // mutation writes back into the same `["llm-providers"]` query cache the rest
 // of the Inference tab reads — no extra fetch and no divergent state.
 const PROVIDERS_CACHE_KEY = ["llm-providers"];
-const MODEL_CATALOG_QUERY_KEY = ["user-model-catalog"];
+const LEARNING_MODELS_QUERY_KEY = "learning-provider-models";
 const MEMORY_WRITE_POLICY_OPTIONS = [
   { value: "staged", labelKey: "llm.learningMemoryPolicyStaged" },
   { value: "automatic", labelKey: "llm.learningMemoryPolicyAutomatic" },
@@ -54,18 +54,33 @@ export function LearningSection({ providerState }) {
   );
   const noActiveProvider = !providerState.hasActiveProvider || !activeProvider;
 
-  // Options come from state the active provider already exposes: the server
-  // model catalog (`/llm/models`, shared query cache), the tenant model
-  // policy, the active selection, and the stored learning model itself so it
-  // stays visible after being toggled off or invalidated.
-  const catalogQuery = useQuery({
-    queryKey: MODEL_CATALOG_QUERY_KEY,
-    queryFn: fetchUserModelCatalog,
+  // Provider-advertised models are the primary source for this operator
+  // control. Keep the request scoped to the active provider and preserve
+  // local policy/selection fallbacks when listing is unavailable.
+  const modelListingQuery = useQuery({
+    queryKey: [
+      LEARNING_MODELS_QUERY_KEY,
+      activeProvider?.id,
+      activeProvider?.adapter,
+      activeProvider?.base_url,
+      providerState.selectedModel,
+    ],
+    queryFn: () =>
+      providerState.listModels({
+        provider_id: activeProvider.id,
+        adapter: activeProvider.adapter,
+        base_url: activeProvider.base_url || undefined,
+        model: providerState.selectedModel || activeProvider.default_model || undefined,
+      }),
     staleTime: 60_000,
     enabled: !noActiveProvider,
   });
   const modelOptions = normalizeModels([
-    ...(catalogQuery.data?.models || []),
+    ...(modelListingQuery.data?.ok === false
+      ? []
+      : Array.isArray(modelListingQuery.data?.models)
+        ? modelListingQuery.data.models
+        : []),
     ...(providerState.userModelPolicy?.allowed_models || []),
     providerState.selectedModel,
     activeProvider?.default_model,
@@ -223,10 +238,12 @@ export function LearningSection({ providerState }) {
             <span id={toggleLabelId} className="text-sm font-medium text-[var(--v2-text-strong)]">
               {t("llm.learningToggleLabel")}
             </span>
+            {/* An enabled setting may still need to be turned off when its
+                provider disappears; only block enabling without a provider. */}
             <Switch
               checked={enabled}
               onChange={handleToggle}
-              disabled={noActiveProvider || saveMutation.isPending}
+              disabled={(!enabled && noActiveProvider) || saveMutation.isPending}
               aria-labelledby={toggleLabelId}
               data-testid="settings-learning-switch"
             />

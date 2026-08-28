@@ -75,6 +75,53 @@ use crate::{
         ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
     },
 };
+/// Uses the active provider with the model selected in Learning settings.
+pub struct LearningInferenceAdapter {
+    provider: Arc<dyn LlmProvider>,
+    controller: Arc<crate::learning_review::LearningRuntimeControllerImpl>,
+}
+
+impl LearningInferenceAdapter {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        controller: Arc<crate::learning_review::LearningRuntimeControllerImpl>,
+    ) -> Self {
+        Self {
+            provider,
+            controller,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::learning_review::LearningInferencePort for LearningInferenceAdapter {
+    async fn infer(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> Result<String, crate::learning_review::LearningInferenceError> {
+        if !self.controller.enabled() {
+            return Err(crate::learning_review::LearningInferenceError::new(
+                "learning is disabled",
+            ));
+        }
+        let model = self.controller.current_model().ok_or_else(|| {
+            crate::learning_review::LearningInferenceError::new("learning has no selected model")
+        })?;
+        let request =
+            CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
+                .with_model(model)
+                .with_max_tokens(crate::learning_review::LEARNING_REVIEW_MAX_TOKENS);
+        self.provider
+            .complete(request)
+            .await
+            .map(|response| response.content)
+            .map_err(|error| {
+                debug!(%error, "learning model inference failed");
+                crate::learning_review::LearningInferenceError::new("learning inference failed")
+            })
+    }
+}
 
 /// The runner's `failure_categories` alias for this reason kind stayed behind
 /// with the drivers that also use it; the gateway now names the contract

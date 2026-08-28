@@ -45,9 +45,6 @@ Grouped by responsibility (all modules are `pub`; see `src/lib.rs`):
   admission, manifest synthesis for user-registered servers, the
   preparation/discovery lifecycle, and remote-catalog safety screening.
   Deliberately separate from the shared install→activate→remove path.
-- **Shared learning review** — `learning_review.rs`: the disabled-by-default,
-  bounded post-run router, supervised task set, and durable candidate adapter.
-  It records memory proposals and a skill decision; it does not promote either.
 
 
 ## Depends on / consumed by

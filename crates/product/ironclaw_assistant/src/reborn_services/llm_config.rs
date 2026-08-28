@@ -109,6 +109,7 @@ where
         caller: ProductSurfaceCaller,
         input: serde_json::Value,
     ) -> Result<(), ProductSurfaceError> {
+        self.authorize_admin(&caller).await?;
         let service = self
             .llm_config
             .as_ref()

@@ -714,8 +714,7 @@ pub struct RebornRuntime {
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: ironclaw_trace_commons::capture::TraceQueueFlushWorkerHandle,
-    learning_review_tasks:
-        Option<Arc<ironclaw_extension_host::learning_review::LearningReviewTasks>>,
+    learning_review_tasks: Option<Arc<ironclaw_loop_host::learning_review::LearningReviewTasks>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -3361,7 +3360,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         );
         if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
         {
-            tracing::warn!(
+            tracing::debug!(
                 %error,
                 "boot-time LLM reload failed; the placeholder provider stays active until the \
                  next successful reload (e.g. through Settings -> Inference)"
@@ -3395,7 +3394,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             None => (None, None),
         };
     let learning_candidate_store: Arc<dyn ironclaw_memory::LearningCandidateStore> = Arc::new(
-        ironclaw_extension_host::learning_review::FilesystemLearningCandidateStore::new(
+        ironclaw_loop_host::learning_review::FilesystemLearningCandidateStore::new(
             Arc::clone(&scoped_filesystem),
             learning_scope,
         ),
@@ -3714,20 +3713,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink, projection_turn_event_wake_sink];
     let mut learning_review_tasks: Option<
-        Arc<ironclaw_extension_host::learning_review::LearningReviewTasks>,
+        Arc<ironclaw_loop_host::learning_review::LearningReviewTasks>,
     > = None;
     if let (Some(parts), Some(controller)) = (llm_reload.as_ref(), learning_controller.as_ref()) {
-        let inference: Arc<dyn ironclaw_extension_host::learning_review::LearningInferencePort> =
-            Arc::new(
-                ironclaw_extension_host::learning_review::LearningInferenceAdapter::new(
-                    Arc::clone(&parts.provider),
-                    Arc::clone(controller),
-                ),
-            );
-        let tasks = Arc::new(ironclaw_extension_host::learning_review::LearningReviewTasks::new());
+        let inference: Arc<dyn ironclaw_loop_host::learning_review::LearningInferencePort> =
+            Arc::new(ironclaw_loop_host::LearningInferenceAdapter::new(
+                Arc::clone(&parts.provider),
+                Arc::clone(controller),
+            ));
+        let tasks = Arc::new(ironclaw_loop_host::learning_review::LearningReviewTasks::new());
         learning_review_tasks = Some(Arc::clone(&tasks));
         turn_event_sinks.push(Arc::new(
-            ironclaw_extension_host::learning_review::LearningReviewTurnEventSink::new(
+            ironclaw_loop_host::learning_review::LearningReviewTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 Arc::clone(&learning_candidate_store),
@@ -3737,7 +3734,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ));
     }
     let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        ironclaw_extension_host::learning_review::CompositeTurnEventSink::new(turn_event_sinks),
+        ironclaw_loop_host::learning_review::CompositeTurnEventSink::new(turn_event_sinks),
     );
 
     let communication_context_provider: Option<

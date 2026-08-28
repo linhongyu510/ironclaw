@@ -103,6 +103,49 @@ test("Inference tab omits unsupported operator-config fields", () => {
     "admins need a UI to control deployment-wide learning"
   );
 });
+test("Inference tab search isolates learning settings and hides them for unrelated terms", () => {
+  const { context, exports } = renderInferenceModule();
+  const learningSearch = exports.InferenceTab({
+    isAdmin: true,
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "learning",
+  });
+
+  assert.equal(
+    findComponentNodes(learningSearch, context.LearningSection).length,
+    1,
+    "learning searches should show the learning controls"
+  );
+  assert.equal(
+    findComponentNodes(learningSearch, context.ProviderManagement).length,
+    0,
+    "learning searches should not show unrelated provider management"
+  );
+
+  const unrelatedSearch = exports.InferenceTab({
+    isAdmin: true,
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "temperature",
+  });
+  assert.equal(
+    findComponentNodes(unrelatedSearch, context.LearningSection).length,
+    0,
+    "unrelated searches should hide learning controls"
+  );
+  assert.equal(
+    findComponentNodes(unrelatedSearch, context.SettingsSearchEmpty).length,
+    1,
+    "unrelated searches should render the empty state"
+  );
+});
 
 test("Inference tab gives non-admin users model preference without provider controls", () => {
   const { context, exports } = renderInferenceModule();

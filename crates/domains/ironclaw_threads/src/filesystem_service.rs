@@ -76,12 +76,13 @@ use crate::{
     AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, BoundedThreadMessageSnapshot, BoundedThreadMessages,
-    BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, FramedSubagentText, InboundMessageReplayMetadata,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
+    BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, CompletedRunMessages,
+    CompletedRunMessagesRequest, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    FramedSubagentText, InboundMessageReplayMetadata, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
     PutToolResultRecordRequest, ReadStructuredFinalizationRequest, ReadToolResultRecordRequest,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
@@ -3676,6 +3677,25 @@ where
                 },
             },
         )))
+    }
+
+    async fn list_completed_run_messages_bounded(
+        &self,
+        request: CompletedRunMessagesRequest,
+    ) -> Result<CompletedRunMessages, SessionThreadError> {
+        match self
+            .read_completed_run_messages(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                request.max_messages,
+                request.max_bytes,
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => Ok(CompletedRunMessages::Complete(messages)),
+            MessageReadResult::LimitExceeded => Ok(CompletedRunMessages::LimitExceeded),
+        }
     }
 
     async fn list_thread_messages_range(

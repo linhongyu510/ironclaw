@@ -101,8 +101,9 @@ use ironclaw_product_contracts::notification_setup::{
 };
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
-    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetLearningSettingsRequest,
+    SetUserModelPolicyRequest, SetUserModelPreferenceRequest, UpsertLlmProviderRequest,
+    UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_llm::{
     LEARNING_SETTINGS_SET_CAPABILITY, LLM_USER_MODEL_POLICY_SET_CAPABILITY,
@@ -4403,7 +4404,7 @@ pub async fn set_learning(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<SetLearningSettingsRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let resolution = invoke_product_capability(

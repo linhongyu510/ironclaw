@@ -16,12 +16,11 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const requests = vi.hoisted(() => ({
   setLearning: vi.fn(),
-  fetchUserModelCatalog: vi.fn(),
+  listLlmProviderModels: vi.fn(),
 }));
 
 vi.mock("../lib/settings-api", () => ({
   setLearning: requests.setLearning,
-  fetchUserModelCatalog: requests.fetchUserModelCatalog,
 }));
 
 import { LearningSection } from "./learning-section";
@@ -39,6 +38,7 @@ function providerState(overrides = {}) {
       },
     ],
     userModelPolicy: null,
+    listModels: requests.listLlmProviderModels,
     hasActiveProvider: true,
     learning: {
       enabled: false,
@@ -65,8 +65,7 @@ async function renderSection(state) {
       </QueryClientProvider>
     );
   });
-  // Let pending react-query fetches (e.g. the shared model catalog) resolve
-  // before the test interacts with the rendered control.
+  // Let pending provider model-listing fetches resolve before interaction.
   await act(async () => {});
   return { container, queryClient, root };
 }
@@ -100,10 +99,9 @@ function menuOptionLabels(rendered) {
   );
 }
 
-test("learning stays off until an admin enables it and offers the provider catalog", async () => {
-  requests.fetchUserModelCatalog.mockResolvedValue({
-    selection_enabled: true,
-    workspace_default: "mock-model",
+test("provider-advertised models appear when no tenant selection policy exists", async () => {
+  requests.listLlmProviderModels.mockResolvedValue({
+    ok: true,
     models: ["mock-model", "claude-opus-4"],
   });
   const rendered = await renderSection(providerState());
@@ -117,17 +115,65 @@ test("learning stays off until an admin enables it and offers the provider catal
     const text = rendered.container.textContent ?? "";
     assert.match(text, /Review successful runs/);
     assert.match(text, /background review/, "supporting copy explains what enabling does");
-    // The learning model menu sources its options from the shared model
-    // catalog plus the active selection.
     await openModelMenu(rendered);
     const options = menuOptionLabels(rendered);
     for (const model of ["mock-model", "claude-opus-4"]) {
-      assert.ok(options.includes(model), `${model} should be offered from the provider catalog`);
+      assert.ok(options.includes(model), `${model} should be offered by the active provider`);
     }
+    assert.deepEqual(requests.listLlmProviderModels.mock.calls[0]?.[0], {
+      provider_id: "openai_compatible",
+      adapter: "open_ai_completions",
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "mock-model",
+    });
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();
-    requests.fetchUserModelCatalog.mockReset();
+    requests.listLlmProviderModels.mockReset();
+  }
+});
+test("fallback models remain available when provider listing fails", async () => {
+  requests.listLlmProviderModels.mockRejectedValue(new Error("provider unavailable"));
+  const rendered = await renderSection(
+    providerState({
+      selectedModel: "active-model",
+      userModelPolicy: { allowed_models: ["policy-model", "active-model"] },
+      providers: [
+        {
+          id: "openai_compatible",
+          adapter: "open_ai_completions",
+          base_url: "http://127.0.0.1:1234/v1",
+          default_model: "provider-default",
+        },
+      ],
+      learning: {
+        enabled: false,
+        model: "stored-learning-model",
+        status: "disabled",
+        reason: null,
+      },
+    })
+  );
+  try {
+    await openModelMenu(rendered);
+    const options = menuOptionLabels(rendered);
+    for (const model of [
+      "active-model",
+      "provider-default",
+      "stored-learning-model",
+      "policy-model",
+    ]) {
+      assert.ok(options.includes(model), `${model} should remain available as a fallback`);
+    }
+    assert.equal(
+      options.filter((model) => model === "active-model").length,
+      1,
+      "fallback options should be deduplicated"
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.listLlmProviderModels.mockReset();
   }
 });
 
@@ -217,21 +263,32 @@ test("disabling preserves the chosen model for later re-enable", async () => {
   }
 });
 
-test("changing the model while learning runs saves the new choice", async () => {
-  requests.fetchUserModelCatalog.mockResolvedValue({
-    selection_enabled: true,
-    workspace_default: "mock-model",
+test("selecting a provider-listed model sends current enabled state and memory policy", async () => {
+  requests.listLlmProviderModels.mockResolvedValue({
+    ok: true,
     models: ["mock-model", "claude-opus-4"],
   });
   requests.setLearning.mockResolvedValue({
     providers: [],
     active: { provider_id: "openai_compatible", model: "claude-opus-4" },
     user_model_policy: null,
-    learning: { enabled: true, model: "claude-opus-4", status: "ready", reason: null },
+    learning: {
+      enabled: true,
+      model: "claude-opus-4",
+      memory_write_policy: "automatic",
+      status: "ready",
+      reason: null,
+    },
   });
   const rendered = await renderSection(
     providerState({
-      learning: { enabled: true, model: "mock-model", status: "ready", reason: null },
+      learning: {
+        enabled: true,
+        model: "mock-model",
+        memory_write_policy: "automatic",
+        status: "ready",
+        reason: null,
+      },
     })
   );
   try {
@@ -239,18 +296,18 @@ test("changing the model while learning runs saves the new choice", async () => 
     const option = rendered.container.querySelector<HTMLButtonElement>(
       '[role="option"][aria-selected="false"]'
     );
-    assert.ok(option, "the unselected catalog option appears in the menu");
+    assert.ok(option, "the unselected provider-listed option appears in the menu");
     await act(async () => option.click());
     assert.deepEqual(requests.setLearning.mock.calls[0]?.[0], {
       enabled: true,
       model: "claude-opus-4",
-      memory_write_policy: "staged",
+      memory_write_policy: "automatic",
     });
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();
     requests.setLearning.mockReset();
-    requests.fetchUserModelCatalog.mockReset();
+    requests.listLlmProviderModels.mockReset();
   }
 });
 
@@ -364,6 +421,7 @@ test("unexpected save failures fall back to generic copy, not raw errors", async
 });
 
 test("controls lock down without an active provider", async () => {
+  requests.listLlmProviderModels.mockReset();
   requests.setLearning.mockResolvedValue({});
   const rendered = await renderSection(providerState({ hasActiveProvider: false }));
   try {
@@ -375,12 +433,63 @@ test("controls lock down without an active provider", async () => {
       '[data-testid="settings-learning-model"] [aria-haspopup="listbox"]'
     );
     assert.ok(trigger?.disabled, "the model selector must be disabled without an active provider");
+    assert.equal(
+      requests.listLlmProviderModels.mock.calls.length,
+      0,
+      "model listing must not be requested without an active provider"
+    );
     await clickSwitch(rendered);
     assert.equal(requests.setLearning.mock.calls.length, 0);
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();
     requests.setLearning.mockReset();
+    requests.listLlmProviderModels.mockReset();
+  }
+});
+test("an enabled invalid learning setting can be disabled after its provider disappears", async () => {
+  requests.setLearning.mockResolvedValue({
+    providers: [],
+    active: null,
+    user_model_policy: null,
+    learning: {
+      enabled: false,
+      model: "mock-model",
+      memory_write_policy: "automatic",
+      status: "disabled",
+      reason: null,
+    },
+  });
+  const rendered = await renderSection(
+    providerState({
+      hasActiveProvider: false,
+      learning: {
+        enabled: true,
+        model: "mock-model",
+        memory_write_policy: "automatic",
+        status: "invalid",
+        reason: "provider unavailable",
+      },
+    })
+  );
+  try {
+    const toggle = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-learning-switch"]'
+    );
+    assert.ok(toggle);
+    assert.equal(toggle.disabled, false, "disabling remains available without a provider");
+    await clickSwitch(rendered);
+    assert.deepEqual(requests.setLearning.mock.calls[0]?.[0], {
+      enabled: false,
+      model: "mock-model",
+      memory_write_policy: "automatic",
+    });
+    assert.equal(switchChecked(rendered), false);
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setLearning.mockReset();
+    requests.listLlmProviderModels.mockReset();
   }
 });
 

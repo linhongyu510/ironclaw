@@ -13654,7 +13654,7 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
         .expect("set active provider");
     services
         .invoke(
-            caller(),
+            caller().with_operator_config(true),
             CapabilityId::new(LEARNING_SETTINGS_SET_CAPABILITY_ID).expect("capability id"),
             json!({
                 "enabled": false,
@@ -13692,6 +13692,42 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
             model: Some("later-model".to_string()),
             memory_write_policy: MemoryWritePolicy::Automatic,
         }]
+    );
+}
+
+#[tokio::test]
+async fn learning_settings_reject_non_operator_before_service_invocation() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let admin_users = Arc::new(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Member,
+        AdminUserStatus::Active,
+    )]));
+    let services =
+        services_with_setup_llm_config(llm_config.clone()).with_admin_user_service(admin_users);
+
+    let error = services
+        .invoke(
+            caller(),
+            CapabilityId::new(LEARNING_SETTINGS_SET_CAPABILITY_ID).expect("capability id"),
+            json!({
+                "enabled": true,
+                "model": "later-model",
+                "memory_write_policy": "automatic"
+            }),
+            ActivityId::new(),
+        )
+        .await
+        .expect_err("non-operator learning mutation must be rejected");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
+    assert!(
+        llm_config
+            .set_learning_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "authorization must reject before calling set_learning"
     );
 }
 

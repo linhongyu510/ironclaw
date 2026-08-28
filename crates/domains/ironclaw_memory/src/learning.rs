@@ -10,6 +10,7 @@ use ironclaw_host_api::{
     turn::TurnRunId,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub const MAX_LEARNING_MEMORY_PROPOSALS: usize = 4;
 pub const MAX_LEARNING_PROPOSAL_BYTES: usize = 512;
@@ -59,6 +60,10 @@ pub struct LearningDecision {
     pub reason: Option<String>,
     #[serde(default)]
     pub source_message_indices: Vec<u16>,
+    /// Host-derived taint: true when the decision cites tool or subagent data.
+    /// Tainted decisions must never be promoted to an installed skill.
+    #[serde(default)]
+    pub tainted: bool,
 }
 
 impl LearningDecision {
@@ -67,6 +72,7 @@ impl LearningDecision {
             action: LearningAction::Skip,
             reason: None,
             source_message_indices: Vec::new(),
+            tainted: false,
         }
     }
 }
@@ -79,16 +85,25 @@ pub struct LearningReview {
     pub skill: LearningDecision,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum LearningReviewValidationError {
+    #[error("too many memory proposals")]
     TooManyMemoryProposals,
+    #[error("memory proposal is empty")]
     EmptyMemoryProposal,
+    #[error("memory proposal is too large")]
     MemoryProposalTooLarge,
+    #[error("memory proposal confidence is invalid")]
     InvalidConfidence,
+    #[error("learning source reference is missing")]
     MissingSourceReference,
+    #[error("too many learning source references")]
     TooManySourceReferences,
+    #[error("learning source references are invalid")]
     InvalidSourceReferences,
+    #[error("skill learning decision is invalid")]
     InvalidSkillDecision,
+    #[error("skill learning reason is too large")]
     SkillReasonTooLarge,
 }
 
@@ -193,9 +208,24 @@ pub enum LearningCandidateStatus {
     Candidate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct LearningIdempotencyKey(String);
+
+impl<'de> Deserialize<'de> for LearningIdempotencyKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let Some(run_id) = value.strip_prefix("learning-review:") else {
+            return Err(serde::de::Error::custom("invalid learning idempotency key"));
+        };
+        TurnRunId::parse(run_id)
+            .map(|_| Self(value))
+            .map_err(|_| serde::de::Error::custom("invalid learning idempotency key"))
+    }
+}
 
 impl LearningIdempotencyKey {
     pub fn as_str(&self) -> &str {
@@ -236,9 +266,11 @@ pub enum LearningCandidateInsert {
     AlreadyExists,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum LearningCandidateStoreError {
+    #[error("learning candidate data is invalid")]
     InvalidData,
+    #[error("learning candidate store is unavailable")]
     Unavailable,
 }
 

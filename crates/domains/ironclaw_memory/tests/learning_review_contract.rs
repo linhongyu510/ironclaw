@@ -2,8 +2,9 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_memory::{
     LearningAction, LearningCandidateStatus, LearningDecision, LearningExplicitness,
-    LearningReview, LearningReviewRecord, LearningScope, MAX_LEARNING_MEMORY_PROPOSALS,
-    MAX_LEARNING_PROPOSAL_BYTES, MemoryLearningProposal, MemoryLearningProposalKind,
+    LearningIdempotencyKey, LearningReview, LearningReviewRecord, LearningScope,
+    MAX_LEARNING_MEMORY_PROPOSALS, MAX_LEARNING_PROPOSAL_BYTES, MemoryLearningProposal,
+    MemoryLearningProposalKind,
 };
 
 fn scope() -> LearningScope {
@@ -52,6 +53,14 @@ fn learning_review_rejects_unknown_output_fields() {
 }
 
 #[test]
+fn learning_idempotency_key_rejects_malformed_values() {
+    let malformed = r#""learning-review:not-a-run""#;
+    assert!(serde_json::from_str::<LearningIdempotencyKey>(malformed).is_err());
+    let valid = format!(r#""learning-review:{}""#, TurnRunId::new());
+    assert!(serde_json::from_str::<LearningIdempotencyKey>(&valid).is_ok());
+}
+
+#[test]
 fn learning_review_rejects_invalid_confidence_and_source_references() {
     let invalid_confidence = LearningReview {
         memory: vec![MemoryLearningProposal {
@@ -81,6 +90,7 @@ fn record_seals_scope_run_and_candidate_status() {
             action: LearningAction::Distill,
             reason: Some("The run contains a reusable procedure".to_string()),
             source_message_indices: vec![1],
+            tainted: false,
         },
     };
 

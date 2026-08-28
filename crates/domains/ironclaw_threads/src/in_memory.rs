@@ -22,19 +22,20 @@ use crate::{
     AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, BoundedThreadMessageSnapshot, BoundedThreadMessages,
-    BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, InboundMessageReplayMetadata, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
-    PutToolResultRecordRequest, ReadStructuredFinalizationRequest, ReadToolResultRecordRequest,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordRead, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, CompletedRunMessages,
+    CompletedRunMessagesRequest, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    InboundMessageReplayMetadata, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, PublishStructuredFinalizationMessageRequest,
+    PutStructuredFinalizationRequest, PutToolResultRecordRequest,
+    ReadStructuredFinalizationRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, StructuredFinalizationRecord, SummaryArtifact, SummaryModelContextPolicy,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordRead,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -1467,6 +1468,30 @@ impl SessionThreadService for InMemorySessionThreadService {
                 },
             },
         )))
+    }
+
+    async fn list_completed_run_messages_bounded(
+        &self,
+        request: CompletedRunMessagesRequest,
+    ) -> Result<CompletedRunMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        let subagent_binding = format!("subagent-result:{}", request.turn_run_id);
+        let mut bytes = 0_usize;
+        let mut messages = Vec::new();
+        for message in &thread.messages {
+            if message.turn_run_id.as_deref() != Some(request.turn_run_id.as_str())
+                && message.source_binding_id.as_deref() != Some(subagent_binding.as_str())
+            {
+                continue;
+            }
+            bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());
+            if messages.len() >= request.max_messages || bytes > request.max_bytes {
+                return Ok(CompletedRunMessages::LimitExceeded);
+            }
+            messages.push(message.clone());
+        }
+        Ok(CompletedRunMessages::Complete(messages))
     }
 
     async fn list_thread_messages_range(

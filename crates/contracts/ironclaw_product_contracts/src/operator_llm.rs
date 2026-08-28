@@ -478,7 +478,7 @@ pub struct LearningSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum LearningStatus {
     Disabled,
     Ready,
@@ -800,6 +800,25 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(state).expect("serialize"),
                 serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn learning_status_uses_snake_case_wire_convention() {
+        for (status, wire) in [
+            (LearningStatus::Disabled, "disabled"),
+            (LearningStatus::Ready, "ready"),
+            (LearningStatus::Invalid, "invalid"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize learning status"),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<LearningStatus>(serde_json::json!(wire))
+                    .expect("deserialize learning status"),
+                status
             );
         }
     }
