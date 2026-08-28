@@ -1064,3 +1064,103 @@ async fn unnarrowed_policy_keeps_full_tool_search_catalog() {
         "an unrestricted policy must surface the full catalog's matches, got only {ids:?}"
     );
 }
+
+/// T2 (#7928 fix), fits path: "get repository" ranks `github.get_repo` at rank
+/// 1 -- a 476 B compact-serialized schema, well inside the 2,560 B budget even
+/// with ranks 2-3's compact entries and JSON scaffolding riding along (measured
+/// total: 1,173 B). Proves the production ranking + reply-construction +
+/// first-look-pager chain delivers a complete schema end-to-end for a
+/// realistic query, never falling back to the pager's `omitted`/`json_page`
+/// views. Replaces the plan's original
+/// `tool_search_reply_rides_the_first_look_preview_inline` draft, which used
+/// "issues pull requests repository" -- that query's rank-1 tool
+/// (`github.search_issues_pull_requests`, a 2,652 B compact schema) pushes the
+/// whole reply to 2,811 B against the 2,560 B budget (over by 251 B), so it
+/// takes the compact-fallback branch instead and `schema_complete: true` never
+/// appears -- the plan's own Goal-section arithmetic, not this test's mistake.
+#[tokio::test]
+async fn tool_search_reply_rides_the_first_look_preview_inline() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "get repository", "limit": 10}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("find a repo tool")
+        .await
+        .expect("turn completes");
+    // The model-visible tool result envelope wraps the raw reply as a JSON
+    // string (`detail.preview`), so every `"` in the raw reply is escaped once
+    // more inside `message.content` -- the needle below matches the actual
+    // bytes (`\"schema_complete\":true`), verified empirically against the
+    // captured content, not the unescaped JSON shape.
+    harness
+        .assert_model_tool_result_content_occurrences(r#"\"schema_complete\":true"#, 1)
+        .await
+        .expect("exactly one rank-1 complete schema reaches the model");
+    harness
+        .assert_model_tool_result_content_occurrences("omitted", 0)
+        .await
+        .expect("pager elision path must never fire for tool_search");
+    harness
+        .assert_model_tool_result_content_occurrences("json_page", 0)
+        .await
+        .expect("must never fall back to the JSON-page view");
+}
+
+/// T2 (#7928 fix), compact-fallback path: the heavy query from the plan's
+/// original draft. `github.search_issues_pull_requests` ranks 1 with a 2,652 B
+/// compact-serialized schema -- together with ranks 2-3's compact entries and
+/// scaffolding the complete-schema candidate would serialize to 2,811 B,
+/// 251 B over `TOOL_SEARCH_REPLY_BUDGET_BYTES` (2,560 B), so every rank rides
+/// compact and the model gets `TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE`
+/// instead of an inline schema. Proves the OTHER production return path is
+/// still never collapsed by the pager, even though it carries no complete
+/// schema.
+#[tokio::test]
+async fn tool_search_reply_falls_back_to_compact_when_rank_one_does_not_fit() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "issues pull requests repository", "limit": 10}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("find an issues tool")
+        .await
+        .expect("turn completes");
+    harness
+        .assert_model_tool_result_content_occurrences(r#"\"schema_complete\":true"#, 0)
+        .await
+        .expect("rank 1's own schema misses the budget, so no rank rides complete");
+    harness
+        .assert_model_tool_result_content_occurrences(
+            "call tool_describe on it to get the full parameters schema",
+            1,
+        )
+        .await
+        .expect("the describe-then-invoke guidance string reaches the model");
+    harness
+        .assert_model_tool_result_content_occurrences("omitted", 0)
+        .await
+        .expect("the bounded compact-fallback reply must never be large enough for the pager to elide it");
+    harness
+        .assert_model_tool_result_content_occurrences("json_page", 0)
+        .await
+        .expect("must never fall back to the JSON-page view");
+}
