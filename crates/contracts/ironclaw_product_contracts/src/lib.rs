@@ -36,6 +36,7 @@ pub mod account_setup;
 pub mod action;
 pub mod actor_identity;
 pub mod admin_users;
+pub mod approval_inbox;
 pub mod approval_prompt;
 pub mod binding;
 pub mod channel_config;

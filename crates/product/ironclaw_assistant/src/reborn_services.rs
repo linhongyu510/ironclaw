@@ -94,9 +94,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
-    CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService, CommandAudience,
+    CommandResultField, CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
     PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID,
@@ -215,6 +215,10 @@ use ironclaw_notifications::{
     NotificationInboxStorePort, NotificationInitialState, NotificationKind,
     NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
     PublishNotificationRequest,
+};
+use ironclaw_product_contracts::approval_inbox::{
+    APPROVALS_PENDING_VIEW, ProductListPendingApprovalsRequest,
+    ProductListPendingApprovalsResponse, ProductPendingApproval, ProductPendingApprovalAction,
 };
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
@@ -4571,6 +4575,12 @@ where
                 let next_cursor = response.next_cursor.clone();
                 views::view_page_with_cursor(response, next_cursor)
             }
+            id if id == APPROVALS_PENDING_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let response = self.build_pending_approvals_view(caller, request).await?;
+                views::view_page(response)
+            }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -6588,6 +6598,131 @@ where
             }
             Err(err) => Err(map_ownership_probe_error(err)),
         }
+    }
+
+    /// Flat, caller-scoped pending-approval listing across every thread the
+    /// caller can see — both browser-bound threads and automation-owned
+    /// threads the caller's automations created. Candidate threads come from
+    /// the durable notification inbox (the same store the notifications view
+    /// reads), which already tracks which threads currently carry an
+    /// unresolved `ApprovalRequired` entry for this caller; per-thread
+    /// authorization and the actual gate list still come from the same
+    /// canonical read models `pending_approvals_for_thread_scope` and the
+    /// automation candidate scan already use, so this view adds no new
+    /// authority path.
+    async fn build_pending_approvals_view(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductListPendingApprovalsRequest,
+    ) -> Result<ProductListPendingApprovalsResponse, ProductSurfaceError> {
+        let limit = request.limit.unwrap_or(20).clamp(1, 50) as usize;
+
+        let page = self
+            .notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: notification_recipient(&caller),
+                limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                cursor: None,
+                include_archived: false,
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+
+        let mut visited_threads = HashSet::new();
+        let mut approvals: Vec<PendingApprovalInteractionView> = Vec::new();
+        let mut thread_titles: HashMap<ThreadId, Option<String>> = HashMap::new();
+
+        for notification in page.notifications {
+            if notification.kind != NotificationKind::ApprovalRequired
+                || notification.resolved_at.is_some()
+            {
+                continue;
+            }
+            let thread_id = notification.source.thread_id;
+            if !visited_threads.insert(thread_id.clone()) {
+                continue;
+            }
+            let actor = caller.actor();
+            let scope = caller.turn_scope(thread_id);
+            match self
+                .resolve_thread_access_for_caller(caller.clone(), scope, &actor)
+                .await
+            {
+                Ok(access) => {
+                    let pending = self
+                        .pending_approvals_for_thread_scope(&access.scope, &access.run_actor)
+                        .await?;
+                    approvals.extend(pending);
+                }
+                Err(error) if error.code == ProductSurfaceErrorCode::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        if let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) {
+            let candidates = self
+                .automation_approval_thread_candidates(&bound_caller)
+                .await?;
+            for candidate in candidates {
+                if !visited_threads.insert(candidate.thread_id.clone()) {
+                    continue;
+                }
+                let Some(approval_thread) = self
+                    .automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                for approval in &approval_thread.approvals {
+                    thread_titles
+                        .entry(approval.scope.thread_id.clone())
+                        .or_insert_with(|| approval_thread.record.title.clone());
+                }
+                approvals.extend(approval_thread.approvals);
+            }
+        }
+
+        // An approval visible through both the notification inbox and the
+        // automation scan collapses to one entry; the gate ref is the
+        // durable identity of a single approval decision.
+        let mut seen_gate_refs = HashSet::new();
+        approvals.retain(|approval| seen_gate_refs.insert(approval.gate_ref.clone()));
+        approvals.truncate(limit);
+
+        let approvals = approvals
+            .into_iter()
+            .map(|approval| {
+                let thread_id = approval.scope.thread_id.clone();
+                ProductPendingApproval {
+                    thread_id: thread_id.to_string(),
+                    run_id: approval.run_id.to_string(),
+                    gate_ref: approval.gate_ref.as_str().to_string(),
+                    approval_request_id: approval.approval_request_id.to_string(),
+                    summary: approval.summary,
+                    action: match approval.action {
+                        ApprovalInteractionActionView::Dispatch { capability_id } => {
+                            ProductPendingApprovalAction::Dispatch {
+                                capability_id: capability_id.to_string(),
+                            }
+                        }
+                        ApprovalInteractionActionView::SpawnCapability { capability_id } => {
+                            ProductPendingApprovalAction::SpawnCapability {
+                                capability_id: capability_id.to_string(),
+                            }
+                        }
+                        ApprovalInteractionActionView::Other => ProductPendingApprovalAction::Other,
+                    },
+                    thread_title: thread_titles.get(&thread_id).cloned().flatten(),
+                }
+            })
+            .collect();
+
+        Ok(ProductListPendingApprovalsResponse { approvals })
     }
 
     async fn resolve_projection_subscription_request(

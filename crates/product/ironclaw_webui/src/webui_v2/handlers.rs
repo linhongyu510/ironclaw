@@ -77,6 +77,9 @@ use ironclaw_product_contracts::admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_product_contracts::approval_inbox::{
+    APPROVALS_PENDING_VIEW, ProductListPendingApprovalsRequest, ProductListPendingApprovalsResponse,
+};
 use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
 };
@@ -1905,6 +1908,29 @@ pub struct ListNotificationsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+/// `GET /api/webchat/v2/approvals/pending`
+pub async fn list_pending_approvals(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Query(query): Query<PendingApprovalsQuery>,
+) -> Result<Json<ProductListPendingApprovalsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = APPROVALS_PENDING_VIEW
+        .query_on(
+            &surface,
+            ProductListPendingApprovalsRequest { limit: query.limit },
+            None,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PendingApprovalsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

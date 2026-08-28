@@ -34,6 +34,7 @@ pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
 pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_LIST_NOTIFICATIONS: &str = "webui.v2.list_notifications";
+pub const WEBUI_V2_ROUTE_LIST_PENDING_APPROVALS: &str = "webui.v2.list_pending_approvals";
 pub const WEBUI_V2_ROUTE_MARK_NOTIFICATION_READ: &str = "webui.v2.mark_notification_read";
 pub const WEBUI_V2_ROUTE_MARK_ALL_NOTIFICATIONS_READ: &str = "webui.v2.mark_all_notifications_read";
 pub const WEBUI_V2_ROUTE_ARCHIVE_NOTIFICATION: &str = "webui.v2.archive_notification";
@@ -158,6 +159,7 @@ pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT: &str =
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_NOTIFICATIONS: &str = "/api/webchat/v2/notifications";
+pub const WEBUI_V2_PATTERN_LIST_PENDING_APPROVALS: &str = "/api/webchat/v2/approvals/pending";
 pub const WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ: &str =
     "/api/webchat/v2/notifications/{notification_id}/read";
 pub const WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ: &str =
@@ -336,6 +338,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         session_channel_message_descriptor(),
         list_threads_descriptor(),
         list_notifications_descriptor(),
+        list_pending_approvals_descriptor(),
         mark_notification_read_descriptor(),
         mark_all_notifications_read_descriptor(),
         archive_notification_descriptor(),
@@ -1056,6 +1059,20 @@ fn list_notifications_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_LIST_NOTIFICATIONS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_LIST_NOTIFICATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_pending_approvals_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PENDING_APPROVALS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_PENDING_APPROVALS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
