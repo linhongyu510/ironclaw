@@ -963,6 +963,12 @@ async fn narrowed_policy_denies_tool_describe_of_non_allowlisted_id() {
         "non-allowlisted vs nonexistent tool_describe must read byte-identical model_observation \
          — a differing diagnostic/status here would be an existence oracle the safe_summary check alone would miss"
     );
+    // T5: the reroute hint (FailureKind::UnknownCapability -> UseDifferentCapability)
+    // reaches the persisted model observation for both branches identically.
+    harness
+        .assert_denial_recovery_hint("use_different_capability")
+        .await
+        .expect("unknown/denied tool_describe target carries the reroute hint");
 }
 
 /// A host-exempt `tool_call` bridge must not expose whether a requested target
@@ -1024,6 +1030,12 @@ async fn narrowed_policy_denies_tool_call_of_non_allowlisted_id_without_existenc
         non_allowlisted.model_observation, nonexistent.model_observation,
         "non-allowlisted and nonexistent tool_call targets must have identical model observations"
     );
+    // T5: the reroute hint (FailureKind::UnknownCapability -> UseDifferentCapability)
+    // reaches the persisted model observation for both branches identically.
+    harness
+        .assert_denial_recovery_hint("use_different_capability")
+        .await
+        .expect("unknown/denied tool_call target carries the reroute hint");
 }
 
 /// #5712 control: an unnarrowed (All) caller keeps the full search catalog —

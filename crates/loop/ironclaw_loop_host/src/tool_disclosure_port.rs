@@ -14,6 +14,7 @@ use ironclaw_host_api::{
         MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
     },
     resolution::{Resolution, ResolutionBatch},
+    result_meta::FailureKind,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureDetail,
@@ -1246,11 +1247,13 @@ impl ToolDisclosureCapabilityPort {
             BridgeKind::Describe => self.invoke_tool_describe(&request, &bridge).await,
             BridgeKind::DescribeFirst => self.invoke_describe_first(&request, &bridge).await,
             BridgeKind::Call if decode_tool_call_arguments(&bridge.arguments).is_none() => {
-                Ok(failed_invalid_input(
+                Ok(failed_recoverable(
+                    FailureKind::InputEncode,
                     "tool_call arguments must be a JSON object encoded as a string",
                 ))
             }
-            BridgeKind::Call => Ok(failed_invalid_input(
+            BridgeKind::Call => Ok(failed_recoverable(
+                FailureKind::UnknownCapability,
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
         }
@@ -1262,14 +1265,23 @@ impl ToolDisclosureCapabilityPort {
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(query) = bridge.arguments.get("query").and_then(Value::as_str) else {
-            return Ok(failed_invalid_input("tool_search requires query"));
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
+                "tool_search requires query",
+            ));
         };
         let query = query.trim();
         if query.is_empty() {
-            return Ok(failed_invalid_input("tool_search requires query"));
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
+                "tool_search requires query",
+            ));
         }
         if query.len() > MAX_SEARCH_QUERY_BYTES {
-            return Ok(failed_invalid_input("tool_search query is too long"));
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
+                "tool_search query is too long",
+            ));
         }
         let limit = bridge
             .arguments
@@ -1281,7 +1293,10 @@ impl ToolDisclosureCapabilityPort {
         let output = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
-                return Ok(failed_invalid_input("tool catalog is unavailable"));
+                return Ok(failed_recoverable(
+                    FailureKind::InputEncode,
+                    "tool catalog is unavailable",
+                ));
             };
             let search_started_at = std::time::Instant::now();
             let outcome = state.search_index.search(query, limit);
@@ -1331,25 +1346,38 @@ impl ToolDisclosureCapabilityPort {
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
-            return Ok(failed_invalid_input("tool_describe requires name"));
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
+                "tool_describe requires name",
+            ));
         };
         if is_bridge_name(name) {
-            return Ok(failed_invalid_input(
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
                 "tool_describe target must not be a bridge",
             ));
         }
         let output = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
-                return Ok(failed_invalid_input("tool catalog is unavailable"));
+                return Ok(failed_recoverable(
+                    FailureKind::InputEncode,
+                    "tool catalog is unavailable",
+                ));
             };
             let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+                return Ok(failed_recoverable(
+                    FailureKind::UnknownCapability,
+                    "tool_describe target is unknown; use tool_search to find the correct tool name",
+                ));
             };
             // #5712: same message as a truly unknown name — a narrowed profile
             // must not learn that a non-allowlisted tool exists.
             if !self.policy.permits_capability_id(&result.capability_id) {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+                return Ok(failed_recoverable(
+                    FailureKind::UnknownCapability,
+                    "tool_describe target is unknown; use tool_search to find the correct tool name",
+                ));
             }
             if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
                 debug!(
@@ -1384,15 +1412,24 @@ impl ToolDisclosureCapabilityPort {
         bridge: &BridgeInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
-            return Ok(failed_invalid_input("auto-schema requires a target name"));
+            return Ok(failed_recoverable(
+                FailureKind::InputEncode,
+                "auto-schema requires a target name",
+            ));
         };
         let output = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
-                return Ok(failed_invalid_input("tool catalog is unavailable"));
+                return Ok(failed_recoverable(
+                    FailureKind::InputEncode,
+                    "tool catalog is unavailable",
+                ));
             };
             let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("auto-schema target is unknown"));
+                return Ok(failed_recoverable(
+                    FailureKind::InputEncode,
+                    "auto-schema target is unknown",
+                ));
             };
             state.disclosed_names.insert(result.name.clone());
             json!({
@@ -1688,9 +1725,9 @@ fn decode_tool_call_arguments(bridge_arguments: &Value) -> Option<Value> {
     }
 }
 
-fn failed_invalid_input(summary: &'static str) -> Resolution {
+fn failed_recoverable(kind: FailureKind, summary: &'static str) -> Resolution {
     resolution::failed(
-        ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        kind,
         summary.to_string(),
         CapabilityFailureDetail::Diagnostic {
             text: summary.to_string(),
@@ -3716,6 +3753,10 @@ mod tests {
             })
             .await
             .expect("bridge handles the fallback");
+        // T5 (#5712/#7892): a target that fails registration falls back to the
+        // same "not a known tool" bridge branch as a genuinely unknown target,
+        // now carrying FailureKind::UnknownCapability so the model's structured
+        // hint agrees with the free text (both say "not a known tool").
         assert!(
             matches!(
                 outcome,
@@ -3723,12 +3764,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "fallback must be a recoverable InvalidInput failure, not run death"
+            "fallback must be a recoverable UnknownCapability failure, not run death"
         );
     }
 
@@ -3780,6 +3821,9 @@ mod tests {
             })
             .await
             .expect("bridge handles recursion");
+        // T5 (#5712/#7892): recursing into a bridge name hits the same "not a
+        // known tool" branch as any other unresolvable tool_call target, now
+        // FailureKind::UnknownCapability.
         assert!(
             matches!(
                 outcome,
@@ -3787,12 +3831,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "recursive tool_call must be a recoverable InvalidInput failure, not run death"
+            "recursive tool_call must be a recoverable UnknownCapability failure, not run death"
         );
         assert!(
             inner
@@ -3834,16 +3878,26 @@ mod tests {
             .await
             .expect("surface builds turn state");
 
-        for (arguments, expected) in [
-            (json!({}), "tool_describe requires name"),
-            (json!({"name": 42}), "tool_describe requires name"),
+        for (arguments, expected, expected_kind) in [
+            (
+                json!({}),
+                "tool_describe requires name",
+                FailureKind::InputEncode,
+            ),
+            (
+                json!({"name": 42}),
+                "tool_describe requires name",
+                FailureKind::InputEncode,
+            ),
             (
                 json!({"name": TOOL_SEARCH_NAME}),
                 "tool_describe target must not be a bridge",
+                FailureKind::InputEncode,
             ),
             (
                 json!({"name": "does_not_exist"}),
-                "tool_describe target is unknown",
+                "tool_describe target is unknown; use tool_search to find the correct tool name",
+                FailureKind::UnknownCapability,
             ),
         ] {
             let candidate =
@@ -3874,6 +3928,18 @@ mod tests {
                         )
                 ),
                 "unexpected tool_describe outcome for {expected}: {outcome:?}"
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    Resolution::Done(ref output)
+                        if matches!(
+                            &output.verdict,
+                            ToolVerdict::RecoverableFailure { error_kind, .. }
+                                if *error_kind == expected_kind
+                        )
+                ),
+                "unexpected FailureKind for {expected}: {outcome:?}"
             );
         }
 
@@ -3943,6 +4009,10 @@ mod tests {
             })
             .await
             .expect("bridge handles unknown target");
+        // T5 (#5712/#7892): an unresolvable tool_call target carries
+        // FailureKind::UnknownCapability so the structured hint agrees with
+        // the free text ("not a known tool"), instead of steering the model
+        // to fix arguments on a target that was never a real tool.
         assert!(
             matches!(
                 outcome,
@@ -3950,12 +4020,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "unknown-target tool_call must be a recoverable InvalidInput failure"
+            "unknown-target tool_call must be a recoverable UnknownCapability failure"
         );
         assert!(
             inner
