@@ -17,6 +17,19 @@ pub enum TelemetryWriteFailureClass {
 }
 
 impl TelemetryWriteFailureClass {
+    const fn index(self) -> usize {
+        match self {
+            Self::StorageAdmission => 0,
+            Self::StoragePoolAdmission => 1,
+            Self::StorageOperation => 2,
+            Self::CounterOverflow => 3,
+            Self::InvalidRecord => 4,
+            Self::InvalidData => 5,
+            Self::ShutdownTimeout => 6,
+            Self::CollectorIdResolution => 7,
+        }
+    }
+
     pub(crate) const fn from_repr(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::StorageAdmission),
@@ -31,6 +44,11 @@ impl TelemetryWriteFailureClass {
         }
     }
 }
+
+const _: () = assert!(
+    TelemetryWriteFailureClass::CollectorIdResolution.index() + 1 == FAILURE_CLASS_COUNT,
+    "FAILURE_CLASS_COUNT must match TelemetryWriteFailureClass",
+);
 
 pub(crate) type FailureClassCode = TelemetryWriteFailureClass;
 
@@ -95,12 +113,7 @@ impl TelemetryDiagnostics {
         self.last_failure_class
     }
     pub const fn failure_class_count(self, class: TelemetryWriteFailureClass) -> u64 {
-        let index = class as usize;
-        if index == 0 || index > FAILURE_CLASS_COUNT {
-            0
-        } else {
-            self.failure_class_counts[index - 1]
-        }
+        self.failure_class_counts[class.index()]
     }
     pub const fn shutdown_timeout_count(self) -> u64 {
         self.shutdown_timeout_count
@@ -233,7 +246,7 @@ impl DiagnosticsState {
     }
 
     pub(crate) fn record_failure(&self, class: FailureClassCode) {
-        let index = class as usize - 1;
+        let index = class.index();
         if checked_atomic_add(&self.failure_class_counts[index], 1).is_err()
             && class != FailureClassCode::CounterOverflow
         {
@@ -281,7 +294,7 @@ impl DiagnosticsState {
     }
 
     pub(crate) fn record_counter_overflow(&self) {
-        let index = FailureClassCode::CounterOverflow as usize - 1;
+        let index = FailureClassCode::CounterOverflow.index();
         let _ = checked_atomic_add(&self.failure_class_counts[index], 1);
         self.last_failure_class
             .store(FailureClassCode::CounterOverflow as u8, Ordering::Relaxed);
