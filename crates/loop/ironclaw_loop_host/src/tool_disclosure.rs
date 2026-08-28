@@ -998,7 +998,7 @@ fn select_promoted_definitions(
             if advertised_tokens.saturating_add(entry.est_schema_tokens)
                 > caps.defer_threshold_tokens()
             {
-                break;
+                continue;
             }
             included_names.insert(entry.definition.name.to_string());
             selected.push((entry.definition.clone(), entry.est_schema_tokens));
@@ -1908,6 +1908,84 @@ mod tests {
             ]
         );
         assert!(!names.contains(&"denied_promoted"));
+    }
+
+    /// T6 (B4, #7892 item 3): the promotion budget walk must SKIP an oversized
+    /// promoted entry and keep considering later, smaller ones -- not
+    /// `break` and drop every entry that follows it regardless of size.
+    #[test]
+    fn select_active_set_admits_a_small_promoted_entry_after_skipping_an_oversized_one() {
+        let definitions = vec![
+            fixture_tool("read_file", "Allowed core", medium_schema(0)),
+            fixture_tool("oversized_00", "Oversized promoted", large_nested_schema(1)),
+            fixture_tool("small_01", "Small promoted", medium_schema(2)),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let mut promoted = PromotedSet::default();
+        promoted.push("oversized_00");
+        promoted.push("small_01");
+
+        let bridge_tokens =
+            advertised_bridge_tool_definitions(&catalog, &CapabilitySurfacePolicy::allow_all())
+                .iter()
+                .fold(0_u32, |total, (_definition, est_schema_tokens)| {
+                    total.saturating_add(*est_schema_tokens)
+                });
+        let read_file_tokens = catalog
+            .entry_by_name("read_file")
+            .expect("read_file entry")
+            .est_schema_tokens;
+        let oversized_tokens = catalog
+            .entry_by_name("oversized_00")
+            .expect("oversized entry")
+            .est_schema_tokens;
+        let small_tokens = catalog
+            .entry_by_name("small_01")
+            .expect("small entry")
+            .est_schema_tokens;
+        assert!(
+            oversized_tokens > small_tokens,
+            "fixture setup: the oversized promoted entry must actually be larger \
+             than the small one, or this test proves nothing (oversized={oversized_tokens}, small={small_tokens})"
+        );
+
+        // Derive the budget so that core+bridges+oversized_00 crosses it but
+        // core+bridges+small_01 does not -- this is the exact boundary
+        // select_promoted_definitions checks per promoted entry.
+        let baseline = bridge_tokens.saturating_add(read_file_tokens);
+        let max_tokens = baseline.saturating_add(small_tokens);
+        assert!(
+            baseline.saturating_add(oversized_tokens) > max_tokens,
+            "fixture setup: oversized_00 alone must cross the derived budget \
+             (baseline={baseline}, oversized={oversized_tokens}, max_tokens={max_tokens})"
+        );
+
+        let active = select_active_set(
+            &catalog,
+            &promoted,
+            DisclosureCaps {
+                max_tokens,
+                max_tools: 10,
+                ctx_limit: None,
+            },
+            &CapabilitySurfacePolicy::allow_all(),
+        );
+        let names: Vec<&str> = active
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+
+        assert!(active.deferred);
+        assert!(
+            names.contains(&"small_01"),
+            "small_01 must be admitted once the oversized entry ahead of it is \
+             skipped, not dropped along with it: {names:?}"
+        );
+        assert!(
+            !names.contains(&"oversized_00"),
+            "oversized_00 itself must still be excluded -- it alone still doesn't fit: {names:?}"
+        );
     }
 
     #[test]
