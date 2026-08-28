@@ -53,6 +53,11 @@ export function LearningSection({ providerState }) {
     (provider) => provider.id === providerState.activeProviderId
   );
   const noActiveProvider = !providerState.hasActiveProvider || !activeProvider;
+  const activeProviderKey = activeProvider
+    ? [activeProvider.id, activeProvider.adapter, activeProvider.base_url || ""].join("\0")
+    : "";
+  const activeProviderKeyRef = React.useRef(activeProviderKey);
+  activeProviderKeyRef.current = activeProviderKey;
 
   // Provider discovery is explicit. Rendering Settings must never trigger an
   // outbound provider request; hermetic browser lanes enforce this boundary.
@@ -61,6 +66,7 @@ export function LearningSection({ providerState }) {
   const [modelFetchError, setModelFetchError] = React.useState(null);
   const fetchProviderModels = async () => {
     if (!activeProvider || isFetchingModels) return;
+    const requestedProviderKey = activeProviderKey;
     setIsFetchingModels(true);
     setModelFetchError(null);
     try {
@@ -70,15 +76,20 @@ export function LearningSection({ providerState }) {
         base_url: activeProvider.base_url || undefined,
         model: providerState.selectedModel || activeProvider.default_model || undefined,
       });
+      if (activeProviderKeyRef.current !== requestedProviderKey) return;
       if (!result?.ok || !Array.isArray(result.models)) {
         setModelFetchError(t("llm.modelsFetchFailed"));
         return;
       }
       setDiscoveredModels((current) => normalizeModels([...current, ...result.models]));
     } catch {
-      setModelFetchError(t("llm.modelsFetchFailed"));
+      if (activeProviderKeyRef.current === requestedProviderKey) {
+        setModelFetchError(t("llm.modelsFetchFailed"));
+      }
     } finally {
-      setIsFetchingModels(false);
+      if (activeProviderKeyRef.current === requestedProviderKey) {
+        setIsFetchingModels(false);
+      }
     }
   };
   const modelOptions = normalizeModels([
@@ -101,9 +112,10 @@ export function LearningSection({ providerState }) {
   React.useEffect(() => {
     setDraftModel(savedModel);
     setDiscoveredModels([]);
+    setIsFetchingModels(false);
     setModelFetchError(null);
     setLocalError(null);
-  }, [savedModel, providerState.activeProviderId]);
+  }, [savedModel, activeProviderKey]);
 
   const saveMutation = useMutation({
     mutationFn: setLearning,

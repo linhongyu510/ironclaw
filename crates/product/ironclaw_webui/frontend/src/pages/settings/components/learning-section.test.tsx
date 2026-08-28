@@ -66,9 +66,22 @@ async function renderSection(state) {
       </QueryClientProvider>
     );
   });
-  // Let pending provider model-listing fetches resolve before interaction.
+  // Let react-query and component effects settle before interaction.
   await act(async () => {});
   return { container, queryClient, root };
+}
+
+async function rerenderSection(rendered, state) {
+  await act(async () => {
+    rendered.root.render(
+      <QueryClientProvider client={rendered.queryClient}>
+        <I18nProvider>
+          <LearningSection providerState={state} />
+        </I18nProvider>
+      </QueryClientProvider>
+    );
+  });
+  await act(async () => {});
 }
 
 async function clickSwitch(rendered) {
@@ -176,6 +189,7 @@ test("fallback models remain available when provider listing fails", async () =>
     const options = menuOptionLabels(rendered);
     for (const model of [
       "active-model",
+
       "provider-default",
       "stored-learning-model",
       "policy-model",
@@ -187,6 +201,46 @@ test("fallback models remain available when provider listing fails", async () =>
       1,
       "fallback options should be deduplicated"
     );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.listLlmProviderModels.mockReset();
+  }
+});
+test("provider changes discard pending model-list results", async () => {
+  let resolveFirstRequest;
+  requests.listLlmProviderModels.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveFirstRequest = resolve;
+      })
+  );
+  const rendered = await renderSection(providerState());
+  try {
+    await fetchProviderModels(rendered);
+    await rerenderSection(
+      rendered,
+      providerState({
+        activeProviderId: "provider-b",
+        selectedModel: "provider-b-default",
+        providers: [
+          {
+            id: "provider-b",
+            adapter: "open_ai_completions",
+            base_url: "http://127.0.0.1:2345/v1",
+            default_model: "provider-b-default",
+            can_list_models: true,
+          },
+        ],
+      })
+    );
+    await act(async () => {
+      resolveFirstRequest({ ok: true, models: ["stale-provider-a-model"] });
+    });
+    await openModelMenu(rendered);
+    const options = menuOptionLabels(rendered);
+    assert.ok(options.includes("provider-b-default"));
+    assert.ok(!options.includes("stale-provider-a-model"));
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();

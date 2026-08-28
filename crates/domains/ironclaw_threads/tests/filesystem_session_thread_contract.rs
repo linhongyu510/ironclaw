@@ -3027,8 +3027,8 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     create("ddl-000").await;
     let after_first = backend.count(FilesystemOperation::EnsureIndex);
     assert_eq!(
-        after_first, 9,
-        "a mount's first thread declares four transcript specs and five message lookup specs"
+        after_first, 11,
+        "a mount's first thread declares six transcript specs and five message lookup specs"
     );
 
     for index in 1..5 {
@@ -3369,7 +3369,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3428,7 +3428,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3452,7 +3452,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v3.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3491,7 +3491,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -5824,7 +5824,7 @@ async fn wait_for_thread_index_projection_repair<F>(
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v3.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
@@ -8045,6 +8045,19 @@ async fn filesystem_completed_run_messages_are_exact_and_bounded() {
         })
         .await
         .unwrap();
+    // Fill more than one unfiltered descending page after the delayed child.
+    // The run-aware index must still return the older target and child rows.
+    for index in 0..12 {
+        service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: TurnRunId::new().to_string(),
+                content: MessageContent::text(format!("later-{index}")),
+            })
+            .await
+            .unwrap();
+    }
     let result = service
         .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
             scope: scope.clone(),

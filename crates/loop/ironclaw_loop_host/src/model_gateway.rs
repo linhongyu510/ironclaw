@@ -117,7 +117,7 @@ impl crate::learning_review::LearningInferencePort for LearningInferenceAdapter 
             .await
             .map(|response| response.content)
             .map_err(|error| {
-                let mapped = map_provider_error(error);
+                let mapped = map_provider_error_without_logging(error);
                 let safe_detail = mapped.detail.as_deref().unwrap_or(&mapped.safe_summary);
                 debug!(
                     error = %ironclaw_common::truncate_for_preview(safe_detail, 512),
@@ -2711,11 +2711,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error = %ironclaw_common::truncate_for_preview(&safe_log_detail, 512),
         "reborn model provider error mapped to safe summary"
     );
-    // Tier 2b: carry the provider's real message (status line + body snippet)
-    // on the model-visible detail channel so the failure explainer can describe
-    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
-    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
-    // summary stays a fixed host-authored category string.
+    map_provider_error_with_detail(error, provider_detail)
+}
+
+fn map_provider_error_without_logging(error: LlmError) -> HostManagedModelError {
+    let provider_detail = error.to_string();
+    map_provider_error_with_detail(error, provider_detail)
+}
+
+fn map_provider_error_with_detail(
+    error: LlmError,
+    provider_detail: String,
+) -> HostManagedModelError {
     if is_unconfigured_provider_error(&error) {
         // No provider is configured at all: a configuration fault, not an
         // availability fault. CredentialUnavailable is unclassified in the
@@ -2997,6 +3004,12 @@ mod tests {
             assert!(
                 lines.iter().all(|line| !line.contains(&secret)),
                 "raw provider credentials must not appear in logs: {lines:?}"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| !line.contains("reborn model provider error mapped")),
+                "background Learning must not emit the shared warning log: {lines:?}"
             );
             Ok(())
         });

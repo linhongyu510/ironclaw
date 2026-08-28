@@ -349,7 +349,7 @@ where
         })?;
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
-        let entry = entry
+        let mut entry = entry
             .with_indexed(
                 fs_index_key("thread_id")?,
                 IndexValue::Text(record.thread_id.to_string()),
@@ -374,6 +374,18 @@ where
                 fs_index_key("message_status")?,
                 IndexValue::Text(serde_enum_index_value(&record.status)?),
             );
+        if let Some(turn_run_id) = record.turn_run_id.as_ref() {
+            entry = entry.with_indexed(
+                fs_index_key("turn_run_id")?,
+                IndexValue::Text(turn_run_id.clone()),
+            );
+        }
+        if let Some(source_binding_id) = record.source_binding_id.as_ref() {
+            entry = entry.with_indexed(
+                fs_index_key("source_binding_id")?,
+                IndexValue::Text(source_binding_id.clone()),
+            );
+        }
         message_lookup_index::with_message_lookup_projections(entry, record)
     }
 
@@ -4308,6 +4320,8 @@ fn root_index_specs() -> Result<Vec<IndexSpec>, SessionThreadError> {
     let mut indexes = vec![
         message_sequence_index_spec()?,
         message_kind_status_index_spec()?,
+        message_turn_run_sequence_index_spec()?,
+        message_source_binding_sequence_index_spec()?,
         summary_index_spec()?,
         thread_index::thread_activity_index_spec()?,
     ];
@@ -4332,6 +4346,34 @@ fn message_sequence_index_spec() -> Result<IndexSpec, SessionThreadError> {
         fs_index_name("thread_message_sequence_v3")?,
         vec![
             fs_index_key("thread_id")?,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
+fn message_turn_run_sequence_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        fs_index_name("thread_message_turn_run_sequence_v1")?,
+        vec![
+            fs_index_key("thread_id")?,
+            fs_index_key("turn_run_id")?,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
+fn message_source_binding_sequence_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        fs_index_name("thread_message_source_binding_sequence_v1")?,
+        vec![
+            fs_index_key("thread_id")?,
+            fs_index_key("source_binding_id")?,
+            fs_index_key("message_kind")?,
+            fs_index_key("message_status")?,
             fs_index_key("sequence")?,
             fs_index_key("message_id")?,
         ],
