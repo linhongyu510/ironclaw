@@ -26,7 +26,7 @@ const UNBOUND_DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:GateNotSupportedStrategy(abort_gate_not_supported_except_external_tool),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=1024,wall_clock_limit=none)"
 )
@@ -55,8 +55,8 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
 
 /// Stable digest: BLAKE3-256 of the unbound-default family fingerprint.
 pub const UNBOUND_DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x25, 0xf3, 0x64, 0x56, 0x3f, 0x30, 0xb1, 0x7c, 0xce, 0x09, 0x3e, 0x8b, 0x3d, 0x36, 0x77, 0xef,
-    0xab, 0x51, 0xff, 0xa3, 0x29, 0x3d, 0xae, 0x6f, 0x6f, 0x5a, 0x22, 0xae, 0x27, 0xf8, 0xbd, 0xd5,
+    0xfb, 0x7b, 0x56, 0x08, 0x72, 0x91, 0xd7, 0xd4, 0x9e, 0x8a, 0x80, 0x6b, 0x81, 0xdc, 0x35, 0x1f,
+    0x66, 0x09, 0x7b, 0xb9, 0x50, 0x48, 0xf3, 0x01, 0x87, 0x0a, 0xd5, 0x44, 0xd0, 0xfd, 0x37, 0xb2,
 ]);
 
 /// Stable digest: BLAKE3-256 of the unbound-structured family fingerprint.
