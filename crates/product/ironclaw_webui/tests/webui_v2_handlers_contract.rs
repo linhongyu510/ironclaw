@@ -4595,6 +4595,8 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     assert_eq!(body["tenant_id"], "tenant-alpha");
     assert_eq!(body["user_id"], "user-alpha");
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(body["server"]["protocol_version"], 1);
+    assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
 
     // The session advertises the inline-attachment contract so the browser
     // file picker derives its `accept` set and size budgets from the server

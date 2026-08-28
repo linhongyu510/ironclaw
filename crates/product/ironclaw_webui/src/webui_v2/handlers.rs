@@ -190,11 +190,25 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const SUGGESTIONS_MAX_RETRY_AFTER_SECONDS: u32 = 60;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
+/// Server identity a client uses to decide what it may call. `protocol_version`
+/// bumps only on a breaking change to the `/api/webchat/v2` surface.
+#[derive(Debug, Clone, Serialize)]
+pub struct WebUiV2ServerInfo {
+    pub version: &'static str,
+    pub protocol_version: u32,
+}
+
+/// Bumps only on a breaking change to the `/api/webchat/v2` surface.
+pub const WEBUI_V2_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
+    /// Server identity (version + protocol version) so a client can decide
+    /// what it may call.
+    pub server: WebUiV2ServerInfo,
     /// Effective feature gates the browser uses to show/hide or constrain
     /// surfaces. Distinct from `capabilities`, which are per-token
     /// authorization flags.
@@ -266,6 +280,10 @@ pub async fn get_session(
         tenant_id,
         user_id,
         capabilities,
+        server: WebUiV2ServerInfo {
+            version: env!("CARGO_PKG_VERSION"),
+            protocol_version: WEBUI_V2_PROTOCOL_VERSION,
+        },
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
             workspace_requires_scoped_projection,
