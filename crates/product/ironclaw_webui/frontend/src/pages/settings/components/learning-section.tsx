@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { Switch } from "../../../design-system/switch";
@@ -12,7 +13,6 @@ import { setLearning } from "../lib/settings-api";
 // mutation writes back into the same `["llm-providers"]` query cache the rest
 // of the Inference tab reads — no extra fetch and no divergent state.
 const PROVIDERS_CACHE_KEY = ["llm-providers"];
-const LEARNING_MODELS_QUERY_KEY = "learning-provider-models";
 const MEMORY_WRITE_POLICY_OPTIONS = [
   { value: "staged", labelKey: "llm.learningMemoryPolicyStaged" },
   { value: "automatic", labelKey: "llm.learningMemoryPolicyAutomatic" },
@@ -54,33 +54,35 @@ export function LearningSection({ providerState }) {
   );
   const noActiveProvider = !providerState.hasActiveProvider || !activeProvider;
 
-  // Provider-advertised models are the primary source for this operator
-  // control. Keep the request scoped to the active provider and preserve
-  // local policy/selection fallbacks when listing is unavailable.
-  const modelListingQuery = useQuery({
-    queryKey: [
-      LEARNING_MODELS_QUERY_KEY,
-      activeProvider?.id,
-      activeProvider?.adapter,
-      activeProvider?.base_url,
-      providerState.selectedModel,
-    ],
-    queryFn: () =>
-      providerState.listModels({
+  // Provider discovery is explicit. Rendering Settings must never trigger an
+  // outbound provider request; hermetic browser lanes enforce this boundary.
+  const [discoveredModels, setDiscoveredModels] = React.useState([]);
+  const [isFetchingModels, setIsFetchingModels] = React.useState(false);
+  const [modelFetchError, setModelFetchError] = React.useState(null);
+  const fetchProviderModels = async () => {
+    if (!activeProvider || isFetchingModels) return;
+    setIsFetchingModels(true);
+    setModelFetchError(null);
+    try {
+      const result = await providerState.listModels({
         provider_id: activeProvider.id,
         adapter: activeProvider.adapter,
         base_url: activeProvider.base_url || undefined,
         model: providerState.selectedModel || activeProvider.default_model || undefined,
-      }),
-    staleTime: 60_000,
-    enabled: !noActiveProvider,
-  });
+      });
+      if (!result?.ok || !Array.isArray(result.models)) {
+        setModelFetchError(t("llm.modelsFetchFailed"));
+        return;
+      }
+      setDiscoveredModels((current) => normalizeModels([...current, ...result.models]));
+    } catch {
+      setModelFetchError(t("llm.modelsFetchFailed"));
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
   const modelOptions = normalizeModels([
-    ...(modelListingQuery.data?.ok === false
-      ? []
-      : Array.isArray(modelListingQuery.data?.models)
-        ? modelListingQuery.data.models
-        : []),
+    ...discoveredModels,
     ...(providerState.userModelPolicy?.allowed_models || []),
     providerState.selectedModel,
     activeProvider?.default_model,
@@ -98,6 +100,8 @@ export function LearningSection({ providerState }) {
   const [localError, setLocalError] = React.useState(null);
   React.useEffect(() => {
     setDraftModel(savedModel);
+    setDiscoveredModels([]);
+    setModelFetchError(null);
     setLocalError(null);
   }, [savedModel, providerState.activeProviderId]);
 
@@ -249,8 +253,22 @@ export function LearningSection({ providerState }) {
             />
           </div>
           <div>
-            <div className="mb-2 text-xs font-medium text-[var(--v2-text-muted)]">
-              {t("llm.learningModelLabel")}
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-medium text-[var(--v2-text-muted)]">
+                {t("llm.learningModelLabel")}
+              </div>
+              {activeProvider?.can_list_models ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={saveMutation.isPending || isFetchingModels}
+                  onClick={fetchProviderModels}
+                  data-testid="settings-learning-fetch-models"
+                >
+                  {t("llm.fetchModels")}
+                </Button>
+              ) : null}
             </div>
             <SelectMenu
               value={draftModel}
@@ -264,6 +282,11 @@ export function LearningSection({ providerState }) {
               menuClassName="w-full max-w-[calc(100vw-2rem)]"
               data-testid="settings-learning-model"
             />
+            {modelFetchError ? (
+              <p role="alert" className="mt-2 text-xs text-[var(--v2-danger-text)]">
+                {modelFetchError}
+              </p>
+            ) : null}
           </div>
           <div>
             <div className="mb-2 text-xs font-medium text-[var(--v2-text-muted)]">

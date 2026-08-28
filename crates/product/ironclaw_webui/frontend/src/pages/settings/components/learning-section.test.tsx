@@ -35,6 +35,7 @@ function providerState(overrides = {}) {
         adapter: "open_ai_completions",
         base_url: "http://127.0.0.1:1234/v1",
         default_model: "mock-model",
+        can_list_models: true,
       },
     ],
     userModelPolicy: null,
@@ -93,6 +94,14 @@ async function openModelMenu(rendered) {
   await act(async () => trigger.click());
 }
 
+async function fetchProviderModels(rendered) {
+  const button = rendered.container.querySelector<HTMLButtonElement>(
+    '[data-testid="settings-learning-fetch-models"]'
+  );
+  assert.ok(button, "the Learning model fetch action is available");
+  await act(async () => button.click());
+}
+
 function menuOptionLabels(rendered) {
   return [...rendered.container.querySelectorAll('[role="option"]')].map(
     (option) => option.textContent ?? ""
@@ -115,6 +124,12 @@ test("provider-advertised models appear when no tenant selection policy exists",
     const text = rendered.container.textContent ?? "";
     assert.match(text, /Review successful runs/);
     assert.match(text, /background review/, "supporting copy explains what enabling does");
+    assert.equal(
+      requests.listLlmProviderModels.mock.calls.length,
+      0,
+      "rendering Settings must not start provider network discovery"
+    );
+    await fetchProviderModels(rendered);
     await openModelMenu(rendered);
     const options = menuOptionLabels(rendered);
     for (const model of ["mock-model", "claude-opus-4"]) {
@@ -144,6 +159,7 @@ test("fallback models remain available when provider listing fails", async () =>
           adapter: "open_ai_completions",
           base_url: "http://127.0.0.1:1234/v1",
           default_model: "provider-default",
+          can_list_models: true,
         },
       ],
       learning: {
@@ -155,6 +171,7 @@ test("fallback models remain available when provider listing fails", async () =>
     })
   );
   try {
+    await fetchProviderModels(rendered);
     await openModelMenu(rendered);
     const options = menuOptionLabels(rendered);
     for (const model of [
@@ -292,6 +309,7 @@ test("selecting a provider-listed model sends current enabled state and memory p
     })
   );
   try {
+    await fetchProviderModels(rendered);
     await openModelMenu(rendered);
     const option = rendered.container.querySelector<HTMLButtonElement>(
       '[role="option"][aria-selected="false"]'
