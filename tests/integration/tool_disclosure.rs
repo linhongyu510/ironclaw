@@ -1176,3 +1176,57 @@ async fn tool_search_reply_falls_back_to_compact_when_rank_one_does_not_fit() {
         .await
         .expect("must never fall back to the JSON-page view");
 }
+
+/// T7: tool_search replies (any query shape -- no-match, repeated, or
+/// case-varied) must never perturb the cached system prompt prefix or the
+/// advertised `tools` array. Promotion (and the prefix churn that earns) only
+/// happens when a deferred tool is actually dispatched via `tool_call` --
+/// searching and describing never promote anything (#6986).
+#[tokio::test]
+async fn tool_search_replies_never_perturb_the_cached_prompt_prefix() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "no such capability zzz"}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "no such capability zzz"}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "get repository"}),
+            ),
+            RebornScriptedReply::tool_call(
+                TOOL_SEARCH_NAME,
+                serde_json::json!({"query": "Get Repository"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("find repo tools")
+        .await
+        .expect("turn completes");
+    harness
+        .assert_system_prompts_identical()
+        .await
+        .expect("no branch edits TOOL_DISCLOSURE_PROTOCOL_PROMPT");
+    harness
+        .assert_prompt_cache_prefix_stable()
+        .await
+        .expect("tool_search/tool_describe promote nothing (#6986)");
+    harness
+        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .await
+        .expect("tool_search itself stays advertised");
+    harness
+        .assert_model_tools_excludes("github__list_issues")
+        .await
+        .expect("no non-promoted deferred tool leaks into tools array");
+}
