@@ -19,7 +19,7 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 use user_sandbox_live::{
     CONTAINER_DIGEST_HEX_LEN, CONTAINER_PREFIX, ContainerIdentity, DockerCleanup, LABEL_TENANT,
-    LABEL_USER,
+    LABEL_USER, containers_for_identity,
 };
 
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
@@ -29,6 +29,7 @@ const LOOP_WORKER_MARKER: &str = "CANONICAL_LOOP_WORKER_ACTIVE";
 const FILE_TOOL_TO_SHELL_MARKER: &str = "FILE_TOOL_TO_SHELL_VISIBLE";
 const FILE_TOOL_TO_SHELL_PATCHED: &str = "FILE_TOOL_TO_SHELL_PATCHED";
 const SHELL_TO_FILE_TOOL_MARKER: &str = "SHELL_TO_FILE_TOOL_VISIBLE";
+const TRIGGER_IDLE_USER_MARKER: &str = "TRIGGER_STARTED_IDLE_USER_LOOP";
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -92,6 +93,49 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             user: expected_user.clone(),
         };
         cleanup.track_identity(identity.clone());
+        assert!(
+            containers_for_identity(&expected_tenant, &expected_user).is_empty(),
+            "idle trigger owner must not have a sandbox before the fire"
+        );
+        let triggered = harness
+            .submit_triggered_turn_scripted(
+                "run the scheduled sandbox check",
+                [
+                    RebornScriptedReply::tool_call(
+                        "builtin.shell",
+                        json!({
+                            "command": format!(
+                                "set -eu; test -f /.dockerenv; found=0; for exe in /proc/[0-9]*/exe; do target=$(readlink \"$exe\" 2>/dev/null || true); if [ \"$target\" = '/usr/local/bin/ironclaw-loop-worker' ]; then found=1; break; fi; done; test \"$found\" -eq 1; echo {LOOP_WORKER_MARKER}; echo {TRIGGER_IDLE_USER_MARKER}"
+                            ),
+                            "credential_contexts": [],
+                        }),
+                    ),
+                    RebornScriptedReply::text("scheduled sandbox check complete"),
+                ],
+            )
+            .await
+            .expect("triggered turn accepted");
+        harness
+            .wait_for_status_in_scope(
+                &triggered.turn_scope,
+                triggered.run_id,
+                ironclaw_turns::TurnStatus::Completed,
+            )
+            .await
+            .expect("triggered sandbox run completes");
+        assert!(cleanup.capture_identity(&identity).running);
+        harness
+            .assert_tool_result_contains(TRIGGER_IDLE_USER_MARKER)
+            .await
+            .expect("trigger fire started the idle user's sandbox loop");
+        harness
+            .thread_harness
+            .assert_final_reply(
+                triggered.turn_scope.thread_id,
+                "scheduled sandbox check complete",
+            )
+            .await
+            .expect("triggered final reply persists in the trigger thread");
 
         harness
             .submit_turn("run a sandboxed shell command")
