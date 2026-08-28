@@ -1730,9 +1730,9 @@ async fn compaction_task_rejects_unbounded_original_input_before_scanning() {
 }
 
 #[tokio::test]
-async fn compaction_task_accepts_full_window_plus_triggering_result() {
+async fn compaction_task_accepts_139_durable_messages() {
     let fixture = CompactionFixture::new().await;
-    for index in 0..131 {
+    for index in 0..139 {
         fixture.append_user(&format!("message {index}")).await;
     }
     let inference = Arc::new(CapturingInference::new("summary"));
@@ -1743,18 +1743,73 @@ async fn compaction_task_accepts_full_window_plus_triggering_result() {
         fixture.scope.clone(),
     );
 
-    port.compact_loop_context(fixture.request(131))
+    port.compact_loop_context(fixture.request(139))
         .await
-        .expect("the production compaction range may contain 131 transcript messages");
+        .expect("durable compaction ranges are not bounded by provider projection count");
 
     assert!(!inference.last_input().is_empty());
 }
 
 #[tokio::test]
-async fn compaction_task_rejects_message_count_above_production_window() {
+async fn compaction_task_accepts_512_small_messages() {
     let fixture = CompactionFixture::new().await;
-    for index in 0..132 {
-        fixture.append_user(&format!("message {index}")).await;
+    for _ in 0..512 {
+        fixture.append_user("ok").await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(512))
+        .await
+        .expect("small messages should fit when their exact envelopes fit");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+
+    assert!(response.input_truncation.is_none());
+}
+
+#[tokio::test]
+async fn compaction_task_truncates_many_bodies_after_envelope_budgeting() {
+    let fixture = CompactionFixture::new().await;
+    for _ in 0..512 {
+        fixture.append_user(&"x".repeat(1024)).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(512))
+        .await
+        .expect("fitting envelopes should leave a bounded budget for message bodies");
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+
+    assert!(inference.last_input().len() <= 256 * 1024);
+    let truncation = response
+        .input_truncation
+        .expect("body budgeting should return typed truncation evidence");
+    assert!(truncation.message_count > 0);
+    assert!(truncation.omitted_bytes > 0);
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_envelope_only_overflow_before_inference() {
+    let fixture = CompactionFixture::new().await;
+    for _ in 0..6000 {
+        fixture.append_user("").await;
     }
     let inference = Arc::new(CapturingInference::new("summary"));
     let port = fixture.port_with_inference(
@@ -1765,9 +1820,9 @@ async fn compaction_task_rejects_message_count_above_production_window() {
     );
 
     let error = port
-        .compact_loop_context(fixture.request(132))
+        .compact_loop_context(fixture.request(6000))
         .await
-        .expect_err("message counts above the production window must fail before inference");
+        .expect_err("serialized envelopes alone must remain bounded");
 
     assert!(matches!(error, LoopCompactionError::InputTooLarge));
     assert!(inference.last_input().is_empty());

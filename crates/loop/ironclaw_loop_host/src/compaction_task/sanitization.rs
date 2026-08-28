@@ -7,12 +7,6 @@ use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
-// The canonical 128-message context window may additionally pin the accepted
-// task and active-task boundary, then admit the capability result that triggers
-// proactive compaction. A valid production range can therefore contain 131
-// transcript messages.
-const MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES: usize = 131;
-const MAX_UNTRUNCATED_TOTAL_MESSAGES: usize = 257;
 const MAX_UNTRUNCATED_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct SanitizedContent {
@@ -144,22 +138,6 @@ impl<'a> CompactionSanitizer<'a> {
         &self,
         messages: &[ValidatedCompactionMessage],
     ) -> Result<(), CompactionError> {
-        let transcript_message_count = messages
-            .iter()
-            .filter(|message| message.kind != MessageKind::Summary)
-            .count();
-        if transcript_message_count > MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES {
-            return Err(CompactionError::MessageCountExceeded {
-                cap: MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES,
-                observed: transcript_message_count,
-            });
-        }
-        if messages.len() > MAX_UNTRUNCATED_TOTAL_MESSAGES {
-            return Err(CompactionError::MessageCountExceeded {
-                cap: MAX_UNTRUNCATED_TOTAL_MESSAGES,
-                observed: messages.len(),
-            });
-        }
         let validation_cap = messages.iter().try_fold(0_usize, |total, message| {
             let observed_bytes = total
                 .checked_add(message.body.len())
@@ -356,6 +334,28 @@ fn validate_matches_stay_within_bodies(
         }
     }
     Ok(())
+}
+
+pub(super) fn serialized_message_envelope_byte_len(
+    sequence: u64,
+    kind: MessageKind,
+) -> Option<usize> {
+    "<message sequence=\""
+        .len()
+        .checked_add(decimal_digit_count(sequence))
+        .and_then(|bytes| bytes.checked_add("\" kind=\"".len()))
+        .and_then(|bytes| bytes.checked_add(message_kind_name(kind).len()))
+        .and_then(|bytes| bytes.checked_add("\">".len()))
+        .and_then(|bytes| bytes.checked_add("</message>\n".len()))
+}
+
+fn decimal_digit_count(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn append_message_checked(
