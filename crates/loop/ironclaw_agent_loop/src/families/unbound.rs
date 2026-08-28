@@ -4,7 +4,9 @@ use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 
 use crate::default_planner::DefaultPlanner;
-use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
+use crate::family::{
+    ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId, LoopFamilyRegistryError,
+};
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::{
     GateNotSupportedStrategy, StructuredOutputReplyAdmissionStrategy,
@@ -65,9 +67,12 @@ pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
     0x46, 0x71, 0xed, 0xbe, 0x77, 0x06, 0x80, 0x38, 0x21, 0xb5, 0xd3, 0x2c, 0x1d, 0x10, 0x87, 0x68,
 ]);
 
-fn structured_result_capability() -> CapabilityId {
-    CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID)
-        .expect("static unbound result capability id is a valid dotted id") // safety: compile-time constant validated by the pin test below.
+fn structured_result_capability() -> Result<CapabilityId, LoopFamilyRegistryError> {
+    CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID).map_err(|error| {
+        LoopFamilyRegistryError::InvalidCapabilityId {
+            reason: error.to_string(),
+        }
+    })
 }
 
 /// The unbound-default family (unbound-turn design §4.2): the default
@@ -92,7 +97,8 @@ pub fn unbound_default() -> LoopFamily {
 /// plus strict structured-output enforcement — every plain-text final is
 /// rejected with a repair hint directing the model to the synthetic result
 /// tool, and the run completes when that tool records a validated result.
-pub fn unbound_structured() -> LoopFamily {
+pub fn unbound_structured() -> Result<LoopFamily, LoopFamilyRegistryError> {
+    let result_capability = structured_result_capability()?;
     let planner = DefaultPlanner::compose_default()
         .with_id(LoopFamilyId::UNBOUND_STRUCTURED)
         .with_version(ComponentIdentity::from_static(
@@ -101,16 +107,16 @@ pub fn unbound_structured() -> LoopFamily {
         ))
         .with_gate(Arc::new(GateNotSupportedStrategy))
         .with_model(Arc::new(StructuredResultModelStrategy::new(
-            structured_result_capability(),
+            result_capability.clone(),
         )))
         .with_reply_admission(Arc::new(StructuredOutputReplyAdmissionStrategy))
         .with_stop(Arc::new(StructuredResultStopStrategy::new(
-            structured_result_capability(),
+            result_capability,
         )));
     let id = planner.id().clone();
     let version = planner.version().clone();
 
-    LoopFamily::new(id, version, Arc::new(planner))
+    Ok(LoopFamily::new(id, version, Arc::new(planner)))
 }
 
 #[cfg(test)]
@@ -122,7 +128,9 @@ mod tests {
     #[test]
     fn structured_result_capability_id_is_valid() {
         assert_eq!(
-            structured_result_capability().as_str(),
+            structured_result_capability()
+                .expect("static unbound result capability id is a valid dotted id")
+                .as_str(),
             STRUCTURED_RESULT_CAPABILITY_ID
         );
     }
@@ -133,7 +141,7 @@ mod tests {
         assert_eq!(default_family.id(), &LoopFamilyId::UNBOUND_DEFAULT);
         assert_eq!(default_family.version().id, "unbound_default");
 
-        let structured = unbound_structured();
+        let structured = unbound_structured().expect("valid unbound-structured family");
         assert_eq!(structured.id(), &LoopFamilyId::UNBOUND_STRUCTURED);
         assert_eq!(structured.version().id, "unbound_structured");
     }
