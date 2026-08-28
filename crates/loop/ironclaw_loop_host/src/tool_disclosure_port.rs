@@ -53,12 +53,13 @@ const TOOL_SEARCH_REPLY_BUDGET_BYTES: usize =
 /// drift between them is a compile-time impossibility, not a silent mismatch.
 pub(crate) const TOOL_SEARCH_INLINE_RESULT_LIMIT: usize = 3;
 
-/// One-line description cap (UTF-8 char boundary). Live GitHub tool descriptions run up to
-/// 116 B today (independently scanning every `description = "..."` in
-/// `crates/extensions/packages/github/manifest.toml`'s 50 tool entries finds 3 over 70 B, the
-/// longest 116 B, `github.list_repos`'s description at manifest.toml:500; 47 of 50 stay
-/// <=70 B). This constant guards a future longer one, bounding every compact entry by
-/// construction regardless — 116 B is still well under the 163 B worst case below.
+/// One-line description cap (UTF-8 char boundary). The longest single-line
+/// `description = "..."` across every committed first-party extension
+/// manifest runs up to 116 B today (independently scanned across all
+/// `crates/extensions/packages/*/manifest.toml` tool entries; only a handful
+/// exceed 70 B, and the great majority of entries stay <=70 B). This constant
+/// guards a future longer one, bounding every compact entry by construction
+/// regardless — 116 B is still well under the 163 B worst case below.
 ///
 /// **Byte-accounting note:** `truncate_preview` (`crates/contracts/ironclaw_common/src/util.rs:34`)
 /// appends its `"..."` ellipsis AFTER truncating to `max_bytes` rather than reserving room for it,
