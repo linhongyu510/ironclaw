@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 use ironclaw_filesystem::{OrderedPage, OrderedQueryCursor, Page, RootFilesystem, SortDirection};
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::turn::TurnRunId;
 
-use crate::{SessionThreadError, ThreadMessageRecord, ThreadScope};
+use crate::{MessageKind, MessageStatus, SessionThreadError, ThreadMessageRecord, ThreadScope};
 
 use super::{
     FilesystemSessionThreadService, deserialize, fs_index_key, message_sequence_index_spec,
@@ -151,6 +152,8 @@ struct MessageRunIdentity<'a> {
     turn_run_id: Option<&'a str>,
     #[serde(borrow)]
     source_binding_id: Option<&'a str>,
+    kind: MessageKind,
+    status: MessageStatus,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -161,7 +164,7 @@ where
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
-        turn_run_id: &str,
+        turn_run_id: TurnRunId,
         max_messages: usize,
         max_bytes: usize,
     ) -> Result<MessageReadResult, SessionThreadError> {
@@ -170,18 +173,19 @@ where
         let index = message_sequence_index_spec()?;
         let sequence_key = fs_index_key("sequence")?;
         let message_id_key = fs_index_key("message_id")?;
-        let subagent_binding = format!("subagent-result:{turn_run_id}");
+        let run_id = turn_run_id.to_string();
+        let subagent_binding = format!("subagent-result:{run_id}");
         let mut budget = MessageReadBudget::new(max_messages, max_bytes);
         let mut messages = Vec::new();
         let mut cursor = None;
-
+        let mut seen_match = false;
         loop {
             let page_limit = budget.page_limit().max(1);
             let mut page = OrderedPage::new(
                 index.name.clone(),
                 sequence_key.clone(),
                 message_id_key.clone(),
-                SortDirection::Ascending,
+                SortDirection::Descending,
                 page_limit,
             );
             if let Some(after) = cursor.take() {
@@ -197,6 +201,7 @@ where
                 )
                 .await?;
             let entry_count = entries.len();
+            let mut older_nonmatch = false;
             for versioned in &entries {
                 if !versioned.path.as_str().ends_with(".json") {
                     continue;
@@ -207,11 +212,17 @@ where
                             "invalid transcript message identity: {error}"
                         ))
                     })?;
-                if identity.turn_run_id != Some(turn_run_id)
-                    && identity.source_binding_id != Some(subagent_binding.as_str())
-                {
+                let run_match = identity.turn_run_id == Some(run_id.as_str());
+                let binding_match = identity.source_binding_id == Some(subagent_binding.as_str())
+                    && identity.kind == MessageKind::System
+                    && identity.status == MessageStatus::Finalized;
+                if !run_match && !binding_match {
+                    if seen_match && identity.turn_run_id.is_some() {
+                        older_nonmatch = true;
+                    }
                     continue;
                 }
+                seen_match = true;
                 if !budget.consume(versioned.entry.body.len()) {
                     return Ok(MessageReadResult::LimitExceeded);
                 }
@@ -223,31 +234,28 @@ where
             cursor = entries
                 .last()
                 .map(|entry| {
-                    let value =
-                        entry
-                            .entry
-                            .indexed
-                            .get(&sequence_key)
-                            .cloned()
-                            .ok_or_else(|| {
+                    Ok::<_, SessionThreadError>(OrderedQueryCursor {
+                        value: entry.entry.indexed.get(&sequence_key).cloned().ok_or_else(
+                            || {
                                 SessionThreadError::Backend(
                                     "ordered message row is missing sequence index".to_string(),
                                 )
-                            })?;
-                    let tie_breaker = entry
-                        .entry
-                        .indexed
-                        .get(&message_id_key)
-                        .cloned()
-                        .ok_or_else(|| {
-                            SessionThreadError::Backend(
-                                "ordered message row is missing message_id index".to_string(),
-                            )
-                        })?;
-                    Ok::<_, SessionThreadError>(OrderedQueryCursor { value, tie_breaker })
+                            },
+                        )?,
+                        tie_breaker: entry
+                            .entry
+                            .indexed
+                            .get(&message_id_key)
+                            .cloned()
+                            .ok_or_else(|| {
+                                SessionThreadError::Backend(
+                                    "ordered message row is missing message_id index".to_string(),
+                                )
+                            })?,
+                    })
                 })
                 .transpose()?;
-            if entry_count < page_limit as usize {
+            if older_nonmatch || entry_count < page_limit as usize {
                 break;
             }
         }

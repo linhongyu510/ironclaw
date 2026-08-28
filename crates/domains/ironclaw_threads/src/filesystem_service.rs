@@ -3687,7 +3687,7 @@ where
             .read_completed_run_messages(
                 &request.scope,
                 &request.thread_id,
-                &request.turn_run_id,
+                request.turn_run_id,
                 request.max_messages,
                 request.max_bytes,
             )

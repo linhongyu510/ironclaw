@@ -709,7 +709,7 @@ pub struct BoundedThreadMessagesRequest {
 pub struct CompletedRunMessagesRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
-    pub turn_run_id: String,
+    pub turn_run_id: TurnRunId,
     pub max_messages: usize,
     pub max_bytes: usize,
 }

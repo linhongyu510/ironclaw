@@ -58,6 +58,7 @@ pub async fn enabled_persists_one_sealed_candidate() -> HarnessResult<()> {
     let run_id = harness.submit_turn("remember my update preference").await?;
     harness.assert_reply_contains("turn complete").await?;
     let records = harness.wait_for_learning_candidate_for_test().await?;
+    harness.shutdown_learning_review_for_test().await?;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(records.len(), 1);
     let record: &LearningReviewRecord = &records[0];
@@ -69,7 +70,7 @@ pub async fn enabled_persists_one_sealed_candidate() -> HarnessResult<()> {
         record.scope.project_id().map(|id| id.as_str()),
         Some("project-itest")
     );
-    assert!(!record.review.memory[0].tainted);
+    assert!(record.review.memory[0].tainted);
     Ok(())
 }
 
@@ -90,7 +91,7 @@ pub async fn disabled_does_not_infer_or_persist() -> HarnessResult<()> {
 
     harness.submit_turn("do not learn this").await?;
     harness.assert_reply_contains("turn complete").await?;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    harness.shutdown_learning_review_for_test().await?;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(harness.learning_candidates_for_test().await?.is_empty());
     Ok(())

@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **62** flat integration bins (55 in
+Totals: **62** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -108,7 +108,7 @@ Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (61)
+## 3. Group scenarios — `tests/integration/group_*/` (62)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -171,7 +171,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
 | Have their standing memory document tidied for them every so often — redundant entries merged, superseded facts resolved — by a background pass that runs with nobody present, as them and only them (#7276) | `scenario_memory_curation_rewrites_standing_document.rs` |
 | Not pay for that tidying on every single turn: below the configured interval no pass is submitted at all (#7276) | `scenario_memory_curation_below_threshold_never_fires.rs` |
-| Drive a completed turn through the production-shaped learning sink, persisting one tenant/user/agent/project-sealed candidate when enabled and performing zero inference when disabled | `scenario_learning_review_caller.rs` |
+| Have one completed turn save a review candidate for their workspace only when learning is enabled; with learning disabled, the turn saves nothing | `scenario_learning_review_caller.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 

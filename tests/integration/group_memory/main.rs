@@ -139,8 +139,8 @@ async fn memory_group_e2e() {
         scenario_memory_curation_below_threshold_never_fires::run().await,
     );
 
-    // Scenario 12: production-shaped completed-turn learning sink persists a
-    // sealed candidate, and its disabled counterpart performs no inference.
+    // Scenario 12: a completed turn saves one review candidate when learning
+    // is enabled, while the disabled case saves nothing.
     report.record(
         "learning_enabled_persists_candidate",
         scenario_learning_review_caller::enabled_persists_one_sealed_candidate().await,

@@ -31,14 +31,15 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    turn::TurnRunId,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef,
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
+    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest, FramedSubagentText,
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
@@ -7982,4 +7983,121 @@ async fn filesystem_accept_prepared_context_replays_without_orphans() {
         matches!(missing, Err(SessionThreadError::UnknownThread { .. })),
         "cross-scope reads must stay non-enumerating, got {missing:?}"
     );
+}
+
+#[tokio::test]
+async fn filesystem_completed_run_messages_are_exact_and_bounded() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let service = FilesystemSessionThreadService::new(scoped_threads_fs_at(
+        backend,
+        "tenant-completed-run",
+        "alice",
+    ));
+    let scope = scope("completed-run");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-completed-run").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run = TurnRunId::new();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: run.to_string(),
+            content: MessageContent::text("target"),
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: TurnRunId::new().to_string(),
+            content: MessageContent::text("later"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_subagent_result(AcceptSubagentResultRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            source_binding_id: format!("subagent-result:{run}"),
+            external_event_id: "child-event".into(),
+            content: FramedSubagentText::frame("trusted child"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "user".into(),
+            source_binding_id: Some(format!("subagent-result:{run}")),
+            reply_target_binding_id: None,
+            external_event_id: Some("user-event".into()),
+            content: MessageContent::text("hostile collision"),
+        })
+        .await
+        .unwrap();
+    let result = service
+        .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: run,
+            max_messages: 10,
+            max_bytes: 100_000,
+        })
+        .await
+        .unwrap();
+    let messages = match result {
+        ironclaw_threads::CompletedRunMessages::Complete(m) => m,
+        _ => panic!("unexpected limit"),
+    };
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content.as_deref(), Some("target"));
+    assert_eq!(messages[1].kind, MessageKind::System);
+    assert_eq!(messages[1].status, MessageStatus::Finalized);
+    assert!(
+        messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("trusted child"))
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.content.as_deref() != Some("hostile collision"))
+    );
+    assert!(matches!(
+        service
+            .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: run,
+                max_messages: 0,
+                max_bytes: 100_000
+            })
+            .await
+            .unwrap(),
+        ironclaw_threads::CompletedRunMessages::LimitExceeded
+    ));
+    assert!(matches!(
+        service
+            .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+                scope,
+                thread_id: thread.thread_id,
+                turn_run_id: run,
+                max_messages: 10,
+                max_bytes: 1
+            })
+            .await
+            .unwrap(),
+        ironclaw_threads::CompletedRunMessages::LimitExceeded
+    ));
 }

@@ -36,6 +36,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod learning_candidate_store;
 pub mod learning_review;
 mod memory_context;
 mod model_capability_view;

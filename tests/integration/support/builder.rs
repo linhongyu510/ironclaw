@@ -985,6 +985,20 @@ impl RebornIntegrationHarness {
             .ok_or("learning review scope is not wired on this harness")?;
         Ok(store.list_unresolved(scope).await?)
     }
+    /// Stop and await every learning-review task spawned by this harness.
+    ///
+    /// Learning review runs asynchronously from the completed-turn event sink
+    /// and borrows the harness group's stores. Call this before dropping the
+    /// harness or its group so no task can outlive those resources.
+    pub async fn shutdown_learning_review_for_test(&self) -> HarnessResult<()> {
+        let tasks = self
+            ._shared
+            .learning_tasks
+            .as_ref()
+            .ok_or("learning review is not wired on this harness")?;
+        tasks.shutdown().await;
+        Ok(())
+    }
 
     /// Wait until the completed-turn learning sink persists at least one
     /// candidate, preserving the event fan-out's asynchronous task boundary.

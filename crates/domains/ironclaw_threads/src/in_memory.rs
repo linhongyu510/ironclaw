@@ -1,3 +1,4 @@
+// arch-exempt: large_file, in-memory thread service decomposition, plan #5662
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -1477,12 +1478,16 @@ impl SessionThreadService for InMemorySessionThreadService {
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
         let subagent_binding = format!("subagent-result:{}", request.turn_run_id);
+        let run_id = request.turn_run_id.to_string();
         let mut bytes = 0_usize;
         let mut messages = Vec::new();
         for message in &thread.messages {
-            if message.turn_run_id.as_deref() != Some(request.turn_run_id.as_str())
-                && message.source_binding_id.as_deref() != Some(subagent_binding.as_str())
-            {
+            let run_match = message.turn_run_id.as_deref() == Some(run_id.as_str());
+            let binding_match = message.source_binding_id.as_deref()
+                == Some(subagent_binding.as_str())
+                && message.kind == MessageKind::System
+                && message.status == MessageStatus::Finalized;
+            if !run_match && !binding_match {
                 continue;
             }
             bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());

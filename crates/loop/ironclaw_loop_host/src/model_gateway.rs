@@ -117,7 +117,12 @@ impl crate::learning_review::LearningInferencePort for LearningInferenceAdapter 
             .await
             .map(|response| response.content)
             .map_err(|error| {
-                debug!(%error, "learning model inference failed");
+                let mapped = map_provider_error(error);
+                let safe_detail = mapped.detail.as_deref().unwrap_or(&mapped.safe_summary);
+                debug!(
+                    error = %ironclaw_common::truncate_for_preview(safe_detail, 512),
+                    "learning model inference failed"
+                );
                 crate::learning_review::LearningInferenceError::new("learning inference failed")
             })
     }
@@ -2885,6 +2890,7 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tracing_test::traced_test;
 
     #[derive(Default)]
     struct StopSequenceRecordingProvider {
@@ -2926,6 +2932,74 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             unreachable!("the stop-sequence test has no tool surface")
         }
+    }
+    struct FailingLearningInferenceProvider {
+        reason: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailingLearningInferenceProvider {
+        fn model_name(&self) -> &str {
+            "learning-inference-test-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(request_failed(&self.reason))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the learning inference test has no tool surface")
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn learning_inference_scrubs_provider_credentials_from_logs_and_errors() {
+        use crate::learning_review::LearningInferencePort;
+        use ironclaw_product_contracts::operator_llm::LearningSettings;
+
+        let secret = ["sk-", "test-secret"].concat();
+        let provider = Arc::new(FailingLearningInferenceProvider {
+            reason: format!("provider rejected credential {secret}"),
+        });
+        let controller = Arc::new(crate::learning_review::LearningRuntimeControllerImpl::new(
+            LearningSettings {
+                enabled: true,
+                model: Some("learning-inference-test-model".to_string()),
+                memory_write_policy: Default::default(),
+            },
+        ));
+        let adapter = LearningInferenceAdapter::new(provider, controller);
+
+        let error = adapter
+            .infer("learning system", "learning user")
+            .await
+            .expect_err("provider failure should be returned");
+
+        assert_eq!(error.to_string(), "learning inference failed");
+        logs_assert(|lines: &[&str]| {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("learning model inference failed")),
+                "adapter failure should be logged"
+            );
+            assert!(
+                lines.iter().all(|line| !line.contains(&secret)),
+                "raw provider credentials must not appear in logs: {lines:?}"
+            );
+            Ok(())
+        });
     }
 
     #[tokio::test]

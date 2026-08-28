@@ -2,8 +2,9 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_memory::{
     LearningAction, LearningCandidateStatus, LearningDecision, LearningExplicitness,
-    LearningIdempotencyKey, LearningReview, LearningReviewRecord, LearningScope,
-    MAX_LEARNING_MEMORY_PROPOSALS, MAX_LEARNING_PROPOSAL_BYTES, MemoryLearningProposal,
+    LearningIdempotencyKey, LearningReview, LearningReviewRecord, LearningReviewValidationError,
+    LearningScope, MAX_LEARNING_MEMORY_PROPOSALS, MAX_LEARNING_PROPOSAL_BYTES,
+    MAX_LEARNING_SKILL_REASON_BYTES, MAX_LEARNING_SOURCE_REFERENCES, MemoryLearningProposal,
     MemoryLearningProposalKind,
 };
 
@@ -33,13 +34,131 @@ fn learning_review_rejects_too_many_or_oversized_memory_proposals() {
         memory: vec![proposal("bounded"); MAX_LEARNING_MEMORY_PROPOSALS + 1],
         skill: LearningDecision::skip(),
     };
-    assert!(too_many.validate().is_err());
+    assert_eq!(
+        too_many.validate(),
+        Err(LearningReviewValidationError::TooManyMemoryProposals)
+    );
 
     let oversized = LearningReview {
         memory: vec![proposal(&"x".repeat(MAX_LEARNING_PROPOSAL_BYTES + 1))],
         skill: LearningDecision::skip(),
     };
-    assert!(oversized.validate().is_err());
+    assert_eq!(
+        oversized.validate(),
+        Err(LearningReviewValidationError::MemoryProposalTooLarge)
+    );
+}
+
+#[test]
+fn learning_review_rejects_whitespace_only_memory_proposals() {
+    let review = LearningReview {
+        memory: vec![proposal(" \t\n")],
+        skill: LearningDecision::skip(),
+    };
+
+    assert_eq!(
+        review.validate(),
+        Err(LearningReviewValidationError::EmptyMemoryProposal)
+    );
+}
+
+#[test]
+fn learning_review_rejects_too_many_source_references() {
+    let review = LearningReview {
+        memory: vec![MemoryLearningProposal {
+            source_message_indices: (0..=MAX_LEARNING_SOURCE_REFERENCES as u16).collect(),
+            ..proposal("bounded")
+        }],
+        skill: LearningDecision::skip(),
+    };
+
+    assert_eq!(
+        review.validate(),
+        Err(LearningReviewValidationError::TooManySourceReferences)
+    );
+}
+
+#[test]
+fn learning_review_rejects_duplicate_and_non_monotonic_source_references() {
+    for source_message_indices in [vec![1, 1], vec![2, 1]] {
+        let review = LearningReview {
+            memory: vec![MemoryLearningProposal {
+                source_message_indices,
+                ..proposal("bounded")
+            }],
+            skill: LearningDecision::skip(),
+        };
+
+        assert_eq!(
+            review.validate(),
+            Err(LearningReviewValidationError::InvalidSourceReferences)
+        );
+    }
+}
+
+#[test]
+fn learning_review_rejects_skip_reasons_and_sources() {
+    let with_reason = LearningReview {
+        memory: Vec::new(),
+        skill: LearningDecision {
+            reason: Some("not reusable".to_string()),
+            ..LearningDecision::skip()
+        },
+    };
+    assert_eq!(
+        with_reason.validate(),
+        Err(LearningReviewValidationError::InvalidSkillDecision)
+    );
+
+    let with_source = LearningReview {
+        memory: Vec::new(),
+        skill: LearningDecision {
+            source_message_indices: vec![1],
+            ..LearningDecision::skip()
+        },
+    };
+    assert_eq!(
+        with_source.validate(),
+        Err(LearningReviewValidationError::InvalidSkillDecision)
+    );
+}
+
+#[test]
+fn learning_review_rejects_missing_and_blank_distill_reasons() {
+    for reason in [None, Some(" \t\n".to_string())] {
+        let review = LearningReview {
+            memory: Vec::new(),
+            skill: LearningDecision {
+                action: LearningAction::Distill,
+                reason,
+                source_message_indices: vec![1],
+                tainted: false,
+            },
+        };
+
+        assert_eq!(
+            review.validate(),
+            Err(LearningReviewValidationError::InvalidSkillDecision)
+        );
+    }
+}
+
+#[test]
+fn learning_review_rejects_oversized_skill_reasons() {
+    let review = LearningReview {
+        memory: Vec::new(),
+        skill: LearningDecision {
+            action: LearningAction::Distill,
+            reason: Some("x".repeat(MAX_LEARNING_SKILL_REASON_BYTES + 1)),
+            source_message_indices: vec![1],
+            tainted: false,
+        },
+    };
+
+    assert_eq!(
+        review.validate(),
+        Err(LearningReviewValidationError::SkillReasonTooLarge)
+    );
 }
 
 #[test]
