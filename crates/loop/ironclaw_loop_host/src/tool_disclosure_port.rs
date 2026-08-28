@@ -6,9 +6,13 @@ use std::{
 use crate::{CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter};
 use async_trait::async_trait;
 use futures::future::join_all;
+use ironclaw_common::truncate_preview;
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
+    model_result_preview::{
+        MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
+    },
     resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_loop_contracts::{
@@ -34,15 +38,46 @@ use crate::tool_search::{
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
-/// Maximum canonical JSON bytes for the complete `tool_search` response.
-/// This mirrors the model-visible inline result ceiling: a result may claim a
-/// complete schema only when the query, metadata, schemas, and JSON envelope
-/// all fit in the bytes the model receives without a follow-up `result_read`.
-const MAX_SEARCH_RESPONSE_BYTES: usize = 24 * 1024;
+/// The byte ceiling tool_search's own raw JSON (before the ModelVisibleToolObservation
+/// wrapper adds its envelope) must fit under. Derived from two named, imported constants —
+/// see T1 and "Wrapper-allowance measurement" below for where the allowance comes from and
+/// how it is checked two-sidedly, not merely assumed. Do not restate this subtraction as a
+/// bare literal anywhere else.
+const TOOL_SEARCH_REPLY_BUDGET_BYTES: usize =
+    MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES - MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES;
 
-/// A single schema above this ceiling stays discoverable but requires
-/// `tool_describe`; this prevents one result from consuming the whole budget.
-const MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT: usize = 8 * 1024;
+/// How many ranks reach the model in one tool_search reply. The single definition used at
+/// BOTH the `.take(...)` below AND `invoke_tool_search`'s runtime fallback AND the advertised
+/// schema `"default"` in tool_disclosure.rs — keep all three reading this one constant so
+/// drift between them is a compile-time impossibility, not a silent mismatch.
+pub(crate) const TOOL_SEARCH_INLINE_RESULT_LIMIT: usize = 3;
+
+/// One-line description cap (UTF-8 char boundary). Live GitHub tool descriptions run up to
+/// 116 B today (independently scanning every `description = "..."` in
+/// `crates/extensions/packages/github/manifest.toml`'s 50 tool entries finds 3 over 70 B, the
+/// longest 116 B, `github.list_repos`'s description at manifest.toml:500; 47 of 50 stay
+/// <=70 B). This constant guards a future longer one, bounding every compact entry by
+/// construction regardless — 116 B is still well under the 163 B worst case below.
+///
+/// **Byte-accounting note:** `truncate_preview` (`crates/contracts/ironclaw_common/src/util.rs:34`)
+/// appends its `"..."` ellipsis AFTER truncating to `max_bytes` rather than reserving room for it,
+/// and its `<tool_output>` re-close branch is inert here (a tool/schema description never starts
+/// with `<tool_output`). So the true worst case is `COMPACT_DESCRIPTION_MAX_BYTES + 3` = **163 B**,
+/// not 160. We pass 160 as the cap; the helper may return up to 163; every byte accounting below
+/// (the compact-entry bound and the required/capability_id comparison) uses 163 B, not 160, as the
+/// worst case. We do not shrink this constant to 157 to force a round 160 B result — that would be
+/// a cosmetic bandaid over the same helper behavior.
+///
+/// **This cap is also rank 1's real competitor for budget, not a cosmetic detail** (see the Goal
+/// section's arithmetic): every byte this constant lets ranks 2-3's descriptions grow by is a byte
+/// rank 1's own schema no longer has room for under `TOOL_SEARCH_REPLY_BUDGET_BYTES`. Raising this
+/// constant without re-checking the boundary test above would silently shrink rank 1's headroom.
+const COMPACT_DESCRIPTION_MAX_BYTES: usize = 160;
+
+/// A SUCCESS results[] entry name, not a failure diagnostic (#5712 covers describe/call FAILURE branches only).
+const TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE: &str = "rank 1 has a complete parameters schema; invoke it directly with the schema above, or via tool_call";
+const TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE: &str = "rank 1 matched but its schema is too large to show inline; call tool_describe on it to get the full parameters schema, then invoke it";
+const TOOL_SEARCH_NO_MATCH_GUIDANCE: &str = "no deferred tool matches this query; do not search again for it; tell the user the capability is unavailable";
 
 /// Internal bridge name for an auto-loaded schema (describe-first) response.
 ///
@@ -217,65 +252,77 @@ fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
         .map(|()| writer.bytes_written)
 }
 
-fn bounded_search_output(
-    query: &str,
-    results: Vec<CatalogSearchResult>,
-    total_response_bytes: usize,
-    per_signature_bytes: usize,
-) -> Value {
-    let mut output_results = Vec::new();
-    for result in results {
-        let output = json!({
-            "name": result.name,
-            "capability_id": result.capability_id.as_str(),
-            "description": result.description,
-            "required": result.required_params,
-            "schema_complete": false,
-        });
-        let schema_fits = serialized_len_within(&result.parameters, per_signature_bytes).is_some();
-        if schema_fits {
-            let mut complete = output.clone();
-            complete["schema_complete"] = Value::Bool(true);
-            complete["parameters"] = result.parameters;
-            let mut candidate_results = output_results.clone();
-            candidate_results.push(complete.clone());
-            if serialized_len_within(
-                &json!({"query": query, "results": candidate_results}),
-                total_response_bytes,
-            )
-            .is_some()
-            {
-                output_results.push(complete);
-                continue;
-            }
-        }
-        let mut candidate_results = output_results.clone();
-        candidate_results.push(output.clone());
-        if serialized_len_within(
-            &json!({"query": query, "results": candidate_results}),
-            total_response_bytes,
-        )
-        .is_none()
-        {
-            break;
-        }
-        output_results.push(output);
-    }
-    json!({"query": query, "results": output_results})
+/// Shared 4-field core: D11's `compact_search_results` and tool_search's own `compact_result_entry` both build from here, then diverge.
+fn compact_result_fields(result: &CatalogSearchResult) -> Value {
+    json!({"name": result.name, "capability_id": result.capability_id.as_str(), "description": result.description, "required": result.required_params})
 }
 
 fn compact_search_results(results: Vec<CatalogSearchResult>) -> Vec<Value> {
-    results
-        .into_iter()
-        .map(|result| {
-            json!({
-                "name": result.name,
-                "capability_id": result.capability_id.as_str(),
-                "description": result.description,
-                "required": result.required_params,
-            })
-        })
-        .collect()
+    results.iter().map(compact_result_fields).collect()
+}
+
+/// One rank's compact entry: D11's core fields plus a truncated description and schema_complete:false. Capped by construction (name <= ProviderToolName::MAX_BYTES 64 B, description <= COMPACT_DESCRIPTION_MAX_BYTES + 3 = 163 B worst case, per the note above — truncate_preview appends "..." after the cap, not within it) — never needs a fit check.
+///
+/// Truncation uses the EXISTING `ironclaw_common::truncate_preview` (`crates/contracts/ironclaw_common/src/util.rs:34`)
+/// rather than a new helper — `ironclaw_common` is already a dependency of `ironclaw_loop_host`
+/// (`crates/loop/ironclaw_loop_host/Cargo.toml:31`) and the function is already live production code,
+/// used at `crates/domains/ironclaw_llm/src/nearai_chat.rs:768`. Note: `truncate_preview` appends
+/// `"..."` on truncation and re-closes a `<tool_output>` tag if truncation cut through one — the
+/// tag-closing branch is a no-op for a plain description string, and the `"..."` suffix is a
+/// (desirable) behavior change from the earlier no-suffix sketch: it signals to the model that the
+/// description was cut. A THIRD copy of this byte-boundary-walk already exists as a private helper —
+/// `ironclaw_host_api::dispatch::truncate_at_char_boundary` (`crates/contracts/ironclaw_host_api/src/dispatch.rs:91`,
+/// module-private, not part of `dispatch`'s public surface) — do NOT add a fourth; this is exactly the
+/// class of duplication `truncate_preview` reuse here avoids repeating.
+fn compact_result_entry(result: &CatalogSearchResult) -> Value {
+    let mut entry = compact_result_fields(result);
+    entry["description"] = Value::String(truncate_preview(
+        &result.description,
+        COMPACT_DESCRIPTION_MAX_BYTES,
+    ));
+    entry["schema_complete"] = Value::Bool(false);
+    entry
+}
+
+/// Build the JSON reply carrying `guidance`. Every caller passes the exact guidance string the
+/// returned value will carry: the value measured here is the value returned — do not reintroduce
+/// a probe that measures a different object than it returns.
+///
+/// Only the schema-complete branch (below) re-measures its candidate at runtime via
+/// `serialized_len_within`. The no-match and compact-fallback branches carry no runtime byte
+/// check — their bound rests on the compact-entry field caps (`name`/`description` enforced by
+/// construction, `capability_id`/`required` bounded only by today's observed corpus — see the
+/// Goal section's "Compact-path worst case" table) plus `MAX_SEARCH_QUERY_BYTES`, and are pinned
+/// only by `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling` and the
+/// `over_output`/no-match test assertions below — a test-time pin, not a runtime guard.
+fn search_reply(query: &str, results: Vec<Value>, guidance: &'static str) -> Value {
+    json!({"query": query, "results": results, "guidance": guidance})
+}
+
+/// Ranks 1..=TOOL_SEARCH_INLINE_RESULT_LIMIT always ride compact (bounded by construction); rank 1
+/// gets exactly ONE additional check: does the reply carrying its own full schema, WITH its real
+/// guidance string already in place, fit the budget? The value tested for fit and the value
+/// returned are the same value — no probe, no clone-and-swap, no separate "what guidance would we
+/// use if this fit" step for the fit check to silently disagree with. This is the ONLY branch with
+/// a runtime fit check; see `search_reply`'s doc comment immediately above for what that does and
+/// does not mean for the other two branches.
+fn bounded_search_output(query: &str, results: Vec<CatalogSearchResult>) -> Value {
+    let compact: Vec<Value> = results
+        .iter()
+        .take(TOOL_SEARCH_INLINE_RESULT_LIMIT)
+        .map(compact_result_entry)
+        .collect();
+    let Some(rank_one) = results.first() else {
+        return search_reply(query, compact, TOOL_SEARCH_NO_MATCH_GUIDANCE);
+    };
+    let mut complete = compact.clone();
+    complete[0]["schema_complete"] = Value::Bool(true);
+    complete[0]["parameters"] = rank_one.parameters.clone();
+    let candidate = search_reply(query, complete, TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE);
+    if serialized_len_within(&candidate, TOOL_SEARCH_REPLY_BUDGET_BYTES).is_some() {
+        return candidate; // the measured object IS the returned object
+    }
+    search_reply(query, compact, TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE)
 }
 
 impl BridgeKind {
@@ -1229,7 +1276,7 @@ impl ToolDisclosureCapabilityPort {
             .get("limit")
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(10)
+            .unwrap_or(TOOL_SEARCH_INLINE_RESULT_LIMIT)
             .clamp(1, 50);
         let output = {
             let mut guard = self.turn_state()?;
@@ -1256,12 +1303,7 @@ impl ToolDisclosureCapabilityPort {
                 }
             }
             let output = if self.mode.includes_complete_signatures() {
-                bounded_search_output(
-                    query,
-                    ranked_results,
-                    MAX_SEARCH_RESPONSE_BYTES,
-                    MAX_SEARCH_SIGNATURE_BYTES_PER_RESULT,
-                )
+                bounded_search_output(query, ranked_results)
             } else {
                 json!({
                     "query": query,
@@ -4101,27 +4143,33 @@ mod tests {
     }
 
     #[test]
-    fn bounded_search_signatures_respect_exact_and_overflow_budgets() {
-        let result = search_result_with_schema("alpha", json!({"type": "object"}));
-        let unlimited =
-            bounded_search_output("alpha", vec![result.clone()], usize::MAX, usize::MAX);
-        let response_bytes = serde_json::to_vec(&unlimited)
-            .expect("test response serializes")
-            .len();
-
-        let exact =
-            bounded_search_output("alpha", vec![result.clone()], response_bytes, usize::MAX);
-        assert_eq!(exact["results"][0]["schema_complete"], true);
-        assert_eq!(exact["results"][0]["parameters"], result.parameters);
-
-        let overflow = bounded_search_output(
-            "alpha",
-            vec![result],
-            response_bytes.saturating_sub(1),
-            usize::MAX,
+    fn bounded_search_output_fits_or_degrades_to_compact() {
+        let small_result = search_result_with_schema("alpha", json!({"type": "object"}));
+        let small_output = bounded_search_output("alpha", vec![small_result.clone()]);
+        assert_eq!(
+            small_output["results"][0]["schema_complete"],
+            Value::Bool(true)
         );
-        assert_eq!(overflow["results"][0]["schema_complete"], false);
-        assert!(overflow["results"][0].get("parameters").is_none());
+        assert_eq!(
+            small_output["results"][0]["parameters"],
+            small_result.parameters
+        );
+        assert_eq!(
+            small_output["guidance"],
+            TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE
+        );
+
+        let large_result = search_result_with_schema("alpha", json!({"value": "x".repeat(4096)}));
+        let large_output = bounded_search_output("alpha", vec![large_result]);
+        assert_eq!(
+            large_output["results"][0]["schema_complete"],
+            Value::Bool(false)
+        );
+        assert!(large_output["results"][0].get("parameters").is_none());
+        assert_eq!(
+            large_output["guidance"],
+            TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE
+        );
     }
 
     #[test]
@@ -4148,79 +4196,182 @@ mod tests {
     }
 
     #[test]
-    fn bounded_search_signatures_preserve_rank_and_skip_oversized_schemas() {
-        let oversized = search_result_with_schema("first", json!({"value": "x".repeat(64)}));
-        let small = search_result_with_schema("second", json!({"type": "object"}));
-        let small_bytes = serde_json::to_vec(&small.parameters)
-            .expect("test schema serializes")
-            .len();
-        let results = bounded_search_output(
-            "query",
-            vec![oversized, small.clone()],
-            usize::MAX,
-            small_bytes,
-        );
+    fn bounded_search_output_only_rank_one_can_be_schema_complete() {
+        let first = search_result_with_schema("first", json!({"type": "object"}));
+        let second = search_result_with_schema("second", json!({"type": "string"}));
+        let output = bounded_search_output("query", vec![first, second]);
 
-        assert_eq!(results["results"][0]["name"], "first");
-        assert_eq!(results["results"][0]["schema_complete"], false);
-        assert_eq!(results["results"][1]["name"], "second");
-        assert_eq!(results["results"][1]["schema_complete"], true);
-        assert_eq!(results["results"][1]["parameters"], small.parameters);
+        assert_eq!(output["results"][0]["name"], "first");
+        assert_eq!(output["results"][0]["schema_complete"], Value::Bool(true));
+        assert_eq!(output["results"][1]["name"], "second");
+        assert_eq!(output["results"][1]["schema_complete"], Value::Bool(false));
     }
 
     #[test]
-    fn bounded_search_signatures_are_deterministic_for_empty_and_multiple_results() {
-        assert_eq!(
-            bounded_search_output("query", Vec::new(), 100, 100)["results"],
-            json!([])
+    fn bounded_search_output_is_deterministic_for_empty_and_multiple_results() {
+        let empty_output = bounded_search_output("query", Vec::new());
+        assert_eq!(empty_output["results"], json!([]));
+        assert_eq!(empty_output["guidance"], TOOL_SEARCH_NO_MATCH_GUIDANCE);
+        assert!(
+            serde_json::to_vec(&empty_output).expect("serializes").len()
+                <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
         );
+
         let first = search_result_with_schema("first", json!({"type": "object"}));
         let second = search_result_with_schema("second", json!({"type": "string"}));
-        let total_bytes = [&first, &second]
-            .into_iter()
-            .map(|result| {
-                serde_json::to_vec(&result.parameters)
-                    .expect("test schema serializes")
-                    .len()
-            })
-            .sum();
         let inputs = vec![first, second];
-        let complete = bounded_search_output("query", inputs.clone(), usize::MAX, total_bytes);
-        assert!(
-            complete["results"]
-                .as_array()
-                .expect("results array")
-                .iter()
-                .all(|result| result["schema_complete"] == true)
-        );
-        let first_only_bytes = serde_json::to_vec(&bounded_search_output(
-            "query",
-            vec![inputs[0].clone()],
-            usize::MAX,
-            total_bytes,
-        ))
-        .expect("first result serializes")
-        .len();
-        let overflow =
-            bounded_search_output("query", inputs.clone(), first_only_bytes, total_bytes);
-        assert_eq!(overflow["results"][0]["schema_complete"], true);
-        assert_eq!(overflow["results"].as_array().expect("results").len(), 1);
-
         assert_eq!(
-            serde_json::to_vec(&bounded_search_output(
-                "query",
-                inputs.clone(),
-                usize::MAX,
-                usize::MAX
-            ))
-            .expect("first result serializes"),
-            serde_json::to_vec(&bounded_search_output(
-                "query",
-                inputs,
-                usize::MAX,
-                usize::MAX
-            ))
-            .expect("second result serializes")
+            serde_json::to_vec(&bounded_search_output("query", inputs.clone()))
+                .expect("first result serializes"),
+            serde_json::to_vec(&bounded_search_output("query", inputs))
+                .expect("second result serializes")
+        );
+    }
+
+    /// A `parameters` schema whose compact-serialized size is controlled precisely: a fixed shape
+    /// plus one `description` field padded to add exactly `pad_len` unescaped ASCII bytes.
+    fn schema_of_pad_len(pad_len: usize) -> Value {
+        json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}, "padding": {"type": "string"}},
+            "description": "x".repeat(pad_len),
+            "required": ["value"],
+        })
+    }
+
+    #[test]
+    fn bounded_search_output_promotes_rank_one_exactly_at_the_shared_budget_boundary() {
+        let rank_two = search_result_with_schema("rank_two", json!({"type": "object"}));
+        let rank_three = search_result_with_schema("rank_three", json!({"type": "object"}));
+
+        // Measure the reply at pad_len=0 to derive the exact byte where it crosses the
+        // budget -- padding is an unescaped ASCII string, so it grows the reply
+        // byte-for-byte; this DERIVES the boundary instead of guessing at it.
+        let baseline = search_result_with_schema("rank_one", schema_of_pad_len(0));
+        let baseline_output = bounded_search_output(
+            "query",
+            vec![baseline.clone(), rank_two.clone(), rank_three.clone()],
+        );
+        assert_eq!(
+            baseline_output["results"][0]["schema_complete"],
+            Value::Bool(true),
+            "pad_len=0 baseline must itself fit, or the derived boundary below is meaningless"
+        );
+        let baseline_bytes = serde_json::to_vec(&baseline_output)
+            .expect("reply serializes")
+            .len();
+        let headroom = TOOL_SEARCH_REPLY_BUDGET_BYTES - baseline_bytes;
+
+        let just_under = search_result_with_schema("rank_one", schema_of_pad_len(headroom));
+        let under_output = bounded_search_output(
+            "query",
+            vec![just_under.clone(), rank_two.clone(), rank_three.clone()],
+        );
+        assert_eq!(
+            under_output["results"][0]["schema_complete"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            under_output["results"][0]["parameters"], just_under.parameters,
+            "complete rank 1 is untruncated (D5)"
+        );
+        assert_eq!(
+            under_output["guidance"],
+            TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE
+        );
+        assert!(
+            serde_json::to_vec(&under_output).expect("serializes").len()
+                <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
+        );
+
+        let just_over = search_result_with_schema("rank_one", schema_of_pad_len(headroom + 1));
+        let over_output = bounded_search_output("query", vec![just_over, rank_two, rank_three]);
+        assert_eq!(
+            over_output["results"][0]["schema_complete"],
+            Value::Bool(false)
+        );
+        assert!(
+            over_output["results"][0].get("parameters").is_none(),
+            "compact rank 1 carries no partial schema (D5)"
+        );
+        assert_eq!(
+            over_output["guidance"],
+            TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE
+        );
+        // The compact-fallback path gets its own byte assertion — every return path is measured.
+        assert!(
+            serde_json::to_vec(&over_output).expect("serializes").len()
+                <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
+            "compact-fallback reply must itself stay under the first-look ceiling"
+        );
+    }
+
+    /// One compact entry at the practical worst-case field sizes derived in the Goal section's
+    /// "Compact-path worst case" table: name at ProviderToolName::MAX_BYTES (64 B, enforced by
+    /// construction), capability_id at the largest real capability id observed across every
+    /// extension manifest (39 B -- NOT enforced by construction), description at
+    /// COMPACT_DESCRIPTION_MAX_BYTES's true 163 B worst case (enforced by truncate_preview),
+    /// required at the largest real required-params array observed across every committed
+    /// extension schema (6 params, google-sheets/format_cells.input.v1.json).
+    fn worst_case_compact_result() -> crate::tool_disclosure::CatalogSearchResult {
+        crate::tool_disclosure::CatalogSearchResult {
+            name: "n".repeat(64),
+            capability_id: CapabilityId::new(format!("fixture.{}", "c".repeat(31)))
+                .expect("valid capability id"), // "fixture." (8) + 31 B -> 39 B total, matching the observed real max
+            // truncate_preview (util.rs:34-38) is a strict `<=`: `if s.len() <= max_bytes { return
+            // s.to_string(); }`. At exactly 160 B (== COMPACT_DESCRIPTION_MAX_BYTES) that condition
+            // is TRUE, so the string is returned UNCHANGED -- no "..." appended, field stays 160 B,
+            // not 163 B. Truncation only actually fires, and only then does the unreserved 3-byte
+            // "..." land, once the input exceeds 160 B. 200 is comfortably past that boundary so the
+            // intent (exercise the true 163 B worst case) is unmistakable, not an off-by-one away
+            // from silently drifting back onto it.
+            description: "d".repeat(200),
+            required_params: vec!["r".repeat(10); 6], // 6 entries, matches the observed real worst case
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    /// Proves the compact fallback path (rank 1's OWN schema forced not to fit, so every rank rides
+    /// compact at once) stays under the shared first-look ceiling at the practical worst-case field
+    /// sizes computed in the Goal section, not just the small fixtures the other tests use.
+    #[test]
+    fn bounded_search_output_compact_worst_case_fits_the_first_look_ceiling() {
+        let query = "q".repeat(MAX_SEARCH_QUERY_BYTES); // 1_024 B, the real cap (tool_search.rs:12)
+        let results: Vec<_> = (0..TOOL_SEARCH_INLINE_RESULT_LIMIT)
+            .map(|n| {
+                let mut r = worst_case_compact_result();
+                if n == 0 {
+                    // Force rank 1's OWN schema to miss the budget so every rank, including rank 1,
+                    // rides compact -- the actual fallback branch this test exists to pin.
+                    r.parameters = schema_of_pad_len(4096);
+                }
+                r
+            })
+            .collect();
+        let output = bounded_search_output(&query, results);
+        assert_eq!(
+            output["results"][0]["schema_complete"],
+            Value::Bool(false),
+            "test setup must exercise the compact-fallback branch, not the schema-complete one"
+        );
+        assert_eq!(
+            output["results"][0]["description"]
+                .as_str()
+                .expect("description is a string")
+                .len(),
+            163,
+            "the fixture must actually cross truncate_preview's <= boundary (util.rs:34-38) -- a \
+             163 B description is the true worst case this test and the Goal section's arithmetic \
+             are built on; if this drifts back to 160 B the fixture is silently exercising the \
+             untruncated case again, not the worst case"
+        );
+        let bytes = serde_json::to_vec(&output).expect("reply serializes").len();
+        assert!(
+            bytes <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
+            "worst-case compact-fallback reply was {bytes} B, over the {MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES} B \
+             first-look ceiling -- see the Goal section's compact-path worst-case arithmetic (computed \
+             at 2,482 B for this exact construction; if this fails, that arithmetic and the corpus \
+             maxima it's based on need re-deriving, not this assertion loosening)"
         );
     }
 

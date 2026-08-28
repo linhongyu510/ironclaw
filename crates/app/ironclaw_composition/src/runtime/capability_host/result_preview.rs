@@ -1,3 +1,4 @@
+use ironclaw_host_api::model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES;
 use ironclaw_loop_contracts::{
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
     ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
@@ -5,7 +6,6 @@ use ironclaw_loop_contracts::{
 use ironclaw_threads::render_json_tool_result_page as render_json_page;
 use ironclaw_turns::LoopResultRef;
 
-pub(super) const RESULT_PREVIEW_MAX_BYTES: usize = 3 * 1024;
 const RESULT_OBSERVATION_MAX_BYTES: usize = 4 * 1024;
 const RESULT_JSON_VIEW_MIN_BYTES: usize = 4;
 const RESULT_LEGACY_PREVIEW_MAX_BYTES: usize = 2 * 1024;
@@ -29,7 +29,7 @@ pub(super) fn first_look_result_preview(
     let Ok(full_text) = std::str::from_utf8(serialized) else {
         return None;
     };
-    if full_text.len() <= RESULT_PREVIEW_MAX_BYTES {
+    if full_text.len() <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES {
         return Some(FirstLookResultPreview {
             text: full_text.to_string(),
             next_offset: None,
@@ -37,7 +37,7 @@ pub(super) fn first_look_result_preview(
         });
     }
     let mut lower = RESULT_JSON_VIEW_MIN_BYTES;
-    let mut upper = RESULT_PREVIEW_MAX_BYTES;
+    let mut upper = MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES;
     let mut best = None;
     let result_ref_text = result_ref.as_str();
     while lower <= upper {
@@ -60,7 +60,7 @@ pub(super) fn first_look_result_preview(
                 break;
             }
         };
-        if text.len() <= RESULT_PREVIEW_MAX_BYTES
+        if text.len() <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
             && structured_preview_fits_observation(result_ref, serialized.len(), &text, item_count)
         {
             best = Some(FirstLookResultPreview {

@@ -76,6 +76,8 @@ pub(crate) use ironclaw_assistant::{
 use ironclaw_extension_host::capability_surface::{
     ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
 };
+#[cfg(test)]
+use ironclaw_host_api::model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES;
 #[cfg(feature = "test-support")]
 pub(crate) use ironclaw_loop_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 #[cfg(any(test, feature = "test-support"))]
@@ -83,8 +85,6 @@ pub(crate) use ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };
-#[cfg(test)]
-use result_preview::RESULT_PREVIEW_MAX_BYTES;
 use result_preview::{first_look_result_preview, result_reference_observation};
 
 #[cfg(feature = "test-support")]

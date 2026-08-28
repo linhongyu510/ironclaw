@@ -97,10 +97,18 @@ async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
         .assert_model_tool_result_content_occurrences("get repository", 1)
         .await
         .expect("bounded search result reaches the next production model request");
+    // T2 (#7928 fix): tool_search's own reply is now bounded to fit the first-look
+    // ceiling, so rank 1's complete schema (github.get_repo, containing
+    // "additionalProperties") rides inline in the search reply itself, in
+    // addition to the same schema returned by the later tool_describe call --
+    // two distinct call results now genuinely carry it, not one. Before T2,
+    // tool_search's unbounded ~3.9 KB reply collapsed entirely behind the
+    // first-look pager's "omitted" marker (the exact #7928 defect this plan
+    // fixes), silently hiding this first occurrence.
     harness
-        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
+        .assert_model_tool_result_content_occurrences("additionalProperties", 2)
         .await
-        .expect("describe schema reaches the next production model request");
+        .expect("bounded search's own complete rank-1 schema and the describe schema both reach the model");
     harness
         .assert_tool_invoked("github.get_repo")
         .await
@@ -286,10 +294,14 @@ async fn discovery_batch_classifies_parallel_and_preserves_valid_siblings() {
         .assert_model_tool_result_content_occurrences("get repository", 1)
         .await
         .expect("valid bounded search sibling reaches the next model request");
+    // T2 (#7928 fix): see the comment on the identical assertion in
+    // `assert_deferred_bridge_flow` above -- tool_search's own bounded reply now
+    // carries rank 1's complete schema (github.get_repo) inline, in addition to
+    // the same schema returned by the sibling tool_describe call.
     harness
-        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
+        .assert_model_tool_result_content_occurrences("additionalProperties", 2)
         .await
-        .expect("valid describe schema sibling reaches the next model request");
+        .expect("bounded search's own complete rank-1 schema and the describe schema sibling both reach the model");
     harness
         .assert_model_tool_result_content_occurrences("tool_describe target is unknown", 1)
         .await

@@ -2057,9 +2057,104 @@ mod tests {
             .expect("text result has a first look");
 
         assert!(
-            preview.text.len() <= RESULT_PREVIEW_MAX_BYTES,
+            preview.text.len() <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
             "redacted first look was {} bytes",
             preview.text.len()
+        );
+    }
+
+    /// A payload whose `note` field grows with `pad_len` (the caller grows it to hit a target byte size)
+    /// and whose quote-character density is a deliberate UPPER BOUND on tool_search's own worst-case
+    /// escaping cost (94 `"` characters at 2,482 B, computed by
+    /// `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling` in
+    /// `ironclaw_loop_host::tool_disclosure_port`) -- not a mirror of tool_search's shape. Generic
+    /// field names only (`alpha`/`beta`/.../`items`/`tag`/`flag`); none of
+    /// `query`/`results`/`guidance`/`name`/`capability_id`/`description`/`required`/`schema_complete`
+    /// appear here, so a rename of any of those in production cannot silently desync this test.
+    fn escaping_upper_bound_payload(pad_len: usize) -> serde_json::Value {
+        let entry = || {
+            serde_json::json!({
+                "alpha": "a".repeat(12),
+                "beta": "b".repeat(8),
+                "gamma": "g".repeat(8),
+                "delta": vec!["x".repeat(6); 6],
+                "epsilon": false,
+                "zeta": "z".repeat(8),
+            })
+        };
+        serde_json::json!({
+            "note": "n".repeat(pad_len),
+            "items": [entry(), entry(), entry()],
+            "tag": "sometag",
+            "flag": true,
+        })
+    }
+
+    /// This test measures wrapper overhead as an ESCAPING UPPER BOUND, not tool_search's reply
+    /// shape -- it deliberately does not mirror `query`/`results`/`guidance` or the compact-entry
+    /// field names. The integration test `tool_search_reply_rides_the_first_look_preview_inline`
+    /// (`tests/integration/tool_disclosure.rs`) is what exercises the real reply shape end to end;
+    /// coupling this byte-arithmetic test to that shape too would make it a second,
+    /// independently-maintained copy that a shape-only rename (no size change) could silently break.
+    #[test]
+    fn tool_search_worst_case_reply_wrapped_observation_fits_the_first_look_ceiling() {
+        use ironclaw_host_api::model_result_preview::{
+            MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
+        };
+        // Both inputs are the same public constants tool_disclosure_port.rs's
+        // TOOL_SEARCH_REPLY_BUDGET_BYTES derives from (T1) -- no independent literal restated here.
+        let budget = MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES - MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES;
+
+        // Grow only the `note` field until the whole payload hits the target byte size -- the other
+        // fields are fixed and are what supplies the quote density (108 `"` characters at this size,
+        // >= the 94 tool_search's own real worst case carries).
+        let mut pad_len = 0usize;
+        let raw_reply = loop {
+            let candidate = escaping_upper_bound_payload(pad_len);
+            let bytes = serde_json::to_vec(&candidate)
+                .expect("candidate serializes")
+                .len();
+            if bytes >= budget {
+                break candidate;
+            }
+            pad_len += 1;
+        };
+        let serialized = serde_json::to_vec(&raw_reply).expect("reply serializes");
+        assert!(
+            serialized.iter().filter(|&&b| b == b'"').count() >= 94,
+            "this payload's quote density must stay an upper bound on tool_search's real worst case \
+             (94 '\"' characters at 2,482 B) -- if it drops below that, the test is no longer proving \
+             what its own doc comment claims"
+        );
+        let result_ref =
+            LoopResultRef::new("result:tool-search-worst-case").expect("valid result ref");
+        let preview = first_look_result_preview(&serialized, &result_ref, None)
+            .expect("worst-case reply is <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, so it takes the verbatim pass-through branch, not the JSON pager");
+        let observation =
+            result_reference_observation(&result_ref, serialized.len() as u64, Some(preview), None);
+        let observation_bytes = serde_json::to_vec(&observation)
+            .expect("observation serializes")
+            .len();
+
+        // Two-sided: `overhead <= allowance` alone only proves the allowance isn't too SMALL; it
+        // never proves it isn't wastefully large (an allowance of 5,000 would pass that assertion
+        // identically). The 100 B tolerance band absorbs ordinary jitter (a byte_len digit-width
+        // change across magnitudes, a longer/shorter result_ref, a future added observation field)
+        // without becoming flaky, while still failing if the allowance is raised without a matching
+        // re-measurement.
+        let overhead = observation_bytes.saturating_sub(serialized.len());
+        let slack = MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES.saturating_sub(overhead);
+        assert!(
+            overhead <= MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
+            "wrapper overhead was {overhead} bytes -- MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES no longer covers the real envelope, raise it in ironclaw_host_api and re-check TOOL_SEARCH_REPLY_BUDGET_BYTES still leaves room for a genuine large schema"
+        );
+        assert!(
+            slack <= 100,
+            "wrapper allowance ({MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES} B) is {slack} B more than the measured overhead ({overhead} B) -- the allowance is now wastefully generous, eating into rank 1's headroom for no reason; lower it (or justify the growth) rather than leaving slack unexplained"
+        );
+        assert!(
+            observation_bytes <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
+            "got {observation_bytes} bytes, over the shared first-look ceiling"
         );
     }
 

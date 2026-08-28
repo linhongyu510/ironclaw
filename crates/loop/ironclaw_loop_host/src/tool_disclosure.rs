@@ -571,7 +571,7 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of matching tool names to return.",
-                            "default": 10,
+                            "default": crate::tool_disclosure_port::TOOL_SEARCH_INLINE_RESULT_LIMIT,
                             "minimum": 1
                         }
                     },
@@ -1664,6 +1664,11 @@ mod tests {
         assert_eq!(
             bridges[0].description,
             "Search deferred tools by name, provider, capability, or parameter vocabulary."
+        );
+        assert_eq!(
+            bridges[0].parameters["properties"]["limit"]["default"],
+            json!(crate::tool_disclosure_port::TOOL_SEARCH_INLINE_RESULT_LIMIT),
+            "tool_search's schema default must match invoke_tool_search's runtime fallback and bounded_search_output's .take() limit"
         );
     }
 
