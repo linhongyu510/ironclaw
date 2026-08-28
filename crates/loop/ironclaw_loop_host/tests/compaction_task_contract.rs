@@ -1685,7 +1685,7 @@ async fn compaction_task_rejects_unbounded_original_input_before_scanning() {
 }
 
 #[tokio::test]
-async fn compaction_task_rejects_unbounded_original_message_count() {
+async fn compaction_task_accepts_full_window_with_pinned_task_and_retained_boundary() {
     let fixture = CompactionFixture::new().await;
     for index in 0..130 {
         fixture.append_user(&format!("message {index}")).await;
@@ -1698,10 +1698,31 @@ async fn compaction_task_rejects_unbounded_original_message_count() {
         fixture.scope.clone(),
     );
 
-    let error = port
-        .compact_loop_context(fixture.request(130))
+    port.compact_loop_context(fixture.request(130))
         .await
-        .expect_err("unbounded original message count must fail before inference");
+        .expect("the production compaction window may contain 130 transcript messages");
+
+    assert!(!inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_message_count_above_production_window() {
+    let fixture = CompactionFixture::new().await;
+    for index in 0..131 {
+        fixture.append_user(&format!("message {index}")).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(131))
+        .await
+        .expect_err("message counts above the production window must fail before inference");
 
     assert!(matches!(error, LoopCompactionError::InputTooLarge));
     assert!(inference.last_input().is_empty());
