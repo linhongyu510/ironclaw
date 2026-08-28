@@ -207,6 +207,7 @@ async fn prompt_stage_compacts_eviction_through_latest_safe_tool_result_once() {
     assert_eq!(requests.len(), 1, "the watermark must trigger exactly once");
     assert_eq!(requests[0].drop_through_seq, 9);
     assert_eq!(requests[0].mode, LoopCompactionMode::WindowEviction);
+    assert_eq!(requests[0].first_retained_seq, None);
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
         Some(9)

@@ -1,9 +1,10 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::strategies::compaction::tail_preserving_user_boundary;
 use ironclaw_loop_contracts::{CompactionInitiator, LoopRunContext};
 
 use super::compaction::{
     CompactionDecision, CompactionStrategy, DefaultCompactionStrategy,
-    eligible_window_eviction_boundary, tail_preserving_user_boundary,
+    eligible_window_eviction_boundary,
 };
 
 /// Compaction policy for Reborn runs that must preserve the live active task.

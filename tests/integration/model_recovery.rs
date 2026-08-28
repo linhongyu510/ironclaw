@@ -365,10 +365,15 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .assert_summary_artifacts_lack(input_secret)
         .await
         .expect("the durable compaction summary does not persist the transcript secret");
-    harness
-        .assert_conversation_history_contains("third setup turn history history")
+    let persisted_oversized = harness
+        .user_message_record("third setup turn")
         .await
-        .expect("summarizer input truncation does not alter durable transcript history");
+        .expect("oversized durable user message remains readable");
+    assert_eq!(
+        persisted_oversized.content.as_deref(),
+        Some(oversized_setup_turn.as_str()),
+        "summarizer-input truncation must not alter durable transcript content"
+    );
     harness
         .assert_summary_artifacts_lack(second_input_secret)
         .await

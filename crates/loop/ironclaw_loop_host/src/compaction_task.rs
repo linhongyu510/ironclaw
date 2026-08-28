@@ -34,6 +34,8 @@ pub(crate) enum CompactionError {
     UnsupportedMode,
     #[error("compaction input too large")]
     InputTooLarge { cap: usize, observed_bytes: usize },
+    #[error("compaction message count {observed} exceeds bound {cap}")]
+    MessageCountExceeded { cap: usize, observed: usize },
     #[error("compaction content contains injection markers")]
     InjectionDetected,
     #[error("compaction leak redaction failed or left unsafe content")]
@@ -554,15 +556,16 @@ where
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
         let sanitizer = self.sanitizer();
-        sanitizer.validate_unredacted_message_boundaries(&range.messages)?;
+        let pre_truncation = sanitizer.sanitize_messages_before_truncation(&range.messages)?;
         let mut truncated_message_count = 0_u32;
         let mut omitted_input_bytes = 0_u64;
-        let truncated = range
+        let truncated = pre_truncation
             .messages
-            .iter()
+            .into_iter()
             .map(|message| {
+                let original_bytes = message.body.len();
                 let (body, omitted_bytes) = if message.kind == MessageKind::Summary {
-                    (message.body.clone(), 0)
+                    (message.body, 0)
                 } else {
                     truncate_message_body_for_compaction(
                         &message.body,
@@ -573,7 +576,7 @@ where
                     truncated_message_count = truncated_message_count.checked_add(1).ok_or(
                         CompactionError::InputTooLarge {
                             cap: MAX_COMPACTION_MESSAGE_BYTES,
-                            observed_bytes: message.body.len(),
+                            observed_bytes: original_bytes,
                         },
                     )?;
                     omitted_input_bytes = omitted_input_bytes
@@ -581,12 +584,12 @@ where
                             tracing::debug!(%error, "compaction omitted byte count overflowed");
                             CompactionError::InputTooLarge {
                                 cap: MAX_COMPACTION_MESSAGE_BYTES,
-                                observed_bytes: message.body.len(),
+                                observed_bytes: original_bytes,
                             }
                         })?)
                         .ok_or(CompactionError::InputTooLarge {
                             cap: MAX_COMPACTION_MESSAGE_BYTES,
-                            observed_bytes: message.body.len(),
+                            observed_bytes: original_bytes,
                         })?;
                 }
                 Ok(ValidatedCompactionMessage {
@@ -597,9 +600,13 @@ where
             })
             .collect::<Result<Vec<_>, CompactionError>>()?;
         let sanitized = sanitizer.sanitize_messages(&truncated)?;
+        let redacted_leak_count = pre_truncation
+            .redacted_leak_count
+            .checked_add(sanitized.redacted_leak_count)
+            .ok_or(CompactionError::LeakRedactionFailed)?;
         Ok(CompactionInput {
             text: sanitized.content,
-            redacted_leak_count: sanitized.redacted_leak_count,
+            redacted_leak_count,
             truncated_message_count,
             omitted_input_bytes,
         })
@@ -951,6 +958,7 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::InvalidCutPoint => LoopCompactionError::InvalidCutPoint,
         CompactionError::UnsupportedMode => LoopCompactionError::UnsupportedMode,
         CompactionError::InputTooLarge { .. } => LoopCompactionError::InputTooLarge,
+        CompactionError::MessageCountExceeded { .. } => LoopCompactionError::InputTooLarge,
         CompactionError::InjectionDetected => LoopCompactionError::SecurityRejected {
             safe_summary: safe("injection detected"),
         },
