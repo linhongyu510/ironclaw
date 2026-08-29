@@ -416,6 +416,27 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
     );
 }
 
+fn host_with_completed_result(
+    result_ref: LoopResultRef,
+    summary: &str,
+    output_digest: Option<ironclaw_loop_contracts::ContentDigest>,
+) -> MockHost {
+    MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                result_ref,
+                summary.to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                true,
+                0,
+                output_digest,
+                None,
+            )],
+            stopped_on_suspension: false,
+        },
+    ])
+}
+
 #[tokio::test]
 async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
     // NOT (re-)promoted to host-reported `CapabilityProgress` — that stays
@@ -423,20 +444,7 @@ async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
     // terminating check (strategies/stop.rs) scans.
     let digest = ironclaw_loop_contracts::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::resolution::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                result_ref.clone(),
-                "completed with digest".to_string(),
-                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
-                true,
-                0,
-                Some(digest),
-                None,
-            )],
-            stopped_on_suspension: false,
-        },
-    ]);
+    let host = host_with_completed_result(result_ref, "completed with digest", Some(digest));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -470,20 +478,7 @@ async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
 #[tokio::test]
 async fn completed_result_without_output_digest_leaves_no_progress_window_empty() {
     let result_ref = LoopResultRef::new("result:no-digest").expect("valid");
-    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::resolution::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                result_ref,
-                "completed without digest".to_string(),
-                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
-                true,
-                0,
-                None,
-                None,
-            )],
-            stopped_on_suspension: false,
-        },
-    ]);
+    let host = host_with_completed_result(result_ref, "completed without digest", None);
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -501,6 +496,24 @@ async fn completed_result_without_output_digest_leaves_no_progress_window_empty(
     );
 }
 
+fn no_progress_batch(
+    result_ref: LoopResultRef,
+    digest: ironclaw_loop_contracts::ContentDigest,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
+        resolutions: vec![resolution::completed(
+            result_ref,
+            "identical output".to_string(),
+            ironclaw_loop_contracts::CapabilityProgress::NoChange,
+            false,
+            0,
+            Some(digest),
+            None,
+        )],
+        stopped_on_suspension: false,
+    }
+}
+
 /// Drives exactly `no_progress_threshold` completed capability observations
 /// with the same call signature and an identical `output_digest` through the
 /// full executor caller path. The first strike must give the run one more
@@ -515,24 +528,6 @@ async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() 
     let threshold = crate::strategies::RepeatedOutputProgressStrategy::default().threshold();
     let digest = ironclaw_loop_contracts::ContentDigest(31_337);
 
-    fn identical_batch_outcome(
-        digest: ironclaw_loop_contracts::ContentDigest,
-        ordinal: usize,
-    ) -> ironclaw_host_api::resolution::ResolutionBatch {
-        ironclaw_host_api::resolution::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                LoopResultRef::new(format!("result:no-progress-{ordinal}")).expect("valid"),
-                "identical output".to_string(),
-                ironclaw_loop_contracts::CapabilityProgress::NoChange,
-                false,
-                0,
-                Some(digest),
-                None,
-            )],
-            stopped_on_suspension: false,
-        }
-    }
-
     let mut responses = Vec::new();
     let mut batch_outcomes = Vec::new();
     // Strike: exactly `threshold` completed observations, same signature
@@ -540,14 +535,20 @@ async fn no_progress_strike_schedules_recovery_warning_and_resets_digest_ring() 
     // signature) and the same output_digest.
     for i in 0..threshold {
         responses.push(calls_response());
-        batch_outcomes.push(identical_batch_outcome(digest, i));
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:no-progress-{i}")).expect("valid"),
+            digest,
+        ));
     }
     // Recovery: fewer than `threshold` further identical observations after
     // the reset — must stay advisory and never re-trip the check.
     let recovery_count = threshold - 1;
     for i in 0..recovery_count {
         responses.push(calls_response());
-        batch_outcomes.push(identical_batch_outcome(digest, threshold + i));
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:no-progress-{}", threshold + i)).expect("valid"),
+            digest,
+        ));
     }
     responses.push(reply_response_with_text("done after recovery"));
 
@@ -648,24 +649,6 @@ async fn no_progress_strike_reports_dominant_digest_count_for_alternating_signat
         }
     }
 
-    fn alternating_batch_outcome(
-        digest: ironclaw_loop_contracts::ContentDigest,
-        ordinal: usize,
-    ) -> ironclaw_host_api::resolution::ResolutionBatch {
-        ironclaw_host_api::resolution::ResolutionBatch {
-            resolutions: vec![resolution::completed(
-                LoopResultRef::new(format!("result:alt-{ordinal}")).expect("valid"),
-                "identical output".to_string(),
-                ironclaw_loop_contracts::CapabilityProgress::NoChange,
-                false,
-                0,
-                Some(digest),
-                None,
-            )],
-            stopped_on_suspension: false,
-        }
-    }
-
     // 2*threshold - 1 calls alternating A,B,A,B,...,A: signature A's
     // (signature, output_digest) pair reaches `threshold` occurrences (the
     // dominant pair, and the strike point) while signature B reaches only
@@ -675,7 +658,10 @@ async fn no_progress_strike_reports_dominant_digest_count_for_alternating_signat
     let mut batch_outcomes = Vec::new();
     for i in 0..total_calls {
         responses.push(alternating_calls_response(i % 2 == 0));
-        batch_outcomes.push(alternating_batch_outcome(digest, i));
+        batch_outcomes.push(no_progress_batch(
+            LoopResultRef::new(format!("result:alt-{i}")).expect("valid"),
+            digest,
+        ));
     }
     responses.push(reply_response_with_text("done after recovery"));
 

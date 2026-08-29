@@ -177,9 +177,10 @@ async fn same_call_with_changing_output_completes_instead_of_terminating() {
     // Negative control: the SAME call repeated 40 times, output different
     // every time (a red/green loop, or a log tail) — must never trip the
     // check no matter how many times the call itself repeats.
-    let changing = (0..40).map(|i| {
-        RebornScriptedReply::tool_call("test_echo", json!({"message": format!("output-{i}")}))
-    });
+    let changing = std::iter::repeat_with(|| {
+        RebornScriptedReply::tool_call("test_echo", json!({"message": "changing-output"}))
+    })
+    .take(40);
     let harness = RebornIntegrationHarness::test_default()
         .with_no_progress_echo_for_test()
         .with_turn_event_sink()
@@ -195,4 +196,8 @@ async fn same_call_with_changing_output_completes_instead_of_terminating() {
         .wait_for_status(run_id, TurnStatus::Completed)
         .await
         .expect("changing-output repetition must complete, not terminate as no-progress");
+    harness
+        .assert_model_tool_result_content_occurrences("echo: changing-output-", 40)
+        .await
+        .expect("each fixed-signature call must return its own changing output");
 }

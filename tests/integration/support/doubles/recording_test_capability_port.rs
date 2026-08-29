@@ -47,9 +47,9 @@ pub struct RecordingTestCapabilityPort {
     /// (`ironclaw_agent_loop::strategies::stop`) keys off (signature,
     /// output_digest) pairs, so a test double driving that check must report
     /// a digest that varies with the scripted arguments the same way a real
-    /// capability's output would — this double's `safe_summary` text is a
-    /// fixed "echo: hi" regardless of input, so the digest is the only
-    /// signal available.
+    /// capability's output would. The changing-output negative control uses a
+    /// fixed marker argument and instead varies both the returned text and its
+    /// digest from the result sequence.
     arguments_by_input_ref: Arc<Mutex<HashMap<String, serde_json::Value>>>,
 }
 
@@ -204,22 +204,45 @@ impl RecordingTestCapabilityPort {
         } else {
             ironclaw_loop_contracts::CapabilityProgress::MadeProgress
         };
+        let arguments = self
+            .arguments_by_input_ref
+            .lock()
+            .unwrap()
+            .get(input_ref.as_str())
+            .cloned();
+        // The changing-output integration negative control keeps the call
+        // arguments fixed, so its output must vary from the result sequence,
+        // not be derived from those arguments. Other no-progress cases retain
+        // the argument-derived digest that makes their scripted output repeat.
+        let changing_output = matches!(
+            arguments.as_ref().and_then(|arguments| arguments.get("message")),
+            Some(serde_json::Value::String(message)) if message == "changing-output"
+        );
+        let output = if matches!(self.mode, CapabilityMode::NoProgress) && changing_output {
+            format!("echo: changing-output-{ordinal}")
+        } else {
+            "echo: hi".to_string()
+        };
         // Only the no-progress mode needs a corroborating output digest — see
-        // the doc comment on `arguments_by_input_ref`.
+        // the doc comment on `arguments_by_input_ref`. For the changing-output
+        // probe, hash the returned output itself so the digest varies
+        // independently of the fixed call signature.
         let output_digest: Option<ContentDigest> =
             if matches!(self.mode, CapabilityMode::NoProgress) {
-                self.arguments_by_input_ref
-                    .lock()
-                    .unwrap()
-                    .get(input_ref.as_str())
-                    .and_then(|arguments| ContentDigest::from_json_value(arguments).ok())
+                if changing_output {
+                    ContentDigest::from_json_value(&serde_json::Value::String(output.clone())).ok()
+                } else {
+                    arguments
+                        .as_ref()
+                        .and_then(|arguments| ContentDigest::from_json_value(arguments).ok())
+                }
             } else {
                 None
             };
         resolution::completed(
             ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
-            "echo: hi".to_string(),
+            output,
             progress,
             false,
             0,

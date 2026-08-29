@@ -27,7 +27,7 @@ use budget::{BudgetInput, BudgetStage, BudgetStep};
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
-    append_capability_safe_summary_ref, apply_capability_filter, capability_call_signature,
+    append_capability_safe_summary_ref, apply_capability_filter,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, gate_tool_result_summary,

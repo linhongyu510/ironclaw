@@ -213,6 +213,24 @@ async fn parallel_batch_stops_launching_new_calls_after_a_park() {
         persisted_refs,
         "the suspension checkpoint must retain all completed siblings"
     );
+    let expected_signatures = (0..4)
+        .map(|index| {
+            CapabilityCallSignature::from_call(
+                capability_id(),
+                &serde_json::json!({ "input_ref": format!("input:parallel-{index}") }),
+            )
+            .expect("signature")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock)
+            .recent_call_signatures
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_signatures,
+        "the checkpoint must exclude signatures for calls that never launched"
+    );
 }
 
 #[tokio::test(start_paused = true)]

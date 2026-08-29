@@ -49,7 +49,7 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:GateNotSupportedStrategy(abort_gate_not_supported_except_external_tool),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:StructuredOutputReplyAdmissionStrategy(reject_all_text_finals),",
-    "stop:StructuredResultStopStrategy(result_capability=builtin.structured_result,all_failed_batches=invalid_model_output,rejected_reply=invalid_model_output),",
+    "stop:StructuredResultStopStrategy(result_capability=builtin.structured_result,all_failed_batches=invalid_model_output,default_stop=DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output)),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=1024,wall_clock_limit=none)"
 )
@@ -63,8 +63,8 @@ pub const UNBOUND_DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
 
 /// Stable digest: BLAKE3-256 of the unbound-structured family fingerprint.
 pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xfe, 0x39, 0x55, 0x21, 0xc6, 0x82, 0x8f, 0x4f, 0xb9, 0xf5, 0x26, 0x6a, 0xa9, 0xa8, 0xb5, 0xa6,
-    0x46, 0x71, 0xed, 0xbe, 0x77, 0x06, 0x80, 0x38, 0x21, 0xb5, 0xd3, 0x2c, 0x1d, 0x10, 0x87, 0x68,
+    0x27, 0x9d, 0x02, 0xc8, 0xe3, 0x05, 0x7f, 0xb7, 0xcd, 0x55, 0xe4, 0x55, 0xd4, 0xd3, 0x64, 0x25,
+    0x84, 0x2a, 0x3f, 0xb8, 0xd9, 0x99, 0xae, 0x1b, 0xf6, 0xb4, 0xfc, 0x95, 0x18, 0xc2, 0xa1, 0x58,
 ]);
 
 fn structured_result_capability() -> Result<CapabilityId, LoopFamilyRegistryError> {

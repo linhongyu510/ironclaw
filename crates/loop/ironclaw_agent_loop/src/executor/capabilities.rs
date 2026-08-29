@@ -28,22 +28,26 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface,
 };
 
+use super::capability_helpers::capability_call_signature;
 use super::{
     AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
     CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
     GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
     append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
     attach_failure_explanation, batch_policy_kind, cancelled_exit_with_reason,
-    cancelled_reason_from_signal, capability_batch_counts, capability_call_signature,
-    capability_error_failure_category, capability_host_error,
-    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_port_error_is_terminal, clear_matching_pending_auth_resume,
-    clear_matching_pending_external_tool_resume, failed_exit, gate_tool_result_summary,
-    honor_capability_retry_alteration, model_visible_capability_failure_observation,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
+    cancelled_reason_from_signal, capability_batch_counts, capability_error_failure_category,
+    capability_host_error, capability_invocation_from_auth_resume_candidate,
+    capability_invocation_from_candidate, capability_is_visible, capability_port_error_is_terminal,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
+    gate_tool_result_summary, honor_capability_retry_alteration,
+    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary_or_fallback,
 };
 use crate::{
-    state::{CapabilityOutputObservation, CheckpointKind, InvocationCharge, LoopExecutionState},
+    state::{
+        CapabilityCallSignature, CapabilityOutputObservation, CheckpointKind, InvocationCharge,
+        LoopExecutionState,
+    },
     strategies::{
         BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
         RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
@@ -362,7 +366,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 
         let mut signatures = HashSet::new();
         for call in denied_calls {
-            push_call_signature_once(&mut state, &mut signatures, &call)?;
+            let signature = push_call_signature_once(&mut state, &mut signatures, &call)?;
             state
                 .recent_failure_kinds
                 .push(LoopFailureKind::PolicyDenied);
@@ -376,6 +380,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 ctx,
                 state,
                 call,
+                signature,
                 CapabilityErrorHandling {
                     summary,
                     model_observation: None,
@@ -520,7 +525,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         };
         if !over_budget_calls.is_empty() {
             for call in over_budget_calls {
-                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                let signature = push_call_signature_once(&mut state, &mut signatures, &call)?;
                 let summary = CapabilityErrorSummary {
                     kind: FailureKind::Resource,
                     safe_summary: SanitizedStrategySummary::from_trusted_static(
@@ -535,6 +540,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     ctx,
                     state,
                     call,
+                    signature,
                     CapabilityErrorHandling {
                         summary,
                         model_observation: None,
@@ -593,6 +599,11 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
             .await;
 
+        let visible_call_signatures = visible_calls
+            .iter()
+            .map(capability_call_signature)
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut pending_approval_resume = state.pending_approval_resume.clone();
         let mut pending_auth_resume = state.pending_auth_resume.clone();
         let invocations = visible_calls
@@ -649,8 +660,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 let stale_summary = SanitizedStrategySummary::from_trusted_static(
                     "capability surface changed before execution; re-issue the call",
                 );
-                for call in visible_calls {
-                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                for (call, signature) in visible_calls.into_iter().zip(visible_call_signatures) {
                     state
                         .recent_failure_kinds
                         .push(LoopFailureKind::PolicyDenied);
@@ -666,6 +676,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx,
                         state,
                         call,
+                        signature,
                         CapabilityErrorHandling {
                             summary,
                             model_observation: None,
@@ -710,8 +721,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             {
                 let summary = capability_port_error_summary(&error);
                 let observation = capability_port_error_observation(&error);
-                for call in visible_calls {
-                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                for (call, signature) in visible_calls.into_iter().zip(visible_call_signatures) {
                     state
                         .recent_failure_kinds
                         .push(capability_error_to_failure_kind(summary.kind));
@@ -722,6 +732,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx,
                         state,
                         call,
+                        signature,
                         CapabilityErrorHandling {
                             summary: summary.clone(),
                             model_observation: Some(observation.clone()),
@@ -834,16 +845,19 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 
         let indexed_outcomes = visible_calls
             .into_iter()
+            .zip(visible_call_signatures)
             .zip(outcomes)
             .enumerate()
-            .map(|(index, (call, outcome))| (index, call, outcome))
+            .map(|(index, ((call, signature), outcome))| (index, call, signature, outcome))
             .collect::<Vec<_>>();
 
-        // Every launched call signature must precede any gate or terminal
-        // checkpoint. A resumed run must never forget work that was already
-        // admitted merely because an earlier outcome selected the run exit.
-        for (_, call, _) in &indexed_outcomes {
-            push_call_signature_once(&mut state, &mut signatures, call)?;
+        // Only outcomes returned by the host represent launched calls. Keep
+        // canonical signatures for the unlaunched suffix out of the recent
+        // call ring while preserving the one-computation-per-call fast path.
+        for (_, _, signature, _) in &indexed_outcomes {
+            if signatures.insert(signature.clone()) {
+                state.recent_call_signatures.push(signature.clone());
+            }
         }
 
         // Durable successful work is recorded before any gate or terminal
@@ -851,7 +865,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // likewise materialized here, then coalesced into one gate below.
         let mut pending_outcomes = Vec::new();
         let mut coalesced_gate_index = None;
-        for (index, call, outcome) in indexed_outcomes {
+        for (index, call, signature, outcome) in indexed_outcomes {
             match outcome {
                 InvokedCapabilityOutcome::Resolution(Resolution::Done(outcome))
                     if outcome.verdict.is_success() =>
@@ -864,6 +878,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx.host,
                         &mut state,
                         &call,
+                        signature,
                         result,
                         &mut capability_batch,
                     )
@@ -880,6 +895,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx.host,
                         &mut state,
                         &call,
+                        signature,
                         input,
                         &mut capability_batch,
                     )
@@ -900,12 +916,13 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ctx.host,
                         &mut state,
                         &call,
+                        signature,
                         result,
                         &mut capability_batch,
                     )
                     .await?;
                 }
-                other => pending_outcomes.push((index, call, other)),
+                other => pending_outcomes.push((index, call, signature, other)),
             }
         }
 
@@ -916,7 +933,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let mut sibling_outcomes = Vec::with_capacity(pending_outcomes.len());
         for item in pending_outcomes {
             let is_gate = matches!(
-                &item.2,
+                &item.3,
                 InvokedCapabilityOutcome::Resolution(resolution)
                     if gate_outcome_writes_before_block(resolution)
             );
@@ -932,7 +949,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // the parked sibling retains its token for the next executor pass.
         let first_gate_conflicts_with_unlaunched_resume = first_gate
             .as_ref()
-            .and_then(|(_, _, outcome)| match outcome {
+            .and_then(|(_, _, _, outcome)| match outcome {
                 InvokedCapabilityOutcome::Resolution(resolution) => gate_outcome_kind(resolution),
                 InvokedCapabilityOutcome::TerminalError(_) => None,
             })
@@ -943,7 +960,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 GateKind::Resource | GateKind::AwaitDependentRun => false,
             });
         if first_gate_conflicts_with_unlaunched_resume
-            && let Some((_, call, InvokedCapabilityOutcome::Resolution(resolution))) =
+            && let Some((_, call, _, InvokedCapabilityOutcome::Resolution(resolution))) =
                 first_gate.take()
         {
             persist_later_gate_outcome(ctx, &mut state, call, resolution).await?;
@@ -952,7 +969,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // was in flight, make the deferred gate model-visible before any
         // sibling handler observes that signal and returns its Final exit.
         if ctx.host.observe_cancellation().is_some()
-            && let Some((_, call, InvokedCapabilityOutcome::Resolution(resolution))) =
+            && let Some((_, call, _, InvokedCapabilityOutcome::Resolution(resolution))) =
                 first_gate.take()
         {
             persist_later_gate_outcome(ctx, &mut state, call, resolution).await?;
@@ -967,7 +984,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             CapabilityRetryMode::Allow
         };
         let mut selected: Option<(usize, SelectedParallelTerminal)> = None;
-        for (index, call, outcome) in sibling_outcomes {
+        for (index, call, signature, outcome) in sibling_outcomes {
             match outcome {
                 InvokedCapabilityOutcome::TerminalError(error) => {
                     if selected
@@ -988,7 +1005,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         .handle_capability_outcome(
                             ctx,
                             snapshot,
-                            call,
+                            (call, signature),
                             resolution,
                             &mut capability_batch,
                             retry_mode,
@@ -1021,6 +1038,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         if let Some((
             gate_index,
             first_call,
+            first_signature,
             InvokedCapabilityOutcome::Resolution(first_gate_outcome),
         )) = first_gate
         {
@@ -1039,7 +1057,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .handle_capability_outcome(
                         ctx,
                         state,
-                        first_call,
+                        (first_call, first_signature),
                         first_gate_outcome,
                         &mut capability_batch,
                         retry_mode,
@@ -1260,11 +1278,12 @@ impl CapabilityStage {
         &self,
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
-        call: CapabilityCallCandidate,
+        call_with_signature: (CapabilityCallCandidate, CapabilityCallSignature),
         resolution: Resolution,
         capability_batch: &mut CapabilityBatchTurnSummary,
         retry_mode: CapabilityRetryMode,
     ) -> Result<OutcomeStep, AgentLoopExecutorError> {
+        let (call, signature) = call_with_signature;
         // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` re-splits on
         // its typed `ToolVerdict`; every gate/suspension arm reconstructs the loop
         // ref from the channel's preserved `origin`. Model-visible content comes
@@ -1281,6 +1300,7 @@ impl CapabilityStage {
                         ctx.host,
                         &mut state,
                         &call,
+                        signature,
                         result,
                         capability_batch,
                     )
@@ -1296,6 +1316,7 @@ impl CapabilityStage {
                         ctx.host,
                         &mut state,
                         &call,
+                        signature,
                         input,
                         capability_batch,
                     )
@@ -1327,6 +1348,7 @@ impl CapabilityStage {
                         ctx,
                         state,
                         call,
+                        signature,
                         CapabilityErrorHandling {
                             summary,
                             model_observation,
@@ -1381,6 +1403,7 @@ impl CapabilityStage {
                     ctx,
                     state,
                     call,
+                    signature,
                     CapabilityErrorHandling {
                         summary,
                         model_observation: Some(observation),
@@ -1521,6 +1544,7 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
+        signature: CapabilityCallSignature,
         handling: CapabilityErrorHandling,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<OutcomeStep, AgentLoopExecutorError> {
@@ -1834,7 +1858,7 @@ impl CapabilityStage {
                             return Box::pin(self.handle_capability_outcome(
                                 ctx,
                                 state,
-                                call,
+                                (call, signature),
                                 promoted,
                                 capability_batch,
                                 retry_mode,
@@ -1986,7 +2010,7 @@ impl CapabilityStage {
             .partition(|call| call.activity_id == denied_activity_id);
 
         for call in denied_calls {
-            push_call_signature_once(&mut state, signatures, &call)?;
+            let signature = push_call_signature_once(&mut state, signatures, &call)?;
             CheckpointStage
                 .emit_progress(
                     ctx,
@@ -2019,6 +2043,7 @@ impl CapabilityStage {
                 ctx,
                 state,
                 call,
+                signature,
                 CapabilityErrorHandling {
                     summary,
                     model_observation,
@@ -2478,6 +2503,7 @@ async fn append_spawned_child_result(
     host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
+    signature: CapabilityCallSignature,
     input: ChildResultAppendInput,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
@@ -2496,7 +2522,7 @@ async fn append_spawned_child_result(
         output_digest: None,
         model_observation: input.model_observation,
     };
-    append_completed_capability_result(host, state, call, result, capability_batch).await
+    append_completed_capability_result(host, state, call, signature, result, capability_batch).await
 }
 
 /// Errored calls are deliberately NOT recorded into `observed_signatures`:
@@ -2519,11 +2545,12 @@ async fn append_completed_capability_result(
     host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
+    // Computed once before dispatch and carried through the indexed outcome.
+    signature: CapabilityCallSignature,
     result: CapabilityResultMessage,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_result_ref(host, call, &result).await?;
-    let signature = capability_call_signature(call)?;
     // #7531 made repeated-call detection advisory-only by deleting this
     // ring's only producer; dominant_repeated_observation (strategies/stop.rs)
     // needs a (signature, output_digest) trail — real OUTPUT repetition, not
