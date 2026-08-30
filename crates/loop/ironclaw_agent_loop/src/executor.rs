@@ -32,8 +32,7 @@ use capability_helpers::{
     capability_is_visible, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, gate_tool_result_summary,
     model_visible_capability_failure_observation, pending_approval_resume_candidate,
-    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
-    push_call_signature_once, push_completed_result,
+    pending_auth_resume_candidate, pending_external_tool_resume_candidate, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};

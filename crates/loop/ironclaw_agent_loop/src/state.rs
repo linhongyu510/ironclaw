@@ -419,9 +419,9 @@ impl LoopExecutionState {
     /// transcript/result refs in the payload are also owned by the source run;
     /// carrying them into the retry would make the retry's terminal exit claim
     /// foreign-run evidence. Reset these run-owned fields and let the retry host
-    /// produce its own refs. The output-digest observations and terminal
-    /// warning/control state are likewise run-owned and are reset below so the
-    /// retry cannot inherit a no-progress strike.
+    /// produce its own refs. The repeat-call and output-digest observations
+    /// plus terminal warning/control state are likewise run-owned and are
+    /// reset below so the retry cannot inherit a no-progress strike.
     ///
     /// Gate-bound resume state (`last_gate`, `pending_approval_resume`,
     /// `pending_auth_resume`) is deliberately NOT cleared here: this same path
@@ -451,11 +451,14 @@ impl LoopExecutionState {
         // does any work. Reset it here so the retry starts its own budget
         // window. (Same-run gate resumes return early above, preserving it.)
         self.budget_ledger = BudgetLedger::fresh_for_run();
-        // No-progress observations and terminal warnings are also scoped to
-        // the source run. Carrying either across a retry would let the new
-        // run inherit a prior strike and terminate without earning it.
+        // Repeat-call and no-progress observations plus terminal warnings are
+        // also scoped to the source run. Carrying any of them across a retry
+        // would let the new run inherit a prior strike and terminate without
+        // earning it.
+        self.recent_call_signatures = BoundedRing::new();
         self.seen_capability_output_digests = BoundedRing::new();
         self.terminal_warning_state = TerminalWarningState::default();
+        self.stop_state.repeated_call_warning = None;
         self.stop_state.trailing_no_progress_results = 0;
         self
     }
@@ -1104,6 +1107,16 @@ mod tests {
         let source_context = test_run_context();
         let target_context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&source_context);
+        let repeated_call_signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"value": 1}),
+        )
+        .expect("valid call signature");
+        state
+            .recent_call_signatures
+            .push(repeated_call_signature.clone());
+        state.stop_state.repeated_call_warning =
+            Some(RepeatedCallWarningState::rendered(repeated_call_signature));
         state
             .seen_capability_output_digests
             .push(CapabilityOutputObservation {
@@ -1127,6 +1140,8 @@ mod tests {
 
         let rebased = state.clone().rebase_for_run(&target_context);
 
+        assert!(rebased.recent_call_signatures.is_empty());
+        assert!(rebased.stop_state.repeated_call_warning.is_none());
         assert!(rebased.seen_capability_output_digests.is_empty());
         assert_eq!(
             rebased.terminal_warning_state,
@@ -1213,6 +1228,16 @@ mod tests {
                 .expect("valid call signature"),
                 output_digest: ironclaw_loop_contracts::ContentDigest(42),
             });
+        let repeated_call_signature = CapabilityCallSignature::from_call(
+            CapabilityId::new("demo.echo").expect("valid capability id"),
+            &json!({"value": 1}),
+        )
+        .expect("valid call signature");
+        state
+            .recent_call_signatures
+            .push(repeated_call_signature.clone());
+        state.stop_state.repeated_call_warning =
+            Some(RepeatedCallWarningState::rendered(repeated_call_signature));
         assert!(
             state
                 .terminal_warning_state
@@ -1222,6 +1247,11 @@ mod tests {
 
         let rebased = state.clone().rebase_for_run(&context);
 
+        assert_eq!(rebased.recent_call_signatures, state.recent_call_signatures);
+        assert_eq!(
+            rebased.stop_state.repeated_call_warning,
+            state.stop_state.repeated_call_warning
+        );
         assert_eq!(rebased, state);
     }
 
