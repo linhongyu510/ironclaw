@@ -32,6 +32,8 @@ from ws12_workflow_contracts import (  # noqa: E402
     CRATE_SCOPE_FILTERS,
     DOCKER_WORKFLOW,
     E2E_WORKFLOW,
+    HOOKS_PARITY_JOB,
+    HOOKS_PARITY_STEP,
     LIBSQL_SCRIPTED_MEMORY_JOB,
     NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
@@ -46,7 +48,6 @@ from ws12_workflow_contracts import (  # noqa: E402
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
-    validate_hooks_parity_timeout,
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
@@ -1150,16 +1151,53 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
     def test_hooks_parity_timeout_cannot_return_to_the_failing_budget(self) -> None:
         workflow = self.workflows[PLATFORM_WORKFLOW]
-        self.assertEqual(validate_hooks_parity_timeout(workflow), [])
+        self.assertEqual(validate_workflow_texts(self.workflows), [])
 
         for old, new in (
             ("timeout-minutes: 30", "timeout-minutes: 20"),
             ("25m \\", "15m \\"),
         ):
             with self.subTest(timeout=old):
-                sabotaged = workflow.replace(old, new, 1)
-                self.assertNotEqual(sabotaged, workflow)
-                self.assertTrue(validate_hooks_parity_timeout(sabotaged))
+                sabotaged_workflow = workflow.replace(old, new, 1)
+                self.assertNotEqual(sabotaged_workflow, workflow)
+                sabotaged = copy.deepcopy(self.workflows)
+                sabotaged[PLATFORM_WORKFLOW] = sabotaged_workflow
+                errors = validate_workflow_texts(sabotaged)
+                self.assertTrue(
+                    any(
+                        target in error
+                        for error in errors
+                        for target in (HOOKS_PARITY_JOB, HOOKS_PARITY_STEP)
+                    ),
+                    errors,
+                )
+
+    def test_hooks_parity_timeout_ignores_commented_and_unrelated_decoys(self) -> None:
+        workflow = self.workflows[PLATFORM_WORKFLOW]
+        backslash = "\\"
+        live_timeout = f"timeout --signal=INT --kill-after=30s 25m {backslash}"
+        decoys = (
+            (
+                "commented",
+                "# timeout --signal=INT --kill-after=30s 25m cargo test\n"
+                f"          cargo test {backslash}",
+            ),
+            (
+                "unrelated",
+                "timeout --signal=INT --kill-after=30s 25m echo cargo test\n"
+                f"          timeout --signal=INT --kill-after=30s 15m {backslash}",
+            ),
+        )
+        for name, replacement in decoys:
+            with self.subTest(decoy=name):
+                sabotaged_workflow = workflow.replace(live_timeout, replacement, 1)
+                self.assertNotEqual(sabotaged_workflow, workflow)
+                sabotaged = copy.deepcopy(self.workflows)
+                sabotaged[PLATFORM_WORKFLOW] = sabotaged_workflow
+                errors = validate_workflow_texts(sabotaged)
+                self.assertTrue(
+                    any(HOOKS_PARITY_STEP in error for error in errors), errors
+                )
 
     def test_removing_each_lane_marker_fails_loudly(self) -> None:
         for path, markers in REQUIRED_MARKERS.items():

@@ -242,6 +242,25 @@ HOOKS_PARITY_MIN_COMMAND_TIMEOUT_MINUTES = 25
 HOOKS_PARITY_MIN_JOB_TIMEOUT_MINUTES = 30
 
 
+def _shell_logical_commands(step: str) -> list[str]:
+    """Return executable shell commands with backslash continuations joined."""
+
+    commands: list[str] = []
+    fragments: list[str] = []
+    for raw_line in step.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line in {"run: |", "run: >"}:
+            continue
+        continued = line.endswith("\\")
+        fragments.append(line[:-1].rstrip() if continued else line)
+        if not continued:
+            commands.append(" ".join(fragments))
+            fragments = []
+    if fragments:
+        commands.append(" ".join(fragments))
+    return commands
+
+
 def validate_hooks_parity_timeout(text: str) -> list[str]:
     """Keep the full cross-backend suite within an honest CI time budget."""
 
@@ -254,8 +273,19 @@ def validate_hooks_parity_timeout(text: str) -> list[str]:
 
     errors: list[str] = []
     job_timeout = re.search(r"(?m)^    timeout-minutes:\s*(\d+)\s*$", job)
-    command_timeout = re.search(
-        r"timeout\s+--signal=INT\s+--kill-after=30s\s+(\d+)m\b", step
+    command_timeout = next(
+        (
+            match
+            for command in _shell_logical_commands(step)
+            if (
+                match := re.match(
+                    r"^timeout\s+--signal=INT\s+--kill-after=30s\s+"
+                    r"(\d+)m\s+cargo\s+test\b",
+                    command,
+                )
+            )
+        ),
+        None,
     )
     if job_timeout is None:
         errors.append(
