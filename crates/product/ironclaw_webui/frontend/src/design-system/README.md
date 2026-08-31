@@ -70,6 +70,34 @@ motion tokens are the vocabulary Phase 4 (#7782 WS4) opts components back into,
 not a licence to animate today. Token *values* are Phase 3a's to change
 (#7781 WS3) — this table is the contract, not the palette.
 
+### The contract is enforced against the built CSS, not the source
+
+`pnpm build` runs `check:tokens`
+([`scripts/check-token-bundle.ts`](../../scripts/check-token-bundle.ts)), which
+reads `dist/assets/*.css` and fails when a token or utility named above is
+missing from the *emitted* stylesheet.
+
+It exists because everything else in this repo checks source. Component tests
+assert Tailwind class **strings**, story tests assert rendered structure, and
+`vite build` exits 0 whenever it produced a bundle — so all of them pass while
+the CSS is silently wrong. That is not theoretical: a comment in `app.css`
+containing a literal `*/` closed early and made Tailwind drop a whole `@theme`
+block (29 keys). Every gate stayed green and no `rounded-control` utility was
+emitted, which would have shipped every button square-cornered.
+
+Two consequences when you touch `app.css`:
+
+- **Adding a token before its first consumer needs `@theme static`.** Tailwind
+  tree-shakes theme keys nothing references; plain `@theme` emits 41 of these
+  keys, `static` emits 56.
+- **Never write a bare `*/` inside a comment.** Spell utility groups
+  `p-* m-* gap-*`, not `p-*/m-*/gap-*`.
+
+The `Tokens/*` stories are the second half of the same guarantee: each sheet's
+`play` function reads every property it documents and fails when one resolves
+empty, and `Tokens/Motion` additionally asserts the
+`prefers-reduced-motion` block zeroes all four durations.
+
 ## Conventions
 
 - **One primitive per file.** Kebab-case filename, PascalCase export

@@ -1748,6 +1748,113 @@ def validate_crate_name_residue(
     return errors
 
 
+def _without_comments(body: str) -> str:
+    """Drop whole-line YAML/shell comments so a contract cannot be satisfied by
+    prose that merely mentions the flag it is meant to pin."""
+    return "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _step_slice(body: str, step_name: str) -> str | None:
+    """One step's text, bounded by the next `- name:` heading."""
+    start = body.find(f"- name: {step_name}")
+    if start == -1:
+        return None
+    following = body.find("- name: ", start + 1)
+    return body[start : following if following != -1 else len(body)]
+
+
+CHROMATIC_JOB = "webui-v2-chromatic"
+ROLLUP_JOB = "code-style"
+
+
+def validate_chromatic_visual_lane(text: str) -> list[str]:
+    """Pin the Chromatic lane's security and supply-chain properties.
+
+    Four separate promises live in this one job, and until #7831 the only
+    recorded CI evidence was the unset-secret skip path — the publish path has
+    never executed, so nothing but a static check can keep it honest:
+
+    1. It runs ONLY on trusted pushes to `main`. Same-repository PR branches
+       receive repository secrets, and the publish executes the checked-out
+       tree's own `build-storybook` script, so running this on `pull_request`
+       hands `CHROMATIC_PROJECT_TOKEN` to PR-authored code.
+    2. The token is probed before anything is checked out, so an unprovisioned
+       repository pays nothing and the skip stays green.
+    3. The CLI version is an exact pin, never a tag or range.
+    4. It stays OUT of the `code-style` roll-up, which is what makes it
+       non-blocking.
+    """
+    errors: list[str] = []
+    body = job_body(text, CHROMATIC_JOB)
+    if body is None:
+        return [f"{CODE_STYLE_WORKFLOW}: missing the {CHROMATIC_JOB} job"]
+
+    # 1. Trusted-event gating.
+    if "github.event_name == 'push'" not in body:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
+            "github.event_name == 'push' — a secret-bearing lane must not run "
+            "PR-authored build scripts"
+        )
+    if "github.ref == 'refs/heads/main'" not in body:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
+            "github.ref == 'refs/heads/main'"
+        )
+
+    # 2. Probe ordering: the token step must precede checkout.
+    probe = body.find("id: token")
+    checkout = body.find("uses: actions/checkout")
+    if probe == -1:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its token probe step")
+    elif checkout != -1 and probe > checkout:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} probes the token AFTER checkout — "
+            "gate the checkout on the probe so a disabled lane does no work"
+        )
+    # Scope the gate check to the checkout STEP. The same `if:` appears on
+    # every later step, so scanning the whole job would pass on an ungated
+    # checkout — the one step whose cost this ordering exists to avoid.
+    checkout_step = _step_slice(body, "Checkout repository")
+    if checkout_step and "if: steps.token.outputs.enabled == 'true'" not in checkout_step:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} checkout is not gated on the token probe"
+        )
+
+    # 3. Supply-chain pin: exact version enforced, never a floating tag.
+    if "CHROMATIC_CLI_VERSION" not in body:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its CLI version pin")
+    if "[0-9]+\\.[0-9]+\\.[0-9]+" not in body:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must reject non-exact "
+            "CHROMATIC_CLI_VERSION values with an exact-version regex"
+        )
+    if "chromatic@latest" in body:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must not float on chromatic@latest")
+
+    # 4. A visual diff is information, not a build failure.
+    # Check the COMMAND, not the prose: the flag is also named in the comment
+    # explaining it, so a comment-inclusive scan would pass on a lane that had
+    # stopped passing the flag.
+    if "--exit-zero-on-changes" not in _without_comments(body):
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass --exit-zero-on-changes"
+        )
+
+    # 5. Non-blocking: absent from the roll-up's needs list.
+    rollup = job_body(text, ROLLUP_JOB)
+    if rollup is not None:
+        needs = rollup.split("steps:")[0]
+        if CHROMATIC_JOB in needs:
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must stay out of the "
+                f"{ROLLUP_JOB} needs list — that absence is what makes it non-blocking"
+            )
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -1771,6 +1878,7 @@ def validate_workflow_texts(
         errors.extend(validate_production_lint_targets(code_style))
         errors.extend(validate_code_style_docs_guard_order(code_style))
         errors.extend(validate_windows_webui_install_shell(code_style))
+        errors.extend(validate_chromatic_visual_lane(code_style))
     stress = workflows.get(STRESS_WORKFLOW)
     if stress is not None:
         errors.extend(validate_libsql_scripted_memory_job(stress))

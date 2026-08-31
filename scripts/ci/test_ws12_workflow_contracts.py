@@ -49,6 +49,7 @@ from ws12_workflow_contracts import (  # noqa: E402
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
+    validate_chromatic_visual_lane,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -3151,6 +3152,95 @@ class LibsqlScriptedMemoryJobSabotageTests(unittest.TestCase):
         )
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("fixed sequential loop" in error for error in errors), errors)
+
+
+class ChromaticVisualLane(unittest.TestCase):
+    """The Chromatic lane carries a repository secret, and its publish path has
+    never executed in CI — the only recorded evidence is the unset-secret skip.
+    A static contract is therefore the only thing standing between a future
+    edit and a leaked token, so each property is pinned by sabotaging the
+    checked-in workflow and proving the validator notices."""
+
+    def setUp(self) -> None:
+        self.workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.workflow = self.workflows[CODE_STYLE_WORKFLOW]
+
+    def sabotage(self, old: str, new: str) -> dict[str, str]:
+        self.assertIn(old, self.workflow)
+        mutated = dict(self.workflows)
+        mutated[CODE_STYLE_WORKFLOW] = self.workflow.replace(old, new, 1)
+        self.assertNotEqual(mutated[CODE_STYLE_WORKFLOW], self.workflow)
+        return mutated
+
+    def test_checked_in_lane_satisfies_the_contract(self) -> None:
+        self.assertEqual(validate_chromatic_visual_lane(self.workflow), [])
+
+    def test_running_on_pull_request_is_rejected(self) -> None:
+        """The core security property. Same-repository PR branches DO receive
+        repository secrets, and the publish runs the checked-out tree's own
+        `build-storybook` script — so a lane that triggers on `pull_request`
+        hands the token to PR-authored code."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n", ""
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
+
+    def test_dropping_the_main_branch_gate_is_rejected(self) -> None:
+        mutated = self.sabotage(
+            "      github.ref == 'refs/heads/main'", "      true"
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("refs/heads/main" in error for error in errors), errors)
+
+    def test_probing_the_token_after_checkout_is_rejected(self) -> None:
+        """Ordering is the whole point of the probe: a disabled lane must not
+        pay for a `fetch-depth: 0` clone before discovering it has nothing to
+        do."""
+        mutated = self.sabotage("        id: token\n", "        id: renamed-probe\n")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("token probe" in error for error in errors), errors)
+
+    def test_ungated_checkout_is_rejected(self) -> None:
+        mutated = self.sabotage(
+            "      - name: Checkout repository\n        if: steps.token.outputs.enabled == 'true'\n"
+            "        uses: actions/checkout",
+            "      - name: Checkout repository\n        uses: actions/checkout",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("not gated on the token probe" in error for error in errors), errors)
+
+    def test_floating_cli_version_is_rejected(self) -> None:
+        """A visual-baseline tool that silently changes version changes the
+        baseline with it, so the exact-version guard must stay."""
+        mutated = self.sabotage(
+            '          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+            '          if false; then',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exact-version regex" in error for error in errors), errors)
+
+    def test_failing_the_build_on_visual_changes_is_rejected(self) -> None:
+        mutated = self.sabotage("            --exit-zero-on-changes \\\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exit-zero-on-changes" in error for error in errors), errors)
+
+    def test_promoting_the_lane_into_the_rollup_is_rejected(self) -> None:
+        """Absence from the roll-up `needs:` list is the only thing making this
+        lane non-blocking; #7782 WS6 asks for it to stay that way until the
+        baseline is proven stable."""
+        mutated = self.sabotage(
+            "      - webui-v2-js-lint\n      - docs-publication-boundary\n",
+            "      - webui-v2-js-lint\n      - webui-v2-chromatic\n      - docs-publication-boundary\n",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("non-blocking" in error for error in errors), errors)
+
+    def test_removing_the_lane_entirely_is_rejected(self) -> None:
+        self.assertEqual(
+            validate_chromatic_visual_lane("jobs:\n  other:\n    name: x\n"),
+            [f"{CODE_STYLE_WORKFLOW}: missing the webui-v2-chromatic job"],
+        )
 
 
 if __name__ == "__main__":
