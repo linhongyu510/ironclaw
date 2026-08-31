@@ -116,6 +116,41 @@ describe("design-token bundle contract", () => {
     expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
   });
 
+  it("rejects an ancestor-scoped rule standing in for the base utility", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".wrap .rounded-control { border-radius: 1rem; }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("rejects a compound selector standing in for the base utility", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".other.rounded-control { border-radius: 1rem; }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  // `content: "border-radius: 1rem"` declares `content`, not `border-radius`.
+  // Splitting each declaration at its first top-level `:` is what keeps a
+  // quoted value from masquerading as the property.
+  it("does not accept the property name inside a quoted value", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      '.rounded-control { content: "border-radius: 1rem"; }'
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("accepts a utility declared inside an at-rule", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      "@media (min-width: 1px) { .rounded-control { border-radius: 1rem; } }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([]);
+  });
+
   it("requires the escaped md: variant, not just the base utility", () => {
     const css = compliantCss().replace(".md\\:rounded-control-lg { border-radius: 1rem; }", "");
     expect(findContractViolations(css).missingUtilities).toEqual([".md\\:rounded-control-lg"]);

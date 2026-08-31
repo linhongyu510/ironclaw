@@ -3268,6 +3268,22 @@ class ChromaticVisualLane(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
 
+    def test_an_inline_comment_decoy_in_the_condition_cannot_satisfy_the_gate(self) -> None:
+        """A trailing `#` comment carrying every required marker, on a condition
+        that actually runs on pull_request. Whole-line comment stripping alone
+        would have let this through with the token exposed."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      github.event_name == 'pull_request'  "
+            "# github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("must not admit" in error for error in errors), errors)
+        self.assertTrue(
+            any("github.event_name == 'push'" in error for error in errors), errors
+        )
+
     def test_a_comment_naming_the_exact_version_regex_cannot_satisfy_it(self) -> None:
         mutated = self.sabotage(
             '          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',

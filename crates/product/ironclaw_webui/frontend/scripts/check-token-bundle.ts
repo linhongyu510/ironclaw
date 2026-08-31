@@ -114,7 +114,6 @@ export interface ContractViolations {
   forbidden: string[];
 }
 
-/** @param css concatenated text of every emitted stylesheet */
 /**
  * Strip `/* … *\/` spans so a comment can never stand in as evidence.
  *
@@ -128,32 +127,159 @@ export function stripCssComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, " ");
 }
 
+export interface StyleRule {
+  /** The selector list, split into its members and trimmed. */
+  selectors: string[];
+  /** Property names declared DIRECTLY in this rule's own block. */
+  properties: string[];
+}
+
+/** Split on top-level commas only — `:is(a, b)` is one selector, not two. */
+function splitSelectorList(prelude: string): string[] {
+  const members: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = "";
+  for (const ch of prelude) {
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[") depth++;
+    if (ch === ")" || ch === "]") depth--;
+    if (ch === "," && depth === 0) {
+      members.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) members.push(current.trim());
+  return members;
+}
+
+/**
+ * Property names declared directly in a block.
+ *
+ * Nested blocks are removed first, and each declaration is split at its FIRST
+ * top-level `:` — so `content: "border-radius: 1rem"` yields `content`, not
+ * `border-radius`. A quoted value can no longer masquerade as a declaration.
+ */
+function parseProperties(body: string): string[] {
+  let flat = "";
+  let depth = 0;
+  for (const ch of body) {
+    if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+    else if (depth === 0) flat += ch;
+  }
+  const properties: string[] = [];
+  for (const chunk of flat.split(";")) {
+    let quote: string | null = null;
+    let depthInner = 0;
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i];
+      if (quote) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === "(") depthInner++;
+      else if (ch === ")") depthInner--;
+      else if (ch === ":" && depthInner === 0) {
+        properties.push(chunk.slice(0, i).trim());
+        break;
+      }
+    }
+  }
+  return properties.filter(Boolean);
+}
+
+/**
+ * Every style rule in the sheet, descending through at-rules (`@media`,
+ * `@supports`, `@layer`) and CSS nesting.
+ *
+ * Parsing rather than pattern-matching is the point. A regex over raw text
+ * cannot tell `.rounded-control{…}` from `.wrap .rounded-control{…}` or
+ * `.other.rounded-control{…}` without re-implementing selector grammar badly —
+ * and each of those styles something other than the bare utility a component
+ * asking for the class relies on.
+ */
+export function parseStyleRules(css: string): StyleRule[] {
+  const rules: StyleRule[] = [];
+  const walk = (text: string): void => {
+    let prelude = "";
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === "{") {
+        let depth = 1;
+        let j = i + 1;
+        while (j < text.length && depth > 0) {
+          if (text[j] === "{") depth++;
+          else if (text[j] === "}") depth--;
+          j++;
+        }
+        const body = text.slice(i + 1, Math.max(i + 1, j - 1));
+        const head = prelude.trim();
+        if (head.startsWith("@")) {
+          walk(body); // conditional group rule — its children are the real rules
+        } else if (head) {
+          rules.push({ selectors: splitSelectorList(head), properties: parseProperties(body) });
+          walk(body); // CSS nesting
+        }
+        prelude = "";
+        i = j;
+        continue;
+      }
+      if (ch === "}" || ch === ";") {
+        prelude = "";
+        i++;
+        continue;
+      }
+      prelude += ch;
+      i++;
+    }
+  };
+  walk(css);
+  return rules;
+}
+
+export interface ContractViolations {
+  missingProperties: string[];
+  missingUtilities: string[];
+  forbidden: string[];
+}
+
+/** @param rawCss concatenated text of every emitted stylesheet */
 export function findContractViolations(rawCss: string): ContractViolations {
   const css = stripCssComments(rawCss);
+  const rules = parseStyleRules(css);
+
   const missingProperties = REQUIRED_PROPERTIES.filter(
     // Match a declaration (`--token:`), not a `var(--token)` reference — a
     // reference proves only that something asked for it, not that it exists.
     (token) => !new RegExp(`${escapeForRegExp(token)}\\s*:`).test(css)
   );
-  const missingUtilities = REQUIRED_UTILITIES.filter(({ selector, declares }) => {
-    // The utility must exist as a STANDALONE rule that actually sets the
-    // property. Three near-misses all have to fail, because none of them
-    // restores the style a component asking for the class expects:
-    //   `.rounded-control:hover { … }`  — a state, not the base rule
-    //   `.rounded-control .child { … }` — a descendant, styling something else
-    //   `.rounded-control {}`           — present but empty
-    // And the boundary keeps the prefix guard: `.rounded-control-sm` must not
-    // count as proof of `.rounded-control`, since the base is what Button's
-    // default size resolves through.
-    //
-    // `[^{}]*` cannot cross a rule boundary, so the declaration found has to
-    // belong to this selector's own block. `(?=[{,])` admits a standalone
-    // member of a selector group (`.a, .rounded-control, .b { … }`).
-    const pattern = new RegExp(
-      `${escapeForRegExp(selector)}\\s*(?=[{,])[^{}]*\\{[^{}]*\\b${escapeForRegExp(declares)}\\s*:`
-    );
-    return !pattern.test(css);
-  }).map(({ selector }) => selector);
+
+  // A utility counts only when some rule lists it as an EXACT member of its
+  // selector list and that rule's own block declares the property the utility
+  // exists to set. Everything that merely contains the class name is excluded
+  // by construction: `.wrap .rounded-control`, `.other.rounded-control`,
+  // `.rounded-control:hover`, `.rounded-control-sm`, and an empty block.
+  const missingUtilities = REQUIRED_UTILITIES.filter(
+    ({ selector, declares }) =>
+      !rules.some(
+        (rule) => rule.selectors.includes(selector) && rule.properties.includes(declares)
+      )
+  ).map(({ selector }) => selector);
+
   const forbidden = FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(css)).map(
     ({ reason }) => reason
   );

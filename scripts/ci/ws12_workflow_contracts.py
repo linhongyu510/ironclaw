@@ -1748,12 +1748,39 @@ def validate_crate_name_residue(
     return errors
 
 
+def _strip_inline_comment(line: str) -> str:
+    """Drop a trailing YAML/shell comment, respecting quotes.
+
+    A whole-line strip is not enough. `if: github.event_name != 'push'  #
+    github.event_name == 'push' && github.ref == 'refs/heads/main'` carries
+    every marker the Chromatic gate looks for inside a comment while the
+    executable condition says the opposite — the decoy class this module keeps
+    re-learning. A `#` inside quotes (`'#0000'`) is data, not a comment.
+    """
+    quote: str | None = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+            continue
+        # YAML and shell both require whitespace before an inline comment.
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index]
+    return line
+
+
 def _without_comments(body: str) -> str:
-    """Drop whole-line YAML/shell comments so a contract cannot be satisfied by
-    prose that merely mentions the flag it is meant to pin."""
-    return "\n".join(
-        line for line in body.splitlines() if not line.lstrip().startswith("#")
-    )
+    """Drop YAML/shell comments — whole-line AND trailing — so a contract
+    cannot be satisfied by prose that merely mentions the marker it pins."""
+    kept: list[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(_strip_inline_comment(line))
+    return "\n".join(kept)
 
 
 def _job_condition(body: str) -> str:
