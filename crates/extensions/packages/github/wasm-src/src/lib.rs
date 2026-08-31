@@ -1443,6 +1443,158 @@ mod tests {
         assert_eq!(requests[0].path, "/user/repos?per_page=30");
     }
 
+    fn realistic_repository(index: usize, large_detail: &str) -> serde_json::Value {
+        json!({
+            "id": 30_000 + index,
+            "node_id": format!("R_{index}"),
+            "name": format!("repo-{index}"),
+            "full_name": format!("nearai/repo-{index}"),
+            "private": index.is_multiple_of(2),
+            "fork": false,
+            "archived": false,
+            "visibility": "public",
+            "html_url": format!("https://github.com/nearai/repo-{index}"),
+            "description": format!("Repository {index}"),
+            "language": "Rust",
+            "default_branch": "main",
+            "stargazers_count": 100 + index,
+            "open_issues_count": index,
+            "updated_at": "2026-08-30T00:00:00Z",
+            "pushed_at": "2026-08-29T00:00:00Z",
+            "owner": {
+                "login": "nearai",
+                "id": 1,
+                "avatar_url": "https://avatars.githubusercontent.com/u/1",
+                "organizations_url": large_detail
+            },
+            "license": {
+                "key": "mit",
+                "name": "MIT License",
+                "spdx_id": "MIT",
+                "url": large_detail
+            },
+            "permissions": {
+                "admin": false,
+                "maintain": false,
+                "push": true,
+                "triage": false,
+                "pull": true
+            },
+            "archive_url": large_detail,
+            "assignees_url": large_detail,
+            "branches_url": large_detail,
+            "collaborators_url": large_detail,
+            "commits_url": large_detail,
+            "contents_url": large_detail,
+            "forks_url": large_detail,
+            "git_url": large_detail,
+            "hooks_url": large_detail,
+            "issues_url": large_detail,
+            "pulls_url": large_detail,
+            "releases_url": large_detail,
+            "subscribers_url": large_detail,
+            "trees_url": large_detail,
+            "_links": {"self": {"href": large_detail}}
+        })
+    }
+
+    #[test]
+    fn list_repos_compacts_realistic_large_provider_response() {
+        let large_detail = "x".repeat(4 * 1024);
+        let provider_items = (0..100)
+            .map(|index| realistic_repository(index, &large_detail))
+            .collect::<Vec<_>>();
+        let provider_output =
+            serde_json::to_string(&provider_items).expect("provider fixture JSON");
+        assert!(provider_output.len() > 5 * 1024 * 1024);
+        let provider_output_len = provider_output.len();
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"type":"all","page":2,"limit":100}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("github.list_repos should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact repositories should stay model-useful, got {} bytes",
+            output.len()
+        );
+        assert!(
+            provider_output_len > output.len() * 10,
+            "repository projection should reduce the provider payload by at least 10x"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository list should be JSON");
+        let items = parsed.as_array().expect("list shape remains an array");
+        assert_eq!(items.len(), 100, "pagination item count must be preserved");
+        assert_eq!(items[0]["full_name"], "nearai/repo-0");
+        assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+        assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+        assert_eq!(
+            items[0]["permissions"],
+            json!({"admin": false, "push": true, "pull": true})
+        );
+        assert!(
+            items[0].get("archive_url").is_none()
+                && items[0]["owner"].get("avatar_url").is_none()
+                && items[0].get("_links").is_none(),
+            "provider-only detail must remain available through github.get_repo"
+        );
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/user/repos?per_page=100&type=all&page=2"
+        );
+    }
+
+    #[test]
+    fn search_repositories_compacts_items_and_preserves_envelope() {
+        let large_detail = "x".repeat(4 * 1024);
+        let provider_items = (0..100)
+            .map(|index| realistic_repository(index, &large_detail))
+            .collect::<Vec<_>>();
+        let provider_output = json!({
+            "total_count": 400,
+            "incomplete_results": false,
+            "items": provider_items,
+        })
+        .to_string();
+        assert!(provider_output.len() > 5 * 1024 * 1024);
+        let provider_output_len = provider_output.len();
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"query":"language:rust","page":3,"limit":100,"sort":"stars","order":"desc"}"#,
+            Some(r#"{"capability_id":"github.search_repositories"}"#),
+        )
+        .expect("github.search_repositories should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact repository results should stay model-useful, got {} bytes",
+            output.len()
+        );
+        assert!(
+            provider_output_len > output.len() * 10,
+            "repository search projection should reduce the provider payload by at least 10x"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository search should be JSON");
+        assert_eq!(parsed["total_count"], 400);
+        assert_eq!(parsed["incomplete_results"], false);
+        let items = parsed["items"]
+            .as_array()
+            .expect("search envelope keeps its items array");
+        assert_eq!(items.len(), 100, "pagination item count must be preserved");
+        assert_eq!(items[0]["full_name"], "nearai/repo-0");
+        assert!(items[0].get("archive_url").is_none());
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/search/repositories?q=language%3Arust&per_page=100&page=3&sort=stars&order=desc"
+        );
+    }
+
     #[test]
     fn list_repos_appends_type_for_authenticated_user() {
         test_support::set_response(Ok(json!([]).to_string()));

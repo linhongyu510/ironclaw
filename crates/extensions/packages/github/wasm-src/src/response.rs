@@ -35,6 +35,73 @@ pub(crate) fn compact_issue_search(response: String) -> Result<String, String> {
     serialize(&Value::Object(compact))
 }
 
+pub(crate) fn compact_repo_list(response: String) -> Result<String, String> {
+    let items: Vec<Value> =
+        serde_json::from_str(&response).map_err(|_| invalid_response_error())?;
+    validate_page_size(items.len())?;
+    let compact = items
+        .iter()
+        .map(compact_repository)
+        .collect::<Result<Vec<_>, _>>()?;
+    serialize(&compact)
+}
+
+pub(crate) fn compact_repository_search(response: String) -> Result<String, String> {
+    let response: Value = serde_json::from_str(&response).map_err(|_| invalid_response_error())?;
+    let object = response.as_object().ok_or_else(invalid_response_error)?;
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid_response_error)?;
+    validate_page_size(items.len())?;
+
+    let mut compact = copy_fields(object, &["total_count", "incomplete_results"]);
+    compact.insert(
+        "items".to_string(),
+        Value::Array(
+            items
+                .iter()
+                .map(compact_repository)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    );
+    serialize(&Value::Object(compact))
+}
+
+fn compact_repository(item: &Value) -> Result<Value, String> {
+    let item = item.as_object().ok_or_else(invalid_response_error)?;
+    let mut compact = copy_fields(
+        item,
+        &[
+            "id",
+            "node_id",
+            "name",
+            "full_name",
+            "private",
+            "fork",
+            "archived",
+            "visibility",
+            "html_url",
+            "description",
+            "language",
+            "default_branch",
+            "stargazers_count",
+            "open_issues_count",
+            "updated_at",
+            "pushed_at",
+        ],
+    );
+    copy_nullable_object(item, &mut compact, "owner", &["login"])?;
+    copy_nullable_object(item, &mut compact, "license", &["spdx_id"])?;
+    copy_object(
+        item,
+        &mut compact,
+        "permissions",
+        &["admin", "push", "pull"],
+    )?;
+    Ok(Value::Object(compact))
+}
+
 fn compact_pull_request(item: &Value) -> Result<Value, String> {
     let item = item.as_object().ok_or_else(invalid_response_error)?;
     let mut compact = copy_fields(
