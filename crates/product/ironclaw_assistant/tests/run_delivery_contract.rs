@@ -3515,6 +3515,16 @@ async fn triggered_project_scoped_fire_is_denied_without_delivery() {
 #[tokio::test]
 async fn pre_submit_failure_reaches_inbox_without_channel_delivery() {
     let inbox = notification_inbox();
+    let default_notifier = PreSubmitFailureInboxNotifier::new(
+        Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>
+    );
+    default_notifier
+        .on_trigger_submitted(triggered_request(TurnRunId::new(), false))
+        .await;
+    assert!(
+        inbox_records(inbox.as_ref()).await.notifications.is_empty(),
+        "the pre-submit notifier ignores accepted runs"
+    );
     let notifier = PreSubmitFailureInboxNotifier::with_publish_timeout(
         Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
         Duration::from_millis(20),

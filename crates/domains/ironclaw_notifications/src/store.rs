@@ -920,6 +920,28 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn malformed_snapshot_and_run_without_thread_are_rejected() {
+        let decode_error = decode_snapshot(b"{").expect_err("malformed snapshot is rejected");
+        assert!(matches!(
+            decode_error,
+            NotificationInboxError::Serialization { .. }
+        ));
+
+        let source = NotificationSource {
+            thread_id: None,
+            turn_run_id: Some(TurnRunId::new()),
+            lifecycle_ref: None,
+            credential_providers: Vec::new(),
+        };
+        let action_error = validate_notification_action(&source, &NotificationAction::None)
+            .expect_err("a run notification requires its canonical thread");
+        assert!(matches!(
+            action_error,
+            NotificationInboxError::InvalidRequest { .. }
+        ));
+    }
+
     /// Frozen copy of the pre-non-actionable schema-v1 reader. Record fields
     /// intentionally remain open to additive metadata, matching the shipped
     /// `NotificationRecord` serde contract.

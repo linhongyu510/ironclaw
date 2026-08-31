@@ -269,16 +269,15 @@ impl RunOutcomeProcessCommitObserver {
         }
     }
 
-    async fn resolve_run_authentication_required(
+    async fn resolve_open_run_notifications(
         &self,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
+        kind: NotificationKind,
         occurred_at: Timestamp,
     ) -> Result<(), String> {
-        // A Resumed process snapshot no longer carries the suspension's gate
-        // reference. Reconcile by the notification's stable run identity;
-        // the recipient Inbox is bounded, and paging preserves older or
-        // archived records that may have survived a transient write outage.
+        // Reconcile by the notification's stable run identity; paging preserves
+        // older or archived records that may have survived a transient outage.
         let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
             return Ok(());
         };
@@ -286,13 +285,14 @@ impl RunOutcomeProcessCommitObserver {
             tenant_id: snapshot.scope.tenant_id.clone(),
             user_id: owner_user_id,
         };
-        // A later auth gate can already be current by the time this older
-        // Resumed commit reaches the observer. Preserve that gate's stable
-        // record: actionable retries intentionally do not reopen records that
-        // were resolved by an earlier lifecycle transition.
-        let current_auth_gate_ref = match self.process_journal_source.as_deref() {
-            Some(source) => Self::current_auth_gate_ref(source, snapshot).await?,
-            None => None,
+        // A later auth gate can already be current by the time an older
+        // Resumed commit arrives. Only auth reconciliation preserves it;
+        // terminal approval reconciliation closes every open gate for the run.
+        let current_auth_gate_ref = match (kind, self.process_journal_source.as_deref()) {
+            (NotificationKind::AuthenticationRequired, Some(source)) => {
+                Self::current_auth_gate_ref(source, snapshot).await?
+            }
+            _ => None,
         };
         let mut cursor = None;
         loop {
@@ -305,9 +305,7 @@ impl RunOutcomeProcessCommitObserver {
                     include_archived: true,
                 })
                 .await
-                .map_err(|error| {
-                    format!("list auth notifications for resumed run failed: {error}")
-                })?;
+                .map_err(|error| format!("list {kind:?} notifications for run failed: {error}"))?;
             for notification in page.notifications {
                 let is_current_auth_gate = current_auth_gate_ref.as_ref().is_some_and(|gate_ref| {
                     notification
@@ -316,7 +314,7 @@ impl RunOutcomeProcessCommitObserver {
                         .as_ref()
                         .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == gate_ref.as_str())
                 });
-                if notification.kind == NotificationKind::AuthenticationRequired
+                if notification.kind == kind
                     && notification.source.turn_run_id == Some(run_id)
                     && notification.resolved_at.is_none()
                     && !is_current_auth_gate
@@ -329,7 +327,7 @@ impl RunOutcomeProcessCommitObserver {
                         })
                         .await
                         .map_err(|error| {
-                            format!("resolve auth notification for resumed run failed: {error}")
+                            format!("resolve {kind:?} notification for run failed: {error}")
                         })?;
                 }
             }
@@ -337,7 +335,9 @@ impl RunOutcomeProcessCommitObserver {
                 return Ok(());
             };
             if cursor.as_ref() == Some(&next_cursor) {
-                return Err("auth notification pagination cursor did not advance".to_string());
+                return Err(format!(
+                    "{kind:?} notification pagination cursor did not advance"
+                ));
             }
             cursor = Some(next_cursor);
         }
@@ -530,8 +530,13 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         if commit.kind == ProcessJournalKind::Resumed
             && metadata.resume_disposition != Some(GateResumeDisposition::Denied)
         {
-            self.resolve_run_authentication_required(&commit.state, run_id, occurred_at)
-                .await?;
+            self.resolve_open_run_notifications(
+                &commit.state,
+                run_id,
+                NotificationKind::AuthenticationRequired,
+                occurred_at,
+            )
+            .await?;
         }
         if commit.kind == ProcessJournalKind::Suspended
             && commit.state.status == ProcessLifecycleStatus::Suspended
@@ -553,6 +558,13 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
             return Ok(());
         }
         if commit.state.status.is_terminal() {
+            self.resolve_open_run_notifications(
+                &commit.state,
+                run_id,
+                NotificationKind::ApprovalRequired,
+                occurred_at,
+            )
+            .await?;
             self.resolve_timed_out_block(&commit.state, run_id, occurred_at)
                 .await?;
         }
@@ -1895,11 +1907,10 @@ mod tests {
         );
     }
 
-    /// A timed-out fire publishes an actionable block and the delivery watcher
-    /// then returns, so nothing else ever observes that run again. Only a
-    /// terminal fact can retire the record.
+    /// A terminal process fact retires actionable records left behind by a
+    /// delivery watcher that returned before observing the final transition.
     #[tokio::test]
-    async fn a_terminal_run_resolves_the_block_left_behind_by_a_delivery_timeout() {
+    async fn a_terminal_run_resolves_stale_actionable_notifications() {
         for status in [
             ProcessLifecycleStatus::Completed,
             ProcessLifecycleStatus::Failed,
@@ -1951,6 +1962,34 @@ mod tests {
                 })
                 .await
                 .expect("seed the timed-out block");
+            inbox
+                .publish(PublishNotificationRequest {
+                    id: crate::run_delivery::run_notification_inbox_id(
+                        run_id,
+                        NotificationKind::ApprovalRequired,
+                        Some("gate:terminal-reconciliation"),
+                    )
+                    .expect("approval notification id"),
+                    recipient: recipient.clone(),
+                    kind: NotificationKind::ApprovalRequired,
+                    severity: NotificationSeverity::Warning,
+                    source: NotificationSource {
+                        thread_id: Some(thread()),
+                        turn_run_id: Some(run_id),
+                        lifecycle_ref: Some(
+                            LifecycleRef::new("gate:terminal-reconciliation")
+                                .expect("approval lifecycle ref"),
+                        ),
+                        credential_providers: Vec::new(),
+                    },
+                    action: NotificationAction::OpenThread {
+                        thread_id: thread(),
+                    },
+                    initial_state: NotificationInitialState::Open,
+                    occurred_at: Utc::now(),
+                })
+                .await
+                .expect("seed the stale approval notification");
 
             if status == ProcessLifecycleStatus::Completed {
                 threads
@@ -1995,6 +2034,15 @@ mod tests {
             assert!(
                 block.resolved_at.is_some(),
                 "{status:?} must retire the block a delivery timeout left open",
+            );
+            let approval = page
+                .notifications
+                .iter()
+                .find(|record| record.kind == NotificationKind::ApprovalRequired)
+                .expect("the approval record survives");
+            assert!(
+                approval.resolved_at.is_some(),
+                "{status:?} must retire an approval left open by a delivery watcher",
             );
         }
     }
