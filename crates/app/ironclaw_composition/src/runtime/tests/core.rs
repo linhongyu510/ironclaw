@@ -6342,6 +6342,215 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
         .expect("reopened runtime shuts down");
 }
 
+#[tokio::test]
+async fn runtime_replay_resolves_historical_terminal_approval_notification() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let gateway: Arc<dyn HostManagedModelGateway> = Arc::new(RecordingGateway {
+        reply: "historical approval replay".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let runtime_input = || {
+        RebornRuntimeInput::from_build_input(
+            crate::deployment::local_filesystem_build_input(
+                "runtime-approval-replay-owner",
+                storage_root.clone(),
+            )
+            .with_runtime_policy(standalone_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-approval-replay-tenant".to_string(),
+            agent_id: "runtime-approval-replay-agent".to_string(),
+            source_binding_id: "runtime-approval-replay-source".to_string(),
+            reply_target_binding_id: "runtime-approval-replay-reply".to_string(),
+        })
+        .with_model_gateway_override(Arc::clone(&gateway))
+    };
+    let seed_runtime = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("seed runtime build does not time out")
+    .expect("seed runtime builds");
+    let filesystem = Arc::clone(&seed_runtime.extension_filesystem);
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, seed_runtime.shutdown())
+        .await
+        .expect("seed runtime shutdown does not time out")
+        .expect("seed runtime shuts down");
+
+    let tenant_id = TenantId::new("runtime-approval-replay-tenant").expect("tenant");
+    let user_id = UserId::new("runtime-approval-replay-owner").expect("user");
+    let agent_id = AgentId::new("runtime-approval-replay-agent").expect("agent");
+    let thread_id = ThreadId::new("runtime-approval-replay-thread").expect("thread");
+    let run_id = TurnRunId::new();
+    let recipient = ironclaw_notifications::NotificationRecipient {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+    };
+    #[allow(clippy::disallowed_methods)]
+    let seeded_inbox = ironclaw_notifications::NotificationInboxStore::new(
+        crate::wrap_scoped(Arc::clone(&filesystem)),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    );
+    ironclaw_notifications::NotificationInboxStorePort::publish(
+        &seeded_inbox,
+        ironclaw_notifications::PublishNotificationRequest {
+            id: ironclaw_notifications::NotificationId::new("runtime-approval-replay-notification")
+                .expect("notification id"),
+            recipient: recipient.clone(),
+            kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
+            severity: ironclaw_notifications::NotificationSeverity::Warning,
+            source: ironclaw_notifications::NotificationSource {
+                thread_id: Some(thread_id.clone()),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(
+                    ironclaw_notifications::LifecycleRef::new("gate:runtime-approval-replay")
+                        .expect("approval lifecycle ref"),
+                ),
+                credential_providers: Vec::new(),
+            },
+            action: ironclaw_notifications::NotificationAction::OpenThread {
+                thread_id: thread_id.clone(),
+            },
+            initial_state: ironclaw_notifications::NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        },
+    )
+    .await
+    .expect("seed unresolved approval notification");
+
+    let process_store = ironclaw_processes::ProcessJournalStore::new(
+        crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
+    );
+    let process_id = ironclaw_host_api::ids::ProcessId::from_uuid(run_id.as_uuid());
+    let process_scope = ResourceScope {
+        tenant_id,
+        user_id: user_id.clone(),
+        agent_id: Some(agent_id),
+        project_id: None,
+        mission_id: None,
+        thread_id: Some(thread_id),
+        invocation_id: InvocationId::new(),
+    };
+    ironclaw_processes::ProcessSubmissionPort::submit_process(
+        &process_store,
+        ironclaw_processes::SubmitProcessRequest {
+            process_id,
+            process_kind: ironclaw_processes::ProcessKind::AgentTurn,
+            scope: process_scope.clone(),
+            exclusive_within_scope: true,
+            operation_id: None,
+            owner_user_id: Some(user_id),
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::json!({
+                "agent_turn": {
+                    "product_context": {
+                        "origin": "scheduled_trigger"
+                    }
+                }
+            }),
+        },
+    )
+    .await
+    .expect("seed historical process submission");
+    let claimed = ironclaw_processes::ProcessTransitionPort::claim_next_processes(
+        &process_store,
+        ironclaw_processes::ClaimProcessesRequest {
+            worker_id: ironclaw_processes::ProcessWorkerId::from_trusted(
+                "runtime-approval-replay-worker",
+            ),
+            scope_filter: Some(process_scope),
+            process_id_filter: Some(process_id),
+            process_kind_filter: Some(ironclaw_processes::ProcessKind::AgentTurn),
+            max_processes: 1,
+        },
+    )
+    .await
+    .expect("claim historical process")
+    .pop()
+    .expect("historical process is claimable");
+    ironclaw_processes::ProcessTransitionPort::fail_process(
+        &process_store,
+        ironclaw_processes::FailProcessRequest {
+            process_id,
+            worker_id: claimed.worker_id,
+            lease_token: claimed.lease_token,
+            failure: ironclaw_host_api::turn::SanitizedFailure::from_trusted_static(
+                "historical_runtime_failure",
+            ),
+            recovery: ironclaw_processes::ProcessFailureRecovery::Terminal,
+            checkpoint_ref: None,
+            metadata: None,
+        },
+    )
+    .await
+    .expect("seed historical terminal process commit");
+    let unresolved = ironclaw_notifications::NotificationInboxStorePort::list(
+        &seeded_inbox,
+        ironclaw_notifications::ListNotificationsRequest {
+            recipient: recipient.clone(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        },
+    )
+    .await
+    .expect("list seeded approval notification");
+    assert_eq!(unresolved.notifications.len(), 1);
+    assert!(unresolved.notifications[0].resolved_at.is_none());
+    drop(process_store);
+    drop(seeded_inbox);
+    drop(filesystem);
+
+    let replay_runtime = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("replay runtime build does not time out")
+    .expect("replay runtime builds");
+    tokio::time::timeout(RUNTIME_POLL_TIMEOUT, async {
+        loop {
+            let page = replay_runtime
+                .notification_inbox
+                .list(ironclaw_notifications::ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: 10,
+                    cursor: None,
+                    include_archived: true,
+                })
+                .await
+                .expect("list replayed approval notification");
+            if page
+                .notifications
+                .iter()
+                .find(|notification| {
+                    notification.kind == ironclaw_notifications::NotificationKind::ApprovalRequired
+                        && notification.source.turn_run_id == Some(run_id)
+                })
+                .is_some_and(|notification| notification.resolved_at.is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("composition replay resolves the historical approval notification");
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, replay_runtime.shutdown())
+        .await
+        .expect("replay runtime shutdown does not time out")
+        .expect("replay runtime shuts down");
+}
+
 async fn stream_product_events(
     api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
