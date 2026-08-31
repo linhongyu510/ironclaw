@@ -276,7 +276,7 @@ fn flatten_top_level(
         serde_json::Map::new()
     };
     for keyword in FORBIDDEN_TOP_LEVEL {
-        flattened.remove(*keyword);
+        drop(flattened.remove(*keyword));
     }
     flattened.insert("type".to_string(), JsonValue::String("object".to_string()));
     flattened.insert(
@@ -519,6 +519,7 @@ mod tests {
                 "mode": ["name"]
             },
             "minProperties": 2,
+            "additionalProperties": false,
             "allOf": [
                 {
                     "properties": {
@@ -550,7 +551,7 @@ mod tests {
         assert_eq!(result["$defs"]["identifier"]["minLength"], 1);
         assert_eq!(result["properties"]["limit"]["type"], "integer");
         assert_eq!(result["required"], serde_json::json!(["mode"]));
-        assert_eq!(result["additionalProperties"], true);
+        assert_eq!(result["additionalProperties"], false);
         assert!(description.contains("Upstream JSON schema"));
     }
 
@@ -564,12 +565,15 @@ mod tests {
             &mut description,
         );
 
+        let mut keys = result
+            .as_object()
+            .expect("strict schema")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
         assert_eq!(
-            result
-                .as_object()
-                .expect("strict schema")
-                .keys()
-                .collect::<Vec<_>>(),
+            keys,
             vec!["additionalProperties", "properties", "required", "type"]
         );
         assert_eq!(result["properties"]["mode"]["type"], "string");
