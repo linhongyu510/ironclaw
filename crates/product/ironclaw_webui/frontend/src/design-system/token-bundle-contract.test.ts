@@ -4,6 +4,7 @@ import {
   FORBIDDEN_PATTERNS,
   REQUIRED_PROPERTIES,
   REQUIRED_UTILITIES,
+  REQUIRED_UTILITY_SELECTORS,
   findContractViolations,
 } from "../../scripts/check-token-bundle";
 
@@ -20,7 +21,7 @@ import {
 function compliantCss(): string {
   const properties = REQUIRED_PROPERTIES.map((token) => `${token}: 1rem;`).join("\n");
   const utilities = REQUIRED_UTILITIES.map(
-    (selector) => `${selector} { border-radius: 1rem; }`
+    ({ selector, declares }) => `${selector} { ${declares}: 1rem; }`
   ).join("\n");
   return `:root{\n${properties}\n--v2-elevation-1: 0 0 #0000;\n}\n${utilities}`;
 }
@@ -73,9 +74,46 @@ describe("design-token bundle contract", () => {
   });
 
   it("accepts a base selector that appears inside a selector group", () => {
-    const css = `${compliantCss()}\n.other, .rounded-control, .third { color: red; }`
+    // Tailwind collapses identical declarations into one grouped rule, so a
+    // standalone member of a group is a perfectly real utility.
+    const css = `${compliantCss()}\n.other, .rounded-control, .third { border-radius: 1rem; }`
       .replace(".rounded-control { border-radius: 1rem; }", "");
     expect(findContractViolations(css).missingUtilities).toEqual([]);
+  });
+
+  // Three near-misses that all leave a component using the class unstyled.
+  // The gate must reject each: presence of the selector is not the contract,
+  // an effective rule is.
+  it("rejects an empty base rule", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".rounded-control {}"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("rejects a pseudo-state rule standing in for the base rule", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".rounded-control:hover { border-radius: 1rem; }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("rejects a descendant rule standing in for the base rule", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".rounded-control .child { border-radius: 1rem; }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("rejects a base rule that declares something other than the expected property", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".rounded-control { color: red; }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
   });
 
   it("requires the escaped md: variant, not just the base utility", () => {
@@ -104,12 +142,14 @@ describe("design-token bundle contract", () => {
   // reach `dist/` — a contract satisfiable by a comment would be no contract.
   it("does not accept tokens or utilities that appear only inside comments", () => {
     const properties = REQUIRED_PROPERTIES.map((token) => `${token}: 1rem;`).join("\n");
-    const utilities = REQUIRED_UTILITIES.map((s) => `${s} { border-radius: 1rem; }`).join("\n");
+    const utilities = REQUIRED_UTILITIES.map(
+      ({ selector, declares }) => `${selector} { ${declares}: 1rem; }`
+    ).join("\n");
     const commentedOut = `/* ${properties}\n${utilities} */\n:root{ --unrelated: 1px; }`;
 
     const { missingProperties, missingUtilities } = findContractViolations(commentedOut);
     expect(missingProperties).toEqual(REQUIRED_PROPERTIES);
-    expect(missingUtilities).toEqual(REQUIRED_UTILITIES);
+    expect(missingUtilities).toEqual(REQUIRED_UTILITY_SELECTORS);
   });
 
   it("still sees real declarations that merely sit next to a comment", () => {
@@ -126,5 +166,6 @@ describe("design-token bundle contract", () => {
     expect(FORBIDDEN_PATTERNS.length).toBeGreaterThan(0);
     expect(REQUIRED_PROPERTIES.length).toBeGreaterThan(0);
     expect(REQUIRED_UTILITIES.length).toBeGreaterThan(0);
+    expect(REQUIRED_UTILITIES.every((u) => u.declares.length > 0)).toBe(true);
   });
 });

@@ -90,11 +90,14 @@ export const REQUIRED_PROPERTIES = [
  * Written as they appear in the bundle — Tailwind escapes the `:` of a variant.
  */
 export const REQUIRED_UTILITIES = [
-  ".rounded-control",
-  ".rounded-control-sm",
-  ".rounded-control-xl",
-  ".md\\:rounded-control-lg",
+  { selector: ".rounded-control", declares: "border-radius" },
+  { selector: ".rounded-control-sm", declares: "border-radius" },
+  { selector: ".rounded-control-xl", declares: "border-radius" },
+  { selector: ".md\\:rounded-control-lg", declares: "border-radius" },
 ];
+
+/** Just the selectors — used for reporting and by the contract tests. */
+export const REQUIRED_UTILITY_SELECTORS = REQUIRED_UTILITIES.map(({ selector }) => selector);
 
 /** Declarations that must NOT appear — see `app.css` on why flat is `0 0 #0000`. */
 export const FORBIDDEN_PATTERNS = [
@@ -132,14 +135,25 @@ export function findContractViolations(rawCss: string): ContractViolations {
     // reference proves only that something asked for it, not that it exists.
     (token) => !new RegExp(`${escapeForRegExp(token)}\\s*:`).test(css)
   );
-  const missingUtilities = REQUIRED_UTILITIES.filter(
-    // Require a selector BOUNDARY, not a substring. `.rounded-control` is a
-    // prefix of `.rounded-control-sm`, so a plain `includes` would accept the
-    // longer utilities as proof the base one exists — and the base is the one
-    // Button's default size depends on. A real selector is followed by `{`,
-    // a `,` in a selector group, a descendant space, or a `:`/`::` state.
-    (selector) => !new RegExp(`${escapeForRegExp(selector)}(?=[{,\\s:])`).test(css)
-  );
+  const missingUtilities = REQUIRED_UTILITIES.filter(({ selector, declares }) => {
+    // The utility must exist as a STANDALONE rule that actually sets the
+    // property. Three near-misses all have to fail, because none of them
+    // restores the style a component asking for the class expects:
+    //   `.rounded-control:hover { … }`  — a state, not the base rule
+    //   `.rounded-control .child { … }` — a descendant, styling something else
+    //   `.rounded-control {}`           — present but empty
+    // And the boundary keeps the prefix guard: `.rounded-control-sm` must not
+    // count as proof of `.rounded-control`, since the base is what Button's
+    // default size resolves through.
+    //
+    // `[^{}]*` cannot cross a rule boundary, so the declaration found has to
+    // belong to this selector's own block. `(?=[{,])` admits a standalone
+    // member of a selector group (`.a, .rounded-control, .b { … }`).
+    const pattern = new RegExp(
+      `${escapeForRegExp(selector)}\\s*(?=[{,])[^{}]*\\{[^{}]*\\b${escapeForRegExp(declares)}\\s*:`
+    );
+    return !pattern.test(css);
+  }).map(({ selector }) => selector);
   const forbidden = FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(css)).map(
     ({ reason }) => reason
   );
@@ -185,8 +199,9 @@ function main(): void {
     console.error("Missing utility selectors:");
     for (const selector of missingUtilities) console.error(`  ${selector}`);
     console.error(
-      "\n  The token may exist while its utility does not. Components using the\n" +
-        "  class then render with no radius at all.\n"
+      "\n  The token may exist while its utility does not — or the rule exists\n" +
+        "  but is empty, or only a `:hover`/descendant variant survived. A\n" +
+        "  component using the class then renders with no radius at all.\n"
     );
   }
   if (forbidden.length > 0) {

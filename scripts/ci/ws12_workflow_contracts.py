@@ -1817,6 +1817,23 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
 
     # 1. Trusted-event gating.
     condition = _job_condition(body)
+    # Substring presence is not enough. `(push && main) || pull_request`
+    # contains both required markers and still runs the token-bearing publish
+    # on PR-authored code — the exact hole the trusted-event gate closes. The
+    # condition for a secret-bearing lane must be a pure conjunction: no
+    # alternate branch, and no mention of `pull_request` at all.
+    if "pull_request" in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} condition must not admit "
+            "pull_request events — the publish runs the checked-out tree's own "
+            "build script with CHROMATIC_PROJECT_TOKEN in scope"
+        )
+    if "||" in condition:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} condition must be a pure "
+            "conjunction — an `||` branch can re-admit untrusted events while "
+            "the required markers still appear"
+        )
     if "github.event_name == 'push'" not in condition:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "

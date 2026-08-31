@@ -3186,6 +3186,21 @@ class ChromaticVisualLane(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
 
+    def test_an_alternate_pull_request_disjunct_is_rejected(self) -> None:
+        """`(push && main) || pull_request` contains every marker the gate looks
+        for and still hands the token to PR-authored build code. Substring
+        presence is not the contract; the absence of an alternate branch is."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      (github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main') ||\n"
+            "      github.event_name == 'pull_request'",
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("must not admit" in error for error in errors), errors)
+        self.assertTrue(any("pure conjunction" in error for error in errors), errors)
+
     def test_dropping_the_main_branch_gate_is_rejected(self) -> None:
         mutated = self.sabotage(
             "      github.ref == 'refs/heads/main'", "      true"
