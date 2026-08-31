@@ -3292,6 +3292,31 @@ class ChromaticVisualLane(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("exact-version regex" in error for error in errors), errors)
 
+    def test_shell_comments_after_operators_cannot_satisfy_the_contract(self) -> None:
+        """Bash starts a comment right after a control operator, so
+        `true;# --exit-zero-on-changes` never executes. A stripper that only
+        honours whitespace-preceded `#` would accept it as evidence."""
+        for decoy in ("true;# --exit-zero-on-changes", "true&&# --exit-zero-on-changes"):
+            with self.subTest(decoy=decoy):
+                mutated = self.sabotage(
+                    "            --exit-zero-on-changes \\\n", f"            {decoy}\n"
+                )
+                errors = validate_workflow_texts(mutated, ROOT)
+                self.assertTrue(
+                    any("exit-zero-on-changes" in error for error in errors), errors
+                )
+
+    def test_a_literal_chromatic_spec_is_rejected(self) -> None:
+        """The runtime guard validates the VARIABLE. If `pnpm dlx` is then handed
+        a literal range the guard protects nothing, so the invocation has to
+        interpolate the validated variable."""
+        mutated = self.sabotage(
+            'pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}"',
+            'pnpm dlx "chromatic@^13.1.2"',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("the validated variable" in error for error in errors), errors)
+
     def test_a_comment_naming_exit_zero_cannot_satisfy_it(self) -> None:
         """The flag is named in the comment that explains it, one line above the
         command — so a comment-inclusive scan passes on a lane that stopped

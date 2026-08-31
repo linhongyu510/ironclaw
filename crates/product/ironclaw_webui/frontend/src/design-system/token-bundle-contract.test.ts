@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  FORBIDDEN_PATTERNS,
+  FORBIDDEN_DECLARATIONS,
   REQUIRED_PROPERTIES,
   REQUIRED_UTILITIES,
   REQUIRED_UTILITY_SELECTORS,
@@ -151,6 +151,27 @@ describe("design-token bundle contract", () => {
     expect(findContractViolations(css).missingUtilities).toEqual([]);
   });
 
+  // `content: "; border-radius: 1rem"` is ONE declaration whose property is
+  // `content`. Splitting on every `;` would invent a second one that appears
+  // to set border-radius.
+  it("does not accept a semicolon inside a quoted value as a declaration break", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      '.rounded-control { content: "; border-radius: 1rem" }'
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  // CSS nesting: the inner rule only applies under `.wrap`, so it is not the
+  // standalone utility a component asking for the bare class relies on.
+  it("rejects a rule nested inside another style rule", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      ".wrap { .rounded-control { border-radius: 1rem; } }"
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
   it("requires the escaped md: variant, not just the base utility", () => {
     const css = compliantCss().replace(".md\\:rounded-control-lg { border-radius: 1rem; }", "");
     expect(findContractViolations(css).missingUtilities).toEqual([".md\\:rounded-control-lg"]);
@@ -158,6 +179,16 @@ describe("design-token bundle contract", () => {
 
   // A `var(--token)` reference proves someone asked for the token, not that it
   // resolves. Counting references would make the gate pass on a broken bundle.
+  // A regex over raw text also matches `content: "--v2-radius-control:"`.
+  // Comparing parsed property names is what makes that impossible.
+  it("does not accept a custom property named inside a quoted value", () => {
+    const css = compliantCss().replace(
+      "--v2-radius-control: 1rem;",
+      'content: "--v2-radius-control: 1rem";'
+    );
+    expect(findContractViolations(css).missingProperties).toContain("--v2-radius-control");
+  });
+
   it("does not accept a var() reference as a declaration", () => {
     const css = compliantCss().replace(
       /--v2-accent-edge\s*:[^;]*;/,
@@ -198,7 +229,7 @@ describe("design-token bundle contract", () => {
   });
 
   it("keeps the forbidden list non-empty so the check cannot silently no-op", () => {
-    expect(FORBIDDEN_PATTERNS.length).toBeGreaterThan(0);
+    expect(FORBIDDEN_DECLARATIONS.length).toBeGreaterThan(0);
     expect(REQUIRED_PROPERTIES.length).toBeGreaterThan(0);
     expect(REQUIRED_UTILITIES.length).toBeGreaterThan(0);
     expect(REQUIRED_UTILITIES.every((u) => u.declares.length > 0)).toBe(true);

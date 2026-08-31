@@ -1766,8 +1766,10 @@ def _strip_inline_comment(line: str) -> str:
         if char in "\"'":
             quote = char
             continue
-        # YAML and shell both require whitespace before an inline comment.
-        if char == "#" and (index == 0 or line[index - 1].isspace()):
+        # A comment starts at a word boundary. YAML wants whitespace before
+        # `#`; Bash also starts one right after a control operator, so
+        # `true;# --exit-zero-on-changes` is a comment, not a command.
+        if char == "#" and (index == 0 or line[index - 1] in " \t;&|(" ):
             return line[:index]
     return line
 
@@ -1905,6 +1907,21 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
         )
     if "chromatic@latest" in publish:
         errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must not float on chromatic@latest")
+    # Bind the pin to the EXECUTABLE command. A guard that validates the
+    # variable is worthless if `pnpm dlx` is then handed a literal spec, so the
+    # invocation must interpolate the validated variable and nothing else.
+    dlx = re.search(r"pnpm dlx\s+\"?chromatic@([^\"\s]+)", publish)
+    if dlx is None:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must invoke chromatic through "
+            "`pnpm dlx \"chromatic@...\"`"
+        )
+    elif dlx.group(1) != "${CHROMATIC_CLI_VERSION}":
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must install "
+            "chromatic@${CHROMATIC_CLI_VERSION} — the validated variable, not the "
+            f"literal spec {dlx.group(1)!r}"
+        )
 
     # 4. A visual diff is information, not a build failure.
     # Check the COMMAND, not the prose: the flag is also named in the comment

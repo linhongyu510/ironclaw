@@ -99,20 +99,20 @@ export const REQUIRED_UTILITIES = [
 /** Just the selectors — used for reporting and by the contract tests. */
 export const REQUIRED_UTILITY_SELECTORS = REQUIRED_UTILITIES.map(({ selector }) => selector);
 
-/** Declarations that must NOT appear — see `app.css` on why flat is `0 0 #0000`. */
-export const FORBIDDEN_PATTERNS = [
+/**
+ * Declarations that must NOT appear — see `app.css` on why flat is `0 0 #0000`.
+ *
+ * Matched against PARSED declarations, so a quoted value mentioning `none`
+ * cannot trigger a false failure any more than it could satisfy a contract.
+ */
+export const FORBIDDEN_DECLARATIONS = [
   {
-    pattern: /--v2-elevation-\d\s*:\s*none/,
+    matches: ({ property, value }: Declaration) =>
+      /^--v2-elevation-\d$/.test(property) && value.trim() === "none",
     reason:
       "flat elevation must be `0 0 #0000`, never `none` — Tailwind composes box-shadow as a comma list where `none` is only legal alone, so `shadow-e1 ring-2` would silently lose its ring",
   },
 ];
-
-export interface ContractViolations {
-  missingProperties: string[];
-  missingUtilities: string[];
-  forbidden: string[];
-}
 
 /**
  * Strip `/* … *\/` spans so a comment can never stand in as evidence.
@@ -127,11 +127,22 @@ export function stripCssComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, " ");
 }
 
+export interface Declaration {
+  property: string;
+  value: string;
+}
+
 export interface StyleRule {
   /** The selector list, split into its members and trimmed. */
   selectors: string[];
-  /** Property names declared DIRECTLY in this rule's own block. */
-  properties: string[];
+  /** Declarations made DIRECTLY in this rule's own block. */
+  declarations: Declaration[];
+  /**
+   * True when this rule is nested inside another STYLE rule (CSS nesting), so
+   * its selector is scoped by a parent. `@media`/`@supports` nesting does not
+   * set this: a conditional group does not narrow the selector.
+   */
+  nestedUnderSelector: boolean;
 }
 
 /** Split on top-level commas only — `:is(a, b)` is one selector, not two. */
@@ -164,14 +175,48 @@ function splitSelectorList(prelude: string): string[] {
   return members;
 }
 
+/** Split a block into declaration chunks on SEMICOLONS OUTSIDE quotes.
+ *
+ * A naive `split(";")` lets `content: "; border-radius: 1rem"` masquerade as
+ * two declarations, the second of which appears to set `border-radius`. The
+ * whole point of this gate is that only real declarations count. */
+function splitDeclarations(flat: string): string[] {
+  const chunks: string[] = [];
+  let quote: string | null = null;
+  let depth = 0;
+  let current = "";
+  for (const ch of flat) {
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === ";" && depth === 0) {
+      chunks.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  chunks.push(current);
+  return chunks;
+}
+
 /**
- * Property names declared directly in a block.
+ * Declarations made directly in a block.
  *
  * Nested blocks are removed first, and each declaration is split at its FIRST
- * top-level `:` — so `content: "border-radius: 1rem"` yields `content`, not
- * `border-radius`. A quoted value can no longer masquerade as a declaration.
+ * top-level `:` — so `content: "border-radius: 1rem"` yields the property
+ * `content`, not `border-radius`. Quoted text is never a declaration.
  */
-function parseProperties(body: string): string[] {
+function parseDeclarations(body: string): Declaration[] {
   let flat = "";
   let depth = 0;
   for (const ch of body) {
@@ -179,8 +224,8 @@ function parseProperties(body: string): string[] {
     else if (ch === "}") depth--;
     else if (depth === 0) flat += ch;
   }
-  const properties: string[] = [];
-  for (const chunk of flat.split(";")) {
+  const declarations: Declaration[] = [];
+  for (const chunk of splitDeclarations(flat)) {
     let quote: string | null = null;
     let depthInner = 0;
     for (let i = 0; i < chunk.length; i++) {
@@ -193,12 +238,13 @@ function parseProperties(body: string): string[] {
       if (ch === "(") depthInner++;
       else if (ch === ")") depthInner--;
       else if (ch === ":" && depthInner === 0) {
-        properties.push(chunk.slice(0, i).trim());
+        const property = chunk.slice(0, i).trim();
+        if (property) declarations.push({ property, value: chunk.slice(i + 1).trim() });
         break;
       }
     }
   }
-  return properties.filter(Boolean);
+  return declarations;
 }
 
 /**
@@ -206,14 +252,14 @@ function parseProperties(body: string): string[] {
  * `@supports`, `@layer`) and CSS nesting.
  *
  * Parsing rather than pattern-matching is the point. A regex over raw text
- * cannot tell `.rounded-control{…}` from `.wrap .rounded-control{…}` or
- * `.other.rounded-control{…}` without re-implementing selector grammar badly —
- * and each of those styles something other than the bare utility a component
- * asking for the class relies on.
+ * cannot tell `.rounded-control{…}` from `.wrap .rounded-control{…}`,
+ * `.other.rounded-control{…}` or `.wrap { .rounded-control{…} }` without
+ * re-implementing selector grammar badly — and each of those styles something
+ * other than the bare utility a component asking for the class relies on.
  */
 export function parseStyleRules(css: string): StyleRule[] {
   const rules: StyleRule[] = [];
-  const walk = (text: string): void => {
+  const walk = (text: string, nestedUnderSelector: boolean): void => {
     let prelude = "";
     let i = 0;
     while (i < text.length) {
@@ -229,10 +275,17 @@ export function parseStyleRules(css: string): StyleRule[] {
         const body = text.slice(i + 1, Math.max(i + 1, j - 1));
         const head = prelude.trim();
         if (head.startsWith("@")) {
-          walk(body); // conditional group rule — its children are the real rules
+          // A conditional group rule does not narrow the selector, so its
+          // children keep whatever nesting context we already had.
+          walk(body, nestedUnderSelector);
         } else if (head) {
-          rules.push({ selectors: splitSelectorList(head), properties: parseProperties(body) });
-          walk(body); // CSS nesting
+          rules.push({
+            selectors: splitSelectorList(head),
+            declarations: parseDeclarations(body),
+            nestedUnderSelector,
+          });
+          // Anything inside a style rule IS scoped by that rule's selector.
+          walk(body, true);
         }
         prelude = "";
         i = j;
@@ -247,7 +300,7 @@ export function parseStyleRules(css: string): StyleRule[] {
       i++;
     }
   };
-  walk(css);
+  walk(css, false);
   return rules;
 }
 
@@ -259,35 +312,38 @@ export interface ContractViolations {
 
 /** @param rawCss concatenated text of every emitted stylesheet */
 export function findContractViolations(rawCss: string): ContractViolations {
-  const css = stripCssComments(rawCss);
-  const rules = parseStyleRules(css);
+  const rules = parseStyleRules(stripCssComments(rawCss));
+  const allDeclarations = rules.flatMap((rule) => rule.declarations);
 
+  // Compare PARSED property names. A regex over raw text also matches
+  // `content: "--v2-radius-control:"`, letting a quoted value satisfy the
+  // contract — and a `var(--token)` reference proves only that something asked
+  // for the token, not that it is declared anywhere.
+  const declaredProperties = new Set(allDeclarations.map(({ property }) => property));
   const missingProperties = REQUIRED_PROPERTIES.filter(
-    // Match a declaration (`--token:`), not a `var(--token)` reference — a
-    // reference proves only that something asked for it, not that it exists.
-    (token) => !new RegExp(`${escapeForRegExp(token)}\\s*:`).test(css)
+    (token) => !declaredProperties.has(token)
   );
 
-  // A utility counts only when some rule lists it as an EXACT member of its
-  // selector list and that rule's own block declares the property the utility
-  // exists to set. Everything that merely contains the class name is excluded
-  // by construction: `.wrap .rounded-control`, `.other.rounded-control`,
-  // `.rounded-control:hover`, `.rounded-control-sm`, and an empty block.
+  // A utility counts only when some STANDALONE rule lists it as an exact
+  // selector-list member and that rule's own block declares the property the
+  // utility exists to set. Excluded by construction: `.wrap .rounded-control`,
+  // `.other.rounded-control`, `.rounded-control:hover`, `.rounded-control-sm`,
+  // `.wrap { .rounded-control { … } }`, and an empty block.
   const missingUtilities = REQUIRED_UTILITIES.filter(
     ({ selector, declares }) =>
       !rules.some(
-        (rule) => rule.selectors.includes(selector) && rule.properties.includes(declares)
+        (rule) =>
+          !rule.nestedUnderSelector &&
+          rule.selectors.includes(selector) &&
+          rule.declarations.some(({ property }) => property === declares)
       )
   ).map(({ selector }) => selector);
 
-  const forbidden = FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(css)).map(
-    ({ reason }) => reason
-  );
-  return { missingProperties, missingUtilities, forbidden };
-}
+  const forbidden = FORBIDDEN_DECLARATIONS.filter(({ matches }) =>
+    allDeclarations.some(matches)
+  ).map(({ reason }) => reason);
 
-function escapeForRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { missingProperties, missingUtilities, forbidden };
 }
 
 export function readBundledCss(assetsDir: string): string {
