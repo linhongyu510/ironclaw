@@ -1870,6 +1870,15 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass --exit-zero-on-changes"
         )
+    # `main` is the only branch that publishes now, so it is the only place the
+    # accepted baseline can advance. Drop this flag and every later build diffs
+    # against a baseline frozen at whenever it was last accepted by hand.
+    if "--auto-accept-changes main" not in publish:
+        errors.append(
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass "
+            "--auto-accept-changes main — it is the only lane that advances the "
+            "accepted Chromatic baseline"
+        )
 
     # 5. Non-blocking: absent from the roll-up's needs list.
     rollup = job_body(text, ROLLUP_JOB)

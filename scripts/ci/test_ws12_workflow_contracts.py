@@ -3269,6 +3269,16 @@ class ChromaticVisualLane(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("exit-zero-on-changes" in error for error in errors), errors)
 
+    def test_dropping_the_accepted_baseline_flag_is_rejected(self) -> None:
+        """`main` is now the only branch that publishes, so it is the only place
+        the accepted baseline can advance. Without this flag every later build
+        diffs against a baseline frozen at the last manual acceptance."""
+        mutated = self.sabotage("            --auto-accept-changes main\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(
+            any("advances the accepted Chromatic baseline" in error for error in errors), errors
+        )
+
     def test_a_decoy_in_another_step_cannot_satisfy_the_publish_step(self) -> None:
         """Publish-step contracts must read the publish step. Deleting it while
         another step carries the same markers must still fail."""

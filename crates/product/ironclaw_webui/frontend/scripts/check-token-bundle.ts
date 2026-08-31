@@ -133,7 +133,12 @@ export function findContractViolations(rawCss: string): ContractViolations {
     (token) => !new RegExp(`${escapeForRegExp(token)}\\s*:`).test(css)
   );
   const missingUtilities = REQUIRED_UTILITIES.filter(
-    (selector) => !css.includes(selector)
+    // Require a selector BOUNDARY, not a substring. `.rounded-control` is a
+    // prefix of `.rounded-control-sm`, so a plain `includes` would accept the
+    // longer utilities as proof the base one exists — and the base is the one
+    // Button's default size depends on. A real selector is followed by `{`,
+    // a `,` in a selector group, a descendant space, or a `:`/`::` state.
+    (selector) => !new RegExp(`${escapeForRegExp(selector)}(?=[{,\\s:])`).test(css)
   );
   const forbidden = FORBIDDEN_PATTERNS.filter(({ pattern }) => pattern.test(css)).map(
     ({ reason }) => reason

@@ -63,6 +63,21 @@ describe("design-token bundle contract", () => {
     expect(missingUtilities).toEqual([".rounded-control-sm"]);
   });
 
+  // `.rounded-control` is a prefix of `.rounded-control-sm`, so substring
+  // matching would accept the longer utilities as proof the base one exists.
+  // The base is what Button's default size depends on.
+  it("does not accept a longer utility as proof the base selector exists", () => {
+    const css = compliantCss().replace(".rounded-control { border-radius: 1rem; }", "");
+    const { missingUtilities } = findContractViolations(css);
+    expect(missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("accepts a base selector that appears inside a selector group", () => {
+    const css = `${compliantCss()}\n.other, .rounded-control, .third { color: red; }`
+      .replace(".rounded-control { border-radius: 1rem; }", "");
+    expect(findContractViolations(css).missingUtilities).toEqual([]);
+  });
+
   it("requires the escaped md: variant, not just the base utility", () => {
     const css = compliantCss().replace(".md\\:rounded-control-lg { border-radius: 1rem; }", "");
     expect(findContractViolations(css).missingUtilities).toEqual([".md\\:rounded-control-lg"]);

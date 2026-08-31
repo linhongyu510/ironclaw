@@ -387,8 +387,10 @@ jobs:
   # reasons that are purely visual, and a diff of Tailwind class strings tells a
   # reviewer nothing about what the screen now looks like. `build-storybook`
   # above proves the catalog still COMPILES; nothing yet proves it still LOOKS
-  # right. This job publishes the built catalog to Chromatic so every PR carries
-  # a rendered diff of the stories it moved.
+  # right. This job publishes the built catalog to Chromatic from `main`, so the
+  # design system accumulates an accepted visual baseline and a rendered history
+  # of what each merge changed. It does NOT diff pull requests — see the
+  # SECURITY note below for why, and what it would take to add that back.
   #
   # Deliberately absent from the `code-style` roll-up `needs:` list below: this
   # is the optional, non-blocking lane #7782 WS6 asks for, promoted to a
