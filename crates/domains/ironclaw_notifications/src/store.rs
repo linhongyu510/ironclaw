@@ -921,12 +921,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn malformed_snapshot_and_run_without_thread_are_rejected() {
+    fn malformed_snapshot_is_rejected() {
         let decode_error = decode_snapshot(b"{").expect_err("malformed snapshot is rejected");
         assert!(matches!(
             decode_error,
             NotificationInboxError::Serialization { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_run_without_thread_before_persistence() {
+        let recipient = NotificationRecipient {
+            tenant_id: TenantId::new("notification-validation-tenant").expect("tenant"),
+            user_id: UserId::new("notification-validation-user").expect("user"),
+        };
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/notification-validation")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        let store = NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            NOTIFICATION_INBOX_MAX_RECORDS,
+        );
 
         let source = NotificationSource {
             thread_id: None,
@@ -934,12 +956,33 @@ mod tests {
             lifecycle_ref: None,
             credential_providers: Vec::new(),
         };
-        let action_error = validate_notification_action(&source, &NotificationAction::None)
+        let action_error = store
+            .publish(PublishNotificationRequest {
+                id: NotificationId::new("run-without-thread").expect("notification id"),
+                recipient: recipient.clone(),
+                kind: NotificationKind::RunFailed,
+                severity: NotificationSeverity::Error,
+                source,
+                action: NotificationAction::None,
+                initial_state: crate::NotificationInitialState::Resolved,
+                occurred_at: Utc::now(),
+            })
+            .await
             .expect_err("a run notification requires its canonical thread");
         assert!(matches!(
             action_error,
             NotificationInboxError::InvalidRequest { .. }
         ));
+        let page = store
+            .list(ListNotificationsRequest {
+                recipient,
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after rejected publish");
+        assert!(page.notifications.is_empty());
     }
 
     /// Frozen copy of the pre-non-actionable schema-v1 reader. Record fields

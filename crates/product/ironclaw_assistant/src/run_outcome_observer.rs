@@ -319,16 +319,22 @@ impl RunOutcomeProcessCommitObserver {
                     && notification.resolved_at.is_none()
                     && !is_current_auth_gate
                 {
-                    self.inbox
+                    match self
+                        .inbox
                         .resolve(NotificationMutationRequest {
                             recipient: recipient.clone(),
                             notification_id: notification.id,
                             occurred_at,
                         })
                         .await
-                        .map_err(|error| {
-                            format!("resolve {kind:?} notification for run failed: {error}")
-                        })?;
+                    {
+                        Ok(_) | Err(NotificationInboxError::NotificationNotFound) => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "resolve {kind:?} notification for run failed: {error}"
+                            ));
+                        }
+                    }
                 }
             }
             let Some(next_cursor) = page.next_cursor else {
@@ -1062,6 +1068,13 @@ mod tests {
     struct FailFirstResolveInbox {
         inner: Arc<dyn NotificationInboxStorePort>,
         fail_next_resolve: AtomicBool,
+        failure: FirstResolveFailure,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FirstResolveFailure {
+        Backend,
+        NotFoundAfterResolve,
     }
 
     impl FailFirstResolveInbox {
@@ -1069,6 +1082,15 @@ mod tests {
             Self {
                 inner,
                 fail_next_resolve: AtomicBool::new(true),
+                failure: FirstResolveFailure::Backend,
+            }
+        }
+
+        fn not_found_after_resolve(inner: Arc<dyn NotificationInboxStorePort>) -> Self {
+            Self {
+                inner,
+                fail_next_resolve: AtomicBool::new(true),
+                failure: FirstResolveFailure::NotFoundAfterResolve,
             }
         }
     }
@@ -1108,9 +1130,15 @@ mod tests {
             request: NotificationMutationRequest,
         ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
             if self.fail_next_resolve.swap(false, Ordering::SeqCst) {
-                return Err(NotificationInboxError::Backend {
-                    reason: "injected post-publish compensation failure".to_string(),
-                });
+                return match self.failure {
+                    FirstResolveFailure::Backend => Err(NotificationInboxError::Backend {
+                        reason: "injected post-publish compensation failure".to_string(),
+                    }),
+                    FirstResolveFailure::NotFoundAfterResolve => {
+                        self.inner.resolve(request).await?;
+                        Err(NotificationInboxError::NotificationNotFound)
+                    }
+                };
             }
             self.inner.resolve(request).await
         }
@@ -2003,8 +2031,16 @@ mod tests {
                     .expect("completed run final reply");
             }
 
+            let observer_inbox: Arc<dyn NotificationInboxStorePort> =
+                if status == ProcessLifecycleStatus::Completed {
+                    Arc::new(FailFirstResolveInbox::not_found_after_resolve(
+                        Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+                    ))
+                } else {
+                    Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>
+                };
             let observer = RunOutcomeProcessCommitObserver::new(
-                Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+                observer_inbox,
                 Arc::clone(&threads) as Arc<dyn SessionThreadService>,
             );
             observer

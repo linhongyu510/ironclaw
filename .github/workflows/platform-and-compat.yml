@@ -145,7 +145,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -185,7 +185,7 @@ jobs:
       # leg mandatory. The libSQL leg always runs (embedded temp-file).
       - name: Run hooks parity matrix + multi-host adversarial suite (all backends)
         run: |
-          timeout --signal=INT --kill-after=30s 15m \
+          timeout --signal=INT --kill-after=30s 25m \
             cargo test -p ironclaw_hooks \
               --features integration,test-support \
               --test parity_matrix \

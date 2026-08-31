@@ -46,6 +46,7 @@ from ws12_workflow_contracts import (  # noqa: E402
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
+    validate_hooks_parity_timeout,
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
     validate_production_lint_targets,
@@ -1146,6 +1147,19 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
     def test_checked_in_workflows_cover_every_lane(self) -> None:
         self.assertEqual(validate_workflow_texts(self.workflows), [])
+
+    def test_hooks_parity_timeout_cannot_return_to_the_failing_budget(self) -> None:
+        workflow = self.workflows[PLATFORM_WORKFLOW]
+        self.assertEqual(validate_hooks_parity_timeout(workflow), [])
+
+        for old, new in (
+            ("timeout-minutes: 30", "timeout-minutes: 20"),
+            ("25m \\", "15m \\"),
+        ):
+            with self.subTest(timeout=old):
+                sabotaged = workflow.replace(old, new, 1)
+                self.assertNotEqual(sabotaged, workflow)
+                self.assertTrue(validate_hooks_parity_timeout(sabotaged))
 
     def test_removing_each_lane_marker_fails_loudly(self) -> None:
         for path, markers in REQUIRED_MARKERS.items():
