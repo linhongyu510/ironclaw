@@ -1748,6 +1748,35 @@ def validate_crate_name_residue(
     return errors
 
 
+def _continued_commands(body: str, executable: str) -> list[str]:
+    """Every command in a shell block that STARTS with `executable`, with
+    backslash continuations joined.
+
+    Matching the step's raw text would accept
+    `echo 'pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}" --exit-zero-on-changes'`
+    as the real invocation while a later line floats the version — the decoy
+    class this module keeps re-learning, one layer in.
+    """
+    commands: list[str] = []
+    current: list[str] | None = None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if current is not None:
+            current.append(line.rstrip("\\").strip())
+            if not line.endswith("\\"):
+                commands.append(" ".join(current))
+                current = None
+            continue
+        if line.startswith(executable):
+            current = [line.rstrip("\\").strip()]
+            if not line.endswith("\\"):
+                commands.append(" ".join(current))
+                current = None
+    if current is not None:
+        commands.append(" ".join(current))
+    return commands
+
+
 def _strip_inline_comment(line: str) -> str:
     """Drop a trailing YAML/shell comment, respecting quotes.
 
@@ -1907,34 +1936,46 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
         )
     if "chromatic@latest" in publish:
         errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must not float on chromatic@latest")
-    # Bind the pin to the EXECUTABLE command. A guard that validates the
-    # variable is worthless if `pnpm dlx` is then handed a literal spec, so the
-    # invocation must interpolate the validated variable and nothing else.
-    dlx = re.search(r"pnpm dlx\s+\"?chromatic@([^\"\s]+)", publish)
-    if dlx is None:
+    # Bind the pin to the EXECUTABLE command. Two ways this goes wrong: a guard
+    # that validates the variable is worthless if `pnpm dlx` is handed a literal
+    # spec anyway, and searching the step's text would match a `pnpm dlx …`
+    # string sitting inside an `echo` while the real command floats. So the
+    # command is extracted as a command — a line that STARTS with `pnpm dlx`,
+    # continuations joined — and every publish flag is checked on that alone.
+    dlx_commands = _continued_commands(publish, "pnpm dlx")
+    if len(dlx_commands) != 1:
         errors.append(
-            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must invoke chromatic through "
-            "`pnpm dlx \"chromatic@...\"`"
+            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must run exactly one "
+            f"`pnpm dlx` command (found {len(dlx_commands)})"
         )
-    elif dlx.group(1) != "${CHROMATIC_CLI_VERSION}":
-        errors.append(
-            f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must install "
-            "chromatic@${CHROMATIC_CLI_VERSION} — the validated variable, not the "
-            f"literal spec {dlx.group(1)!r}"
-        )
+        publish_command = ""
+    else:
+        publish_command = dlx_commands[0]
+        spec = re.search(r"pnpm dlx\s+\"?chromatic@([^\"\s]+)", publish_command)
+        if spec is None:
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must invoke chromatic through "
+                "`pnpm dlx \"chromatic@...\"`"
+            )
+        elif spec.group(1) != "${CHROMATIC_CLI_VERSION}":
+            errors.append(
+                f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must install "
+                "chromatic@${CHROMATIC_CLI_VERSION} — the validated variable, not the "
+                f"literal spec {spec.group(1)!r}"
+            )
 
     # 4. A visual diff is information, not a build failure.
     # Check the COMMAND, not the prose: the flag is also named in the comment
     # explaining it, so a comment-inclusive scan would pass on a lane that had
     # stopped passing the flag.
-    if "--exit-zero-on-changes" not in publish:
+    if "--exit-zero-on-changes" not in publish_command:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass --exit-zero-on-changes"
         )
     # `main` is the only branch that publishes now, so it is the only place the
     # accepted baseline can advance. Drop this flag and every later build diffs
     # against a baseline frozen at whenever it was last accepted by hand.
-    if "--auto-accept-changes main" not in publish:
+    if "--auto-accept-changes main" not in publish_command:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass "
             "--auto-accept-changes main — it is the only lane that advances the "

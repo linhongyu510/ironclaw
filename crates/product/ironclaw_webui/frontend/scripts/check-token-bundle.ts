@@ -145,67 +145,79 @@ export interface StyleRule {
   nestedUnderSelector: boolean;
 }
 
+/**
+ * Walk CSS text, reporting only the characters that are STRUCTURE.
+ *
+ * A structural scanner that ignores strings and escapes is not parsing CSS, it
+ * is guessing at it: `content: "x\\"; border-radius: 1rem"` is one declaration
+ * whose value happens to contain a quote and a semicolon, and `content: "{"`
+ * does not open a block. Every scanner below shares this walk so none of them
+ * can drift from the others.
+ */
+function* scanStructure(text: string): Generator<{ char: string; index: number }> {
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    yield { char, index };
+  }
+}
+
 /** Split on top-level commas only — `:is(a, b)` is one selector, not two. */
 function splitSelectorList(prelude: string): string[] {
-  const members: string[] = [];
+  const cuts: number[] = [];
   let depth = 0;
-  let quote: string | null = null;
-  let current = "";
-  for (const ch of prelude) {
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "(" || ch === "[") depth++;
-    if (ch === ")" || ch === "]") depth--;
-    if (ch === "," && depth === 0) {
-      members.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += ch;
+  for (const { char, index } of scanStructure(prelude)) {
+    if (char === "(" || char === "[") depth++;
+    else if (char === ")" || char === "]") depth--;
+    else if (char === "," && depth === 0) cuts.push(index);
   }
-  if (current.trim()) members.push(current.trim());
+  const members: string[] = [];
+  let from = 0;
+  for (const cut of [...cuts, prelude.length]) {
+    const member = prelude.slice(from, cut).trim();
+    if (member) members.push(member);
+    from = cut + 1;
+  }
   return members;
 }
 
-/** Split a block into declaration chunks on SEMICOLONS OUTSIDE quotes.
+/**
+ * Split a block into declaration chunks on structural semicolons.
  *
  * A naive `split(";")` lets `content: "; border-radius: 1rem"` masquerade as
- * two declarations, the second of which appears to set `border-radius`. The
- * whole point of this gate is that only real declarations count. */
+ * two declarations, the second of which appears to set `border-radius`.
+ */
 function splitDeclarations(flat: string): string[] {
-  const chunks: string[] = [];
-  let quote: string | null = null;
+  const cuts: number[] = [];
   let depth = 0;
-  let current = "";
-  for (const ch of flat) {
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "(") depth++;
-    if (ch === ")") depth--;
-    if (ch === ";" && depth === 0) {
-      chunks.push(current);
-      current = "";
-      continue;
-    }
-    current += ch;
+  for (const { char, index } of scanStructure(flat)) {
+    if (char === "(") depth++;
+    else if (char === ")") depth--;
+    else if (char === ";" && depth === 0) cuts.push(index);
   }
-  chunks.push(current);
+  const chunks: string[] = [];
+  let from = 0;
+  for (const cut of [...cuts, flat.length]) {
+    chunks.push(flat.slice(from, cut));
+    from = cut + 1;
+  }
   return chunks;
 }
 
@@ -213,36 +225,42 @@ function splitDeclarations(flat: string): string[] {
  * Declarations made directly in a block.
  *
  * Nested blocks are removed first, and each declaration is split at its FIRST
- * top-level `:` — so `content: "border-radius: 1rem"` yields the property
- * `content`, not `border-radius`. Quoted text is never a declaration.
+ * structural `:` — so `content: "border-radius: 1rem"` yields the property
+ * `content`. Quoted text is never a declaration.
  */
 function parseDeclarations(body: string): Declaration[] {
+  // Strip nested blocks using structural braces only, so a `{` inside a string
+  // cannot swallow the rest of the block.
   let flat = "";
   let depth = 0;
-  for (const ch of body) {
-    if (ch === "{") depth++;
-    else if (ch === "}") depth--;
-    else if (depth === 0) flat += ch;
+  let cursor = 0;
+  for (const { char, index } of scanStructure(body)) {
+    if (char !== "{" && char !== "}") continue;
+    if (char === "{") {
+      if (depth === 0) flat += body.slice(cursor, index);
+      depth++;
+    } else {
+      depth--;
+      if (depth === 0) cursor = index + 1;
+    }
   }
+  if (depth === 0) flat += body.slice(cursor);
+
   const declarations: Declaration[] = [];
   for (const chunk of splitDeclarations(flat)) {
-    let quote: string | null = null;
     let depthInner = 0;
-    for (let i = 0; i < chunk.length; i++) {
-      const ch = chunk[i];
-      if (quote) {
-        if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'") { quote = ch; continue; }
-      if (ch === "(") depthInner++;
-      else if (ch === ")") depthInner--;
-      else if (ch === ":" && depthInner === 0) {
-        const property = chunk.slice(0, i).trim();
-        if (property) declarations.push({ property, value: chunk.slice(i + 1).trim() });
+    let split = -1;
+    for (const { char, index } of scanStructure(chunk)) {
+      if (char === "(") depthInner++;
+      else if (char === ")") depthInner--;
+      else if (char === ":" && depthInner === 0) {
+        split = index;
         break;
       }
     }
+    if (split === -1) continue;
+    const property = chunk.slice(0, split).trim();
+    if (property) declarations.push({ property, value: chunk.slice(split + 1).trim() });
   }
   return declarations;
 }
@@ -260,44 +278,49 @@ function parseDeclarations(body: string): Declaration[] {
 export function parseStyleRules(css: string): StyleRule[] {
   const rules: StyleRule[] = [];
   const walk = (text: string, nestedUnderSelector: boolean): void => {
-    let prelude = "";
-    let i = 0;
-    while (i < text.length) {
-      const ch = text[i];
-      if (ch === "{") {
-        let depth = 1;
-        let j = i + 1;
-        while (j < text.length && depth > 0) {
-          if (text[j] === "{") depth++;
-          else if (text[j] === "}") depth--;
-          j++;
-        }
-        const body = text.slice(i + 1, Math.max(i + 1, j - 1));
-        const head = prelude.trim();
-        if (head.startsWith("@")) {
-          // A conditional group rule does not narrow the selector, so its
-          // children keep whatever nesting context we already had.
-          walk(body, nestedUnderSelector);
-        } else if (head) {
-          rules.push({
-            selectors: splitSelectorList(head),
-            declarations: parseDeclarations(body),
-            nestedUnderSelector,
-          });
-          // Anything inside a style rule IS scoped by that rule's selector.
-          walk(body, true);
-        }
-        prelude = "";
-        i = j;
+    // Structural braces only: a `{` inside a quoted value is not a block.
+    const braces = [...scanStructure(text)].filter(
+      ({ char }) => char === "{" || char === "}"
+    );
+    let preludeFrom = 0;
+    let position = 0;
+    while (position < braces.length) {
+      const open = braces[position];
+      if (open.char !== "{") {
+        // A stray `}` closes whatever we were reading; start a fresh prelude.
+        preludeFrom = open.index + 1;
+        position++;
         continue;
       }
-      if (ch === "}" || ch === ";") {
-        prelude = "";
-        i++;
-        continue;
+      let depth = 1;
+      let cursor = position + 1;
+      while (cursor < braces.length && depth > 0) {
+        depth += braces[cursor].char === "{" ? 1 : -1;
+        cursor++;
       }
-      prelude += ch;
-      i++;
+      const closeIndex = depth === 0 ? braces[cursor - 1].index : text.length;
+      const body = text.slice(open.index + 1, closeIndex);
+      const prelude = text.slice(preludeFrom, open.index);
+      // `;` ends a statement at-rule (`@import …;`) — only the tail is a prelude.
+      const lastStatement = [...scanStructure(prelude)]
+        .filter(({ char }) => char === ";")
+        .pop();
+      const head = prelude.slice(lastStatement ? lastStatement.index + 1 : 0).trim();
+      if (head.startsWith("@")) {
+        // A conditional group rule does not narrow the selector, so its
+        // children keep whatever nesting context we already had.
+        walk(body, nestedUnderSelector);
+      } else if (head) {
+        rules.push({
+          selectors: splitSelectorList(head),
+          declarations: parseDeclarations(body),
+          nestedUnderSelector,
+        });
+        // Anything inside a style rule IS scoped by that rule's selector.
+        walk(body, true);
+      }
+      preludeFrom = closeIndex + 1;
+      position = cursor;
     }
   };
   walk(css, false);

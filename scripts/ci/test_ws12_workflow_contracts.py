@@ -3306,6 +3306,18 @@ class ChromaticVisualLane(unittest.TestCase):
                     any("exit-zero-on-changes" in error for error in errors), errors
                 )
 
+    def test_an_echo_decoy_cannot_stand_in_for_the_real_command(self) -> None:
+        """An `echo` carrying a perfect command satisfies a text search while the
+        line that actually runs floats the version and drops the flags."""
+        mutated = self.sabotage(
+            '          pnpm dlx "chromatic@${CHROMATIC_CLI_VERSION}" \\\n',
+            "          echo 'pnpm dlx \"chromatic@${CHROMATIC_CLI_VERSION}\" "
+            "--exit-zero-on-changes --auto-accept-changes main'\n"
+            '          pnpm dlx "chromatic@^13.1.2" \\\n',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("the validated variable" in error for error in errors), errors)
+
     def test_a_literal_chromatic_spec_is_rejected(self) -> None:
         """The runtime guard validates the VARIABLE. If `pnpm dlx` is then handed
         a literal range the guard protects nothing, so the invocation has to

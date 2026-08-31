@@ -172,6 +172,35 @@ describe("design-token bundle contract", () => {
     expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
   });
 
+  // CSS strings honour backslash escapes, so `"x\"; border-radius: 1rem"` is
+  // ONE value containing a quote and a semicolon — not a second declaration.
+  it("does not accept an escaped quote as the end of a CSS string", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      String.raw`.rounded-control { content: "x\"; border-radius: 1rem"; }`
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  // A `{` inside a quoted value does not open a block; if the brace walk
+  // thought it did, the rest of the sheet would be mis-nested.
+  it("does not let a quoted brace alter rule nesting", () => {
+    const css = compliantCss().replace(
+      ".rounded-control { border-radius: 1rem; }",
+      '.rounded-control { content: "{ border-radius: 1rem }"; }'
+    );
+    expect(findContractViolations(css).missingUtilities).toEqual([".rounded-control"]);
+  });
+
+  it("still parses rules that follow a value containing braces and quotes", () => {
+    // A pathological but legal value: an unbalanced brace, a semicolon, and an
+    // escaped quote. Everything after it must still parse normally.
+    const decoy = String.raw`.decoy { content: "{ ; \" }"; }`;
+    const css = `${decoy}\n${compliantCss()}`;
+    expect(findContractViolations(css).missingUtilities).toEqual([]);
+    expect(findContractViolations(css).missingProperties).toEqual([]);
+  });
+
   it("requires the escaped md: variant, not just the base utility", () => {
     const css = compliantCss().replace(".md\\:rounded-control-lg { border-radius: 1rem; }", "");
     expect(findContractViolations(css).missingUtilities).toEqual([".md\\:rounded-control-lg"]);
