@@ -138,6 +138,7 @@ pub use channel_workflow::{
     RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
 pub use run_outcome_observer::{
+    ApprovalNotificationBackfillProcessCommitObserver,
     AuthNotificationBackfillProcessCommitObserver, ResourceBlockBackfillProcessCommitObserver,
     RunOutcomeProcessCommitObserver,
 };

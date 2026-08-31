@@ -564,13 +564,6 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
             return Ok(());
         }
         if commit.state.status.is_terminal() {
-            self.resolve_open_run_notifications(
-                &commit.state,
-                run_id,
-                NotificationKind::ApprovalRequired,
-                occurred_at,
-            )
-            .await?;
             self.resolve_timed_out_block(&commit.state, run_id, occurred_at)
                 .await?;
         }
@@ -640,6 +633,51 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// Durable replay for approval notifications introduced after the primary
+/// outcome observer had already advanced past terminal run commits. This owns
+/// approval cleanup for both replayed and future terminal background runs so
+/// the primary v1 observer keeps its cursor without duplicating Inbox scans.
+pub struct ApprovalNotificationBackfillProcessCommitObserver {
+    outcome_observer: RunOutcomeProcessCommitObserver,
+}
+
+impl ApprovalNotificationBackfillProcessCommitObserver {
+    pub fn new(
+        inbox: Arc<dyn NotificationInboxStorePort>,
+        thread_service: Arc<dyn SessionThreadService>,
+    ) -> Self {
+        Self {
+            outcome_observer: RunOutcomeProcessCommitObserver::new(inbox, thread_service),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for ApprovalNotificationBackfillProcessCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "run-approval-inbox-backfill-observer-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        let Some(metadata) = eligible_user_run(&commit.state) else {
+            return Ok(());
+        };
+        if !is_background_run(&metadata) || !commit.state.status.is_terminal() {
+            return Ok(());
+        }
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        self.outcome_observer
+            .resolve_open_run_notifications(
+                &commit.state,
+                run_id,
+                NotificationKind::ApprovalRequired,
+                occurred_at,
+            )
+            .await
     }
 }
 
@@ -948,6 +986,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
+        ApprovalNotificationBackfillProcessCommitObserver,
         AuthNotificationBackfillProcessCommitObserver, ResourceBlockBackfillProcessCommitObserver,
         RunOutcomeProcessCommitObserver,
     };
@@ -1935,10 +1974,10 @@ mod tests {
         );
     }
 
-    /// A terminal process fact retires actionable records left behind by a
-    /// delivery watcher that returned before observing the final transition.
+    /// The primary observer retains its cursor while the approval backfill
+    /// replays terminal facts that older deployments already acknowledged.
     #[tokio::test]
-    async fn a_terminal_run_resolves_stale_actionable_notifications() {
+    async fn terminal_observers_resolve_stale_actionable_notifications() {
         for status in [
             ProcessLifecycleStatus::Completed,
             ProcessLifecycleStatus::Failed,
@@ -2031,7 +2070,39 @@ mod tests {
                     .expect("completed run final reply");
             }
 
-            let observer_inbox: Arc<dyn NotificationInboxStorePort> =
+            let terminal_commit = commit(
+                run_id,
+                status,
+                ProcessJournalKind::Completed,
+                "scheduled_trigger",
+            );
+            let primary = RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+                Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+            );
+            primary
+                .observe_process_commit(terminal_commit.clone())
+                .await
+                .expect("primary terminal commit");
+            let before_backfill = inbox
+                .list(ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: 10,
+                    cursor: None,
+                    include_archived: true,
+                })
+                .await
+                .expect("list before approval backfill");
+            assert!(
+                before_backfill
+                    .notifications
+                    .iter()
+                    .find(|record| record.kind == NotificationKind::ApprovalRequired)
+                    .is_some_and(|record| record.resolved_at.is_none()),
+                "the stable primary cursor must leave historical approval cleanup to the backfill"
+            );
+
+            let backfill_inbox: Arc<dyn NotificationInboxStorePort> =
                 if status == ProcessLifecycleStatus::Completed {
                     Arc::new(FailFirstResolveInbox::not_found_after_resolve(
                         Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
@@ -2039,19 +2110,14 @@ mod tests {
                 } else {
                     Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>
                 };
-            let observer = RunOutcomeProcessCommitObserver::new(
-                observer_inbox,
+            let backfill = ApprovalNotificationBackfillProcessCommitObserver::new(
+                backfill_inbox,
                 Arc::clone(&threads) as Arc<dyn SessionThreadService>,
             );
-            observer
-                .observe_process_commit(commit(
-                    run_id,
-                    status,
-                    ProcessJournalKind::Completed,
-                    "scheduled_trigger",
-                ))
+            backfill
+                .observe_process_commit(terminal_commit)
                 .await
-                .expect("terminal commit");
+                .expect("historical terminal approval reconciliation");
 
             let page = inbox
                 .list(ListNotificationsRequest {
@@ -2163,16 +2229,27 @@ mod tests {
     }
 
     #[test]
-    fn primary_outcome_observer_preserves_its_v1_cursor_identity() {
-        let observer = RunOutcomeProcessCommitObserver::new(
-            inbox() as Arc<dyn NotificationInboxStorePort>,
-            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+    fn approval_backfill_uses_a_new_cursor_without_changing_the_primary_identity() {
+        let inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let primary = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        );
+        let approval_backfill = ApprovalNotificationBackfillProcessCommitObserver::new(
+            inbox as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
         );
 
         assert_eq!(
-            observer.process_observer_id(),
+            primary.process_observer_id(),
             "run-outcome-inbox-commit-observer-v1",
-            "resource-block rollout must not replay every historical terminal outcome"
+            "the existing outcome cursor remains stable across the upgrade"
+        );
+        assert_eq!(
+            approval_backfill.process_observer_id(),
+            "run-approval-inbox-backfill-observer-v1",
+            "approval cleanup needs a fresh cursor to replay historical terminals"
         );
     }
 

@@ -34,12 +34,12 @@ use uuid::Uuid;
 
 use ironclaw_assistant::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
-    AuthNotificationBackfillProcessCommitObserver, DefaultApprovalInteractionService,
-    DefaultAuthInteractionService, OutboundPreferencesProductService,
-    PersistentApprovalGranteeResolver, ResourceBlockBackfillProcessCommitObserver,
-    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
-    SuggestionsProcessCommitObserver,
+    ApprovalNotificationBackfillProcessCommitObserver, ApprovalResolverPort,
+    ApprovalTurnRunLocator, AuthInteractionService, AuthNotificationBackfillProcessCommitObserver,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService,
+    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
+    ResourceBlockBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver,
+    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -3292,6 +3292,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("auth notification backfill observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(
+            ApprovalNotificationBackfillProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&thread_service),
+            ),
+        ))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("approval notification backfill observer wiring failed: {error}"),
         })?;
     processes
         .subscribe_process_observer(Arc::new(ResourceBlockBackfillProcessCommitObserver::new(
