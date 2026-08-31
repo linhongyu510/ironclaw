@@ -112,7 +112,21 @@ export interface ContractViolations {
 }
 
 /** @param css concatenated text of every emitted stylesheet */
-export function findContractViolations(css: string): ContractViolations {
+/**
+ * Strip `/* … *\/` spans so a comment can never stand in as evidence.
+ *
+ * Tailwind emits a licence banner and Vite can preserve annotations, so
+ * comments genuinely do reach `dist/`. A comment mentioning `--v2-radius-chip:`
+ * or `.rounded-control` would otherwise satisfy this contract while no rule was
+ * emitted at all — which is the exact shape of failure the gate exists to
+ * catch, so it must not be satisfiable by prose.
+ */
+export function stripCssComments(css: string): string {
+  return css.replace(/\/\*[\s\S]*?\*\//g, " ");
+}
+
+export function findContractViolations(rawCss: string): ContractViolations {
+  const css = stripCssComments(rawCss);
   const missingProperties = REQUIRED_PROPERTIES.filter(
     // Match a declaration (`--token:`), not a `var(--token)` reference — a
     // reference proves only that something asked for it, not that it exists.

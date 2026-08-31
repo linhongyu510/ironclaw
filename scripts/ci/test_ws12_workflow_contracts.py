@@ -3236,6 +3236,55 @@ class ChromaticVisualLane(unittest.TestCase):
         errors = validate_workflow_texts(mutated, ROOT)
         self.assertTrue(any("non-blocking" in error for error in errors), errors)
 
+    # The decoy family. Every check in this validator reads workflow text, so
+    # each one has to prove it reads the EXECUTABLE field rather than any
+    # comment or neighbouring command that happens to contain the marker.
+    # Two earlier versions of this validator failed exactly here.
+
+    def test_a_comment_naming_the_push_gate_cannot_satisfy_it(self) -> None:
+        """Swap the real trigger gate for a PR-friendly one while leaving a
+        comment that still mentions `github.event_name == 'push'`."""
+        mutated = self.sabotage(
+            "      github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/main'",
+            "      github.event_name == 'pull_request'",
+        )
+        # The surrounding block comment still says `pull_request` and `push`.
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("PR-authored build scripts" in error for error in errors), errors)
+
+    def test_a_comment_naming_the_exact_version_regex_cannot_satisfy_it(self) -> None:
+        mutated = self.sabotage(
+            '          if [[ ! "${CHROMATIC_CLI_VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then',
+            '          # was: =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$\n          if false; then',
+        )
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exact-version regex" in error for error in errors), errors)
+
+    def test_a_comment_naming_exit_zero_cannot_satisfy_it(self) -> None:
+        """The flag is named in the comment that explains it, one line above the
+        command — so a comment-inclusive scan passes on a lane that stopped
+        passing the flag. This is a real bug this suite already caught once."""
+        mutated = self.sabotage("            --exit-zero-on-changes \\\n", "")
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("exit-zero-on-changes" in error for error in errors), errors)
+
+    def test_a_decoy_in_another_step_cannot_satisfy_the_publish_step(self) -> None:
+        """Publish-step contracts must read the publish step. Deleting it while
+        another step carries the same markers must still fail."""
+        publish = ws12_workflow_contracts._step_slice(
+            job_body(self.workflow, "webui-v2-chromatic") or "", "Publish Storybook to Chromatic"
+        )
+        self.assertIsNotNone(publish)
+        decoy = (
+            "      - name: Decoy\n"
+            "        run: |\n"
+            "          echo CHROMATIC_CLI_VERSION ^[0-9]+\\.[0-9]+\\.[0-9]+$ --exit-zero-on-changes\n"
+        )
+        mutated = self.sabotage(publish or "", decoy)
+        errors = validate_workflow_texts(mutated, ROOT)
+        self.assertTrue(any("lost its publish step" in error for error in errors), errors)
+
     def test_removing_the_lane_entirely_is_rejected(self) -> None:
         self.assertEqual(
             validate_chromatic_visual_lane("jobs:\n  other:\n    name: x\n"),

@@ -1756,6 +1756,30 @@ def _without_comments(body: str) -> str:
     )
 
 
+def _job_condition(body: str) -> str:
+    """The job-level `if:` expression only, with comments stripped.
+
+    Scanning the whole job body for `github.event_name == 'push'` would let a
+    comment that merely *mentions* the gate satisfy it while the executable
+    condition said something else — the same decoy class this module already
+    guards elsewhere.
+    """
+    lines = _without_comments(body).splitlines()
+    collected: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.startswith("    if:"):
+            continue
+        collected.append(line.split("if:", 1)[1])
+        # A block scalar (`if: >-`) continues while the lines stay more
+        # deeply indented than the `if:` key itself.
+        for following in lines[index + 1 :]:
+            if following.strip() and not following.startswith("      "):
+                break
+            collected.append(following)
+        break
+    return "\n".join(collected)
+
+
 def _step_slice(body: str, step_name: str) -> str | None:
     """One step's text, bounded by the next `- name:` heading."""
     start = body.find(f"- name: {step_name}")
@@ -1792,13 +1816,14 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
         return [f"{CODE_STYLE_WORKFLOW}: missing the {CHROMATIC_JOB} job"]
 
     # 1. Trusted-event gating.
-    if "github.event_name == 'push'" not in body:
+    condition = _job_condition(body)
+    if "github.event_name == 'push'" not in condition:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
             "github.event_name == 'push' — a secret-bearing lane must not run "
             "PR-authored build scripts"
         )
-    if "github.ref == 'refs/heads/main'" not in body:
+    if "github.ref == 'refs/heads/main'" not in condition:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must gate on "
             "github.ref == 'refs/heads/main'"
@@ -1824,21 +1849,24 @@ def validate_chromatic_visual_lane(text: str) -> list[str]:
         )
 
     # 3. Supply-chain pin: exact version enforced, never a floating tag.
-    if "CHROMATIC_CLI_VERSION" not in body:
+    publish = _without_comments(_step_slice(body, "Publish Storybook to Chromatic") or "")
+    if not publish:
+        errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its publish step")
+    if "CHROMATIC_CLI_VERSION" not in publish:
         errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} lost its CLI version pin")
-    if "[0-9]+\\.[0-9]+\\.[0-9]+" not in body:
+    if "[0-9]+\\.[0-9]+\\.[0-9]+" not in publish:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must reject non-exact "
             "CHROMATIC_CLI_VERSION values with an exact-version regex"
         )
-    if "chromatic@latest" in body:
+    if "chromatic@latest" in publish:
         errors.append(f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must not float on chromatic@latest")
 
     # 4. A visual diff is information, not a build failure.
     # Check the COMMAND, not the prose: the flag is also named in the comment
     # explaining it, so a comment-inclusive scan would pass on a lane that had
     # stopped passing the flag.
-    if "--exit-zero-on-changes" not in _without_comments(body):
+    if "--exit-zero-on-changes" not in publish:
         errors.append(
             f"{CODE_STYLE_WORKFLOW}: {CHROMATIC_JOB} must pass --exit-zero-on-changes"
         )

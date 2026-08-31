@@ -57,14 +57,23 @@ function Row({ token, note }: { token: string; note: string }) {
 
 /**
  * Walk the parsed CSSOM for the `prefers-reduced-motion: reduce` block and
- * return the duration tokens it collapses to `0ms`.
+ * return the duration tokens it collapses to `0ms` **on a rule that actually
+ * targets the element the tokens are read from**.
  *
- * Reading the CSSOM rather than emulating the media query keeps this check
- * inside the story — it works in the static catalog build as well as the
- * Chromium suite — while still failing on a renamed token, a dropped
- * declaration, or a mistyped selector, which is what the gate is for.
+ * The selector match is the load-bearing part. Counting `0ms` declarations
+ * alone would pass on a rule scoped to something that never matches — the
+ * media query would be active for a reduced-motion user while `:root` kept its
+ * normal durations, which is precisely the regression this is meant to stop.
+ *
+ * Reading the CSSOM rather than emulating the media query keeps the check
+ * inside the story, so it runs in the static catalog build as well as the
+ * Chromium suite. The one thing it does not prove is the resolved cascade
+ * under emulation; everything it does assert — a renamed token, a dropped
+ * declaration, a selector that stopped matching `:root`, a changed media
+ * condition — is a real regression it fails on.
  */
 function reducedMotionZeroedTokens(): string[] {
+  const target = document.documentElement;
   const zeroed = new Set<string>();
   for (const sheet of Array.from(document.styleSheets)) {
     let rules: CSSRule[];
@@ -75,9 +84,12 @@ function reducedMotionZeroedTokens(): string[] {
     }
     for (const rule of rules) {
       if (!(rule instanceof CSSMediaRule)) continue;
-      if (!rule.conditionText.includes("prefers-reduced-motion")) continue;
+      // `reduce` specifically: a `no-preference` block would zero nothing.
+      if (!/prefers-reduced-motion\s*:\s*reduce/.test(rule.conditionText)) continue;
       for (const inner of Array.from(rule.cssRules)) {
         if (!(inner instanceof CSSStyleRule)) continue;
+        // The rule must apply to the element the tokens are read from.
+        if (!target.matches(inner.selectorText)) continue;
         for (const token of DURATION_TOKENS) {
           if (inner.style.getPropertyValue(token).trim() === "0ms") zeroed.add(token);
         }
@@ -155,9 +167,10 @@ export const Motion: Story = {
       expect(unresolved).toEqual([]);
     });
 
-    // Every duration must be zeroed under reduced motion — reported as a
-    // sorted list so a regression names the survivors rather than failing on
-    // whichever token happened to be checked first.
+    // Every duration must be zeroed under reduced motion, by a rule that
+    // actually targets `:root` — reported as a sorted list so a regression
+    // names the survivors rather than failing on whichever token happened to
+    // be checked first.
     expect(reducedMotionZeroedTokens().sort()).toEqual([...DURATION_TOKENS].sort());
   },
 };

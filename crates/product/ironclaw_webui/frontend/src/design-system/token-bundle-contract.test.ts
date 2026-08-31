@@ -84,6 +84,29 @@ describe("design-token bundle contract", () => {
     expect(findContractViolations(css).forbidden[0]).toMatch(/never `none`/);
   });
 
+  // The gate's evidence must be emitted CSS, never prose. Tailwind ships a
+  // licence banner and Vite can preserve annotations, so comments really do
+  // reach `dist/` — a contract satisfiable by a comment would be no contract.
+  it("does not accept tokens or utilities that appear only inside comments", () => {
+    const properties = REQUIRED_PROPERTIES.map((token) => `${token}: 1rem;`).join("\n");
+    const utilities = REQUIRED_UTILITIES.map((s) => `${s} { border-radius: 1rem; }`).join("\n");
+    const commentedOut = `/* ${properties}\n${utilities} */\n:root{ --unrelated: 1px; }`;
+
+    const { missingProperties, missingUtilities } = findContractViolations(commentedOut);
+    expect(missingProperties).toEqual(REQUIRED_PROPERTIES);
+    expect(missingUtilities).toEqual(REQUIRED_UTILITIES);
+  });
+
+  it("still sees real declarations that merely sit next to a comment", () => {
+    const css = `/* banner: --v2-radius-chip lives here */\n${compliantCss()}`;
+    expect(findContractViolations(css).missingProperties).toEqual([]);
+  });
+
+  it("does not let a commented-out `none` elevation escape the forbidden check", () => {
+    const css = `${compliantCss()}\n/* --v2-elevation-2: none; */`;
+    expect(findContractViolations(css).forbidden).toEqual([]);
+  });
+
   it("keeps the forbidden list non-empty so the check cannot silently no-op", () => {
     expect(FORBIDDEN_PATTERNS.length).toBeGreaterThan(0);
     expect(REQUIRED_PROPERTIES.length).toBeGreaterThan(0);

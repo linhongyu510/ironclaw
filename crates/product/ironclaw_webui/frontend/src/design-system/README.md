@@ -73,7 +73,7 @@ not a licence to animate today. Token *values* are Phase 3a's to change
 ### The contract is enforced against the built CSS, not the source
 
 `pnpm build` runs `check:tokens`
-([`scripts/check-token-bundle.ts`](../../scripts/check-token-bundle.ts)), which
+([`../../scripts/check-token-bundle.ts`](../../scripts/check-token-bundle.ts)), which
 reads `dist/assets/*.css` and fails when a token or utility named above is
 missing from the *emitted* stylesheet.
 
