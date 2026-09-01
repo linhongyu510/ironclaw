@@ -1596,6 +1596,77 @@ mod tests {
     }
 
     #[test]
+    fn list_repos_rejects_missing_or_mistyped_projected_fields() {
+        let mut missing_field = realistic_repository(0, "detail");
+        missing_field
+            .as_object_mut()
+            .expect("repository fixture")
+            .remove("full_name");
+        let mut wrong_scalar_type = realistic_repository(0, "detail");
+        wrong_scalar_type["stargazers_count"] = json!("100");
+        let mut wrong_nested_type = realistic_repository(0, "detail");
+        wrong_nested_type["owner"]["login"] = json!(42);
+
+        for malformed_item in [missing_field, wrong_scalar_type, wrong_nested_type] {
+            test_support::set_response(Ok(json!([malformed_item]).to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    r#"{"limit":1}"#,
+                    Some(r#"{"capability_id":"github.list_repos"}"#),
+                )
+                .unwrap_err(),
+                "github_api_invalid_response"
+            );
+        }
+    }
+
+    #[test]
+    fn list_repos_preserves_documented_nullable_fields() {
+        let mut repository = realistic_repository(0, "detail");
+        repository["description"] = serde_json::Value::Null;
+        repository["language"] = serde_json::Value::Null;
+        repository["license"] = serde_json::Value::Null;
+        test_support::set_response(Ok(json!([repository]).to_string()));
+
+        let output = execute_inner(
+            r#"{"limit":1}"#,
+            Some(r#"{"capability_id":"github.list_repos"}"#),
+        )
+        .expect("documented nullable repository fields should remain valid");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact repository list should be JSON");
+
+        assert!(parsed[0]["description"].is_null());
+        assert!(parsed[0]["language"].is_null());
+        assert!(parsed[0]["license"].is_null());
+    }
+
+    #[test]
+    fn search_repositories_rejects_missing_or_mistyped_envelope_fields() {
+        let repository = realistic_repository(0, "detail");
+        let malformed_responses = [
+            json!({"incomplete_results": false, "items": [repository.clone()]}),
+            json!({"total_count": "1", "incomplete_results": false, "items": [repository.clone()]}),
+            json!({"total_count": 1, "items": [repository.clone()]}),
+            json!({"total_count": 1, "incomplete_results": 0, "items": [repository]}),
+        ];
+
+        for malformed_response in malformed_responses {
+            test_support::set_response(Ok(malformed_response.to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    r#"{"query":"language:rust","limit":1}"#,
+                    Some(r#"{"capability_id":"github.search_repositories"}"#),
+                )
+                .unwrap_err(),
+                "github_api_invalid_response"
+            );
+        }
+    }
+
+    #[test]
     fn list_repos_appends_type_for_authenticated_user() {
         test_support::set_response(Ok(json!([]).to_string()));
 
